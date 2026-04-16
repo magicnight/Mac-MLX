@@ -7,8 +7,9 @@ on:
     branches: [main]
 
 # Stage 1 baseline (updated Stage 3): test SPM packages and the SwiftUI Xcode app on every push.
-# Pin to the latest Xcode 16.x — Swift 6.1+ runtime is more lenient about actor executor
-# assertions than the Swift 6.0 default on macos-15 runners (caught by mlx-swift-lm + actor patterns).
+# Pin to the latest Xcode 16.x. Tests run sequentially because Pulse 5.1.4's NSManagedObjectContext
+# perform-block pattern trips the Swift 6.0+ runtime "Incorrect actor executor assumption" check
+# under Swift Testing's parallel executor on macos-15 runners (does not reproduce on Swift 6.3+ locally).
 
 jobs:
   spm:
@@ -30,12 +31,12 @@ jobs:
       - name: Resolve & test MacMLXCore
         run: |
           swift package --package-path MacMLXCore resolve
-          swift test --package-path MacMLXCore --parallel
+          swift test --package-path MacMLXCore
 
       - name: Resolve & test macmlx-cli
         run: |
           swift package --package-path macmlx-cli resolve
-          swift test --package-path macmlx-cli --parallel
+          swift test --package-path macmlx-cli
 
       - name: Smoke-run macmlx --version
         run: swift run --package-path macmlx-cli macmlx --version
