@@ -18,7 +18,7 @@ let package = Package(
             dependencies: [
                 "MacMLXCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                // SwiftTUI imported in Stage 5; declared here for early SPM resolution.
+                .product(name: "SwiftTUI", package: "SwiftTUI"),
             ]
         ),
         .testTarget(
