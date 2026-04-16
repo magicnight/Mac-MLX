@@ -26,7 +26,12 @@ public protocol InferenceEngine: Actor {
     ///
     /// The stream finishes naturally on `.stop`, on `.length` when `maxTokens`
     /// is reached, or with an error on engine failure.
-    func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error>
+    ///
+    /// Declared `nonisolated` so callers (including @MainActor SwiftUI views)
+    /// can invoke it without awaiting the actor's executor; implementations
+    /// must not touch actor-isolated state in this method's synchronous body
+    /// (use a `Task` inside the stream's continuation if you need to).
+    nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error>
 
     /// Synchronously confirm the engine is responsive.
     func healthCheck() async -> Bool

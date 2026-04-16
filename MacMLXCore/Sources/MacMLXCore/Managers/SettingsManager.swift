@@ -162,7 +162,11 @@ public actor SettingsManager {
     }
 
     /// Mutate the current settings via a closure, then persist to disk.
-    public func update(_ mutate: (inout Settings) -> Void) throws {
+    ///
+    /// `mutate` is `@Sendable` so cross-actor callers (e.g. a `@MainActor`
+    /// view model) can pass closures into this `actor` method without tripping
+    /// Swift 6 strict concurrency.
+    public func update(_ mutate: @Sendable (inout Settings) -> Void) throws {
         var copy = current
         mutate(&copy)
         try writeToDisk(copy)
