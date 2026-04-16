@@ -1,13 +1,26 @@
 import Testing
 import Foundation
+import os
 @testable import MacMLXCore
 
 // MARK: - MockURLProtocol
 
 /// URLProtocol subclass that intercepts all requests and routes them through a handler closure.
 /// Inject via `URLSessionConfiguration.protocolClasses` to avoid real network calls.
+///
+/// The handler is stored under an OSAllocatedUnfairLock (instead of
+/// `nonisolated(unsafe) static var`) because URLSession invokes
+/// `startLoading()` on its own background executor, and the Swift 6.0+
+/// runtime asserts on cross-executor access to unsynchronised statics.
 final class MockURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var handler: ((URLRequest) -> (HTTPURLResponse, Data))?
+    typealias Handler = @Sendable (URLRequest) -> (HTTPURLResponse, Data)
+
+    private static let lockedHandler = OSAllocatedUnfairLock<Handler?>(initialState: nil)
+
+    static var handler: Handler? {
+        get { lockedHandler.withLock { $0 } }
+        set { lockedHandler.withLock { $0 = newValue } }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
