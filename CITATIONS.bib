@@ -1,0 +1,160 @@
+% CITATIONS.bib
+% BibTeX entries for all open-source dependencies used in macMLX.
+% Keep this file up to date when adding or removing dependencies.
+
+% ============================================================
+% Core Inference Framework
+% ============================================================
+
+@software{mlx2023,
+  author  = {Awni Hannun and Jagrit Digani and Angelos Katharopoulos and Ronan Collobert},
+  title   = {{MLX}: Efficient and flexible machine learning on {Apple} silicon},
+  url     = {https://github.com/ml-explore/mlx},
+  version = {0.0},
+  year    = {2023},
+}
+
+@software{mlxswiftlm2024,
+  author  = {{Apple Machine Learning Research}},
+  title   = {{MLX Swift LM}: {LLMs} and {VLMs} with {MLX} {Swift}},
+  url     = {https://github.com/ml-explore/mlx-swift-lm},
+  year    = {2024},
+}
+
+@software{mlxswift2023,
+  author  = {{Apple Machine Learning Research}},
+  title   = {{MLX Swift}: {Swift} {API} for {MLX}},
+  url     = {https://github.com/ml-explore/mlx-swift},
+  year    = {2023},
+}
+
+% mlx-lm retained as optional engine reference
+@software{mlxlm2024,
+  author  = {{Apple Machine Learning Research}},
+  title   = {{MLX LM}: Large language model inference and fine-tuning with {MLX}},
+  url     = {https://github.com/ml-explore/mlx-lm},
+  year    = {2024},
+}
+
+% ============================================================
+% HTTP Server
+% ============================================================
+
+@software{hummingbird,
+  author  = {Adam Fowler and {Hummingbird contributors}},
+  title   = {{Hummingbird}: Lightweight, flexible {HTTP} server framework for {Swift}},
+  url     = {https://github.com/hummingbird-project/hummingbird},
+  year    = {2021},
+}
+
+% ============================================================
+% Auto-Update
+% ============================================================
+
+@software{sparkle,
+  author  = {Andy Matuschak and {Sparkle contributors}},
+  title   = {{Sparkle}: A software update framework for {macOS}},
+  url     = {https://github.com/sparkle-project/Sparkle},
+  year    = {2006},
+}
+
+% ============================================================
+% Logging & Observability
+% ============================================================
+
+@software{pulse,
+  author  = {Alexander Grebenyuk},
+  title   = {{Pulse}: Powerful logging system for {Apple} platforms},
+  url     = {https://github.com/kean/Pulse},
+  year    = {2020},
+}
+
+% Rich used in Python engine (optional)
+@software{rich,
+  author  = {Will McGugan},
+  title   = {{Rich}: Rich text and beautiful formatting in the terminal},
+  url     = {https://github.com/Textualize/rich},
+  year    = {2020},
+}
+
+% ============================================================
+% Python Backend (optional engine)
+% ============================================================
+
+@software{fastapi,
+  author  = {Sebasti{\'a}n Ram{\'i}rez},
+  title   = {{FastAPI}},
+  url     = {https://github.com/fastapi/fastapi},
+  version = {0.115.0},
+  year    = {2018},
+}
+
+@software{uvicorn,
+  author  = {Tom Christie and {Encode OSS Ltd.}},
+  title   = {{Uvicorn}: An {ASGI} web server implementation for {Python}},
+  url     = {https://github.com/encode/uvicorn},
+  year    = {2017},
+}
+
+@software{uv,
+  author  = {{Astral}},
+  title   = {{uv}: An extremely fast {Python} package and project manager},
+  url     = {https://github.com/astral-sh/uv},
+  year    = {2023},
+}
+
+@software{ruff,
+  author  = {{Astral}},
+  title   = {{Ruff}: An extremely fast {Python} linter and code formatter},
+  url     = {https://github.com/astral-sh/ruff},
+  year    = {2022},
+}
+
+% ============================================================
+% Inspiration & Reference Implementations
+% ============================================================
+
+% Primary architecture and feature reference
+@software{omlx,
+  author  = {Jun Kim},
+  title   = {{oMLX}: {LLM} inference server with continuous batching
+             and {SSD} caching for {Apple Silicon}},
+  url     = {https://github.com/jundot/omlx},
+  year    = {2024},
+}
+
+% CLI architecture and Swift inference reference
+@software{swama,
+  author  = {{Trans-N-ai contributors}},
+  title   = {{Swama}: High-performance {MLX}-based {LLM} inference
+             engine for {macOS} with native {Swift} implementation},
+  url     = {https://github.com/Trans-N-ai/swama},
+  year    = {2025},
+}
+
+% Advanced engine reference (SSD streaming, TurboQuant)
+@software{swiftlm,
+  author  = {{SharpAI contributors}},
+  title   = {{SwiftLM}: Native {MLX} {Swift} {LLM} inference server
+             for {Apple Silicon}},
+  url     = {https://github.com/SharpAI/SwiftLM},
+  year    = {2025},
+}
+
+% Product experience and engine separation design reference
+% LM Studio by LM Studio Inc. — no formal BibTeX available
+% Cited informally in README acknowledgements section
+
+@software{swifttui,
+  author  = {Rens Breur},
+  title   = {{SwiftTUI}: {SwiftUI} for terminal applications},
+  url     = {https://github.com/rensbreur/SwiftTUI},
+  year    = {2022},
+}
+
+@software{swiftargumentparser,
+  author  = {{Apple Inc.}},
+  title   = {{swift-argument-parser}: Straightforward, type-safe argument parsing for {Swift}},
+  url     = {https://github.com/apple/swift-argument-parser},
+  year    = {2020},
+}

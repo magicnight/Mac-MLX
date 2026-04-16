@@ -1,0 +1,57 @@
+cff-version: 1.2.0
+message: >-
+  If you use macMLX in your research or project,
+  please cite it using the metadata from this file.
+type: software
+title: macMLX
+abstract: >-
+  Native macOS LLM inference application powered by Apple MLX.
+  Provides a SwiftUI GUI for managing and running local language models
+  on Apple Silicon via an OpenAI-compatible API.
+authors:
+  - name: mac-mlx contributors
+    website: "https://github.com/magicnight/mac-mlx"
+repository-code: "https://github.com/magicnight/mac-mlx"
+license: MIT
+keywords:
+  - llm
+  - inference
+  - macos
+  - apple-silicon
+  - mlx
+  - swiftui
+  - local-ai
+references:
+  - type: software
+    title: "MLX: Efficient and flexible machine learning on Apple silicon"
+    authors:
+      - given-names: Awni
+        family-names: Hannun
+      - given-names: Jagrit
+        family-names: Digani
+      - given-names: Angelos
+        family-names: Katharopoulos
+      - given-names: Ronan
+        family-names: Collobert
+    url: "https://github.com/ml-explore/mlx"
+    year: 2023
+  - type: software
+    title: "MLX LM: Large language model inference and fine-tuning with MLX"
+    authors:
+      - name: Apple Machine Learning Research
+    url: "https://github.com/ml-explore/mlx-lm"
+    year: 2024
+  - type: software
+    title: FastAPI
+    authors:
+      - given-names: Sebastián
+        family-names: Ramírez
+    url: "https://github.com/fastapi/fastapi"
+    year: 2018
+  - type: software
+    title: "oMLX: LLM inference server for Apple Silicon"
+    authors:
+      - given-names: Jun
+        family-names: Kim
+    url: "https://github.com/jundot/omlx"
+    year: 2024

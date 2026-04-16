@@ -1,0 +1,39 @@
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+build/
+dist/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Python — uv managed
+__pycache__/
+*.pyc
+*.pyo
+.venv/          # uv creates venv here, never commit it
+*.egg-info/
+# Note: uv.lock SHOULD be committed (do not ignore it)
+# Note: pyproject.toml SHOULD be committed
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+
+# Secrets & signing
+*.p12
+*.mobileprovision
+ExportOptions.plist
+
+# Local dev overrides
+.env
+.env.local

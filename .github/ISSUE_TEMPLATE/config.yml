@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Feature Discussions
+    url: https://github.com/magicnight/mac-mlx/discussions
+    about: Use Discussions for feature requests and ideas

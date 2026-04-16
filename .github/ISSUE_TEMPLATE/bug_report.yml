@@ -1,0 +1,65 @@
+name: Bug Report
+description: Report a bug in macMLX
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a bug!
+
+  - type: input
+    id: version
+    attributes:
+      label: macMLX Version
+      placeholder: e.g. v0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Apple Silicon Chip
+      options:
+        - M1
+        - M1 Pro / Max / Ultra
+        - M2
+        - M2 Pro / Max / Ultra
+        - M3
+        - M3 Pro / Max / Ultra
+        - M4
+        - M4 Pro / Max
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS Version
+      placeholder: e.g. macOS 14.5
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Open macMLX
+        2. Click ...
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: Paste relevant logs from ~/.mac-mlx/logs/
+      render: shell
