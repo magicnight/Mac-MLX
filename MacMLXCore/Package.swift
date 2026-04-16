@@ -11,15 +11,18 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.22.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.0.0"),
+        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "0.1.0"),
     ],
     targets: [
         .target(
             name: "MacMLXCore",
             dependencies: [
-                // Imports added in Stage 2 — declared above so SPM resolves them now.
-                // .product(name: "MLXLLM", package: "mlx-swift-lm"),
-                // .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "Transformers", package: "swift-transformers"),
                 .product(name: "Pulse", package: "Pulse"),
+                // Hummingbird wired in by Stage 3 server sub-agent (merged next).
+                // .product(name: "Hummingbird", package: "hummingbird"),
             ]
         ),
         .testTarget(
