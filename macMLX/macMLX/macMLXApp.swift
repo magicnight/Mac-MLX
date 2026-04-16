@@ -8,13 +8,18 @@ import SwiftUI
 
 @main
 struct macMLXApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var appState = AppState()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(appState)
-                .task { await appState.bootstrap() }
+                .task {
+                    await appState.bootstrap()
+                    // Wire the menu bar manager once AppState is ready.
+                    appDelegate.menuBarManager.setup(appState: appState)
+                }
         }
         .windowResizability(.contentSize)
     }
