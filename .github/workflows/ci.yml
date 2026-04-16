@@ -6,64 +6,54 @@ on:
   pull_request:
     branches: [main]
 
+# Stage 1 baseline: build the two SPM packages and the SwiftUI Xcode app on every push.
+# Python backend, SwiftLint, and notarized signing land in later stages.
+
 jobs:
-  swift:
-    name: Swift Build & Test
-    runs-on: macos-latest
+  spm:
+    name: SPM Build & Test
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.app
-
-      - name: Build
+      - name: Show toolchain
         run: |
-          xcodebuild -scheme macMLX \
-                     -configuration Debug \
-                     build \
-                     CODE_SIGN_IDENTITY="" \
-                     CODE_SIGNING_REQUIRED=NO
+          sw_vers
+          xcodebuild -version
+          swift --version
 
-      - name: Test
+      - name: Resolve & test MacMLXCore
         run: |
-          xcodebuild -scheme macMLX \
-                     -configuration Debug \
-                     test \
-                     CODE_SIGN_IDENTITY="" \
-                     CODE_SIGNING_REQUIRED=NO
+          swift package --package-path MacMLXCore resolve
+          swift test --package-path MacMLXCore --parallel
 
-  python:
-    name: Python Backend Test
-    runs-on: macos-latest
+      - name: Resolve & test macmlx-cli
+        run: |
+          swift package --package-path macmlx-cli resolve
+          swift test --package-path macmlx-cli --parallel
+
+      - name: Smoke-run macmlx --version
+        run: swift run --package-path macmlx-cli macmlx --version
+
+  app:
+    name: Xcode App Build
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-          enable-cache: true
+      - name: Show Xcode
+        run: xcodebuild -version
 
-      - name: Install dependencies
-        working-directory: Backend
-        run: uv sync --all-groups
-
-      - name: Lint
-        working-directory: Backend
-        run: uv run ruff check .
-
-      - name: Run backend tests
-        working-directory: Backend
-        run: uv run pytest Tests/ -v
-
-  lint-swift:
-    name: SwiftLint
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install SwiftLint
-        run: brew install swiftlint
-
-      - name: Run SwiftLint
-        run: swiftlint lint --strict
+      - name: Build macMLX.app (Debug, no signing)
+        run: |
+          xcodebuild \
+            -project macMLX/macMLX.xcodeproj \
+            -scheme macMLX \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
