@@ -1,17 +1,32 @@
+// macMLXApp.swift
+// macMLX
 //
-//  macMLXApp.swift
-//  macMLX
-//
-//  Created by Kefeng Zhou on 16/4/2569 BE.
-//
+// App entry. Owns the AppState root, runs bootstrap on first appearance,
+// and dispatches to MainWindowView (or OnboardingWindow once Task 4 lands).
 
 import SwiftUI
 
 @main
 struct macMLXApp: App {
+    @State private var appState = AppState()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(appState)
+                .task { await appState.bootstrap() }
         }
+        .windowResizability(.contentSize)
+    }
+}
+
+/// Branches between Onboarding and MainWindow based on settings state.
+private struct RootView: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        // TODO(Task 4): wire OnboardingWindow when settings.onboardingComplete == false.
+        // For now everyone lands on MainWindow until onboarding ships.
+        MainWindowView()
     }
 }
