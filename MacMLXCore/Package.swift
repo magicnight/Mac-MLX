@@ -18,7 +18,7 @@ let package = Package(
             dependencies: [
                 // Imports added in Stage 2 — declared above so SPM resolves them now.
                 // .product(name: "MLXLLM", package: "mlx-swift-lm"),
-                // .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "Hummingbird", package: "hummingbird"),
             ]
         ),
         .testTarget(
