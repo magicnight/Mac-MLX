@@ -1,6 +1,9 @@
-# Xcode
-*.xcodeproj/xcuserdata/
-*.xcworkspace/xcuserdata/
+# Xcode — user-specific data (must use **/ to recurse, plain *.xcodeproj/ only matches at root)
+**/xcuserdata/
+*.xcuserstate
+**/*.xcuserdatad/
+
+# Xcode — build artifacts
 build/
 dist/
 DerivedData/
@@ -11,6 +14,7 @@ DerivedData/
 # Swift Package Manager
 .build/
 .swiftpm/
+Packages/
 
 # Python — uv managed
 __pycache__/
@@ -33,7 +37,15 @@ __pycache__/
 *.p12
 *.mobileprovision
 ExportOptions.plist
+sparkle_private_key*
 
 # Local dev overrides
 .env
 .env.local
+
+# OMC — runtime state (plans/ and project-memory.json are committed)
+.omc/sessions/
+.omc/state/
+.omc/logs/
+.omc/research/
+.omc/notepad.md
