@@ -5,63 +5,119 @@ on:
     tags:
       - 'v*.*.*'
 
+# Triggered when a v*.*.* tag is pushed. Builds, signs (Sparkle EdDSA),
+# packages, attaches the DMG to a GitHub Release, and commits the
+# updated appcast.xml back to main.
+#
+# Required GitHub Secrets:
+#   SPARKLE_PRIVATE_KEY  - private EdDSA key from Sparkle's generate_keys
+#                          tool. PEM-formatted contents only (no path).
+
 jobs:
   build:
-    name: Build & Package DMG
-    runs-on: macos-latest
+    name: Build, Sign & Release
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    permissions:
+      contents: write   # needed to push appcast.xml + create release
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.app
+      - name: Pin Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-          enable-cache: true
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
 
       - name: Install Homebrew tools
         run: brew install create-dmg
 
-      - name: Verify backend dependencies
-        working-directory: Backend
-        run: uv sync
-
-      - name: Inject version into Info.plist
-        run: |
-          # Strip leading "v": "v0.1.0" -> "0.1.0"
-          VERSION="${GITHUB_REF_NAME#v}"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
-            macMLX/Resources/Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" \
-            macMLX/Resources/Info.plist
-          echo "Injected version: $VERSION (build $GITHUB_RUN_NUMBER)"
-
-      - name: Build archive
-        run: ./scripts/build.sh
+      - name: Build & archive
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: ./scripts/build.sh
 
       - name: Package DMG
-        run: ./scripts/package-dmg.sh
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: ./scripts/package-dmg.sh
 
-      - name: Compute SHA256
+      - name: Sign DMG with Sparkle EdDSA
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
-          shasum -a 256 dist/*.dmg > dist/SHA256SUMS.txt
-          cat dist/SHA256SUMS.txt
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "warning: SPARKLE_PRIVATE_KEY secret not set — skipping appcast update."
+            echo "Set the secret at: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            exit 0
+          fi
+          # Resolve Sparkle's sign_update tool from the SPM checkout.
+          SIGN_TOOL=$(find ~/Library/Developer/Xcode/DerivedData -name sign_update -type f -perm +111 | head -1)
+          if [ -z "$SIGN_TOOL" ]; then
+            # Fallback: install via Homebrew cask.
+            brew install --cask sparkle
+            SIGN_TOOL=$(find /opt/homebrew/Caskroom/sparkle -name sign_update -type f | head -1)
+          fi
+          if [ -z "$SIGN_TOOL" ]; then
+            echo "error: could not locate Sparkle sign_update tool"
+            exit 1
+          fi
+          echo "Using sign_update at: $SIGN_TOOL"
+          KEY_PATH=$(mktemp)
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_PATH"
+          DMG_PATH=$(ls dist/*.dmg | head -1)
+          SIG_OUTPUT=$("$SIGN_TOOL" "$DMG_PATH" -f "$KEY_PATH")
+          # sign_update prints the signature alone; capture it.
+          SPARKLE_SIGNATURE=$(echo "$SIG_OUTPUT" | grep -oE 'sparkle:edSignature="[^"]+"' | sed 's/.*"\(.*\)"/\1/' || echo "$SIG_OUTPUT")
+          DMG_SIZE=$(stat -f%z "$DMG_PATH")
+          rm -f "$KEY_PATH"
+          {
+            echo "SPARKLE_SIGNATURE=$SPARKLE_SIGNATURE"
+            echo "DMG_SIZE=$DMG_SIZE"
+            echo "DMG_PATH=$DMG_PATH"
+          } >> "$GITHUB_ENV"
+
+      - name: Update appcast.xml
+        if: env.SPARKLE_SIGNATURE != ''
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 scripts/update_appcast.py \
+              --version "$VERSION" \
+              --build "$GITHUB_RUN_NUMBER" \
+              --signature "$SPARKLE_SIGNATURE" \
+              --size "$DMG_SIZE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          if git diff --staged --quiet; then
+            echo "No appcast changes to commit."
+          else
+            git commit -m "chore: appcast for v${VERSION}"
+            # Push to main; tag commits exist on main already.
+            git push origin HEAD:main
+          fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.dmg
-            dist/SHA256SUMS.txt
+            dist/*.sha256
           draft: false
+          prerelease: false
           generate_release_notes: true
