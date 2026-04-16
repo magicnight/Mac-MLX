@@ -21,8 +21,7 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 .product(name: "Pulse", package: "Pulse"),
-                // Hummingbird wired in by Stage 3 server sub-agent (merged next).
-                // .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "Hummingbird", package: "hummingbird"),
             ]
         ),
         .testTarget(
