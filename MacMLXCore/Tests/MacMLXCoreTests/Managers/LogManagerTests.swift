@@ -17,7 +17,14 @@ private func makeTempStore() throws -> LoggerStore {
 
 // MARK: - Tests
 
-@Suite("LogManager")
+/// Pulse 5.1.4 trips Swift 6.0+ "Incorrect actor executor assumption" runtime
+/// check during LoggerStore CoreData tear-down on macos-15 / Xcode 16.4.
+/// Locally on Swift 6.3 the check is relaxed and these pass cleanly.
+/// CI sets MACMLX_SKIP_LOG_MANAGER_TESTS=1 until Pulse ships a Swift 6.0-clean release.
+private let skipLogManagerOnCI = ProcessInfo.processInfo
+    .environment["MACMLX_SKIP_LOG_MANAGER_TESTS"] == "1"
+
+@Suite("LogManager", .disabled(if: skipLogManagerOnCI, "Pulse 5.1.4 actor executor incompatibility on Swift 6.0 CI runner"))
 struct LogManagerTests {
 
     // MARK: Message storage
