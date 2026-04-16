@@ -5,16 +5,22 @@
 // and dispatches to MainWindowView (or OnboardingWindow once Task 4 lands).
 
 import SwiftUI
+import MacMLXCore
 
 @main
 struct macMLXApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var appState = AppState()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(appState)
-                .task { await appState.bootstrap() }
+                .task {
+                    await appState.bootstrap()
+                    // Wire the menu bar manager once AppState is ready.
+                    appDelegate.menuBarManager.setup(appState: appState)
+                }
         }
         .windowResizability(.contentSize)
     }
@@ -23,10 +29,30 @@ struct macMLXApp: App {
 /// Branches between Onboarding and MainWindow based on settings state.
 private struct RootView: View {
     @Environment(AppState.self) private var appState
+    @State private var showOnboarding = false
 
     var body: some View {
-        // TODO(Task 4): wire OnboardingWindow when settings.onboardingComplete == false.
-        // For now everyone lands on MainWindow until onboarding ships.
         MainWindowView()
+            .sheet(isPresented: $showOnboarding) {
+                OnboardingWindow {
+                    showOnboarding = false
+                }
+                .environment(appState)
+            }
+            .onAppear {
+                // Show onboarding on first launch (settings not yet loaded —
+                // bootstrap() runs in .task; re-evaluate once it fires).
+            }
+            .onChange(of: appState.currentSettings.onboardingComplete) { _, newValue in
+                if !newValue {
+                    showOnboarding = true
+                }
+            }
+            .task {
+                // After bootstrap has loaded settings, decide whether to show onboarding.
+                if !appState.currentSettings.onboardingComplete {
+                    showOnboarding = true
+                }
+            }
     }
 }
