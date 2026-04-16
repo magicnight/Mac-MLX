@@ -122,13 +122,24 @@ public actor SettingsManager {
     /// Must be called once after init to load settings from disk.
     ///
     /// Separated from init because actor initialisers cannot throw.
+    ///
+    /// Policy:
+    /// - File missing → write defaults so the file exists next time.
+    /// - File present but corrupt → use defaults in memory, but do **not**
+    ///   overwrite the file (leave it for human inspection).
+    ///
     /// - Returns: The loaded (or default) settings.
     @discardableResult
     public func load() async -> Settings {
-        if let loaded = try? readFromDisk() {
-            current = loaded
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            // Present — attempt decode; on corruption keep the file intact.
+            if let loaded = try? readFromDisk() {
+                current = loaded
+            } else {
+                current = .default
+            }
         } else {
-            // File missing — persist defaults so the file exists next time.
+            // Missing — persist defaults so the file exists next time.
             current = .default
             try? writeToDisk(current)
         }

@@ -113,4 +113,21 @@ public actor LogManager {
     public func critical(_ message: String, category: LogCategory = .error) {
         log(message, level: .critical, category: category)
     }
+
+    // MARK: Flushing
+
+    /// Synchronously flush any pending writes to disk.
+    ///
+    /// `storeMessage(...)` queues writes on Pulse's background context and
+    /// returns immediately. Callers that need to read back logs (tests, app
+    /// shutdown) must invoke `flush()` first to guarantee the writes have
+    /// landed in the view context.
+    public func flush() {
+        store.backgroundContext.performAndWait {
+            try? store.backgroundContext.save()
+        }
+        store.viewContext.performAndWait {
+            store.viewContext.refreshAllObjects()
+        }
+    }
 }

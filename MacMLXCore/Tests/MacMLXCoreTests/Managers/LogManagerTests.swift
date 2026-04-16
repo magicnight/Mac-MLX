@@ -28,11 +28,9 @@ struct LogManagerTests {
         let manager = LogManager(store: store)
 
         await manager.log("hello from inference", level: .info, category: .inference)
+        await manager.flush()
 
-        // Give the Core Data stack a moment to flush.
-        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
-
-        let messages = try store.allMessages()
+        let messages = try store.messages()
         #expect(messages.isEmpty == false)
 
         let match = messages.first { $0.text == "hello from inference" }
@@ -78,10 +76,9 @@ struct LogManagerTests {
         await manager.warning("w")
         await manager.error("e")
         await manager.critical("c")
+        await manager.flush()
 
-        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
-
-        let messages = try store.allMessages()
+        let messages = try store.messages()
         #expect(messages.count == 5)
     }
 }
