@@ -12,7 +12,7 @@ authors:
   - name: mac-mlx contributors
     website: "https://github.com/magicnight/mac-mlx"
 repository-code: "https://github.com/magicnight/mac-mlx"
-license: MIT
+license: Apache-2.0
 keywords:
   - llm
   - inference
@@ -22,6 +22,9 @@ keywords:
   - swiftui
   - local-ai
 references:
+  # ------------------------------------------------------------
+  # Core Inference Framework
+  # ------------------------------------------------------------
   - type: software
     title: "MLX: Efficient and flexible machine learning on Apple silicon"
     authors:
@@ -36,11 +39,69 @@ references:
     url: "https://github.com/ml-explore/mlx"
     year: 2023
   - type: software
+    title: "MLX Swift LM: LLMs and VLMs with MLX Swift"
+    authors:
+      - name: Apple Machine Learning Research
+    url: "https://github.com/ml-explore/mlx-swift-lm"
+    year: 2024
+  - type: software
+    title: "MLX Swift: Swift API for MLX"
+    authors:
+      - name: Apple Machine Learning Research
+    url: "https://github.com/ml-explore/mlx-swift"
+    year: 2023
+  - type: software
     title: "MLX LM: Large language model inference and fine-tuning with MLX"
     authors:
       - name: Apple Machine Learning Research
     url: "https://github.com/ml-explore/mlx-lm"
     year: 2024
+    notes: >-
+      Retained as an optional Python engine reference.
+  # ------------------------------------------------------------
+  # HTTP Server
+  # ------------------------------------------------------------
+  - type: software
+    title: "Hummingbird: Lightweight, flexible HTTP server framework for Swift"
+    authors:
+      - given-names: Adam
+        family-names: Fowler
+      - name: Hummingbird contributors
+    url: "https://github.com/hummingbird-project/hummingbird"
+    year: 2021
+  # ------------------------------------------------------------
+  # Auto-Update
+  # ------------------------------------------------------------
+  - type: software
+    title: "Sparkle: A software update framework for macOS"
+    authors:
+      - given-names: Andy
+        family-names: Matuschak
+      - name: Sparkle contributors
+    url: "https://github.com/sparkle-project/Sparkle"
+    year: 2006
+  # ------------------------------------------------------------
+  # Logging & Observability
+  # ------------------------------------------------------------
+  - type: software
+    title: "Pulse: Powerful logging system for Apple platforms"
+    authors:
+      - given-names: Alexander
+        family-names: Grebenyuk
+    url: "https://github.com/kean/Pulse"
+    year: 2020
+  - type: software
+    title: "Rich: Rich text and beautiful formatting in the terminal"
+    authors:
+      - given-names: Will
+        family-names: McGugan
+    url: "https://github.com/Textualize/rich"
+    year: 2020
+    notes: >-
+      Used in the Python engine for stderr formatting (optional).
+  # ------------------------------------------------------------
+  # Python Backend (optional engine)
+  # ------------------------------------------------------------
   - type: software
     title: FastAPI
     authors:
@@ -49,9 +110,66 @@ references:
     url: "https://github.com/fastapi/fastapi"
     year: 2018
   - type: software
-    title: "oMLX: LLM inference server for Apple Silicon"
+    title: "Uvicorn: An ASGI web server implementation for Python"
+    authors:
+      - given-names: Tom
+        family-names: Christie
+      - name: Encode OSS Ltd.
+    url: "https://github.com/encode/uvicorn"
+    year: 2017
+  - type: software
+    title: "uv: An extremely fast Python package and project manager"
+    authors:
+      - name: Astral
+    url: "https://github.com/astral-sh/uv"
+    year: 2023
+  - type: software
+    title: "Ruff: An extremely fast Python linter and code formatter"
+    authors:
+      - name: Astral
+    url: "https://github.com/astral-sh/ruff"
+    year: 2022
+  # ------------------------------------------------------------
+  # CLI & TUI
+  # ------------------------------------------------------------
+  - type: software
+    title: "swift-argument-parser: Straightforward, type-safe argument parsing for Swift"
+    authors:
+      - name: Apple Inc.
+    url: "https://github.com/apple/swift-argument-parser"
+    year: 2020
+  - type: software
+    title: "SwiftTUI: SwiftUI for terminal applications"
+    authors:
+      - given-names: Rens
+        family-names: Breur
+    url: "https://github.com/rensbreur/SwiftTUI"
+    year: 2022
+  # ------------------------------------------------------------
+  # Inspiration & Reference Implementations
+  # ------------------------------------------------------------
+  - type: software
+    title: "oMLX: LLM inference server with continuous batching and SSD caching for Apple Silicon"
     authors:
       - given-names: Jun
         family-names: Kim
     url: "https://github.com/jundot/omlx"
     year: 2024
+    notes: >-
+      Primary architecture and feature reference.
+  - type: software
+    title: "Swama: High-performance MLX-based LLM inference engine for macOS with native Swift implementation"
+    authors:
+      - name: Trans-N-ai contributors
+    url: "https://github.com/Trans-N-ai/swama"
+    year: 2025
+    notes: >-
+      CLI architecture and Swift inference reference.
+  - type: software
+    title: "SwiftLM: Native MLX Swift LLM inference server for Apple Silicon"
+    authors:
+      - name: SharpAI contributors
+    url: "https://github.com/SharpAI/SwiftLM"
+    year: 2025
+    notes: >-
+      Advanced engine reference (SSD streaming, TurboQuant).
