@@ -61,7 +61,11 @@ struct LogManagerTests {
                 await manager.log("test \(level) \(category)", level: level, category: category)
             }
         }
-        // If we reach here without crashing the test passes.
+        // Drain pending writes so the LoggerStore tears down cleanly when the
+        // test scope exits. Without this, Pulse's async background-context
+        // saves can race with test cleanup and trip the Swift 6.0 runtime
+        // 'Incorrect actor executor assumption' check on CI.
+        await manager.flush()
     }
 
     // MARK: Convenience methods
