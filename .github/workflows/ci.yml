@@ -6,8 +6,9 @@ on:
   pull_request:
     branches: [main]
 
-# Stage 1 baseline: build the two SPM packages and the SwiftUI Xcode app on every push.
-# Python backend, SwiftLint, and notarized signing land in later stages.
+# Stage 1 baseline (updated Stage 3): test SPM packages and the SwiftUI Xcode app on every push.
+# Pin to the latest Xcode 16.x — Swift 6.1+ runtime is more lenient about actor executor
+# assertions than the Swift 6.0 default on macos-15 runners (caught by mlx-swift-lm + actor patterns).
 
 jobs:
   spm:
@@ -16,6 +17,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pin Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
 
       - name: Show toolchain
         run: |
@@ -42,6 +46,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pin Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
 
       - name: Show Xcode
         run: xcodebuild -version
