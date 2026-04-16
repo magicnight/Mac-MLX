@@ -53,8 +53,11 @@ private struct TokenizerBridge: MLXLMCommon.Tokenizer, @unchecked Sendable {
         do {
             return try upstream.applyChatTemplate(
                 messages: messages, tools: tools, additionalContext: additionalContext)
-        } catch Tokenizers.TokenizerError.chatTemplate(_) {
-            throw MLXLMCommon.TokenizerError.missingChatTemplate
+        } catch let tokenizerError as Tokenizers.TokenizerError {
+            if case .chatTemplate = tokenizerError {
+                throw MLXLMCommon.TokenizerError.missingChatTemplate
+            }
+            throw tokenizerError
         }
     }
 }
