@@ -111,14 +111,14 @@ cd Backend && uv sync          # Python engine (optional)
 
 ## Roadmap
 
-**v0.1**
-- [x] Native SwiftUI GUI + menu bar
-- [x] mlx-swift-lm default engine
-- [x] CLI + TUI (serve, pull, run, list, ps)
-- [x] HuggingFace model downloader
-- [x] OpenAI-compatible API (Hummingbird)
-- [x] Memory-aware onboarding
-- [x] Sparkle auto-update
+**v0.1** (in progress — see [.omc/plans/v0.1-implementation.md](.omc/plans/v0.1-implementation.md))
+- [ ] Native SwiftUI GUI + menu bar
+- [ ] mlx-swift-lm default engine
+- [ ] CLI + TUI (serve, pull, run, list, ps)
+- [ ] HuggingFace model downloader
+- [ ] OpenAI-compatible API (Hummingbird)
+- [ ] Memory-aware onboarding
+- [ ] Sparkle auto-update
 
 **v0.2**
 - [ ] Homebrew tap

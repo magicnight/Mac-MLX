@@ -1,0 +1,155 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776351494565,
+  "projectRoot": "/Users/kevin/Projects/macmlx",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {},
+  "hotPaths": [
+    {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1776354551353,
+      "type": "file"
+    },
+    {
+      "path": "macMLX/macMLX/ContentView.swift",
+      "accessCount": 2,
+      "lastAccessed": 1776356958122,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 1,
+      "lastAccessed": 1776353681542,
+      "type": "directory"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353771016,
+      "type": "file"
+    },
+    {
+      "path": "Brewfile",
+      "accessCount": 1,
+      "lastAccessed": 1776353771208,
+      "type": "file"
+    },
+    {
+      "path": ".claude/architecture.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353778328,
+      "type": "file"
+    },
+    {
+      "path": ".claude/swift-conventions.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353778697,
+      "type": "file"
+    },
+    {
+      "path": ".claude/ui-guidelines.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353779102,
+      "type": "file"
+    },
+    {
+      "path": ".claude/api-contracts.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353779935,
+      "type": "file"
+    },
+    {
+      "path": ".claude/features/inference-engines.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353787400,
+      "type": "file"
+    },
+    {
+      "path": ".claude/features/chat-ui.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353787806,
+      "type": "file"
+    },
+    {
+      "path": ".claude/features/menubar.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353788214,
+      "type": "file"
+    },
+    {
+      "path": ".claude/features/cli-tui.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353788465,
+      "type": "file"
+    },
+    {
+      "path": ".claude/features/onboarding.md",
+      "accessCount": 1,
+      "lastAccessed": 1776353789468,
+      "type": "file"
+    },
+    {
+      "path": "MacMLXCore/Tests/MacMLXCoreTests/VersionTests.swift",
+      "accessCount": 1,
+      "lastAccessed": 1776355203006,
+      "type": "file"
+    },
+    {
+      "path": "MacMLXCore/Package.swift",
+      "accessCount": 1,
+      "lastAccessed": 1776355227082,
+      "type": "file"
+    },
+    {
+      "path": "MacMLXCore/Sources/MacMLXCore/MacMLXCore.swift",
+      "accessCount": 1,
+      "lastAccessed": 1776355232840,
+      "type": "file"
+    },
+    {
+      "path": "macmlx-cli/Tests/macmlxTests/CommandSmokeTests.swift",
+      "accessCount": 1,
+      "lastAccessed": 1776355373252,
+      "type": "file"
+    },
+    {
+      "path": "macmlx-cli/Package.swift",
+      "accessCount": 1,
+      "lastAccessed": 1776355381534,
+      "type": "file"
+    },
+    {
+      "path": "macmlx-cli/Sources/macmlx/MacmlxCommand.swift",
+      "accessCount": 1,
+      "lastAccessed": 1776355390615,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
