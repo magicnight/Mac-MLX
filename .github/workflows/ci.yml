@@ -3,12 +3,36 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.omc/**'
+      - '**/*.md'
+      - 'CHANGELOG.md'
+      - 'CITATION.cff'
+      - 'CITATIONS.bib'
+      - 'LICENSE'
+      - 'README.md'
+      - 'CODE_OF_CONDUCT.md'
+      - 'SECURITY.md'
+      - 'CONTRIBUTING.md'
+      - '.gitignore'
+      - 'docs/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '.omc/**'
+      - '**/*.md'
+      - 'docs/**'
+  workflow_dispatch: {}
 
-# Pin to Xcode 16.4 (Swift 6.1). LogManager tests are skipped on CI via env var
-# until Pulse 5.1.4 + Swift 6.0/6.1 actor-executor teardown issue is fixed upstream.
-# All other tests (60 - 4 LogManager = 56) run.
+# Minute budget notes:
+#   - Only code changes trigger CI (paths-ignore filters docs/plans).
+#   - Consecutive pushes to the same ref cancel the older run.
+#   - SPM resolution + MLX C++ compile is cached across runs (~7min -> ~2min).
+#   - Use "[skip ci]" in a commit message to bypass entirely.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   MACMLX_SKIP_LOG_MANAGER_TESTS: "1"
@@ -23,6 +47,18 @@ jobs:
 
       - name: Pin Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Cache SPM checkouts + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            MacMLXCore/.build
+            macmlx-cli/.build
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('MacMLXCore/Package.resolved', 'macmlx-cli/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
 
       - name: Show toolchain
         run: |
@@ -52,6 +88,16 @@ jobs:
 
       - name: Pin Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Cache Xcode DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: xcode-${{ runner.os }}-${{ hashFiles('MacMLXCore/Package.resolved', 'macMLX/macMLX.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            xcode-${{ runner.os }}-
 
       - name: Show Xcode
         run: xcodebuild -version
