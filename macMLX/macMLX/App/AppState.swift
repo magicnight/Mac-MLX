@@ -19,6 +19,7 @@ public final class AppState {
     public let downloader: HFDownloader
     public let logs: LogManager
     public let coordinator: EngineCoordinator
+    public let conversations: ConversationStore
 
     /// Single app-scoped Chat view model. Owned here (not by ChatView's
     /// @State) so message history and the in-flight generation Task survive
@@ -38,12 +39,14 @@ public final class AppState {
         let settings = SettingsManager()
         let logs = LogManager()
         let coordinator = EngineCoordinator(logs: logs)
+        let conversations = ConversationStore()  // defaults to ~/.mac-mlx/conversations
         self.settings = settings
         self.library = ModelLibraryManager()
         self.downloader = HFDownloader()
         self.logs = logs
         self.coordinator = coordinator
-        self.chat = ChatViewModel(coordinator: coordinator)
+        self.conversations = conversations
+        self.chat = ChatViewModel(coordinator: coordinator, store: conversations)
     }
 
     // MARK: - Lifecycle
