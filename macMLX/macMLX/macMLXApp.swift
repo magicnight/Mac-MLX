@@ -60,11 +60,11 @@ private struct CheckForUpdatesMenuItem: View {
             updater.checkForUpdates()
         }
         .disabled(!canCheckForUpdates)
-        .task {
-            // Mirror Sparkle's published property into local state.
-            for await value in updater.publisher(for: \.canCheckForUpdates).values {
-                canCheckForUpdates = value
-            }
+        // .onReceive uses SwiftUI's built-in Combine bridge, so we don't
+        // need an explicit `import Combine` (which Release builds require
+        // even though Debug compiles fine without it).
+        .onReceive(updater.publisher(for: \.canCheckForUpdates)) { newValue in
+            canCheckForUpdates = newValue
         }
     }
 }
