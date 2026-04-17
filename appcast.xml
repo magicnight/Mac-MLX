@@ -6,6 +6,15 @@
     <description>macMLX releases</description>
     <language>en</language>
     <item>
+      <title>Version 0.3.2</title>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:shortVersionString>0.3.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Fri, 17 Apr 2026 14:18:47 +0000</pubDate>
+      <enclosure url="https://github.com/magicnight/Mac-MLX/releases/download/v0.3.2/macMLX-v0.3.2.dmg" sparkle:edSignature="cX1qAUcoolIg9WHXH7E02QBPr7vnbqylpqwCumjnjDHZKCIeGudqBae8YzDgdaBPGjtVsAYjCaOlznwD0e9PDA==" length="10179606" type="application/octet-stream" />
+      <sparkle:releaseNotesLink>https://github.com/magicnight/Mac-MLX/releases/tag/v0.3.2</sparkle:releaseNotesLink>
+    </item>
+    <item>
       <title>Version 0.3.1</title>
       <sparkle:version>6</sparkle:version>
       <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
