@@ -2,9 +2,12 @@
 
 > Native macOS LLM inference, powered by Apple MLX.
 
-macMLX brings local LLM inference to Apple Silicon with a first-class native macOS experience. No cloud, no telemetry, no Electron — just your Mac running models at full speed.
+macMLX brings local LLM inference to Apple Silicon with a first-class
+native macOS experience. No cloud, no telemetry, no Electron — just
+your Mac running models at full speed.
 
-**macMLX is for everyone**: a polished GUI for newcomers, and a powerful CLI + TUI for developers.
+**macMLX is for everyone**: a polished SwiftUI app for newcomers, and a
+proper CLI for developers.
 
 ---
 
@@ -12,126 +15,174 @@ macMLX brings local LLM inference to Apple Silicon with a first-class native mac
 
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| Native macOS GUI | ✅ | ❌ Electron | ❌ | ❌ Web UI |
+| Native macOS GUI | ✅ SwiftUI | ❌ Electron | ❌ | ❌ Web UI |
 | MLX-native inference | ✅ | ❌ GGUF | ❌ GGUF | ✅ |
-| CLI + TUI | ✅ | ❌ | ✅ | ✅ |
-| 100B+ MoE models | ✅ SwiftLM | ❌ | ❌ | ❌ |
+| CLI | ✅ | ❌ | ✅ | ✅ |
+| Resumable downloads + mirrors | ✅ | ⚠ partial | ⚠ partial | ❌ |
+| OpenAI-compatible API | ✅ always-on | ✅ | ✅ | ✅ |
 | Zero Python required | ✅ | ✅ | ✅ | ❌ |
 
 ## Requirements
 
 - macOS 14.0 (Sonoma) or later
 - Apple Silicon (M1 / M2 / M3 / M4)
-- No Python required for default usage
+- No Python required
 
 ## Installation
 
-### GUI App
-
 Download `macMLX-vX.X.X.dmg` from [Releases](../../releases).
 
-**First launch**: Right-click → Open → Open (Gatekeeper bypass, one-time).
+**First launch**: Right-click the app → Open → Open (one-time
+Gatekeeper bypass — the DMG isn't notarized; see the release notes for
+the exact `xattr` command if the dialog doesn't show an Open button).
 
-### CLI
+## What's in v0.2
 
-```bash
-# Bundled with the app — symlink during onboarding
-macmlx --version
+Download and chat got serious. Ten issues landed since v0.1:
 
-# Homebrew (coming in v0.2)
-brew install magicnight/mac-mlx/macmlx
-```
+**Download**
+- Real per-chunk progress bars with speed (MB/s) and ETA (#7)
+- Cancel button mid-download; partial files cleaned up (#5)
+- **Resume across cancel + app restart** — `URLError` resume-data persists to `~/.mac-mlx/downloads/` and the next Download continues from the last byte (#6)
+- **Background URLSession** — transfers survive App Nap and full app quits; pending files are simply there next time you open the app (#8)
+- Configurable HuggingFace endpoint for mirrors (e.g. `https://hf-mirror.com`) — for regions where huggingface.co is slow (#21)
+
+**Chat**
+- Full Markdown rendering for assistant messages, including streaming (#10)
+- Right-click any message for Copy / Edit / Regenerate / Delete (#11)
+- Conversations auto-save to `~/.mac-mlx/conversations/` and reload on launch (#9)
+- **Parameters Inspector** (⌘⌥I) — per-model temperature, top_p, max tokens, system prompt — persists to `~/.mac-mlx/model-params/` (#15)
+
+**Polish**
+- Chat inference now survives sidebar tab switches (#1)
+- Single-instance enforcement — a second launch activates the existing window (#2)
+- Menu bar popover has a Quit button (#17)
+
+Full list: [CHANGELOG.md](CHANGELOG.md).
 
 ## Quickstart
 
 ### GUI
-1. Launch macMLX — the setup wizard guides you through everything
-2. Download a model from the built-in HuggingFace browser
+1. Launch macMLX — the setup wizard points you at `~/.mac-mlx/models` and picks the MLX Swift engine
+2. Download a model from the built-in HuggingFace browser (resumable, works through mirrors)
 3. Load it and start chatting
 
 ### CLI
+
 ```bash
-macmlx pull Qwen3-8B-4bit          # download model
-macmlx run Qwen3-8B-4bit           # interactive chat TUI
-macmlx serve                        # start OpenAI-compatible API
-macmlx run Qwen3-8B-4bit "Hello"   # single prompt
+macmlx pull mlx-community/Qwen3-8B-4bit     # download
+macmlx list                                  # local models
+macmlx run Qwen3-8B-4bit "Hello, world"      # single prompt
+macmlx run Qwen3-8B-4bit                     # interactive
+macmlx serve                                 # start API on :8000
+macmlx ps                                    # is serve running?
+macmlx stop                                  # graceful SIGTERM
 ```
 
-## Connecting External Tools
+## Connecting external tools
 
-macMLX exposes an OpenAI-compatible API at `http://localhost:8000/v1`.
+macMLX's OpenAI-compatible server runs on `http://localhost:8000/v1`
+whenever you load a model (or whenever `macmlx serve` is running).
 
 ```bash
-# Claude Code
-claude --model macmlx/Qwen3-8B-4bit
-
-# curl
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"Qwen3-8B-4bit","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+  -d '{"model":"Qwen3-8B-4bit","messages":[{"role":"user","content":"Hi"}],"stream":true}'
 ```
 
-Any OpenAI-compatible client works: Cursor, Continue, Open WebUI, etc.
+Any OpenAI-compatible client works — point it at
+`http://localhost:8000/v1` with any key:
 
-## Inference Engines
+- Cursor / Continue / Cline: set the custom base URL in settings
+- Open WebUI: add as an OpenAI provider
+- Raycast, Zed, etc.: same pattern
 
-| Engine | Use case | Setup |
-|--------|---------|-------|
-| **MLX Swift** (default) | Most models, best integration | None — built-in |
-| **SwiftLM** | 100B+ MoE models, SSD streaming | Install separately |
-| **Python mlx-lm** | Maximum model compatibility | uv + mlx-lm |
+## Inference engines
+
+| Engine | Status | Notes |
+|--------|--------|-------|
+| **MLX Swift** (default) | ✅ Shipping | Apple's `mlx-swift-lm`, in-process. Supports models up to ~70B on 64 GB+ Macs. |
+| **SwiftLM** (100B+ MoE) | 🕒 Deferred to v0.3 | Subprocess launch blocked by App Sandbox policy; revisit when there's a concrete user ask ([#12](../../issues/12)). |
+| **Python mlx-lm** | 🕒 Deferred to v0.3 | Same sandbox blocker ([#13](../../issues/13)). |
+
+Settings → Engine shows Install Guide links for the deferred engines;
+selecting them today surfaces a graceful "engine not available" state.
 
 ## Architecture
 
 ```
-macMLX.app / macmlx CLI
-        │
-MacMLXCore (Swift SPM package)
-        │
-   Engine Protocol
-   ├── mlx-swift-lm (default, in-process)
-   ├── SwiftLM (optional, 100B+ MoE)
-   └── Python mlx-lm (optional, max compat)
-        │
-Hummingbird HTTP → localhost:8000/v1
-        │
-Apple Silicon (Metal / ANE / NVMe)
+macMLX.app (SwiftUI)        macmlx (CLI)
+            │                    │
+            └─────── MacMLXCore ─┘    (Swift SPM package)
+                        │
+               InferenceEngine
+                        │
+                  MLXSwiftEngine    (in-process, mlx-swift-lm 3.31.x)
+                        │
+                  HummingbirdServer  → http://localhost:8000/v1
+                        │
+                Apple Silicon (Metal / ANE)
 ```
 
-## Building from Source
+Data lives under `~/.mac-mlx/`:
+
+```
+~/.mac-mlx/
+├── models/              # weights (default, changeable in Settings)
+├── conversations/       # chat history JSON
+├── model-params/        # per-model parameter overrides
+├── downloads/           # resume-data for interrupted downloads
+├── logs/                # Pulse logs
+├── settings.json        # user preferences
+└── macmlx.pid           # CLI daemon coordination
+```
+
+This path is deliberately a dotfile under real `$HOME`: macOS App
+Sandbox's dotfile exemption lets a sandboxed app read/write here
+without `user-selected.read-write` entitlements or security-scoped
+bookmarks, while staying visible to power users.
+
+## Building from source
 
 ```bash
 git clone https://github.com/magicnight/mac-mlx
 cd mac-mlx
-brew bundle                    # dev tools
-open macMLX/macMLX.xcodeproj  # GUI app
-cd macmlx-cli && swift build  # CLI
-cd Backend && uv sync          # Python engine (optional)
+brew bundle                            # dev tools
+
+# GUI app
+open macMLX/macMLX.xcodeproj           # or: xcodebuild -scheme macMLX build
+
+# CLI
+swift build --package-path macmlx-cli
+
+# Core + tests
+swift test --package-path MacMLXCore   # 60 tests, runs in ~3s
 ```
 
 ## Roadmap
 
-**v0.1** (in progress — see [.omc/plans/v0.1-implementation.md](.omc/plans/v0.1-implementation.md))
-- [ ] Native SwiftUI GUI + menu bar
-- [ ] mlx-swift-lm default engine
-- [ ] CLI + TUI (serve, pull, run, list, ps)
-- [ ] HuggingFace model downloader
-- [ ] OpenAI-compatible API (Hummingbird)
-- [ ] Memory-aware onboarding
-- [ ] Sparkle auto-update
+### Shipped
 
-**v0.2**
-- [ ] Homebrew tap
-- [ ] SwiftLM engine integration (100B+ MoE)
-- [ ] Python mlx-lm engine
-- [ ] VLM support
-- [ ] Benchmark + community leaderboard
-- [ ] HuggingFace mirror endpoint
-- [ ] Conversation history persistence
+- **v0.1.0** — native SwiftUI GUI, menu bar, CLI (`serve` / `pull` / `run` / `list` / `ps` / `stop`), HuggingFace downloader, OpenAI-compatible API, Sparkle auto-update, memory-aware onboarding.
+- **v0.2.0** — see "What's in v0.2" above. Download + chat polish; 10 issues closed.
+
+### Next (v0.3 candidates)
+
+- [#12](../../issues/12) SwiftLM engine (100B+ MoE) — pending sandbox policy review
+- [#13](../../issues/13) Python mlx-lm engine — pending sandbox policy review
+- [#22](../../issues/22) Benchmark feature (tok/s, TTFT, peak memory)
+- [#23](../../issues/23) Vision-Language Model support
+- [#16](../../issues/16) Logs tab (PulseUI console)
+- [#20](../../issues/20) Homebrew tap for the CLI
+
+### Long-term
+
+- [#18](../../issues/18) Rich SwiftTUI dashboards (blocked upstream on Swift 6 compatibility)
+- [#19](../../issues/19) Signed + notarized DMG (when there's a paid Apple Developer account)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). All contributions welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and PRs welcome.
 
 ## License
 
@@ -139,9 +190,9 @@ Apache 2.0 — see [LICENSE](LICENSE)
 
 ## Acknowledgements
 
-- [MLX](https://github.com/ml-explore/mlx) and [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) by Apple
+- [MLX](https://github.com/ml-explore/mlx) and [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-examples) by Apple
 - [Swama](https://github.com/Trans-N-ai/swama) — Swift inference architecture inspiration
-- [SwiftLM](https://github.com/SharpAI/SwiftLM) — 100B+ MoE engine
+- [SwiftLM](https://github.com/SharpAI/SwiftLM) — 100B+ MoE engine (future integration)
 - [oMLX](https://github.com/jundot/omlx) — feature depth reference
 - [Hummingbird](https://github.com/hummingbird-project/hummingbird) — Swift HTTP server
 - [Sparkle](https://github.com/sparkle-project/Sparkle) — auto-update framework
