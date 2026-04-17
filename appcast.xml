@@ -1,11 +1,18 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>macMLX</title>
     <link>https://github.com/magicnight/Mac-MLX</link>
     <description>macMLX releases</description>
     <language>en</language>
-    <!-- Releases will be appended here automatically by scripts/update_appcast.py
-         when CI runs on a v*.*.* tag push. -->
+    <item>
+      <title>Version 0.1.0</title>
+      <sparkle:version>2</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Fri, 17 Apr 2026 04:47:09 +0000</pubDate>
+      <enclosure url="https://github.com/magicnight/Mac-MLX/releases/download/v0.1.0/macMLX-v0.1.0.dmg" sparkle:edSignature="BHKimYIuQ4hgl6TY939F23A+deGlpSWOPqBMR3O8sKIBm++1ddTBQLQcS3q9xbwt91v2YnKwaaI8xGKLnx8TCQ==" length="9976125" type="application/octet-stream" />
+      <sparkle:releaseNotesLink>https://github.com/magicnight/Mac-MLX/releases/tag/v0.1.0</sparkle:releaseNotesLink>
+    </item>
   </channel>
 </rss>
