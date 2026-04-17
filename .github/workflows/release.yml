@@ -89,6 +89,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Update appcast.xml
+        # continue-on-error so a push race here doesn't kill the whole
+        # release. DMG is already signed by this point; the worst-case
+        # consequence of a failed appcast push is Sparkle not auto-
+        # notifying about this build, recoverable by re-running this
+        # step later. Pre-v0.3 a stale-push error here took out the
+        # Create Release step too — fixed below.
+        continue-on-error: true
         if: env.SPARKLE_SIGNATURE != ''
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -106,13 +113,33 @@ jobs:
           git add appcast.xml
           if git diff --staged --quiet; then
             echo "No appcast changes to commit."
-          else
-            git commit -m "chore: appcast for v${VERSION}"
-            # Push to main; tag commits exist on main already.
-            git push origin HEAD:main
+            exit 0
           fi
+          git commit -m "chore: appcast for v${VERSION}"
+
+          # Main may have advanced during the 10-20 minute Xcode archive
+          # step. Rebase + retry so we don't lose the appcast entry to a
+          # fast-forward race (what took out the v0.3.0 release initially).
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main; then
+              if git push origin HEAD:main; then
+                echo "Appcast pushed on attempt ${attempt}."
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+            fi
+            echo "Appcast push attempt ${attempt} failed; retrying…"
+            sleep $((attempt * 5))
+          done
+          echo "warning: appcast push failed after 3 attempts. DMG is still being released; re-run this step (or the whole workflow) once main quiets down."
+          exit 1
 
       - name: Create GitHub Release
+        # Always run (unless a prior required step hard-failed) so the
+        # DMG gets published even if the appcast push raced with main.
+        if: always()
         uses: softprops/action-gh-release@v2
         with:
           files: |

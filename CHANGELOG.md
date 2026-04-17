@@ -15,9 +15,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [0.3.0] - 2026-04-17
 
-v0.3 shipped the **local benchmark feature** and a sweep of
+v0.3 shipped the **local benchmark feature**, a sweep of
 cross-cutting defects flagged by an independent code review of the
-v0.1+v0.2 surface.
+v0.1+v0.2 surface, a second pass on CLI/engine parity with the GUI,
+the VLM (#23) implementation plan for v0.4, and a release-pipeline
+hardening that fixes the race this very tag tripped over on its
+first publish attempt.
 
 ### Added
 - **Benchmark tab** (⌥⌘ sidebar) — local benchmark runner with config (model / prompt tokens / gen tokens / runs / notes), last-result readout (prefill + generation TPS, TTFT, peak memory, load time), history list with delete + clear, `Share to Community` (pre-fills a GitHub issue via `benchmark_submission.yml`), `Copy as JSON`. (#22, `88545ad` / `e3cf815` / `e155a7a`)
@@ -28,6 +31,8 @@ v0.1+v0.2 surface.
 - `MemoryProbe` gained `residentMemoryBytes()` + `residentMemoryGB()` (used by benchmark sampler **and** `HummingbirdServer`'s `/v1/status`, which now reports real RSS instead of 0).
 - **Simplified Chinese README** (`README.zh-CN.md`) with bilingual switcher header on both files.
 - `.github/ISSUE_TEMPLATE/benchmark_submission.yml` — target template for the app's Share-to-Community link.
+- `MacMLXCore/Util/JSONCoding.swift` — shared `precisionEncoder()` (`.secondsSince1970`) + `tolerantDecoder()` that accepts both legacy ISO-8601 and new Double-seconds date shapes. Enables sub-second ordering for rapid-save scenarios without breaking v0.2 users' saved conversations.
+- `.omc/plans/v0.3-vlm-plan.md` — full research + implementation blueprint for VLM support (#23). Finding: `MLXVLM` already ships in our `mlx-swift-lm` dependency with 16 supported VLM architectures. 7-step build plan targeting v0.4.0.
 
 ### Changed
 - **SettingsManager no longer writes to the sandbox container** (CRITICAL). Pre-v0.3 `SettingsManager.init()` used `FileManager.default.homeDirectoryForCurrentUser` → `~/Library/Containers/<bundle-id>/Data/…`, so the GUI's `settings.json` lived inside the container while the CLI (and `Settings.default.modelDirectory`) used real `~/.mac-mlx/`. GUI and CLI were quietly disagreeing. Routed through `DataRoot.macMLX`. (`9764628`)
@@ -37,6 +42,12 @@ v0.1+v0.2 surface.
 - **`PeakMemorySampler.stopAndCollect()` is now deterministic** — stores the Task handle, cancels, and awaits its value. Pre-v0.3 the sampling loop could run for ~50ms after stop returned, holding `self` until the next tick. (`9764628`)
 - **`EngineCoordinator` exposes `engineVersion`** synchronously on the @MainActor (refreshed on init + after every `switchTo(_:)`). Lets the benchmark view model attach the real engine version to the result without awaiting the engine actor. (`e3cf815`)
 - **TUI deferral comments** now point at [#18](https://github.com/magicnight/Mac-MLX/issues/18) (upstream SwiftTUI Swift 6 blocker) instead of stale `// TODO: v0.2`.
+- **CLI `macmlx run` / `macmlx serve` now honour `Settings.preferredEngine`** via a new `CLIContext.makeEngine()` helper. Previously both hard-coded `MLXSwiftEngine()` — CLI and GUI disagreed silently on engine choice.
+- **CLI `macmlx run` layers explicit flags over persisted per-model `ModelParameters`** via `CLIContext.resolveParameters(for:…)`. A user who set `temperature=0.3` for `Qwen3-8B-4bit` in the GUI Parameters Inspector now sees that value in `macmlx run Qwen3-8B-4bit` unless they pass `--temperature` explicitly. `--temperature`, `--max-tokens`, and `--system` are now `Optional` so "unset" is distinguishable from the old compile-time defaults.
+- **CLI `macmlx list` empty-state displays the real configured model directory** (via `ctx.settings.modelDirectory`), not a hard-coded `~/models` guess. Moved-directory users no longer get wrong instructions.
+- **ConversationStore date precision** — encoder switched from `.iso8601` (whole seconds only) to `JSONCoding.precisionEncoder()` (`.secondsSince1970` Double); decoder accepts both for backward compatibility. Rapid autosaves during active chat now have deterministic sort order in `list()`.
+- **Release pipeline hardening** (`.github/workflows/release.yml`) — appcast push now rebases + retries (main advances during the 15-20 min Xcode archive step), and is `continue-on-error` so a push race doesn't block the DMG from landing as a GitHub Release. A race here took out the first v0.3.0 publish attempt (DMG built + signed but no Release artifact created); fix lets the job proceed to `Create GitHub Release` regardless.
+- `.gitignore` now covers Xcode 16's `xcshareddata/swiftpm/` editor state (was a persistent untracked-file source for every developer).
 
 ### Fixed
 - **Missing test coverage for v0.2 stores** — `ConversationStoreTests` + `ModelParametersStoreTests` (+12 tests total) cover save/load round-trip, sort ordering, delete, corrupt-file tolerance, empty store, and the slash-in-model-ID filesystem-safety edge case. Top-level test functions wrapped in `@Suite` structs so identical names across store test files don't collide.
