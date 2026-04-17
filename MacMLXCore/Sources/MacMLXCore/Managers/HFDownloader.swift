@@ -62,13 +62,18 @@ public struct DownloadProgress: Sendable, Hashable {
     public let currentFileBytesDownloaded: Int64
     public let currentFileTotalBytes: Int64
 
+    /// Exponentially-smoothed throughput on the current file, bytes/sec.
+    /// 0 until the second chunk arrives (need two samples for a rate).
+    public let currentFileBytesPerSecond: Double
+
     public init(
         modelID: String,
         completedFiles: Int,
         totalFiles: Int,
         currentFileName: String?,
         currentFileBytesDownloaded: Int64,
-        currentFileTotalBytes: Int64
+        currentFileTotalBytes: Int64,
+        currentFileBytesPerSecond: Double = 0
     ) {
         self.modelID = modelID
         self.completedFiles = completedFiles
@@ -76,6 +81,7 @@ public struct DownloadProgress: Sendable, Hashable {
         self.currentFileName = currentFileName
         self.currentFileBytesDownloaded = currentFileBytesDownloaded
         self.currentFileTotalBytes = currentFileTotalBytes
+        self.currentFileBytesPerSecond = currentFileBytesPerSecond
     }
 
     /// Current-file fraction in [0, 1], or 0 if the file total isn't known yet.
@@ -105,6 +111,42 @@ public struct DownloadProgress: Sendable, Hashable {
     /// `"2 of 5 files"`.
     public var filesHuman: String {
         "\(completedFiles) of \(totalFiles) files"
+    }
+
+    /// `"12.5 MB/s"` — decimal MB per second. Empty string before the
+    /// second chunk arrives (rate needs two samples).
+    public var currentFileSpeedHuman: String {
+        guard currentFileBytesPerSecond > 0 else { return "" }
+        let bps = currentFileBytesPerSecond
+        if bps >= 1_000_000 {
+            return String(format: "%.1f MB/s", bps / 1_000_000)
+        }
+        if bps >= 1_000 {
+            return String(format: "%.0f KB/s", bps / 1_000)
+        }
+        return String(format: "%.0f B/s", bps)
+    }
+
+    /// Estimated remaining seconds for the current file, based on the
+    /// current throughput EMA. Nil if speed or total size is unknown.
+    public var currentFileETASeconds: Double? {
+        guard currentFileTotalBytes > 0,
+              currentFileBytesPerSecond > 0 else { return nil }
+        let remaining = Double(currentFileTotalBytes - currentFileBytesDownloaded)
+        guard remaining > 0 else { return 0 }
+        return remaining / currentFileBytesPerSecond
+    }
+
+    /// `"2m 13s"`, `"45s"`, or `"—"` if ETA is unknown.
+    public var currentFileETAHuman: String {
+        guard let secs = currentFileETASeconds, secs.isFinite else { return "—" }
+        let total = Int(secs.rounded())
+        if total < 1 { return "<1s" }
+        if total < 60 { return "\(total)s" }
+        if total < 3600 { return "\(total / 60)m \(total % 60)s" }
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        return "\(hours)h \(minutes)m"
     }
 }
 
@@ -233,7 +275,9 @@ public actor HFDownloader {
                 currentFileTotalBytes: 0
             ))
 
+            let sampler = SpeedSampler()
             let delegate = ProgressDelegate { written, expected in
+                let bps = sampler.record(bytes: written)
                 progress?(DownloadProgress(
                     modelID: localModelID,
                     completedFiles: completedSoFar,
@@ -243,7 +287,8 @@ public actor HFDownloader {
                     // URLSession returns -1 (NSURLSessionTransferSizeUnknown)
                     // if the server omitted Content-Length. Map to 0 so the
                     // UI falls back to indeterminate display.
-                    currentFileTotalBytes: max(0, expected)
+                    currentFileTotalBytes: max(0, expected),
+                    currentFileBytesPerSecond: bps
                 ))
             }
 
@@ -293,6 +338,48 @@ public actor HFDownloader {
             }
         }
         return data
+    }
+}
+
+// MARK: - SpeedSampler (exponential moving average throughput)
+
+/// Computes a smoothed bytes-per-second rate over consecutive URLSession
+/// didWriteData callbacks for a single file. Internally locked because the
+/// delegate may fire from any URLSession worker queue; EMA state is tiny so
+/// a plain `NSLock` is the right primitive.
+private final class SpeedSampler: @unchecked Sendable {
+    /// Smoothing factor — 0.3 weights the most recent sample, 0.7 keeps
+    /// the previous average. Small enough to mask spikes, large enough to
+    /// follow real throughput changes (network hiccups, LFS CDN ramps).
+    private let alpha = 0.3
+
+    private let lock = NSLock()
+    private var lastWallclock: Date?
+    private var lastTotalBytes: Int64 = 0
+    private var ema: Double = 0
+
+    /// Feed a new `totalBytesWritten` sample and return the current EMA
+    /// throughput in bytes/sec. Returns 0 on the first call (one sample
+    /// isn't enough for a rate).
+    func record(bytes: Int64) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        guard let last = lastWallclock else {
+            lastWallclock = now
+            lastTotalBytes = bytes
+            return 0
+        }
+        let dt = now.timeIntervalSince(last)
+        guard dt > 0 else { return ema }  // duplicate callback, no time elapsed
+        let dbytes = Double(bytes - lastTotalBytes)
+        guard dbytes >= 0 else { return ema }  // shouldn't happen but guard anyway
+        let instantaneous = dbytes / dt
+        ema = ema == 0
+            ? instantaneous
+            : (alpha * instantaneous + (1 - alpha) * ema)
+        lastWallclock = now
+        lastTotalBytes = bytes
+        return ema
     }
 }
 

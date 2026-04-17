@@ -105,6 +105,18 @@ struct DownloadModelStep: View {
                             Text(stats.currentFilePercent)
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
+                            if !stats.currentFileSpeedHuman.isEmpty {
+                                Text("·").foregroundStyle(.tertiary)
+                                Text(stats.currentFileSpeedHuman)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            if stats.currentFileETASeconds != nil {
+                                Text("·").foregroundStyle(.tertiary)
+                                Text(stats.currentFileETAHuman)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
                             Text("·").foregroundStyle(.tertiary)
                         } else {
                             Text("Starting…")

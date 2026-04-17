@@ -96,6 +96,18 @@ struct HFModelRow: View {
                         Text(progress.currentFilePercent)
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
+                        if !progress.currentFileSpeedHuman.isEmpty {
+                            Text("·").foregroundStyle(.tertiary)
+                            Text(progress.currentFileSpeedHuman)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        if progress.currentFileETASeconds != nil {
+                            Text("·").foregroundStyle(.tertiary)
+                            Text(progress.currentFileETAHuman)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("Starting…")
                             .font(.caption.monospacedDigit())
@@ -164,7 +176,8 @@ struct HFModelRow: View {
         totalFiles: 4,
         currentFileName: "model-00002-of-00004.safetensors",
         currentFileBytesDownloaded: 2_100_000_000,
-        currentFileTotalBytes: 4_500_000_000
+        currentFileTotalBytes: 4_500_000_000,
+        currentFileBytesPerSecond: 12_500_000  // 12.5 MB/s
     )
     return List {
         HFModelRow(model: model, isDownloaded: false, isDownloading: false, progress: nil, onDownload: {})
