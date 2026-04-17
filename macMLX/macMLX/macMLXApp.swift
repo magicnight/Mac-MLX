@@ -13,7 +13,12 @@ struct macMLXApp: App {
     @State private var appState = AppState()
 
     var body: some Scene {
-        WindowGroup {
+        // Identified WindowGroup so the menu bar "Open" button can call
+        // openWindow(id: "main") to recreate the main window after it has
+        // been closed via the red traffic light (LSUIElement means close
+        // button doesn't quit the app; without an id, SwiftUI's OpenWindow
+        // action has no target to respawn).
+        WindowGroup(id: "main") {
             RootView()
                 .environment(appState)
                 .task {

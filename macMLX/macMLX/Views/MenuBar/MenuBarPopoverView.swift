@@ -10,6 +10,7 @@ import MacMLXCore
 struct MenuBarPopoverView: View {
 
     @Environment(AppState.self) private var appState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -88,7 +89,20 @@ struct MenuBarPopoverView: View {
     private var openButton: some View {
         Button("Open") {
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+
+            // Look for an existing main-window instance we can just raise.
+            // SwiftUI-managed windows have their group's identifier in
+            // `windowNumber`-unrelated fields; we match by NSWindow kind +
+            // visibility. If none exists (the user closed via red traffic
+            // light under LSUIElement), re-create via openWindow(id:).
+            let existing = NSApp.windows.first { win in
+                win.isVisible && win.canBecomeMain && !win.title.isEmpty
+            }
+            if let existing {
+                existing.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "main")
+            }
         }
         .frame(maxWidth: .infinity)
         .buttonStyle(.borderedProminent)
