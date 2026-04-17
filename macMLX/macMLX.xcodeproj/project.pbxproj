@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		0A46F36D2F9144FF0046E74C /* MacMLXCore in Frameworks */ = {isa = PBXBuildFile; productRef = 0A46F36C2F9144FF0046E74C /* MacMLXCore */; };
 		0A701A512F91E797000E48AF /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A701A502F91E797000E48AF /* Sparkle */; };
+		0AE33A412F9284FE00208B68 /* PulseProxy in Frameworks */ = {isa = PBXBuildFile; productRef = 0AE33A402F9284FE00208B68 /* PulseProxy */; };
+		0AE33A432F9284FE00208B68 /* PulseUI in Frameworks */ = {isa = PBXBuildFile; productRef = 0AE33A422F9284FE00208B68 /* PulseUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,7 +30,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0AE33A412F9284FE00208B68 /* PulseProxy in Frameworks */,
 				0A46F36D2F9144FF0046E74C /* MacMLXCore in Frameworks */,
+				0AE33A432F9284FE00208B68 /* PulseUI in Frameworks */,
 				0A701A512F91E797000E48AF /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -74,6 +78,8 @@
 			packageProductDependencies = (
 				0A46F36C2F9144FF0046E74C /* MacMLXCore */,
 				0A701A502F91E797000E48AF /* Sparkle */,
+				0AE33A402F9284FE00208B68 /* PulseProxy */,
+				0AE33A422F9284FE00208B68 /* PulseUI */,
 			);
 			productName = macMLX;
 			productReference = 0A46F35D2F9142070046E74C /* macMLX.app */;
@@ -106,6 +112,7 @@
 			packageReferences = (
 				0A46F36B2F9144FF0046E74C /* XCLocalSwiftPackageReference "../MacMLXCore" */,
 				0A701A4F2F91E797000E48AF /* XCRemoteSwiftPackageReference "Sparkle" */,
+				0AE33A3F2F9284FE00208B68 /* XCRemoteSwiftPackageReference "Pulse" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0A46F35E2F9142070046E74C /* Products */;
@@ -367,6 +374,14 @@
 				minimumVersion = 2.0.0;
 			};
 		};
+		0AE33A3F2F9284FE00208B68 /* XCRemoteSwiftPackageReference "Pulse" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kean/Pulse.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -378,6 +393,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0A701A4F2F91E797000E48AF /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		0AE33A402F9284FE00208B68 /* PulseProxy */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0AE33A3F2F9284FE00208B68 /* XCRemoteSwiftPackageReference "Pulse" */;
+			productName = PulseProxy;
+		};
+		0AE33A422F9284FE00208B68 /* PulseUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0AE33A3F2F9284FE00208B68 /* XCRemoteSwiftPackageReference "Pulse" */;
+			productName = PulseUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

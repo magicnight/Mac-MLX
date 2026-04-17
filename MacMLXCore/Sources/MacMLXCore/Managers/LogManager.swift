@@ -57,7 +57,12 @@ public actor LogManager {
 
     // MARK: State
 
-    private let store: LoggerStore
+    /// Underlying Pulse store. `nonisolated` so UI surfaces
+    /// (PulseUI.ConsoleView in the Logs tab, #16) can grab it
+    /// synchronously from @MainActor without hopping into the actor
+    /// — `LoggerStore` is a Sendable reference type backed by its own
+    /// internal concurrency, safe to hand out.
+    public nonisolated let store: LoggerStore
 
     // MARK: Init
 

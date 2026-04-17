@@ -13,6 +13,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.4] - 2026-04-17
+
+Logs tab (#16). A native macOS log viewer built on top of Pulse's
+`LoggerStore` Core Data stack — every log line from the coordinator,
+downloader, HTTP server, benchmark runner, and chat pipeline shows
+up here with search + level filter.
+
+### Added
+- **Logs tab** in the sidebar (`list.bullet.rectangle` icon, between
+  Benchmark and Settings). SwiftUI `Table` with columns for time,
+  coloured level badge, category, and message. Search field +
+  level picker in the toolbar. "Clear" button for wiping the
+  on-disk store.
+- `LogManager.store` is now `public nonisolated let` (was private)
+  so the UI can read the backing `LoggerStore` synchronously from
+  `@MainActor` without an await hop.
+
+### Notes on PulseUI
+- Originally planned to drop in `PulseUI.ConsoleView` directly; Pulse
+  5.x `ConsoleView` turns out to be `#if !os(macOS)`-gated. PulseUI
+  on macOS is intended for use with the standalone *Pulse for Mac*
+  app (users export a `.pulse` bundle and open it there). We built
+  the viewer natively against `LoggerMessageEntity` instead so the
+  Logs tab works in-process with no external app required. PulseUI
+  stays linked to the app target for any macOS-compatible pieces
+  we might adopt in a future Pulse release.
+
+---
+
 ## [0.3.3] - 2026-04-17
 
 Server-side change: the OpenAI-compatible `/v1/chat/completions`
