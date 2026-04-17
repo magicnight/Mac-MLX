@@ -25,7 +25,7 @@ struct ChatMessageView: View {
     @ViewBuilder
     private var bubble: some View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
-            Text(messageContent)
+            renderedContent
                 .textSelection(.enabled)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -62,13 +62,65 @@ struct ChatMessageView: View {
     private var messageContent: String {
         message.isGenerating ? message.content + " █" : message.content
     }
+
+    // MARK: - Rendered content (#10 Markdown)
+
+    /// Assistant messages are rendered as Markdown — LLM outputs are
+    /// naturally markdown-heavy (code, lists, headers). User messages
+    /// stay plain: users rarely type intentional markdown and literal
+    /// asterisks shouldn't collapse to bold.
+    ///
+    /// `AttributedString.MarkdownParsingOptions.failurePolicy =
+    /// .returnPartiallyParsedIfPossible` is key during streaming — when a
+    /// chunk arrives mid-`**bold**`, the partial `**bold` chunk parses as
+    /// literal characters and won't throw, so rendering stays smooth.
+    @ViewBuilder
+    private var renderedContent: some View {
+        let text = messageContent
+        if message.role == .assistant,
+           let attributed = try? AttributedString(
+               markdown: text,
+               options: AttributedString.MarkdownParsingOptions(
+                   allowsExtendedAttributes: false,
+                   interpretedSyntax: .full,
+                   failurePolicy: .returnPartiallyParsedIfPossible
+               )
+           ) {
+            Text(attributed)
+        } else {
+            Text(text)
+        }
+    }
 }
 
 #Preview {
     VStack {
         ChatMessageView(message: UIChatMessage(role: .user, content: "What is MLX?"))
-        ChatMessageView(message: UIChatMessage(role: .assistant, content: "MLX is Apple's array framework for machine learning on Apple Silicon.", isGenerating: false))
-        ChatMessageView(message: UIChatMessage(role: .assistant, content: "Generating", isGenerating: true))
+        ChatMessageView(message: UIChatMessage(
+            role: .assistant,
+            content: """
+            **MLX** is Apple's array framework for machine learning on Apple Silicon.
+
+            ## Key features
+            - Unified memory (CPU + GPU + ANE)
+            - Lazy evaluation
+            - Multi-device support
+
+            Use `import MLX` to get started. Here is a tiny example:
+
+            ```swift
+            import MLX
+            let x = MLXArray([1, 2, 3])
+            print(x.sum())
+            ```
+            """
+        ))
+        ChatMessageView(message: UIChatMessage(
+            role: .assistant,
+            content: "Streaming **bol",
+            isGenerating: true
+        ))
     }
-    .frame(width: 500)
+    .frame(width: 520)
+    .padding()
 }
