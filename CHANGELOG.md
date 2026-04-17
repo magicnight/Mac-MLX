@@ -13,7 +13,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [0.2.0] - YYYY-MM-DD
+## [0.2.0] - 2026-04-17
 
 v0.2 focused on **download and chat polish**. Subprocess engines
 (SwiftLM, Python MLX) deferred to v0.3 pending App Sandbox policy
