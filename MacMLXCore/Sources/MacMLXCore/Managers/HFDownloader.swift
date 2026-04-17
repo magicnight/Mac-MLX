@@ -181,21 +181,47 @@ public actor HFDownloader {
     /// callers that touch UI state should hop to `@MainActor` themselves.
     public typealias ProgressHandler = @Sendable (DownloadProgress) -> Void
 
+    // MARK: - Constants
+
+    /// Canonical Hugging Face Hub origin.
+    public static let defaultEndpoint = URL(string: "https://huggingface.co")!
+
     // MARK: - Dependencies
 
     private let urlSession: URLSession
+    /// Base URL for all Hub API + resolve requests. Configurable via
+    /// `setBaseURL(_:)` so users in regions where huggingface.co is slow
+    /// or blocked can route through a mirror like hf-mirror.com (#21).
+    private var baseURL: URL
 
     // MARK: - Init
 
-    public init(urlSession: URLSession = .shared) {
+    public init(urlSession: URLSession = .shared, baseURL: URL = HFDownloader.defaultEndpoint) {
         self.urlSession = urlSession
+        self.baseURL = baseURL
     }
+
+    // MARK: - Configuration
+
+    /// Update the Hub endpoint in-place. Safe to call while downloads
+    /// are in flight — only new requests pick up the change.
+    public func setBaseURL(_ url: URL) {
+        self.baseURL = url
+    }
+
+    /// Current Hub endpoint. Exposed for UI ("your endpoint is …").
+    public func currentBaseURL() -> URL { baseURL }
 
     // MARK: - Public API
 
     /// Search Hugging Face Hub for `mlx-community` models matching `query`.
     public func search(query: String, limit: Int = 20) async throws -> [HFModel] {
-        var components = URLComponents(string: "https://huggingface.co/api/models")!
+        guard var components = URLComponents(
+            url: baseURL.appending(path: "api/models"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw DownloadError.writeFailed("Could not construct search URL")
+        }
         components.queryItems = [
             URLQueryItem(name: "author", value: "mlx-community"),
             URLQueryItem(name: "search", value: query),
@@ -212,10 +238,7 @@ public actor HFDownloader {
 
     /// Fetch the list of files for a given model ID.
     public func files(for modelID: String) async throws -> [HFRemoteFile] {
-        let urlString = "https://huggingface.co/api/models/\(modelID)"
-        guard let url = URL(string: urlString) else {
-            throw DownloadError.modelNotFound(modelID)
-        }
+        let url = baseURL.appending(path: "api/models/\(modelID)")
         let data = try await fetchData(from: url)
         let envelope = try JSONDecoder.huggingFace.decode(ModelDetailsEnvelope.self, from: data)
         return envelope.siblings.map { sibling in
@@ -249,10 +272,12 @@ public actor HFDownloader {
         guard fileCount > 0 else { return modelDir }
 
         for (index, remoteFile) in remoteFiles.enumerated() {
-            let resolveURLString = "https://huggingface.co/\(modelID)/resolve/main/\(remoteFile.path)"
-            guard let resolveURL = URL(string: resolveURLString) else {
-                throw DownloadError.writeFailed("Could not construct resolve URL for \(remoteFile.path)")
-            }
+            // Resolve URL: <endpoint>/<modelID>/resolve/main/<path>
+            // Works both for huggingface.co and for drop-in mirrors like
+            // hf-mirror.com that replicate the same URL shape.
+            let resolveURL = baseURL.appending(
+                path: "\(modelID)/resolve/main/\(remoteFile.path)"
+            )
 
             let destination = modelDir.appending(path: remoteFile.path, directoryHint: .notDirectory)
             let parentDir = destination.deletingLastPathComponent()

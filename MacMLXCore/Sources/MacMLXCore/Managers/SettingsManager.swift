@@ -41,6 +41,11 @@ public struct Settings: Codable, Equatable, Sendable {
     /// How many days to retain log entries before pruning.
     public var logRetentionDays: Int
 
+    /// Hugging Face Hub endpoint URL. Default: "https://huggingface.co".
+    /// Users in regions where huggingface.co is slow or blocked can point
+    /// this at a mirror like "https://hf-mirror.com" (#21).
+    public var hfEndpoint: String
+
     // MARK: Factory
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
@@ -66,7 +71,8 @@ public struct Settings: Codable, Equatable, Sendable {
         pythonPath: nil,
         swiftLMPath: nil,
         sparkleUpdateChannel: "release",
-        logRetentionDays: 7
+        logRetentionDays: 7,
+        hfEndpoint: "https://huggingface.co"
     )
 
     /// Real user home directory, bypassing the sandbox container redirect.
@@ -95,7 +101,8 @@ public struct Settings: Codable, Equatable, Sendable {
         pythonPath: String?,
         swiftLMPath: String?,
         sparkleUpdateChannel: String,
-        logRetentionDays: Int
+        logRetentionDays: Int,
+        hfEndpoint: String = "https://huggingface.co"
     ) {
         self.modelDirectory = modelDirectory
         self.preferredEngine = preferredEngine
@@ -107,6 +114,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.swiftLMPath = swiftLMPath
         self.sparkleUpdateChannel = sparkleUpdateChannel
         self.logRetentionDays = logRetentionDays
+        self.hfEndpoint = hfEndpoint
     }
 }
 

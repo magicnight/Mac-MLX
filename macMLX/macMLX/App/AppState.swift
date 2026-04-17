@@ -66,12 +66,28 @@ public final class AppState {
     // MARK: - Lifecycle
 
     /// Bootstrap on app launch. Loads settings from disk, then primes the
-    /// engine coordinator with the user's preferred engine.
+    /// engine coordinator with the user's preferred engine and pushes the
+    /// stored HF endpoint into the downloader (#21).
     public func bootstrap() async {
         let loaded = await settings.load()
         currentSettings = loaded
         coordinator.switchTo(loaded.preferredEngine)
+        await applyHFEndpoint(loaded.hfEndpoint)
         await logs.log("App bootstrapped", level: .info, category: .system)
+    }
+
+    /// Persist + activate a new Hugging Face Hub endpoint. Safe to call
+    /// while downloads are in flight — only new requests pick up the new
+    /// origin. Invalid URLs (no host) are rejected silently and the
+    /// previous endpoint stays in effect.
+    public func setHFEndpoint(_ endpointString: String) async {
+        await updateSettings { $0.hfEndpoint = endpointString }
+        await applyHFEndpoint(endpointString)
+    }
+
+    private func applyHFEndpoint(_ endpointString: String) async {
+        guard let url = URL(string: endpointString), url.host != nil else { return }
+        await downloader.setBaseURL(url)
     }
 
     /// Persist a mutated copy of `currentSettings`. Calls `update` on the

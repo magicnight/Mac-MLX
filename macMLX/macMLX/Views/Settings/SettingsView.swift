@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var selectedEngine: EngineID = .mlxSwift
     @State private var serverPort: Int = 8000
     @State private var autoStartServer: Bool = false
+    @State private var hfEndpoint: String = "https://huggingface.co"
 
     var body: some View {
         Form {
@@ -40,6 +41,8 @@ struct SettingsView: View {
             .onChange(of: autoStartServer) { _, newValue in
                 Task { await appState.updateSettings { $0.autoStartServer = newValue } }
             }
+
+            downloadsSection
 
             rerunSetupSection
         }
@@ -79,6 +82,40 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Downloads section (#21)
+
+    private var downloadsSection: some View {
+        Section("Downloads") {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Hugging Face Endpoint")
+                TextField("https://huggingface.co", text: $hfEndpoint)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .onSubmit {
+                        Task { await appState.setHFEndpoint(hfEndpoint) }
+                    }
+                    .font(.system(.body, design: .monospaced))
+
+                HStack {
+                    Text("Use a mirror (e.g. https://hf-mirror.com) for faster access in restricted regions. Press Return to apply.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer()
+
+                    Button("Reset") {
+                        hfEndpoint = "https://huggingface.co"
+                        Task { await appState.setHFEndpoint(hfEndpoint) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(hfEndpoint == "https://huggingface.co")
+                }
+            }
+        }
+    }
+
     // MARK: - Re-run setup section
 
     private var rerunSetupSection: some View {
@@ -106,6 +143,7 @@ struct SettingsView: View {
         selectedEngine = s.preferredEngine
         serverPort = s.serverPort
         autoStartServer = s.autoStartServer
+        hfEndpoint = s.hfEndpoint
     }
 
     private func showModelDirectoryPicker() {
