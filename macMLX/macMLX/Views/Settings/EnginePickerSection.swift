@@ -43,12 +43,24 @@ struct EnginePickerSection: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                // Unavailable engines get a friendly explanation under the description.
+                // Unavailable engines: hint + Install Guide link.
                 if state != .available {
-                    Text(state.unavailableHint)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 1)
+                    HStack(spacing: 6) {
+                        Text(state.unavailableHint)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        if let url = engine.installGuideURL {
+                            Link(destination: url) {
+                                HStack(spacing: 2) {
+                                    Text("Install Guide")
+                                    Image(systemName: "arrow.up.right")
+                                }
+                                .font(.caption2)
+                            }
+                            .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    .padding(.top, 1)
                 }
             }
 
@@ -141,6 +153,19 @@ extension EngineID {
             return "External binary · Built for 100B+ MoE models with SSD streaming"
         case .pythonMLX:
             return "uv-managed Python subprocess · Widest model compatibility"
+        }
+    }
+
+    /// URL the "Install Guide ↗" link opens for deferred engines.
+    /// Nil for engines that ship built-in (no install step needed).
+    var installGuideURL: URL? {
+        switch self {
+        case .mlxSwift:
+            return nil
+        case .swiftLM:
+            return URL(string: "https://github.com/SharpAI/SwiftLM#installation")
+        case .pythonMLX:
+            return URL(string: "https://github.com/ml-explore/mlx-lm#installation")
         }
     }
 }
