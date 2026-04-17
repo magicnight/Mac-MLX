@@ -56,20 +56,34 @@ struct ListCommand: AsyncParsableCommand {
         let sizeW = max(8, models.map { $0.humanSize.count }.max() ?? 0)
         let quantW = max(6, models.map { ($0.quantization ?? "-").count }.max() ?? 0)
 
-        let header = String(format: "%-*s  %*s  %-*s",
-            nameW, "NAME",
-            sizeW, "SIZE",
-            quantW, "QUANT")
+        // Use Swift-native padding instead of `String(format: "%-*s", …)` —
+        // the C printf `%s` specifier expects a `const char *`, but passing
+        // a Swift `String` bridges via NSString's UTF-16 buffer, which on
+        // arm64 release builds segfaults non-deterministically (exit 139).
+        // Reproduced pre-fix with `macmlx list` on any non-empty model set.
+        let header = padLeft("NAME", nameW) + "  " + padRight("SIZE", sizeW) + "  " + padLeft("QUANT", quantW)
         let divider = String(repeating: "-", count: header.count)
         print(header)
         print(divider)
         for m in models {
-            let row = String(format: "%-*s  %*s  %-*s",
-                nameW, m.displayName,
-                sizeW, m.humanSize,
-                quantW, m.quantization ?? "-")
+            let row = padLeft(m.displayName, nameW) + "  "
+                + padRight(m.humanSize, sizeW) + "  "
+                + padLeft(m.quantization ?? "-", quantW)
             print(row)
         }
+    }
+
+    /// Left-align `s` to exactly `width` chars (pads with spaces; truncates
+    /// if longer — shouldn't happen here since column widths are derived
+    /// from content `.count`).
+    private func padLeft(_ s: String, _ width: Int) -> String {
+        s.padding(toLength: max(width, s.count), withPad: " ", startingAt: 0)
+    }
+
+    /// Right-align `s` to exactly `width` chars (pads with leading spaces).
+    private func padRight(_ s: String, _ width: Int) -> String {
+        if s.count >= width { return s }
+        return String(repeating: " ", count: width - s.count) + s
     }
 
 }
