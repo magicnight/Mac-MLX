@@ -13,6 +13,58 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.2] - 2026-04-17
+
+Chat history management — the conversation-store backend that shipped
+in v0.2 #9 finally has a UI. Power-user feature for people who keep
+multiple ongoing threads and occasionally want to roll back mid-stream.
+
+### Added
+- **Conversation sidebar** (⌘⌃S to toggle). Collapsible left pane on
+  the Chat tab lists saved conversations newest-first with title +
+  relative timestamp. Single-click switches; double-click inline-
+  renames; right-click menu offers Rename / Delete (with confirmation).
+  Default collapsed — existing users' first impression unchanged.
+- **"Rewind to here"** context menu on every chat message. Drops
+  everything after the clicked message; keeps that message and every
+  earlier one. User decides what to do next (often: edit the last
+  kept message and resend).
+- **New Chat ⌘N** inside the sidebar creates a fresh conversation
+  (flushes the current one to disk first).
+- `ChatViewModel` extensions: `reloadConversationList()`,
+  `switchTo(_:)`, `createNew()`, `rename(_:to:)`,
+  `deleteConversation(_:)`, `truncateAfter(_:)`, `currentConversationID`,
+  `conversations` (sorted list), plus private `persistNow()` that
+  skips empty-chat writes so the sidebar doesn't spam empty rows.
+- `ChatMessageView` grows an optional `onTruncate` closure; every
+  existing context-menu entry stays; `Rewind to here` with
+  `arrow.uturn.backward` SF Symbol.
+- `ConversationSidebar.swift` — standalone view. Inline-rename via
+  `TextField` state; delete via `confirmationDialog`; empty-state
+  via `ContentUnavailableView`.
+
+### Changed
+- Chat layout is now two columns (sidebar + main) with the existing
+  Parameters Inspector as an optional third. Main column stays
+  flush-left when the sidebar is collapsed — no layout shift for
+  users who never open it. `HStack` + animation rather than a nested
+  `NavigationSplitView` to avoid double disclosure chevrons under
+  macOS.
+- `ChatViewModel.clearHistory()` is now a one-line alias for
+  `createNew()` (was the same thing minus sidebar refresh).
+- `persist()` now fires `reloadConversationList()` after each save
+  so `updatedAt` bumps re-sort the sidebar in real time.
+
+### Notes
+- No unit tests added for the new view-model methods — the app target
+  doesn't have a test bundle set up, and the VM methods are thin
+  wrappers over well-tested `ConversationStore` primitives
+  (6 tests in `ConversationStoreTests` already cover save / list /
+  delete / corrupt-file tolerance / ordering). Adding an app-side
+  test bundle is a separate chore-commit candidate.
+
+---
+
 ## [0.3.1] - 2026-04-17
 
 Patch release — five UX fixes surfaced during v0.3 bring-up use, plus

@@ -69,6 +69,15 @@ final class ChatViewModel {
     var inputText: String = ""
     var isGenerating: Bool = false
 
+    /// All saved conversations, newest-first. Refreshed on `reloadConversationList()`
+    /// — fires after every `persist()`, `switchTo(_:)`, `deleteConversation(_:)`,
+    /// and once on init. Drives the v0.3.2 conversation sidebar.
+    private(set) var conversations: [Conversation] = []
+
+    /// ID of the currently-open conversation. Nil until first save.
+    /// Used by the sidebar to highlight the active row.
+    var currentConversationID: UUID { current.id }
+
     /// Convenience passthrough to the parameters VM so existing ChatView
     /// code that reads `viewModel.systemPrompt` keeps working. The source
     /// of truth is `parameters.parameters.systemPrompt` (editable from the
@@ -109,7 +118,8 @@ final class ChatViewModel {
         // properties are fully initialised — Swift 6 rejects that).
         self.current = Conversation()
 
-        // Load the latest persisted conversation in the background.
+        // Load the latest persisted conversation in the background, and
+        // populate the sidebar list.
         Task { [weak self] in
             guard let self else { return }
             if let loaded = try? await store.loadLatest() {
@@ -117,7 +127,115 @@ final class ChatViewModel {
                     self.adopt(loaded)
                 }
             }
+            await self.reloadConversationList()
         }
+    }
+
+    // MARK: - Conversation management (#v0.3.2)
+
+    /// Refresh `conversations` from disk. Fired after every save and
+    /// after sidebar-driven mutations (rename / delete / switch).
+    func reloadConversationList() async {
+        conversations = (try? await store.list()) ?? []
+    }
+
+    /// Switch the active conversation. Saves the current state first
+    /// (not destructive) and adopts the target. Cancels any in-flight
+    /// generation.
+    func switchTo(_ conversationID: UUID) async {
+        guard conversationID != current.id else { return }
+        stopGeneration()
+        // Flush current to disk before loading a different one so the
+        // user doesn't lose a half-typed-but-auto-saved pass.
+        persistNow()
+
+        // Find target in our cached list first; fall back to a fresh
+        // `list()` in case the cache is stale.
+        var target = conversations.first(where: { $0.id == conversationID })
+        if target == nil {
+            await reloadConversationList()
+            target = conversations.first(where: { $0.id == conversationID })
+        }
+        guard let target else { return }
+
+        // Clear state before adopting so `adopt(_:)` doesn't short-circuit
+        // on the "don't clobber user's work" guard.
+        messages = []
+        inputText = ""
+        adopt(target)
+    }
+
+    /// Create a fresh conversation. Current state is persisted first; the
+    /// new conversation is blank until first message (no empty rows in
+    /// the sidebar).
+    func createNew() {
+        stopGeneration()
+        persistNow()
+        messages = []
+        inputText = ""
+        current = Conversation(
+            modelID: coordinator.currentModel?.id,
+            systemPrompt: parameters.parameters.systemPrompt
+        )
+        // Reload so sidebar reflects the just-persisted previous convo.
+        Task { await reloadConversationList() }
+    }
+
+    /// Rename a conversation by ID. Writes the rename through
+    /// ConversationStore and refreshes the sidebar.
+    func rename(_ conversationID: UUID, to newTitle: String) async {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if conversationID == current.id {
+            current.title = trimmed
+            persistNow()
+        } else if var target = conversations.first(where: { $0.id == conversationID }) {
+            target.title = trimmed
+            try? await store.save(target)
+        }
+        await reloadConversationList()
+    }
+
+    /// Delete a conversation by ID. If it's the currently-open one, we
+    /// transition to the next most recent (or a fresh empty conversation
+    /// if none remain).
+    func deleteConversation(_ conversationID: UUID) async {
+        try? await store.delete(id: conversationID)
+
+        if conversationID == current.id {
+            stopGeneration()
+            messages = []
+            await reloadConversationList()
+            // Jump to the next most recent, or new-chat if store is empty.
+            if let fallback = conversations.first {
+                // Can't call `switchTo` (it'd flush the just-deleted convo
+                // back to disk). Adopt directly.
+                current = fallback
+                messages = fallback.messages.map(UIChatMessage.init(stored:))
+            } else {
+                current = Conversation(
+                    modelID: coordinator.currentModel?.id,
+                    systemPrompt: parameters.parameters.systemPrompt
+                )
+            }
+        } else {
+            await reloadConversationList()
+        }
+    }
+
+    /// Truncate the current conversation after `messageID` — the named
+    /// message and every earlier one stay; everything after is dropped.
+    /// Used by the "Rewind to here" context menu entry (v0.3.2 #).
+    /// Does not regenerate — user is in charge of what to do next
+    /// (often: edit the last user message and resend).
+    func truncateAfter(_ messageID: UUID) {
+        guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        stopGeneration()
+        if idx + 1 < messages.count {
+            messages.removeSubrange((idx + 1)...)
+        }
+        persist()
     }
 
     // MARK: - Edit state (#11)
@@ -271,17 +389,9 @@ final class ChatViewModel {
 
     // MARK: - New chat
 
-    /// Clears the current in-memory state and allocates a fresh
-    /// conversation ID. The previous conversation stays on disk (user
-    /// can scroll their history in the future sidebar — #9 follow-up).
-    func clearHistory() {
-        stopGeneration()
-        messages = []
-        inputText = ""
-        current = Conversation(systemPrompt: parameters.parameters.systemPrompt)
-        // Don't persist the empty conversation — only written on first
-        // real message.
-    }
+    /// Compat alias for `createNew()` — kept so existing New Chat button
+    /// callsites don't need to change.
+    func clearHistory() { createNew() }
 
     // MARK: - Private helpers
 
@@ -310,6 +420,20 @@ final class ChatViewModel {
 
         Task { [store] in
             try? await store.save(conv)
+            // Reload the sidebar list so a save bumping updatedAt
+            // re-sorts the sidebar in real time.
+            await self.reloadConversationList()
         }
+    }
+
+    /// Like `persist()` but skips the save when there's nothing to save
+    /// (empty blank conversation that never got a message). Used by the
+    /// switch/createNew/delete paths to flush outgoing state without
+    /// spamming empty rows into the sidebar.
+    private func persistNow() {
+        // Only persist if the conversation has at least one stored message.
+        let storable = messages.filter { !$0.isGenerating }
+        guard !storable.isEmpty else { return }
+        persist()
     }
 }

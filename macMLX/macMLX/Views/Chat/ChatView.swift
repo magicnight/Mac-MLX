@@ -26,6 +26,10 @@ private struct ChatContent: View {
     @Environment(AppState.self) private var appState
     @State private var scrollProxy: ScrollViewProxy? = nil
     @State private var showInspector: Bool = false
+    /// Conversation-history sidebar (v0.3.2). Default **collapsed** so
+    /// existing users' first impression of the tab is unchanged; user
+    /// opens it via the toolbar button (⌘⌃S) when they want to browse.
+    @State private var showConversationSidebar: Bool = false
     /// Local models available for the toolbar model switcher (#5).
     /// Refreshed on appear + when the model directory changes.
     @State private var availableModels: [LocalModel] = []
@@ -38,6 +42,19 @@ private struct ChatContent: View {
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            if showConversationSidebar {
+                ConversationSidebar(viewModel: viewModel)
+                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                Divider()
+            }
+            mainColumn
+        }
+        .animation(.easeInOut(duration: 0.18), value: showConversationSidebar)
+    }
+
+    private var mainColumn: some View {
         VStack(spacing: 0) {
             // Toolbar
             chatToolbar
@@ -172,6 +189,18 @@ private struct ChatContent: View {
 
     private var chatToolbar: some View {
         HStack {
+            // Conversation sidebar toggle (v0.3.2). Collapsed by default;
+            // user opens when they want to browse / switch conversations.
+            Button {
+                showConversationSidebar.toggle()
+            } label: {
+                Label("Conversations", systemImage: "sidebar.leading")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.bordered)
+            .help("Show/hide conversation history (⌘⌃S)")
+            .keyboardShortcut("s", modifiers: [.command, .control])
+
             // Model switcher (#5) — pre-v0.3.1 this was a `.constant`
             // Picker that only displayed the loaded model with no way to
             // switch. Now a real Menu: lists local models, checkmarks the
@@ -255,7 +284,8 @@ private struct ChatContent: View {
                                     }
                                 }
                                 : nil,
-                            onDelete: { viewModel.delete(messageCopy.id) }
+                            onDelete: { viewModel.delete(messageCopy.id) },
+                            onTruncate: { viewModel.truncateAfter(messageCopy.id) }
                         )
                         .id(message.id)
                     }

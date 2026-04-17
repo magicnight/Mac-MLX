@@ -13,6 +13,11 @@ struct ChatMessageView: View {
     var onEdit: (() -> Void)? = nil
     var onRegenerate: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
+    /// Truncate the conversation at this message (keep this + earlier,
+    /// drop everything later). Powers "Rewind to here" in v0.3.2 history
+    /// management — same underlying semantics as Git's soft reset but
+    /// at the per-message level.
+    var onTruncate: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 0) {
@@ -55,6 +60,15 @@ struct ChatMessageView: View {
             } label: {
                 Label("Regenerate", systemImage: "arrow.clockwise")
             }
+        }
+
+        if let onTruncate {
+            Button {
+                onTruncate()
+            } label: {
+                Label("Rewind to here", systemImage: "arrow.uturn.backward")
+            }
+            .help("Keep this message and every earlier message, drop later ones.")
         }
 
         if onDelete != nil && onCopy != nil {
