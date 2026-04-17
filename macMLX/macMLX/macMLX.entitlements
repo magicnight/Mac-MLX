@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox is also set via ENABLE_APP_SANDBOX build setting.
+         Repeating here keeps the entitlements file self-descriptive. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Outbound network: Hugging Face Hub model downloads via HFDownloader. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Inbound network: HummingbirdServer binds localhost:8000+ for the
+         OpenAI-compatible API and serves requests from sibling CLIs, IDE
+         integrations, and external tools. -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- User-selected directories: the Settings view's NSOpenPanel lets
+         users point macMLX at their existing model directories
+         (~/models, ~/.lmstudio/models, etc.) outside the app container.
+         Security-scoped bookmarks persist the access across launches. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>
