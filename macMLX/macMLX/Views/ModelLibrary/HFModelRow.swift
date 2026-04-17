@@ -13,6 +13,7 @@ struct HFModelRow: View {
     /// chunk write callback fires after `onDownload` is invoked.
     let progress: DownloadProgress?
     let onDownload: () -> Void
+    let onCancel: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -141,8 +142,16 @@ struct HFModelRow: View {
     @ViewBuilder
     private var trailingAction: some View {
         if isDownloading {
-            // Empty placeholder — progress is shown inline below metadata.
-            EmptyView()
+            // Cancel button sits in the trailing slot during download.
+            // Progress info is shown inline below metadata.
+            Button(role: .destructive, action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .buttonStyle(.plain)
+            .font(.title3)
+            .foregroundStyle(.secondary)
+            .help("Cancel download")
         } else if isDownloaded {
             Text("Downloaded")
                 .font(.caption)
@@ -180,10 +189,10 @@ struct HFModelRow: View {
         currentFileBytesPerSecond: 12_500_000  // 12.5 MB/s
     )
     return List {
-        HFModelRow(model: model, isDownloaded: false, isDownloading: false, progress: nil, onDownload: {})
-        HFModelRow(model: model, isDownloaded: true, isDownloading: false, progress: nil, onDownload: {})
-        HFModelRow(model: model, isDownloaded: false, isDownloading: true, progress: inflightProgress, onDownload: {})
-        HFModelRow(model: model, isDownloaded: false, isDownloading: true, progress: nil, onDownload: {})
+        HFModelRow(model: model, isDownloaded: false, isDownloading: false, progress: nil, onDownload: {}, onCancel: {})
+        HFModelRow(model: model, isDownloaded: true, isDownloading: false, progress: nil, onDownload: {}, onCancel: {})
+        HFModelRow(model: model, isDownloaded: false, isDownloading: true, progress: inflightProgress, onDownload: {}, onCancel: {})
+        HFModelRow(model: model, isDownloaded: false, isDownloading: true, progress: nil, onDownload: {}, onCancel: {})
     }
     .frame(width: 560, height: 360)
 }

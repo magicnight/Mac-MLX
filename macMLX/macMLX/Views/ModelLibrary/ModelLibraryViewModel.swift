@@ -40,6 +40,10 @@ final class ModelLibraryViewModel {
     /// Latest download progress per model, keyed by HF modelID. Updated
     /// from the URLSession delegate via a @MainActor hop.
     var downloadProgress: [String: DownloadProgress] = [:]
+    /// Outer Swift Tasks for in-flight downloads, keyed by HF modelID.
+    /// Cancelling the Task cancels the underlying URLSession download
+    /// (URLError.cancelled is thrown), wiring up issue #5's Cancel button.
+    private var downloadTasks: [String: Task<Void, Never>] = [:]
 
     // MARK: - Private
 
@@ -113,7 +117,10 @@ final class ModelLibraryViewModel {
         }
     }
 
-    func downloadModel(_ model: HFModel) async {
+    func downloadModel(_ model: HFModel) {
+        // Already downloading? Cancel-then-start would be confusing; no-op.
+        guard downloadTasks[model.id] == nil else { return }
+
         downloadingModelIDs.insert(model.id)
         let dir = appState.currentSettings.modelDirectory
 
@@ -127,19 +134,46 @@ final class ModelLibraryViewModel {
             }
         }
 
-        do {
-            _ = try await appState.downloader.download(
-                modelID: model.id,
-                to: dir,
-                progress: handler
-            )
-            // Refresh local library after download completes
-            await loadLocalModels()
-        } catch {
-            hfError = "Download failed: \(error.localizedDescription)"
+        let task = Task { @MainActor in
+            defer {
+                downloadingModelIDs.remove(modelID)
+                downloadProgress.removeValue(forKey: modelID)
+                downloadTasks.removeValue(forKey: modelID)
+            }
+            do {
+                _ = try await appState.downloader.download(
+                    modelID: modelID,
+                    to: dir,
+                    progress: handler
+                )
+                await loadLocalModels()
+            } catch is CancellationError {
+                // User hit Cancel — silent, no error banner.
+            } catch let err as URLError where err.code == .cancelled {
+                // URLSession reports Task-level cancel as URLError.cancelled.
+                // Treat it as a silent user cancel too.
+                // Best-effort cleanup of partial files:
+                cleanupPartialDirectory(for: modelID, under: dir)
+            } catch {
+                hfError = "Download failed: \(error.localizedDescription)"
+            }
         }
-        downloadingModelIDs.remove(model.id)
-        downloadProgress.removeValue(forKey: model.id)
+        downloadTasks[modelID] = task
+    }
+
+    /// Cancel an in-flight download. No-op if the model isn't currently
+    /// downloading. URLSession throws `URLError.cancelled` in response,
+    /// which `downloadModel` catches and suppresses.
+    func cancelDownload(_ model: HFModel) {
+        downloadTasks[model.id]?.cancel()
+    }
+
+    /// Remove the half-downloaded model directory so a later retry starts
+    /// fresh. Best-effort; ignores errors (the dir may not exist).
+    private func cleanupPartialDirectory(for modelID: String, under parent: URL) {
+        let modelName = modelID.split(separator: "/").last.map(String.init) ?? modelID
+        let dir = parent.appending(path: modelName, directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: dir)
     }
 
     func isDownloaded(_ model: HFModel) -> Bool {

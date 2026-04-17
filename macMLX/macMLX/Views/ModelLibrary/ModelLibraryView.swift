@@ -190,9 +190,8 @@ private struct ModelLibraryContent: View {
                     isDownloaded: viewModel.isDownloaded(model),
                     isDownloading: viewModel.downloadingModelIDs.contains(model.id),
                     progress: viewModel.downloadProgress[model.id],
-                    onDownload: {
-                        Task { await viewModel.downloadModel(model) }
-                    }
+                    onDownload: { viewModel.downloadModel(model) },
+                    onCancel: { viewModel.cancelDownload(model) }
                 )
             }
             .listStyle(.inset)
