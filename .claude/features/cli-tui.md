@@ -283,3 +283,47 @@ Not in v0.1:
 - `bench` command (v0.2)
 - `logs` command (v0.2)
 - Shell completions (v0.2)
+
+## Historical: SwiftTUI — considered, abandoned in v0.3.5
+
+Original v0.1 plan called for
+[rensbreur/SwiftTUI](https://github.com/rensbreur/SwiftTUI) — a
+third-party library that ports the SwiftUI DSL (`VStack`, `Text`,
+etc.) to terminal rendering — for the `serve` / `pull` / `run`
+dashboards. It shipped v0.1 through v0.3.4 as a **linked-but-unused
+stub**: three `_*View` types existed only to keep the product
+referenced so the build wouldn't drop it.
+
+### Why it didn't work for us
+
+- **Swift 6 incompatibility.** SwiftTUI's `View` protocol is declared
+  `nonisolated`. Under Swift 6 strict concurrency that clashes
+  immediately with our `@MainActor` state classes — the compiler
+  outright rejects the combination.
+- **Upstream unmaintained.** The repo has been stagnant for over a
+  year as of 2026-04. No Swift 6 adaptation work in sight.
+- **No viable drop-in replacement.** Swift's TUI ecosystem is thin;
+  nothing else in SPM land offers the SwiftUI-DSL aesthetic. The
+  available C libraries (ncurses, notcurses) would require writing a
+  bridging shim of comparable complexity to just doing ANSI ourselves.
+
+### What replaced it (v0.3.5)
+
+- New `macmlx-cli/Sources/macmlx/Shared/CLITerm.swift` — a ~100-line
+  ANSI helper (colours, bold/dim, unicode block progress bars,
+  box-drawing header/footer). TTY detection so piped output stays
+  clean.
+- All three dashboards (`PullDashboard`, `ServeDashboard`, `ChatTUI`)
+  reimplemented against `CLITerm`. Progress bar gets sub-cell
+  precision (U+258x), serve status is boxed with colour-coded
+  key/value rows, chat REPL has a tidy header.
+- SwiftTUI package reference removed from `macmlx-cli/Package.swift`.
+- GitHub issue #18 closed — the underlying goal (live CLI
+  dashboards) is met without SwiftTUI as the vehicle.
+
+### Reintroduction criteria
+
+If SwiftTUI (a) resumes active development AND (b) ships Swift 6
+strict-concurrency compatibility, it may be reevaluated for richer
+full-screen dashboards (think htop/btop aesthetic). Until then,
+`CLITerm` is the shape.

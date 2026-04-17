@@ -13,6 +13,59 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.5] - 2026-04-17
+
+CLI TUI refresh: the three dashboards (`macmlx pull` / `macmlx serve`
+/ `macmlx run` interactive) now render via a tiny in-house ANSI
+helper instead of a stub-linked SwiftTUI dependency. SwiftTUI has
+been unmaintained for over a year and is incompatible with Swift 6
+strict concurrency (its `View` protocol is `nonisolated`, clashes
+with our `@MainActor` state classes). Shipped through v0.3.4 as a
+zombie import; now cleanly removed.
+
+### Added
+- `macmlx-cli/Sources/macmlx/Shared/CLITerm.swift` — small ANSI
+  toolkit: colour / bold / dim helpers, TTY detection (so piped
+  output stays clean), unicode block progress bars with sub-cell
+  precision (U+258x), and box-drawing header/footer for section
+  titles.
+- **Unicode progress bar** on `macmlx pull` — replaces the bare
+  `[2/4]  47%` text line with `[2/4] ██████████▌           47%`
+  plus speed and ETA. Sub-cell precision means the bar advances
+  smoothly even for small percentage deltas.
+- **Boxed startup banner** on `macmlx serve` — coloured key/value
+  rows inside a unicode box, including the health and status URLs.
+- **Tidier REPL header** on `macmlx run` interactive — dimmed hint
+  line, cyan `>` prompt, red error lines.
+- `.claude/features/cli-tui.md` gains a "Historical: SwiftTUI"
+  section documenting the decision, rationale, and reintroduction
+  criteria.
+
+### Removed
+- **SwiftTUI** dependency from `macmlx-cli/Package.swift`. No code
+  actually used it; the three `_*View` stubs were linker decoys.
+- The `_PullDashboardView` / `_ServeDashboardView` / `_ChatTUIView`
+  stub types that existed only to keep the SwiftTUI product
+  referenced.
+- **PulseUI** + **PulseProxy** package products from the
+  `macMLX.xcodeproj` (maintainer action). Added in v0.3.4 on the
+  assumption we'd drop in `PulseUI.ConsoleView`, but Pulse 5.x
+  gates that view behind `#if !os(macOS)` — we wrote the Logs
+  viewer natively against `LoggerMessageEntity` instead and never
+  imported PulseUI from Swift. Pulse core stays (still the backing
+  store for `LogManager` + the Logs tab).
+
+### Notes
+- GitHub issue #18 closed — the underlying ask (real live CLI
+  dashboards) is satisfied by the CLITerm-based rendering without
+  requiring SwiftTUI as the vehicle. If SwiftTUI resumes
+  development AND ships Swift 6 compatibility we can revisit for
+  richer full-screen dashboards.
+- CLI tests: 16/16 green. `macmlx list` smoke-tested against a
+  local model directory. Core tests: 90/90 still green.
+
+---
+
 ## [0.3.4] - 2026-04-17
 
 Logs tab (#16). A native macOS log viewer built on top of Pulse's

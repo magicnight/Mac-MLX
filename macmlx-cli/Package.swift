@@ -10,7 +10,14 @@ let package = Package(
     dependencies: [
         .package(path: "../MacMLXCore"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.1"),
-        .package(url: "https://github.com/rensbreur/SwiftTUI.git", revision: "537133031bc2b2731048d00748c69700e1b48185"),
+        // SwiftTUI removed in v0.3.5 — upstream (rensbreur/SwiftTUI) has
+        // been unmaintained for over a year and its nonisolated `View`
+        // protocol is incompatible with Swift 6 strict concurrency. The
+        // three TUI dashboards now render with our own ANSI helper
+        // (`CLITerm.swift`). If SwiftTUI catches up to Swift 6 and
+        // matches SwiftUI's pace, consider reintroducing it for richer
+        // dashboards (tracked as historical note in
+        // .claude/features/cli-tui.md).
     ],
     targets: [
         .executableTarget(
@@ -18,7 +25,6 @@ let package = Package(
             dependencies: [
                 "MacMLXCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                .product(name: "SwiftTUI", package: "SwiftTUI"),
             ]
         ),
         .testTarget(

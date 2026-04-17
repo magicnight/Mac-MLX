@@ -1,15 +1,14 @@
+// PullDashboard.swift
+// macmlx
+//
+// Live-updating progress display for `macmlx pull`. Uses `\r` to overwrite
+// a single line and a unicode block progress bar for a proper visual
+// indicator. No SwiftTUI — we run on ANSI escape sequences only.
+
 import Foundation
 import MacMLXCore
-import SwiftTUI
-
-// Deferred — SwiftTUI's View protocol is nonisolated, conflicting with
-// @MainActor state classes under Swift 6 strict concurrency. Full TUI
-// requires an upstream SwiftTUI fix (tracked as #18). We print live
-// progress to stdout via carriage-return overwrite in the meantime.
 
 /// Entry point for pull download progress display.
-///
-/// v0.1: Plain stdout with `\r`-overwritten progress line per chunk.
 enum PullDashboard {
     /// Download `modelID` and report live progress to stdout.
     static func run(
@@ -17,7 +16,7 @@ enum PullDashboard {
         target: URL,
         downloader: HFDownloader
     ) async throws {
-        print("Pulling \(modelID)")
+        print(CLITerm.colourise("Pulling \(modelID)", CLITerm.bold))
         print("Target: \(target.path(percentEncoded: false))")
         print("")
 
@@ -34,7 +33,7 @@ enum PullDashboard {
             while !Task.isCancelled {
                 if let snap = latest.get() {
                     let line = formatLine(snap)
-                    // \r returns to start of line; pad with spaces to clobber
+                    // \r returns to start of line; trailing spaces clobber
                     // any leftover characters from a longer previous line.
                     FileHandle.standardOutput.write(Data("\r\(line)   ".utf8))
                 }
@@ -56,21 +55,32 @@ enum PullDashboard {
         if let final = latest.get() {
             FileHandle.standardOutput.write(Data("\r\(formatLine(final))   \n".utf8))
         }
-        print("Downloaded to: \(dest.path(percentEncoded: false))")
+        print(CLITerm.colourise("✓ Downloaded to: \(dest.path(percentEncoded: false))", CLITerm.green))
     }
 
-    /// `"[2/4]  47%  2.10 GB / 4.50 GB  12.5 MB/s  2m 13s  model-...safetensors"`
-    /// — shows per-file progress (always accurate) + file counter (always accurate)
-    /// + EMA speed + ETA when available. Overall aggregate bytes is intentionally
-    /// NOT displayed because HF manifests omit LFS file sizes.
+    /// `"[2/4] ████████▌                  47%  2.10 GB / 4.50 GB  12.5 MB/s  2m 13s  model.safetensors"`
+    /// — shows per-file progress (always accurate) + file counter + unicode
+    /// progress bar (visual indicator, only when total size known) + EMA
+    /// speed + ETA. Overall aggregate bytes is intentionally NOT displayed
+    /// because HF manifests omit LFS file sizes.
     private static func formatLine(_ p: DownloadProgress) -> String {
         let files = "[\(p.completedFiles)/\(p.totalFiles)]"
-        let pct = p.currentFileTotalBytes > 0 ? p.currentFilePercent : "..."
-        let bytes = p.currentFileTotalBytes > 0 ? p.currentFileHuman : "(starting)"
+
+        // Bar only if the current file has a known total size.
+        let bar: String
+        if p.currentFileTotalBytes > 0 {
+            let coloured = CLITerm.progressBar(fraction: p.currentFileFraction, width: 24)
+            bar = " \(CLITerm.colourise(coloured, CLITerm.cyan))"
+        } else {
+            bar = ""
+        }
+
+        let pct = p.currentFileTotalBytes > 0 ? " \(p.currentFilePercent)" : " ..."
+        let bytes = p.currentFileTotalBytes > 0 ? "  \(p.currentFileHuman)" : "  (starting)"
         let speed = p.currentFileSpeedHuman.isEmpty ? "" : "  \(p.currentFileSpeedHuman)"
         let eta = p.currentFileETASeconds != nil ? "  \(p.currentFileETAHuman)" : ""
         let current = p.currentFileName.map { "  " + $0 } ?? ""
-        return "\(files)  \(pct)  \(bytes)\(speed)\(eta)\(current)"
+        return "\(files)\(bar)\(pct)\(bytes)\(speed)\(eta)\(current)"
     }
 }
 
@@ -90,13 +100,5 @@ private final class ProgressBox: @unchecked Sendable {
     func get() -> DownloadProgress? {
         lock.lock(); defer { lock.unlock() }
         return value
-    }
-}
-
-// Minimal SwiftTUI stub — keeps the product linked.
-// Full dashboard deferred to #18.
-private struct _PullDashboardView: View {
-    var body: some View {
-        Text("macmlx pull — TUI v0.2")
     }
 }

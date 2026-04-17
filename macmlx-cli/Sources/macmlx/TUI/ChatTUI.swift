@@ -1,15 +1,14 @@
+// ChatTUI.swift
+// macmlx
+//
+// Plain stdin/stdout REPL for `macmlx run` in interactive mode. No
+// full-screen TUI — a readline-style loop is the right level of
+// complexity for CLI chat. The SwiftTUI experiment was removed in
+// v0.3.5 (upstream unmaintained + Swift 6 incompatible).
+
 import Foundation
 import MacMLXCore
-import SwiftTUI
 
-// Deferred — SwiftTUI's View protocol is nonisolated, conflicting with
-// @MainActor state classes under Swift 6 strict concurrency. Full TUI
-// requires an upstream SwiftTUI fix (tracked as #18). Interactive chat
-// uses a plain readline-style stdin loop in the meantime.
-
-/// Entry point for the interactive chat TUI.
-///
-/// v0.1: Uses a plain stdin/stdout REPL. SwiftTUI rendering deferred to v0.2.
 enum ChatTUI {
     /// Run an interactive stdin chat loop with `engine` and `model`.
     ///
@@ -20,17 +19,18 @@ enum ChatTUI {
         model: LocalModel,
         system: String?
     ) async throws {
-        print("macmlx run — \(model.displayName)")
-        print("Type your message and press Enter. Empty line or Ctrl+D to quit.")
-        print(String(repeating: "─", count: 50))
+        let width = 54
+        print(CLITerm.boxHeader("macmlx run — \(model.displayName)", width: width))
+        print(CLITerm.colourise("Type a message and press Enter. Empty line or Ctrl+D to quit.", CLITerm.dim))
+        print(CLITerm.boxFooter(width: width))
 
         var conversationMessages: [ChatMessage] = []
 
         while true {
-            print("> ", terminator: "")
+            print(CLITerm.colourise("> ", CLITerm.cyan), terminator: "")
             fflush(stdout)
             guard let line = readLine(strippingNewline: true), !line.isEmpty else {
-                print("\nGoodbye.")
+                print(CLITerm.colourise("Goodbye.", CLITerm.dim))
                 break
             }
 
@@ -43,7 +43,6 @@ enum ChatTUI {
                 parameters: GenerationParameters()
             )
 
-            print("", terminator: "")  // assistant response on new line
             var responseText = ""
 
             do {
@@ -55,18 +54,10 @@ enum ChatTUI {
                 }
                 print()  // newline after response
             } catch {
-                print("\n[Error: \(error.localizedDescription)]")
+                print(CLITerm.colourise("\n[Error: \(error.localizedDescription)]", CLITerm.red))
             }
 
             conversationMessages.append(ChatMessage(role: .assistant, content: responseText))
         }
-    }
-}
-
-// Minimal SwiftTUI stub — keeps the product linked.
-// Full dashboard deferred to #18.
-private struct _ChatTUIView: View {
-    var body: some View {
-        Text("macmlx run — TUI v0.2")
     }
 }
