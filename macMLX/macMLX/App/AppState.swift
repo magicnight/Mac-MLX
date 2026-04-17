@@ -22,6 +22,11 @@ public final class AppState {
     public let conversations: ConversationStore
     public let parametersStore: ModelParametersStore
 
+    /// Local benchmark history store (issue #22). Persists to
+    /// `~/.mac-mlx/benchmarks/` with the same dotfile-exemption pattern
+    /// as the other stores.
+    public let benchmarks: BenchmarkStore
+
     /// Single app-scoped Chat view model. Owned here (not by ChatView's
     /// @State) so message history and the in-flight generation Task survive
     /// sidebar tab switches — see issue #1.
@@ -33,6 +38,11 @@ public final class AppState {
     /// Inspector panel (issue #15). Same retain story as `chat`.
     let parameters: ParametersViewModel
 
+    /// Benchmark feature's view model (issue #22). Hoisted onto AppState
+    /// so an in-progress benchmark Task survives sidebar tab switches,
+    /// same rationale as `chat`.
+    let benchmark: BenchmarkViewModel
+
     /// Snapshot of the most recently loaded settings. Updated after each
     /// `settings.load()` / `settings.update()` call so SwiftUI bindings have
     /// something synchronous to observe.
@@ -43,23 +53,32 @@ public final class AppState {
     public init() {
         let settings = SettingsManager()
         let logs = LogManager()
+        let library = ModelLibraryManager()
         let coordinator = EngineCoordinator(logs: logs)
         let conversations = ConversationStore()  // ~/.mac-mlx/conversations
         let parametersStore = ModelParametersStore()  // ~/.mac-mlx/model-params
+        let benchmarks = BenchmarkStore()            // ~/.mac-mlx/benchmarks
         let parameters = ParametersViewModel(store: parametersStore)
 
         self.settings = settings
-        self.library = ModelLibraryManager()
+        self.library = library
         self.downloader = HFDownloader()
         self.logs = logs
         self.coordinator = coordinator
         self.conversations = conversations
         self.parametersStore = parametersStore
+        self.benchmarks = benchmarks
         self.parameters = parameters
         self.chat = ChatViewModel(
             coordinator: coordinator,
             store: conversations,
             parameters: parameters
+        )
+        self.benchmark = BenchmarkViewModel(
+            coordinator: coordinator,
+            library: library,
+            store: benchmarks,
+            logs: logs
         )
     }
 

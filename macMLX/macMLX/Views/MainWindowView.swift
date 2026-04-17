@@ -15,17 +15,19 @@ struct MainWindowView: View {
 
     /// Sidebar tabs. Order matches the spec's reference apps (Reeder / Lasso / Sleeve).
     enum Tab: String, CaseIterable, Identifiable {
-        case library  = "Models"
-        case chat     = "Chat"
-        case settings = "Settings"
+        case library   = "Models"
+        case chat      = "Chat"
+        case benchmark = "Benchmark"
+        case settings  = "Settings"
 
         var id: String { rawValue }
 
         var systemImage: String {
             switch self {
-            case .library:  "tray.full"
-            case .chat:     "bubble.left.and.bubble.right"
-            case .settings: "gear"
+            case .library:   "tray.full"
+            case .chat:      "bubble.left.and.bubble.right"
+            case .benchmark: "stopwatch"
+            case .settings:  "gear"
             }
         }
     }
@@ -100,9 +102,10 @@ struct MainWindowView: View {
     @ViewBuilder
     private var detail: some View {
         switch selectedTab {
-        case .library:  ModelLibraryView()
-        case .chat:     ChatView()
-        case .settings: SettingsView()
+        case .library:   ModelLibraryView()
+        case .chat:      ChatView()
+        case .benchmark: BenchmarkView()
+        case .settings:  SettingsView()
         }
     }
 }
