@@ -256,6 +256,13 @@ public actor HFDownloader {
     ///     write with an aggregated `DownloadProgress` snapshot. Fires from
     ///     the URLSession delegate queue; UI consumers should bridge to
     ///     `@MainActor`.
+    ///
+    /// Files that already exist at the destination are skipped (treated as
+    /// complete — we don't re-verify sizes). Files cancelled mid-download
+    /// leave a resume record at `~/.mac-mlx/downloads/{modelID}/resume.dat`
+    /// that this method picks up on the next call to continue from the
+    /// last byte (#6).
+    ///
     /// - Returns: URL of the created model directory.
     public func download(
         modelID: String,
@@ -271,17 +278,36 @@ public actor HFDownloader {
         let fileCount = remoteFiles.count
         guard fileCount > 0 else { return modelDir }
 
-        for (index, remoteFile) in remoteFiles.enumerated() {
-            // Resolve URL: <endpoint>/<modelID>/resolve/main/<path>
-            // Works both for huggingface.co and for drop-in mirrors like
-            // hf-mirror.com that replicate the same URL shape.
-            let resolveURL = baseURL.appending(
-                path: "\(modelID)/resolve/main/\(remoteFile.path)"
-            )
+        // Prior cancel may have left a resume record — if the file it
+        // points at is the next incomplete one, we'll pick up from the
+        // last saved byte instead of restarting.
+        let resumeRecord = loadResumeRecord(for: modelID)
 
+        for (index, remoteFile) in remoteFiles.enumerated() {
             let destination = modelDir.appending(path: remoteFile.path, directoryHint: .notDirectory)
             let parentDir = destination.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+
+            // Skip if already on disk — optimistic completeness check.
+            // A mid-download cancel leaves nothing at destination (the move
+            // from URLSession's temp location happens only after success),
+            // so a present file is safe to treat as complete.
+            if FileManager.default.fileExists(atPath: destination.path) {
+                progress?(DownloadProgress(
+                    modelID: modelID,
+                    completedFiles: index + 1,
+                    totalFiles: fileCount,
+                    currentFileName: index + 1 < fileCount ? remoteFiles[index + 1].path : nil,
+                    currentFileBytesDownloaded: 0,
+                    currentFileTotalBytes: 0
+                ))
+                continue
+            }
+
+            // Resume URL: <endpoint>/<modelID>/resolve/main/<path>
+            let resolveURL = baseURL.appending(
+                path: "\(modelID)/resolve/main/\(remoteFile.path)"
+            )
 
             // Snapshot context — captured by value into the @Sendable closure.
             let localModelID = modelID
@@ -309,31 +335,64 @@ public actor HFDownloader {
                     totalFiles: totalFilesSnapshot,
                     currentFileName: currentFileNameSnapshot,
                     currentFileBytesDownloaded: written,
-                    // URLSession returns -1 (NSURLSessionTransferSizeUnknown)
-                    // if the server omitted Content-Length. Map to 0 so the
-                    // UI falls back to indeterminate display.
                     currentFileTotalBytes: max(0, expected),
                     currentFileBytesPerSecond: bps
                 ))
             }
 
-            let (tempURL, response) = try await urlSession.download(
-                for: URLRequest(url: resolveURL),
-                delegate: delegate
-            )
+            // Resume if we have valid data for THIS exact file from a
+            // prior cancellation. Safety: resumeData is opaque and tied
+            // to a specific URL — using it for a different file would
+            // fail at the URLSession layer. We match by filename.
+            let resumeDataForThisFile: Data? =
+                (resumeRecord?.currentFile == remoteFile.path) ? resumeRecord?.resumeData : nil
 
-            if let httpResponse = response as? HTTPURLResponse,
-               httpResponse.statusCode != 200 {
-                throw DownloadError.badStatusCode(httpResponse.statusCode, url: resolveURL)
-            }
-
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
-            }
             do {
+                let (tempURL, response): (URL, URLResponse)
+                if let resumeData = resumeDataForThisFile {
+                    (tempURL, response) = try await urlSession.download(
+                        resumeFrom: resumeData,
+                        delegate: delegate
+                    )
+                } else {
+                    (tempURL, response) = try await urlSession.download(
+                        for: URLRequest(url: resolveURL),
+                        delegate: delegate
+                    )
+                }
+
+                if let httpResponse = response as? HTTPURLResponse,
+                   httpResponse.statusCode != 200 {
+                    throw DownloadError.badStatusCode(httpResponse.statusCode, url: resolveURL)
+                }
+
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
                 try FileManager.default.moveItem(at: tempURL, to: destination)
+
+                // This file is done — any saved resume state for it is stale.
+                clearResumeRecord(for: modelID)
+
+            } catch let urlErr as URLError where urlErr.code == .cancelled {
+                // Capture resume data if URLSession was able to produce it.
+                // `URLError.downloadTaskResumeData` is Foundation's Swift-native
+                // accessor for the opaque blob (tail-end byte range + ETag)
+                // that the server needs for a Range continuation.
+                if let data = urlErr.downloadTaskResumeData {
+                    saveResumeRecord(
+                        for: modelID,
+                        record: ResumeRecord(
+                            currentFile: remoteFile.path,
+                            resumeData: data
+                        )
+                    )
+                }
+                throw urlErr
             } catch {
-                throw DownloadError.writeFailed("Could not move \(remoteFile.path): \(error.localizedDescription)")
+                // Non-cancel errors: don't bother saving resume data, just
+                // bubble up. (Typical cases: HTTP 4xx/5xx, DNS, filesystem.)
+                throw error
             }
 
             // Post-file tick: bump completedFiles, point currentFileName at
@@ -349,7 +408,78 @@ public actor HFDownloader {
             ))
         }
 
+        // All files complete — clear any leftover record (covers the edge
+        // case where user cancelled file 2, then later resumed and
+        // completed everything including a pending record on file 2).
+        clearResumeRecord(for: modelID)
         return modelDir
+    }
+
+    // MARK: - Resume record (#6)
+
+    /// Saved state from a cancelled download, pointing at the specific
+    /// file and byte offset to resume from.
+    private struct ResumeRecord {
+        let currentFile: String
+        let resumeData: Data
+    }
+
+    /// `~/.mac-mlx/downloads/{encoded-modelID}/` — sibling of conversation
+    /// and parameter stores. Under App Sandbox the dotfile exemption
+    /// applies.
+    private func resumeDirectory(for modelID: String) -> URL {
+        let home: URL = {
+            if let path = NSHomeDirectoryForUser(NSUserName()) {
+                return URL(filePath: path, directoryHint: .isDirectory)
+            }
+            return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
+        }()
+        let encoded = modelID.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed.subtracting(.init(charactersIn: "/"))
+        ) ?? modelID
+        return home.appending(
+            path: ".mac-mlx/downloads/\(encoded)",
+            directoryHint: .isDirectory
+        )
+    }
+
+    private func saveResumeRecord(for modelID: String, record: ResumeRecord) {
+        let dir = resumeDirectory(for: modelID)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try record.currentFile.write(
+                to: dir.appending(path: "current-file.txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try record.resumeData.write(
+                to: dir.appending(path: "resume.dat"),
+                options: .atomic
+            )
+        } catch {
+            // Best-effort — failing to save resume data isn't fatal; the
+            // user just can't resume this particular cancel.
+        }
+    }
+
+    private func loadResumeRecord(for modelID: String) -> ResumeRecord? {
+        let dir = resumeDirectory(for: modelID)
+        guard let currentFile = try? String(
+            contentsOf: dir.appending(path: "current-file.txt"),
+            encoding: .utf8
+        ),
+        let resumeData = try? Data(contentsOf: dir.appending(path: "resume.dat")) else {
+            return nil
+        }
+        return ResumeRecord(
+            currentFile: currentFile.trimmingCharacters(in: .whitespacesAndNewlines),
+            resumeData: resumeData
+        )
+    }
+
+    private func clearResumeRecord(for modelID: String) {
+        let dir = resumeDirectory(for: modelID)
+        try? FileManager.default.removeItem(at: dir)
     }
 
     // MARK: - Private Helpers
