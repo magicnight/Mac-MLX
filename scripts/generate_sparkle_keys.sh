@@ -77,28 +77,30 @@ HINT
 fi
 
 # --- Generate ---
+#
+# Sparkle 2.x stores the private key in the macOS Keychain. Two paths:
+#   1. First call (no key in keychain): generate_keys prints the public key
+#      and stores the private key in keychain.
+#   2. Subsequent calls: generate_keys -x <path> exports the existing
+#      private key from keychain to a file, and prints the public key.
+#
+# We always run with -x so we get the private key on disk for CI use.
 
 mkdir -p "$(dirname "$PRIVATE_KEY_PATH")"
 chmod 700 "$(dirname "$PRIVATE_KEY_PATH")"
 
-# generate_keys on Sparkle 2.x writes to the macOS Keychain AND prints both
-# keys. We extract them from the output.
-OUTPUT=$("$GENERATE_KEYS")
+OUTPUT=$("$GENERATE_KEYS" -x "$PRIVATE_KEY_PATH" 2>&1)
 echo "$OUTPUT"
+chmod 600 "$PRIVATE_KEY_PATH" 2>/dev/null || true
 
+# Public key is base64 with `=` padding, 43 chars before `=` for Ed25519.
+# generate_keys prints it on the line containing "Public key:" or as a
+# standalone token. Grab any 43-char base64 + '=' token from the output.
 PUBLIC_KEY=$(echo "$OUTPUT" | grep -oE '[A-Za-z0-9+/]{43}=' | tail -1 || true)
-PRIVATE_KEY=$(echo "$OUTPUT" | grep -oE 'SUSignUpdate -s [A-Za-z0-9+/=]+' | sed 's|SUSignUpdate -s ||' || true)
 
 if [[ -z "$PUBLIC_KEY" ]]; then
-    echo "error: could not extract public key from generate_keys output." >&2
-    echo "Re-read the output above and paste the values manually." >&2
-    exit 3
-fi
-
-# Persist private key to disk for CI usage.
-if [[ -n "$PRIVATE_KEY" ]]; then
-    printf '%s' "$PRIVATE_KEY" > "$PRIVATE_KEY_PATH"
-    chmod 600 "$PRIVATE_KEY_PATH"
+    echo "warning: could not auto-detect public key in generate_keys output." >&2
+    echo "Re-read the output above for a base64 string ending in '=' and paste manually." >&2
 fi
 
 echo

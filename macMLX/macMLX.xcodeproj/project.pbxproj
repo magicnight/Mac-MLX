@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0A46F36D2F9144FF0046E74C /* MacMLXCore in Frameworks */ = {isa = PBXBuildFile; productRef = 0A46F36C2F9144FF0046E74C /* MacMLXCore */; };
+		0A701A512F91E797000E48AF /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A701A502F91E797000E48AF /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0A46F36D2F9144FF0046E74C /* MacMLXCore in Frameworks */,
+				0A701A512F91E797000E48AF /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = macMLX;
 			packageProductDependencies = (
 				0A46F36C2F9144FF0046E74C /* MacMLXCore */,
+				0A701A502F91E797000E48AF /* Sparkle */,
 			);
 			productName = macMLX;
 			productReference = 0A46F35D2F9142070046E74C /* macMLX.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				0A46F36B2F9144FF0046E74C /* XCLocalSwiftPackageReference "../MacMLXCore" */,
+				0A701A4F2F91E797000E48AF /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0A46F35E2F9142070046E74C /* Products */;
@@ -265,7 +269,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = macMLX/Info.plist;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -300,7 +304,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = macMLX/Info.plist;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -352,10 +356,26 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		0A701A4F2F91E797000E48AF /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		0A46F36C2F9144FF0046E74C /* MacMLXCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MacMLXCore;
+		};
+		0A701A502F91E797000E48AF /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0A701A4F2F91E797000E48AF /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
