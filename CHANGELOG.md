@@ -9,7 +9,38 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-(nothing yet — next release will be v0.3.x)
+(nothing yet)
+
+---
+
+## [0.3.0] - 2026-04-17
+
+v0.3 shipped the **local benchmark feature** and a sweep of
+cross-cutting defects flagged by an independent code review of the
+v0.1+v0.2 surface.
+
+### Added
+- **Benchmark tab** (⌥⌘ sidebar) — local benchmark runner with config (model / prompt tokens / gen tokens / runs / notes), last-result readout (prefill + generation TPS, TTFT, peak memory, load time), history list with delete + clear, `Share to Community` (pre-fills a GitHub issue via `benchmark_submission.yml`), `Copy as JSON`. (#22, `88545ad` / `e3cf815` / `e155a7a`)
+- `MacMLXCore/Util/DataRoot.swift` — single source of truth for `~/.mac-mlx/` paths under App Sandbox (replaced 5 inline copies of the `NSHomeDirectoryForUser` dance).
+- `MacMLXCore/Managers/BenchmarkStore.swift` — actor persisting results to `~/.mac-mlx/benchmarks/{uuid}.json`.
+- `MacMLXCore/Managers/BenchmarkRunner.swift` — measurement actor (warm-up + N measured runs + median aggregation, peak RSS via Mach `task_info`).
+- `MacMLXCore/Util/HardwareInfo.swift` — chip / memory / macOS version via `sysctlbyname`.
+- `MemoryProbe` gained `residentMemoryBytes()` + `residentMemoryGB()` (used by benchmark sampler **and** `HummingbirdServer`'s `/v1/status`, which now reports real RSS instead of 0).
+- **Simplified Chinese README** (`README.zh-CN.md`) with bilingual switcher header on both files.
+- `.github/ISSUE_TEMPLATE/benchmark_submission.yml` — target template for the app's Share-to-Community link.
+
+### Changed
+- **SettingsManager no longer writes to the sandbox container** (CRITICAL). Pre-v0.3 `SettingsManager.init()` used `FileManager.default.homeDirectoryForCurrentUser` → `~/Library/Containers/<bundle-id>/Data/…`, so the GUI's `settings.json` lived inside the container while the CLI (and `Settings.default.modelDirectory`) used real `~/.mac-mlx/`. GUI and CLI were quietly disagreeing. Routed through `DataRoot.macMLX`. (`9764628`)
+- **CLI honours the user's HF endpoint mirror** (CRITICAL). `macmlx pull` was hitting `huggingface.co` even when the GUI had the user on `https://hf-mirror.com` — #21 only ever wired the GUI side. `CLIContext.bootstrap()` now calls `downloader.setBaseURL(_:)`. (`9764628`)
+- **Parameters Inspector overrides auto-load on model load** (CRITICAL). Pre-v0.3 `loadForModel(_:)` only ran from the Inspector's `.onAppear`; users who chatted without opening the Inspector saw persisted per-model temperature/top_p/system-prompt ignored. `EngineCoordinator` gained an `onModelLoaded` callback, `AppState` wires it to `parameters.loadForModel`. (`9764628`)
+- **Background URLSession identifier is process-scoped**. Suffixed with `.app` or `.cli` based on `Bundle.main.bundlePath.hasSuffix(".app")` so GUI + CLI don't fight for the same identifier when both run. (`9764628`)
+- **`PeakMemorySampler.stopAndCollect()` is now deterministic** — stores the Task handle, cancels, and awaits its value. Pre-v0.3 the sampling loop could run for ~50ms after stop returned, holding `self` until the next tick. (`9764628`)
+- **`EngineCoordinator` exposes `engineVersion`** synchronously on the @MainActor (refreshed on init + after every `switchTo(_:)`). Lets the benchmark view model attach the real engine version to the result without awaiting the engine actor. (`e3cf815`)
+- **TUI deferral comments** now point at [#18](https://github.com/magicnight/Mac-MLX/issues/18) (upstream SwiftTUI Swift 6 blocker) instead of stale `// TODO: v0.2`.
+
+### Fixed
+- **Missing test coverage for v0.2 stores** — `ConversationStoreTests` + `ModelParametersStoreTests` (+12 tests total) cover save/load round-trip, sort ordering, delete, corrupt-file tolerance, empty store, and the slash-in-model-ID filesystem-safety edge case. Top-level test functions wrapped in `@Suite` structs so identical names across store test files don't collide.
+- Miscellaneous stale `// TODO: v0.2` markers that were never resolved: `ModelLibraryManager.parameterCount/architecture` now marked "v0.3+ requires config.json parser", `MLXSwiftEngine.toolCall` note cleaned, `PSCommandTests` phantom v0.2 integration-test TODO dropped.
 
 ---
 
