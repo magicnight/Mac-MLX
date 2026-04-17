@@ -13,6 +13,56 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.1] - 2026-04-17
+
+Patch release — five UX fixes surfaced during v0.3 bring-up use, plus
+a CLI segfault fix that would have hit any `macmlx list` user on a
+non-empty model store.
+
+### Fixed
+- **`macmlx list` segfault** on any non-empty local model store
+  (`%s` + Swift `String` UB in the printf-based table formatter).
+  Replaced with Swift-native `padding(toLength:…)` helpers. `list`
+  exit code now 0; `list --json` already worked. (`1d68a94`)
+- **Chat "No model loaded" banner flicker** during generation.
+  `EngineStatus.isLoaded` now returns `true` for both `.ready` and
+  `.generating` — a model generating *is* loaded from the UI's
+  perspective. Fixes the banner flashing on every send → first-token
+  window. Test updated to reflect the correct behaviour.
+- **Assistant-message Markdown renderer was collapsing paragraphs.**
+  `AttributedString(markdown:)` with `interpretedSyntax: .full` consumed
+  block-level markers AND the `\n\n` paragraph separators, and SwiftUI's
+  `Text(AttributedString)` flattened the result into a single run.
+  Switched to `.inlineOnlyPreservingWhitespace` — paragraph breaks
+  preserved, inline bold/italic/code/links still highlighted, block
+  markers pass through as literal text (better than losing them).
+- **Manually-copied models not appearing in the Models tab** until the
+  user toggled the directory in Settings. Models view now auto-rescans
+  when `currentSettings.modelDirectory` changes, and the empty-state
+  spells out the actual scanned path so users can tell immediately
+  whether the app is looking where they expect.
+
+### Changed
+- **Max tokens control in Parameters Inspector** now a `TextField`
+  with `format: .number` (direct entry, clamped to 128–32768) plus
+  a side Stepper for ±128 nudges. Pre-v0.3.1 Stepper-only took ~112
+  clicks to go from 128 to 16384.
+- **Chat toolbar model selector is finally functional.** Previously a
+  `.constant`-bound Picker that only displayed the loaded model. Now
+  a Menu that lists local models, checkmarks the loaded one, and
+  loads on tap. Disabled mid-generation to prevent mid-stream swaps;
+  shows a ProgressView while load is in flight. Refresh action in the
+  menu re-scans the model directory on demand.
+- **Release workflow hardening** — appcast push now rebases against
+  fresh `origin/main` + retries up to 3 times with backoff, and is
+  `continue-on-error: true` so a push race cannot block the DMG from
+  shipping as a GitHub Release. `Create GitHub Release` step is
+  `if: always()`. Caught by the v0.3.0 publish attempt (DMG built +
+  signed but never released; recovered by re-tagging on the fix
+  commit). (`6d45083`)
+
+---
+
 ## [0.3.0] - 2026-04-17
 
 v0.3 shipped the **local benchmark feature**, a sweep of

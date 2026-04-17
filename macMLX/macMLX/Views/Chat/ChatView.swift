@@ -26,6 +26,12 @@ private struct ChatContent: View {
     @Environment(AppState.self) private var appState
     @State private var scrollProxy: ScrollViewProxy? = nil
     @State private var showInspector: Bool = false
+    /// Local models available for the toolbar model switcher (#5).
+    /// Refreshed on appear + when the model directory changes.
+    @State private var availableModels: [LocalModel] = []
+    /// Model currently being loaded via the toolbar switcher — keeps the
+    /// menu greyed while load is in flight so the user can't stack swaps.
+    @State private var switchingToModelID: String? = nil
 
     private var isModelLoaded: Bool {
         appState.coordinator.status.isLoaded
@@ -59,6 +65,12 @@ private struct ChatContent: View {
             )
         }
         .navigationTitle("Chat")
+        .task {
+            await reloadAvailableModels()
+        }
+        .onChange(of: appState.currentSettings.modelDirectory) { _, _ in
+            Task { await reloadAvailableModels() }
+        }
         .onChange(of: viewModel.messages.count) { _, _ in
             scrollToBottom()
         }
@@ -91,22 +103,80 @@ private struct ChatContent: View {
         }
     }
 
+    // MARK: - Model switcher (#5)
+
+    private var modelSwitcher: some View {
+        Menu {
+            if availableModels.isEmpty {
+                Text("No local models")
+            }
+            ForEach(availableModels) { model in
+                Button {
+                    switchToModel(model)
+                } label: {
+                    if model.id == appState.coordinator.currentModel?.id {
+                        Label(model.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(model.displayName)
+                    }
+                }
+            }
+            Divider()
+            Button("Refresh") {
+                Task { await reloadAvailableModels() }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu")
+                Text(currentModelLabel)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if switchingToModelID != nil {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .frame(maxWidth: 260)
+        // Block swapping mid-generation — coordinator state would get
+        // weird if we unload while a token stream is in flight.
+        .disabled(viewModel.isGenerating || switchingToModelID != nil)
+    }
+
+    private var currentModelLabel: String {
+        if let id = switchingToModelID {
+            return "Loading \(id)…"
+        }
+        if let current = appState.coordinator.currentModel {
+            return current.displayName
+        }
+        return availableModels.isEmpty ? "No local models" : "Pick a model…"
+    }
+
+    private func switchToModel(_ model: LocalModel) {
+        if model.id == appState.coordinator.currentModel?.id { return }
+        switchingToModelID = model.id
+        Task {
+            _ = await appState.coordinator.load(model)
+            switchingToModelID = nil
+        }
+    }
+
+    private func reloadAvailableModels() async {
+        let dir = appState.currentSettings.modelDirectory
+        availableModels = (try? await appState.library.scan(dir)) ?? []
+    }
+
     // MARK: - Toolbar
 
     private var chatToolbar: some View {
         HStack {
-            // Model selector
-            Picker(selection: .constant(appState.coordinator.currentModel?.id ?? "")) {
-                if let model = appState.coordinator.currentModel {
-                    Text(model.displayName).tag(model.id)
-                } else {
-                    Text("No model loaded").tag("")
-                }
-            } label: {
-                Label("Model", systemImage: "cpu")
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 220)
+            // Model switcher (#5) — pre-v0.3.1 this was a `.constant`
+            // Picker that only displayed the loaded model with no way to
+            // switch. Now a real Menu: lists local models, checkmarks the
+            // one loaded, loads on tap.
+            modelSwitcher
 
             Spacer()
 

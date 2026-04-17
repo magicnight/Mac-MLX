@@ -45,18 +45,39 @@ struct ParametersInspector: View {
                 HStack {
                     Text("Max Tokens")
                         .frame(width: 130, alignment: .leading)
+                    // Direct numeric entry — users regularly jump from 2048
+                    // to 16384 and the pre-v0.3.1 Stepper-only flow took
+                    // ~112 clicks at step=128. TextField accepts any int,
+                    // clamped to [128, 32768] on commit. Side Stepper
+                    // preserves the "±128 nudge" affordance.
+                    TextField(
+                        "",
+                        value: Binding(
+                            get: { params.parameters.maxTokens },
+                            set: { newValue in
+                                let clamped = max(128, min(32768, newValue))
+                                params.parameters.maxTokens = clamped
+                                params.persist()
+                            }
+                        ),
+                        format: .number
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 80)
+                    .multilineTextAlignment(.trailing)
+
                     Stepper(
+                        "",
                         value: Binding(
                             get: { params.parameters.maxTokens },
                             set: { params.parameters.maxTokens = $0; params.persist() }
                         ),
                         in: 128...32768,
                         step: 128
-                    ) {
-                        Text("\(params.parameters.maxTokens)")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    .help("Maximum tokens to generate in one response.")
+                    )
+                    .labelsHidden()
+                    .help("Maximum tokens to generate (128–32768). Type directly or ±128 with the stepper.")
                 }
             }
 

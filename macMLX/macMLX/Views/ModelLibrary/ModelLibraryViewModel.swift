@@ -58,6 +58,14 @@ final class ModelLibraryViewModel {
 
     // MARK: - Local
 
+    /// Directory that `loadLocalModels()` scanned last — or the currently
+    /// configured one if no scan has happened yet. Surfaced in the
+    /// "No Local Models" empty-state so users can tell at a glance
+    /// whether the app is looking at the directory they expect.
+    var scanDirectory: URL {
+        appState.currentSettings.modelDirectory
+    }
+
     func loadLocalModels() async {
         isLoadingLocal = true
         localError = nil

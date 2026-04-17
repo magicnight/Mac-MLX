@@ -113,15 +113,28 @@ struct ChatMessageView: View {
 
     // MARK: - Rendered content (#10 Markdown)
 
-    /// Assistant messages are rendered as Markdown — LLM outputs are
-    /// naturally markdown-heavy (code, lists, headers). User messages
-    /// stay plain: users rarely type intentional markdown and literal
-    /// asterisks shouldn't collapse to bold.
+    /// Assistant messages are rendered with inline-only Markdown: bold,
+    /// italic, inline code spans, links — and crucially, paragraph breaks
+    /// are preserved.
     ///
-    /// `AttributedString.MarkdownParsingOptions.failurePolicy =
-    /// .returnPartiallyParsedIfPossible` is key during streaming — when a
-    /// chunk arrives mid-`**bold**`, the partial `**bold` chunk parses as
-    /// literal characters and won't throw, so rendering stays smooth.
+    /// Why `.inlineOnlyPreservingWhitespace` and not `.full`:
+    /// - `.full` parses block-level structure (headers, lists, code
+    ///   fences) but SwiftUI's `Text(AttributedString)` cannot *render*
+    ///   block structure. It flattens the entire attributed string into
+    ///   a single run AND consumes the `\n\n` separators that delimited
+    ///   paragraphs in the source. Net effect: a well-structured LLM
+    ///   reply collapses to one wall of prose. This was a v0.2 regression
+    ///   from v0.1's plain `Text(content)` which naturally preserved
+    ///   newlines.
+    /// - `.inlineOnlyPreservingWhitespace` keeps every whitespace
+    ///   character in the output (so `\n\n` still renders as a blank
+    ///   line) while still lighting up inline `**bold**` / `*italic*` /
+    ///   `` `code` `` / `[link](url)`. Block markers like `# Heading`
+    ///   or `- item` pass through as literal text — acceptable, and
+    ///   better than losing the structure entirely.
+    /// - `.returnPartiallyParsedIfPossible` remains the right failure
+    ///   policy for streaming: a chunk arriving mid-`**bold**` parses
+    ///   cleanly as partial bold, no flicker between tokens.
     @ViewBuilder
     private var renderedContent: some View {
         let text = messageContent
@@ -130,7 +143,7 @@ struct ChatMessageView: View {
                markdown: text,
                options: AttributedString.MarkdownParsingOptions(
                    allowsExtendedAttributes: false,
-                   interpretedSyntax: .full,
+                   interpretedSyntax: .inlineOnlyPreservingWhitespace,
                    failurePolicy: .returnPartiallyParsedIfPossible
                )
            ) {

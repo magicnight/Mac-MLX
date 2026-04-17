@@ -14,10 +14,15 @@ func engineStatusEqualityCoversAllCases() {
 }
 
 @Test
-func engineStatusIsLoadedReportsTrueOnlyForReady() {
+func engineStatusIsLoadedCoversReadyAndGenerating() {
+    // A model is "loaded" from the UI's perspective whenever there is a
+    // model in memory — both `.ready` (idle between turns) and
+    // `.generating` (actively producing tokens). Pre-v0.3.1 this only
+    // returned `true` for `.ready`, which caused the "No model loaded"
+    // banner to flicker on for every send → first-token window.
     #expect(EngineStatus.idle.isLoaded == false)
     #expect(EngineStatus.loading(model: "x").isLoaded == false)
     #expect(EngineStatus.ready(model: "x").isLoaded == true)
-    #expect(EngineStatus.generating.isLoaded == false)
+    #expect(EngineStatus.generating.isLoaded == true)
     #expect(EngineStatus.error("x").isLoaded == false)
 }

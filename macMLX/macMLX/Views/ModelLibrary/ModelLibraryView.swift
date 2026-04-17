@@ -25,6 +25,14 @@ struct ModelLibraryView: View {
             viewModel = vm
             await vm.loadLocalModels()
         }
+        // Auto-rescan when the user changes the model directory in
+        // Settings — pre-v0.3.1 user had to press Refresh manually after
+        // Settings changes, which made it feel like Refresh was broken.
+        .onChange(of: appState.currentSettings.modelDirectory) { _, _ in
+            if let vm = viewModel {
+                Task { await vm.loadLocalModels() }
+            }
+        }
     }
 }
 
@@ -142,7 +150,11 @@ private struct ModelLibraryContent: View {
                     systemImage: "tray",
                     description: Text(
                         viewModel.searchQuery.isEmpty
-                            ? "Download models from the Hugging Face tab, or add them to your model directory."
+                            // Spell out the actual scanned path. Fixes the
+                            // "I copied models but they don't show up"
+                            // confusion when Settings points at a stale
+                            // directory (e.g. leftover v0.1 `~/models`).
+                            ? "No models found in \(Self.displayPath(viewModel.scanDirectory)).\nDownload from the Hugging Face tab, or set the directory in Settings."
                             : "No models match \"\(viewModel.searchQuery)\""
                     )
                 )
@@ -196,6 +208,16 @@ private struct ModelLibraryContent: View {
             }
             .listStyle(.inset)
         }
+    }
+
+    // MARK: - Path display
+
+    /// Collapse the user's real home to `~` for terser rendering in the
+    /// empty-state message.
+    private static func displayPath(_ url: URL) -> String {
+        let raw = url.path(percentEncoded: false)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return raw.hasPrefix(home) ? "~" + raw.dropFirst(home.count) : raw
     }
 
     // MARK: - Error view
