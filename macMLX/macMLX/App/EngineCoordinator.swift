@@ -30,6 +30,14 @@ public final class EngineCoordinator {
     /// "Tokens today" counter (resets on app restart, not on midnight).
     public private(set) var tokensGeneratedTotal: Int = 0
 
+    /// Hook invoked after a successful `load(_:)` finishes — used by
+    /// `AppState` to re-hydrate per-model state (e.g. the Parameters
+    /// Inspector's overrides via `ParametersViewModel.loadForModel`) so
+    /// features that don't explicitly open the Inspector still see their
+    /// persisted values. Fires on the @MainActor; receivers don't need
+    /// to hop.
+    var onModelLoaded: (@MainActor (LocalModel) async -> Void)?
+
     // MARK: - Private state
 
     private var engine: (any InferenceEngine)?
@@ -86,6 +94,10 @@ public final class EngineCoordinator {
             currentModel = model
             status = .ready(model: model.id)
             await logs.log("Model loaded: \(model.id)", level: .info, category: .engine)
+            // Fire the post-load hook so AppState can rehydrate per-model
+            // state (e.g. Parameters Inspector overrides) even if the
+            // user never opens the Inspector view.
+            await onModelLoaded?(model)
             return .success(())
         } catch {
             status = .error(error.localizedDescription)

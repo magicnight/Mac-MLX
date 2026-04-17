@@ -100,19 +100,7 @@ public actor ConversationStore {
     /// advantage of macOS App Sandbox's dotfile exemption, same as the
     /// rest of the `.mac-mlx` data root).
     public init(directory: URL? = nil, fileManager: FileManager = .default) {
-        if let directory {
-            self.directory = directory
-        } else {
-            // Use NSHomeDirectoryForUser to bypass the sandbox container
-            // redirect (matches Settings.default.modelDirectory logic).
-            let home: URL = {
-                if let path = NSHomeDirectoryForUser(NSUserName()) {
-                    return URL(filePath: path, directoryHint: .isDirectory)
-                }
-                return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-            }()
-            self.directory = home.appending(path: ".mac-mlx/conversations", directoryHint: .isDirectory)
-        }
+        self.directory = directory ?? DataRoot.macMLX("conversations")
         self.fileManager = fileManager
     }
 

@@ -2,9 +2,10 @@ import Foundation
 import MacMLXCore
 import SwiftTUI
 
-// TODO: v0.2 — SwiftTUI's View protocol is nonisolated, conflicting with
-// @MainActor state classes under Swift 6 strict concurrency. Full TUI deferred.
-// For v0.1 we print live progress to stdout via carriage-return overwrite.
+// Deferred — SwiftTUI's View protocol is nonisolated, conflicting with
+// @MainActor state classes under Swift 6 strict concurrency. Full TUI
+// requires an upstream SwiftTUI fix (tracked as #18). We print live
+// progress to stdout via carriage-return overwrite in the meantime.
 
 /// Entry point for pull download progress display.
 ///
@@ -92,8 +93,8 @@ private final class ProgressBox: @unchecked Sendable {
     }
 }
 
-// Minimal SwiftTUI stub — keeps the product linked
-// TODO: v0.2 — replace with a real Application(rootView:).start() dashboard
+// Minimal SwiftTUI stub — keeps the product linked.
+// Full dashboard deferred to #18.
 private struct _PullDashboardView: View {
     var body: some View {
         Text("macmlx pull — TUI v0.2")

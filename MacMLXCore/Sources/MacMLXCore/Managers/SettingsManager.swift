@@ -50,19 +50,10 @@ public struct Settings: Codable, Equatable, Sendable {
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
     ///
-    /// **Model directory rationale**: we deliberately point at the user's
-    /// REAL home `~/.mac-mlx/models`, not `FileManager.default.homeDirectoryForCurrentUser`.
-    /// Under App Sandbox the latter resolves to the container
-    /// (`~/Library/Containers/<bundle-id>/Data/`), which is not user-visible
-    /// and buries downloaded models where Finder can't find them. macOS's
-    /// sandbox has a long-standing *dotfile exemption* — directories under
-    /// real `$HOME` whose name starts with `.` are writable from a sandboxed
-    /// app without needing `user-selected.read-write` entitlements or
-    /// security-scoped bookmarks. So `~/.mac-mlx/` both works under sandbox
-    /// AND is visible to power users.
+    /// See `DataRoot.macMLX` for the rationale behind the dotfile-exempt
+    /// path choice under App Sandbox.
     public static let `default`: Settings = .init(
-        modelDirectory: Settings.realUserHomeDirectory
-            .appending(path: ".mac-mlx/models"),
+        modelDirectory: DataRoot.macMLX("models"),
         preferredEngine: .mlxSwift,
         serverPort: 8000,
         autoStartServer: false,
@@ -74,20 +65,6 @@ public struct Settings: Codable, Equatable, Sendable {
         logRetentionDays: 7,
         hfEndpoint: "https://huggingface.co"
     )
-
-    /// Real user home directory, bypassing the sandbox container redirect.
-    /// `NSHomeDirectoryForUser(NSUserName())` consults the Directory Service
-    /// for the logged-in user's `pw_dir`, which is `/Users/<name>` even
-    /// inside a sandboxed process, unlike
-    /// `FileManager.default.homeDirectoryForCurrentUser` which under sandbox
-    /// returns the container path. Falls back to `NSHomeDirectory()` if
-    /// lookup fails (shouldn't happen on a configured Mac).
-    private static var realUserHomeDirectory: URL {
-        if let path = NSHomeDirectoryForUser(NSUserName()) {
-            return URL(filePath: path, directoryHint: .isDirectory)
-        }
-        return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-    }
 
     // MARK: Init
 
@@ -137,10 +114,17 @@ public actor SettingsManager {
     // MARK: - Init
 
     /// Production initialiser — persists to `~/.mac-mlx/settings.json`.
+    ///
+    /// Uses `DataRoot.macMLX` (real `$HOME`, not the sandbox container)
+    /// so GUI and CLI processes converge on the same `settings.json`.
+    /// Before v0.3 this used `FileManager.default.homeDirectoryForCurrentUser`
+    /// which under sandbox wrote to `~/Library/Containers/<bundle-id>/Data/…`,
+    /// splitting settings between GUI and CLI surfaces.
     public init() {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".mac-mlx/settings.json")
-        self.fileURL = url
+        self.fileURL = DataRoot.macMLX.appending(
+            path: "settings.json",
+            directoryHint: URL.DirectoryHint.notDirectory
+        )
         self.current = .default
     }
 

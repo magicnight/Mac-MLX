@@ -226,8 +226,9 @@ public actor MLXSwiftEngine: InferenceEngine {
             case .info(let info):
                 completionInfo = info
             case .toolCall:
-                // Tool calls not supported in v0.1 — skip.
-                // TODO: v0.2 — dispatch tool calls
+                // Tool calls not supported yet — out of scope through v0.3.
+                // Re-visit when there's a concrete tool-use feature to
+                // wire into (e.g. OpenAI-compatible function-calling).
                 break
             }
         }

@@ -247,7 +247,7 @@ public actor HummingbirdServer {
 
         var body: [String: Any] = [
             "status": loaded != nil ? "loaded" : "idle",
-            "memory_used_gb": 0.0,  // TODO: v0.2 — process RSS not yet available
+            "memory_used_gb": MemoryProbe.residentMemoryGB(),
             "memory_total_gb": totalMemory,
             "uptime_seconds": uptime,
             "requests_total": requestCount,

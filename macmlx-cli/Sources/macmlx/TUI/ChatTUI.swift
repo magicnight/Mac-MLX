@@ -2,9 +2,10 @@ import Foundation
 import MacMLXCore
 import SwiftTUI
 
-// TODO: v0.2 — SwiftTUI's View protocol is nonisolated, conflicting with
-// @MainActor state classes under Swift 6 strict concurrency. Full TUI deferred.
-// For v0.1 the interactive chat uses a plain readline-style stdin loop.
+// Deferred — SwiftTUI's View protocol is nonisolated, conflicting with
+// @MainActor state classes under Swift 6 strict concurrency. Full TUI
+// requires an upstream SwiftTUI fix (tracked as #18). Interactive chat
+// uses a plain readline-style stdin loop in the meantime.
 
 /// Entry point for the interactive chat TUI.
 ///
@@ -62,8 +63,8 @@ enum ChatTUI {
     }
 }
 
-// Minimal SwiftTUI stub — keeps the product linked
-// TODO: v0.2 — replace with a real Application(rootView:).start() chat dashboard
+// Minimal SwiftTUI stub — keeps the product linked.
+// Full dashboard deferred to #18.
 private struct _ChatTUIView: View {
     var body: some View {
         Text("macmlx run — TUI v0.2")

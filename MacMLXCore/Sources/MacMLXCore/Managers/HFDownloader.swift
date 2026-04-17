@@ -226,7 +226,7 @@ public actor HFDownloader {
     private static let sharedBackground: BackgroundContainer = {
         let router = DownloadSessionRouter()
         let config = URLSessionConfiguration.background(
-            withIdentifier: "com.magicnight.macmlx.downloader"
+            withIdentifier: processScopedBackgroundIdentifier()
         )
         // Don't relaunch the app to deliver completion events — user will
         // see their downloads done the next time they open macMLX.
@@ -242,6 +242,20 @@ public actor HFDownloader {
         )
         return BackgroundContainer(session: session, router: router)
     }()
+
+    /// Background-session identifier suffixed by process role so the
+    /// GUI app (`macMLX.app`) and the CLI binary (`macmlx`) don't fight
+    /// for the same identifier when both run concurrently — Foundation
+    /// forbids two live sessions with the same identifier in one
+    /// **process**, but two different processes *can* each own a
+    /// differently-named identifier. Reviewer-flagged MEDIUM.
+    private static func processScopedBackgroundIdentifier() -> String {
+        let base = "com.magicnight.macmlx.downloader"
+        if Bundle.main.bundlePath.hasSuffix(".app") {
+            return base + ".app"
+        }
+        return base + ".cli"
+    }
 
     // MARK: - Init
 
@@ -524,21 +538,12 @@ public actor HFDownloader {
 
     /// `~/.mac-mlx/downloads/{encoded-modelID}/` — sibling of conversation
     /// and parameter stores. Under App Sandbox the dotfile exemption
-    /// applies.
+    /// applies (see `DataRoot.macMLX`).
     private func resumeDirectory(for modelID: String) -> URL {
-        let home: URL = {
-            if let path = NSHomeDirectoryForUser(NSUserName()) {
-                return URL(filePath: path, directoryHint: .isDirectory)
-            }
-            return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-        }()
         let encoded = modelID.addingPercentEncoding(
             withAllowedCharacters: .urlPathAllowed.subtracting(.init(charactersIn: "/"))
         ) ?? modelID
-        return home.appending(
-            path: ".mac-mlx/downloads/\(encoded)",
-            directoryHint: .isDirectory
-        )
+        return DataRoot.macMLX("downloads/\(encoded)")
     }
 
     private func saveResumeRecord(for modelID: String, record: ResumeRecord) {

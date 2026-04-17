@@ -106,8 +106,8 @@ public actor ModelLibraryManager {
             sizeBytes: sizeBytes,
             format: .mlx,
             quantization: quantization,
-            parameterCount: nil, // TODO: v0.2 — enrich from config.json
-            architecture: nil    // TODO: v0.2 — enrich from config.json
+            parameterCount: nil, // Deferred — requires config.json parser (v0.3+)
+            architecture: nil    // Deferred — requires config.json parser (v0.3+)
         )
     }
 

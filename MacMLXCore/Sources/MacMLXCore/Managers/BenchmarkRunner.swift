@@ -10,7 +10,6 @@
 // canned-stream mock, no MLX dependency.
 
 import Foundation
-import Darwin.Mach
 
 // MARK: - Runner
 
@@ -281,46 +280,40 @@ public actor BenchmarkRunner {
 /// process.
 private actor PeakMemorySampler {
     private var peak: UInt64 = 0
-    private var active = true
+    private var sampleTask: Task<Void, Never>?
 
     static func start() -> PeakMemorySampler {
         let probe = PeakMemorySampler()
-        Task.detached(priority: .utility) {
-            await probe.loop()
+        // Detached so the sampler survives the actor hop into the
+        // benchmark runner's continuation. The task is retained on the
+        // actor so `stopAndCollect()` can cancel + await deterministic
+        // teardown — pre-v0.3 we relied on a plain `active` flag which
+        // let the loop run for up to ~50ms after stop returned and held
+        // `self` until the next tick. Reviewer-flagged HIGH.
+        let task = Task.detached(priority: .utility) { [weak probe] in
+            while !Task.isCancelled {
+                await probe?.recordSample()
+                try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+            }
         }
+        Task { await probe.setTask(task) }
         return probe
     }
 
-    private func loop() async {
-        while active {
-            peak = max(peak, Self.currentResidentBytes())
-            try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
-        }
+    private func setTask(_ task: Task<Void, Never>) { self.sampleTask = task }
+
+    fileprivate func recordSample() {
+        peak = max(peak, MemoryProbe.residentMemoryBytes())
     }
 
     func stopAndCollect() async -> UInt64 {
-        active = false
+        sampleTask?.cancel()
+        // Await the sampling task's completion so we don't race with a
+        // final sample landing after this method returns.
+        _ = await sampleTask?.value
+        sampleTask = nil
         // One final read so a brief generation at least returns a number.
-        peak = max(peak, Self.currentResidentBytes())
+        peak = max(peak, MemoryProbe.residentMemoryBytes())
         return peak
-    }
-
-    /// Resident set size of the current Mach task, in bytes.
-    static func currentResidentBytes() -> UInt64 {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<integer_t>.size
-        )
-        let status = withUnsafeMutablePointer(to: &info) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
-                task_info(
-                    mach_task_self_,
-                    task_flavor_t(MACH_TASK_BASIC_INFO),
-                    rebound,
-                    &count
-                )
-            }
-        }
-        return status == KERN_SUCCESS ? info.resident_size : 0
     }
 }

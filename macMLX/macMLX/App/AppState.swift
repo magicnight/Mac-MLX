@@ -80,6 +80,18 @@ public final class AppState {
             store: benchmarks,
             logs: logs
         )
+
+        // Rehydrate per-model state after any model load, regardless of
+        // which surface triggered it (Models tab, Benchmark tab, CLI via
+        // OpenAI API, menu bar). Pre-v0.3 the Parameters Inspector only
+        // loaded its overrides on its own onAppear, so a chat session
+        // that never opened the Inspector saw dead storage — the
+        // persisted per-model temperature / top_p / system prompt were
+        // all ignored. Hooking into EngineCoordinator.onModelLoaded
+        // makes the overrides always active.
+        coordinator.onModelLoaded = { [parameters] model in
+            await parameters.loadForModel(model.id)
+        }
     }
 
     // MARK: - Lifecycle

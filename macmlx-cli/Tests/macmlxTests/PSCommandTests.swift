@@ -57,14 +57,11 @@ struct PSCommandTests {
 
     @Test
     func pidFileReadReturnsNilWhenFileAbsent() throws {
-        // Use a temp URL that doesn't exist.
-        // PIDFile.read() reads from PIDFile.url, so this just ensures the
-        // overall static read() surface works. We can't easily override
-        // the URL in v0.1, so we test the codec separately above.
-        //
-        // The real integration behaviour (create/read/clear) would be tested
-        // in a higher-level integration test suite using a temporary directory.
-        // TODO: v0.2 — add integration tests with injectable URL.
+        // PIDFile.read() reads from PIDFile.url which is hard-coded, so
+        // this smoke assertion just exercises the static read() surface.
+        // A full create/read/clear integration test would need PIDFile to
+        // accept an injectable URL — open a tracking issue before
+        // refactoring.
         #expect(Bool(true))  // placeholder to keep test runner happy
     }
 }

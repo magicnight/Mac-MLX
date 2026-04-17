@@ -64,22 +64,9 @@ public actor ModelParametersStore {
     private let fileManager: FileManager
 
     /// Default directory: `~/.mac-mlx/model-params/` (real home, dotfile
-    /// exemption applies under sandbox).
+    /// exemption applies under sandbox — see `DataRoot.macMLX`).
     public init(directory: URL? = nil, fileManager: FileManager = .default) {
-        if let directory {
-            self.directory = directory
-        } else {
-            let home: URL = {
-                if let path = NSHomeDirectoryForUser(NSUserName()) {
-                    return URL(filePath: path, directoryHint: .isDirectory)
-                }
-                return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-            }()
-            self.directory = home.appending(
-                path: ".mac-mlx/model-params",
-                directoryHint: .isDirectory
-            )
-        }
+        self.directory = directory ?? DataRoot.macMLX("model-params")
         self.fileManager = fileManager
     }
 
