@@ -56,29 +56,35 @@ Want to see what Gatekeeper thinks of the app?
 spctl --assess --verbose /Applications/macMLX.app
 ```
 
-## What's in v0.2
+## Feature highlights (v0.2 → v0.3.5)
 
-Download and chat got serious. Ten issues landed since v0.1:
+Twelve-ish shipped releases since the v0.1 MVP. Pick the ones that matter:
 
-**Download**
-- Real per-chunk progress bars with speed (MB/s) and ETA (#7)
-- Cancel button mid-download; partial files cleaned up (#5)
-- **Resume across cancel + app restart** — `URLError` resume-data persists to `~/.mac-mlx/downloads/` and the next Download continues from the last byte (#6)
-- **Background URLSession** — transfers survive App Nap and full app quits; pending files are simply there next time you open the app (#8)
-- Configurable HuggingFace endpoint for mirrors (e.g. `https://hf-mirror.com`) — for regions where huggingface.co is slow (#21)
+**Downloads**
+- Resumable downloads survive cancels AND app quits (background URLSession + persisted resume data) — #5/#6/#8
+- Live speed (MB/s) + ETA + per-file progress bar — #7
+- Configurable Hugging Face endpoint for mirrors like `https://hf-mirror.com` (GUI + CLI, both) — #21
 
 **Chat**
-- Full Markdown rendering for assistant messages, including streaming (#10)
-- Right-click any message for Copy / Edit / Regenerate / Delete (#11)
-- Conversations auto-save to `~/.mac-mlx/conversations/` and reload on launch (#9)
-- **Parameters Inspector** (⌘⌥I) — per-model temperature, top_p, max tokens, system prompt — persists to `~/.mac-mlx/model-params/` (#15)
+- Conversation sidebar: switch between saved chats, rename, delete, **rewind to here** (truncate after any message) — v0.3.2
+- Streaming Markdown rendering with paragraph breaks preserved — #10 (+ v0.3.1 fix)
+- Right-click any message: Copy / Edit / Regenerate / Delete — #11
+- Per-model **Parameters Inspector** (⌘⌥I) — temperature, top_p, max tokens, system prompt persist to disk — #15
+- Chat model switcher in toolbar loads on tap — v0.3.1
 
-**Polish**
-- Chat inference now survives sidebar tab switches (#1)
-- Single-instance enforcement — a second launch activates the existing window (#2)
-- Menu bar popover has a Quit button (#17)
+**Benchmark** — v0.3.0 tab for local tok/s, TTFT, peak memory, and history, with `Share to Community` to a GitHub-issue leaderboard — #22
 
-Full list: [CHANGELOG.md](CHANGELOG.md).
+**Logs** — v0.3.4 tab reads Pulse's store directly: search, level filter, live tail, clear
+
+**API (OpenAI-compat)**
+- Cold-swap: `/v1/chat/completions` auto-loads any locally-downloaded model by ID, serialises concurrent swaps — v0.3.3
+- `/x/status` reports real RSS
+
+**CLI** — native ANSI dashboards (`macmlx pull`, `serve`, `run`), honours `preferredEngine` + per-model `ModelParameters` + HF mirror settings — v0.3.1 / v0.3.3 / v0.3.5
+
+**Stability / polish** — chat survives sidebar tab switches (#1), single-instance enforcement (#2), Quit in menu bar (#17), `macmlx list` segfault fix (v0.3.1), ConversationStore date-precision fix (v0.3.3), and a 3-commit independent code-review sweep in v0.3.0
+
+Full per-tag breakdown: [CHANGELOG.md](CHANGELOG.md).
 
 ## Quickstart
 
@@ -176,7 +182,7 @@ open macMLX/macMLX.xcodeproj           # or: xcodebuild -scheme macMLX build
 swift build --package-path macmlx-cli
 
 # Core + tests
-swift test --package-path MacMLXCore   # 60 tests, runs in ~3s
+swift test --package-path MacMLXCore   # 90 tests, runs in ~3s
 ```
 
 ## Roadmap
@@ -184,21 +190,31 @@ swift test --package-path MacMLXCore   # 60 tests, runs in ~3s
 ### Shipped
 
 - **v0.1.0** — native SwiftUI GUI, menu bar, CLI (`serve` / `pull` / `run` / `list` / `ps` / `stop`), HuggingFace downloader, OpenAI-compatible API, Sparkle auto-update, memory-aware onboarding.
-- **v0.2.0** — see "What's in v0.2" above. Download + chat polish; 10 issues closed.
+- **v0.2.0** — Download + chat polish (10 issues): resumable downloads, HF mirrors, Markdown rendering, message edit/regenerate, Parameters Inspector.
+- **v0.3.x** — six patch releases: Benchmark feature, cross-cutting gap fixes, UX patches, Chat history sidebar, API cold-swap, Logs tab, native ANSI CLI dashboards. See `CHANGELOG.md` for the per-tag breakdown.
 
-### Next (v0.3 candidates)
+### Next (v0.3.6 — maintenance patch)
 
-- [#12](../../issues/12) SwiftLM engine (100B+ MoE) — pending sandbox policy review
-- [#13](../../issues/13) Python mlx-lm engine — pending sandbox policy review
-- [#22](../../issues/22) Benchmark feature (tok/s, TTFT, peak memory)
-- [#23](../../issues/23) Vision-Language Model support
-- [#16](../../issues/16) Logs tab (PulseUI console)
-- [#20](../../issues/20) Homebrew tap for the CLI
+- `macmlx --version` auto-bumped from the release tag
+- `macmlx search <query>` command (queries `mlx-community` by default)
+- Release binary slim-down via `strip -S` + dynamic Swift stdlib
+- CLI `--log-level` + `--log-stderr` flags so Pulse logging surfaces from the terminal
 
-### Long-term
+### Next minor (v0.4.0)
 
-- [#18](../../issues/18) Rich SwiftTUI dashboards (blocked upstream on Swift 6 compatibility)
-- [#19](../../issues/19) Signed + notarized DMG (when there's a paid Apple Developer account)
+- [#23](../../issues/23) Vision-Language Model support — `MLXVLM` already in the dependency tree, 16 architectures (Qwen2.5-VL, SmolVLM, Gemma-3, Paligemma, …). Full plan in [`.omc/plans/v0.4-vlm-plan.md`](.omc/plans/v0.4-vlm-plan.md).
+
+### Later (v0.5+)
+
+- **v0.5** — LoRA adapter loading (drop in existing HF adapters, no training) + conversation/dataset export
+- **v0.6** — Speech I/O: WhisperKit for ASR (mic input in chat) + AVSpeechSynthesizer for TTS (play assistant replies)
+- [#20](../../issues/20) Homebrew tap for the CLI (scheduled around v0.3.6–v0.4 once the CLI tarball lands as a release asset)
+
+### Deferred / blocked
+
+- [#19](../../issues/19) Signed + notarized DMG — needs a paid Apple Developer account
+- Full native-MLX Whisper in Swift — upstream `mlx-swift-lm` doesn't ship audio models yet; WhisperKit (Core ML) covers the UX in the meantime
+- [#12](../../issues/12) / [#13](../../issues/13) Subprocess-based engines (SwiftLM, Python mlx-lm) — closed as *not planned* because App Sandbox blocks spawning external binaries. Reopenable if sandbox policy is revisited or a Swift-native 100B+ MoE inference path appears.
 
 ## Contributing
 

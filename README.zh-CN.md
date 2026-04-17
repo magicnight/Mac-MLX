@@ -53,34 +53,35 @@ open /Applications/macMLX.app         # 首次启动
 spctl --assess --verbose /Applications/macMLX.app
 ```
 
-## v0.2 有什么新东西
+## 功能亮点（v0.2 → v0.3.5）
 
-下载和聊天体验全面升级。自 v0.1 起合入了 10 个 issue：
+自 v0.1 MVP 起陆续发了十多个版本。挑你关心的看：
 
 **下载**
-- 实时分块进度条，显示下载速度 (MB/s) 与 ETA (#7)
-- 下载途中可取消，残留分块自动清理 (#5)
-- **跨取消和应用重启续传** —— `URLError` 里的 resume-data 会被持久化到
-  `~/.mac-mlx/downloads/`，再次 Download 时从上次中断的字节开始 (#6)
-- **后台 URLSession** —— 传输在 App Nap 和应用整体退出后仍继续进行；
-  下次打开 macMLX 时，之前挂起的文件已经在那儿了 (#8)
-- HuggingFace endpoint 可配置，支持镜像（如 `https://hf-mirror.com`），
-  照顾访问 huggingface.co 慢的地区 (#21)
+- 可续传下载，跨取消 + 应用退出都不丢进度（后台 URLSession + resume-data 持久化）—— #5/#6/#8
+- 实时速度 (MB/s) + ETA + 每文件进度条 —— #7
+- Hugging Face endpoint 可配置镜像（如 `https://hf-mirror.com`）—— GUI + CLI 两端都支持 —— #21
 
 **聊天**
-- 助手回复支持完整 Markdown 渲染，流式输出过程中也能增量显示 (#10)
-- 任意消息右键菜单：Copy / Edit / Regenerate / Delete (#11)
-- 对话自动保存到 `~/.mac-mlx/conversations/`，下次启动自动加载 (#9)
-- **参数面板（Parameters Inspector，⌘⌥I）** —— 按模型维度保存
-  temperature / top_p / max tokens / system prompt，持久化到
-  `~/.mac-mlx/model-params/` (#15)
+- **对话侧栏**：在多个历史对话间切换、重命名、删除、**回溯到指定消息**（truncate 之后的）—— v0.3.2
+- 流式 Markdown 渲染，段落间距保留 —— #10（v0.3.1 修正）
+- 任意消息右键：Copy / Edit / Regenerate / Delete —— #11
+- 按模型的 **Parameters Inspector**（⌘⌥I）—— temperature / top_p / max tokens / system prompt 持久化到磁盘 —— #15
+- Chat 工具栏模型切换器点击即加载 —— v0.3.1
 
-**打磨**
-- 切换侧边栏标签不再中断聊天推理 (#1)
-- 单实例强制 —— 重复启动会激活已存在的窗口 (#2)
-- 菜单栏弹窗里加了 Quit 按钮 (#17)
+**Benchmark** —— v0.3.0 新增标签页，测本机 tok/s、TTFT、峰值内存，带历史记录 + `Share to Community` 一键开 GitHub issue —— #22
 
-完整清单：[CHANGELOG.md](CHANGELOG.md)。
+**Logs** —— v0.3.4 新增标签页，直接读 Pulse store：搜索、按 level 过滤、实时刷新、一键清空
+
+**API（OpenAI 兼容）**
+- 冷换模型：`/v1/chat/completions` 请求指定模型即按需加载，并发请求串行等待 —— v0.3.3
+- `/x/status` 汇报真实 RSS
+
+**CLI** —— 原生 ANSI 仪表盘（`macmlx pull` / `serve` / `run`），遵循 `preferredEngine` + 每模型 `ModelParameters` + HF 镜像设置 —— v0.3.1 / v0.3.3 / v0.3.5
+
+**稳定性 / 打磨** —— 聊天侧边栏切换不丢上下文 (#1)、单实例强制 (#2)、菜单栏 Quit (#17)、`macmlx list` segfault 修复（v0.3.1）、ConversationStore 日期精度修复（v0.3.3），以及 v0.3.0 一轮独立代码评审扫了一大批坑
+
+按 tag 的完整变更：[CHANGELOG.md](CHANGELOG.md)。
 
 ## 快速上手
 
@@ -177,7 +178,7 @@ open macMLX/macMLX.xcodeproj           # 或：xcodebuild -scheme macMLX build
 swift build --package-path macmlx-cli
 
 # 核心包 + 测试
-swift test --package-path MacMLXCore   # 60 个测试，约 3 秒
+swift test --package-path MacMLXCore   # 90 个测试，约 3 秒
 ```
 
 ## 路线图
@@ -185,21 +186,31 @@ swift test --package-path MacMLXCore   # 60 个测试，约 3 秒
 ### 已发布
 
 - **v0.1.0** —— 原生 SwiftUI GUI、菜单栏、CLI（`serve` / `pull` / `run` / `list` / `ps` / `stop`）、HuggingFace 下载器、OpenAI 兼容 API、Sparkle 自动更新、内存感知的新手引导。
-- **v0.2.0** —— 见上文 "v0.2 有什么新东西"。下载 + 聊天打磨；10 个 issue 关闭。
+- **v0.2.0** —— 下载 + 聊天打磨（10 个 issue）：续传下载、HF 镜像、Markdown 渲染、消息编辑/重生成、参数面板。
+- **v0.3.x** —— 六个 patch release：Benchmark 功能、跨切面缺陷修复、UX 小修、聊天历史侧栏、API 冷换模型、Logs 标签页、原生 ANSI CLI 仪表盘。按 tag 的细节见 `CHANGELOG.md`。
 
-### 下一阶段（v0.3 候选）
+### 下一版本（v0.3.6 —— 维护补丁）
 
-- [#12](../../issues/12) SwiftLM 引擎（100B+ MoE）—— 待 sandbox 策略复议
-- [#13](../../issues/13) Python mlx-lm 引擎 —— 待 sandbox 策略复议
-- [#22](../../issues/22) Benchmark 功能（tok/s、TTFT、峰值内存）
-- [#23](../../issues/23) VLM（视觉语言模型）支持
-- [#16](../../issues/16) Logs 标签页（PulseUI console）
-- [#20](../../issues/20) CLI 的 Homebrew tap
+- `macmlx --version` 自动同步 tag
+- `macmlx search <query>` 命令（默认查 `mlx-community`）
+- 二进制精简：`strip -S` + Swift stdlib 动态链接
+- CLI 加 `--log-level` + `--log-stderr` 开关让 Pulse 日志在终端里可见
 
-### 长期
+### 下个 minor 版本（v0.4.0）
 
-- [#18](../../issues/18) 丰富的 SwiftTUI 仪表盘（上游 SwiftTUI Swift 6 兼容性阻塞中）
-- [#19](../../issues/19) 签名 + 公证 DMG（等有付费 Apple Developer 账号时）
+- [#23](../../issues/23) VLM（视觉语言模型）支持 —— `MLXVLM` 已经在依赖里，16 种架构（Qwen2.5-VL / SmolVLM / Gemma-3 / Paligemma 等）。完整计划见 [`.omc/plans/v0.4-vlm-plan.md`](.omc/plans/v0.4-vlm-plan.md)。
+
+### 更远（v0.5 起）
+
+- **v0.5** —— LoRA adapter 加载（HF 上现成 adapter 直接用，不含训练）+ 对话/数据集导出
+- **v0.6** —— 语音 I/O：WhisperKit 做 ASR（聊天麦克风输入）+ AVSpeechSynthesizer 做 TTS（助手回复朗读）
+- [#20](../../issues/20) CLI 的 Homebrew tap（v0.3.6–v0.4 期间等 CLI tarball 作为 release asset 一起打后再推）
+
+### 已 defer / 被阻塞
+
+- [#19](../../issues/19) 签名 + 公证 DMG —— 需要付费 Apple Developer 账号
+- Swift 原生 MLX Whisper —— 上游 `mlx-swift-lm` 还没提供音频模型；当下用 WhisperKit（Core ML）覆盖体验
+- [#12](../../issues/12) / [#13](../../issues/13) 子进程引擎（SwiftLM、Python mlx-lm）—— 关闭为 *not planned*，因为 App Sandbox 禁止 spawn 外部二进制。若 sandbox 策略未来调整或出现 Swift 原生 100B+ MoE 推理方案，可重新打开。
 
 ## 参与贡献
 

@@ -27,15 +27,57 @@ Commands:
   pull      Download a model from HuggingFace
   run       Run a model (interactive chat TUI or single prompt)
   list      List downloaded models
+  search    Search mlx-community on HuggingFace (v0.3.6)
   ps        Show running server status
   bench     Run benchmark on a model
   stop      Stop the running server
   logs      Open log viewer (launches Pulse or prints to stdout)
 
 Options (global):
-  --json    Output as JSON (for scripting)
-  --quiet   Suppress non-essential output
-  --help    Show help
+  --json               Output as JSON (for scripting)
+  --quiet              Suppress non-essential output
+  --log-level <level>  debug | info | warning | error | critical | off
+                       (v0.3.6 — default: warning; writes to LoggerStore)
+  --log-stderr         Tee log output to stderr as plain text (v0.3.6)
+  --help               Show help
+```
+
+### `macmlx search` (v0.3.6, planned)
+
+Thin wrapper over `HFDownloader.search(query:limit:)`. Queries the
+`mlx-community` author on Hugging Face Hub (other authors intentionally
+not exposed — matches GUI Hugging Face tab behaviour).
+
+```
+macmlx search <query> [--limit N] [--sort <key>] [--json]
+
+Options:
+  --limit N             Max results to return (default: 10)
+  --sort <key>          Sort by: downloads (default) | likes | recent
+  --json                JSON output for scripting
+
+Examples:
+  macmlx search qwen3
+  macmlx search llama-3 --limit 20 --sort likes
+  macmlx search smol --json | jq '.[] | .id'
+```
+
+Plain-text output: NAME, DOWNLOADS, LIKES columns.
+`--json` output: `[HFModel]` array serialised with camelCase keys.
+
+### `--log-level` + `--log-stderr` (v0.3.6, planned)
+
+All subcommands will accept these global flags. `--log-level` filters
+what the `LogManager` (Pulse-backed) records — unchanged from the
+GUI's behaviour, just exposed at the CLI boundary. `--log-stderr`
+additionally mirrors entries as plain coloured lines on stderr for
+terminal debugging without opening the GUI Logs tab.
+
+```
+$ macmlx serve --log-level debug --log-stderr
+[DEBUG  engine    ] Loaded model: Qwen3-8B-4bit
+[INFO   http      ] Serving on http://127.0.0.1:8000
+[DEBUG  http      ] chat_completion model=Qwen3-8B-4bit tokens=512
 ```
 
 ## Command Details
