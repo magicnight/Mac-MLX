@@ -40,13 +40,18 @@ final class ChatViewModel {
 
     // MARK: - Private
 
-    private let appState: AppState
+    // Fix #1: hold a direct EngineCoordinator reference instead of the full
+    // AppState. Letting AppState own the ChatViewModel (rather than the
+    // ChatView owning it via @State) means the VM — and its in-flight
+    // `generationTask` — survives tab switches. The AppState -> VM edge
+    // would create a retain cycle back, so we accept only what we need.
+    private let coordinator: EngineCoordinator
     private var generationTask: Task<Void, Never>? = nil
 
     // MARK: - Init
 
-    init(appState: AppState) {
-        self.appState = appState
+    init(coordinator: EngineCoordinator) {
+        self.coordinator = coordinator
     }
 
     // MARK: - Send
@@ -54,7 +59,7 @@ final class ChatViewModel {
     func send() async {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty,
-              let currentModel = appState.coordinator.currentModel else { return }
+              let currentModel = coordinator.currentModel else { return }
 
         inputText = ""
         isGenerating = true
@@ -82,7 +87,7 @@ final class ChatViewModel {
         // Stream tokens
         generationTask = Task { [weak self] in
             guard let self else { return }
-            let stream = self.appState.coordinator.generate(request)
+            let stream = self.coordinator.generate(request)
             do {
                 for try await chunk in stream {
                     guard !Task.isCancelled else { break }

@@ -20,6 +20,13 @@ public final class AppState {
     public let logs: LogManager
     public let coordinator: EngineCoordinator
 
+    /// Single app-scoped Chat view model. Owned here (not by ChatView's
+    /// @State) so message history and the in-flight generation Task survive
+    /// sidebar tab switches — see issue #1.
+    /// Internal rather than `public` because `ChatViewModel` is app-internal
+    /// (unlike the `MacMLXCore` actor types above which are public).
+    let chat: ChatViewModel
+
     /// Snapshot of the most recently loaded settings. Updated after each
     /// `settings.load()` / `settings.update()` call so SwiftUI bindings have
     /// something synchronous to observe.
@@ -30,11 +37,13 @@ public final class AppState {
     public init() {
         let settings = SettingsManager()
         let logs = LogManager()
+        let coordinator = EngineCoordinator(logs: logs)
         self.settings = settings
         self.library = ModelLibraryManager()
         self.downloader = HFDownloader()
         self.logs = logs
-        self.coordinator = EngineCoordinator(logs: logs)
+        self.coordinator = coordinator
+        self.chat = ChatViewModel(coordinator: coordinator)
     }
 
     // MARK: - Lifecycle

@@ -19,9 +19,36 @@ struct MenuBarPopoverView: View {
             statsGrid
             Divider()
             actionButtons
+            Divider()
+            quitButton
         }
         .padding(16)
         .frame(width: 280)
+    }
+
+    // MARK: - Quit button (fix #17)
+    //
+    // LSUIElement apps hide the Dock icon, so ⌘Q from an unfocused state
+    // doesn't reach us. The menu bar popover is the canonical escape hatch.
+    private var quitButton: some View {
+        Button {
+            NSApp.terminate(nil)
+        } label: {
+            HStack {
+                Image(systemName: "power")
+                    .foregroundStyle(.secondary)
+                Text("Quit macMLX")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("⌘Q")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("q", modifiers: .command)
     }
 
     // MARK: - Header

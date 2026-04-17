@@ -36,6 +36,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Fix #2: single-instance check. If another macMLX is already
+        // running, raise that instance and quit ourselves. Prevents the
+        // duplicate menu-bar-icon scenario when the user launches twice
+        // (e.g. Xcode ⌘R while an Applications-installed copy is open).
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let mySelf = ProcessInfo.processInfo.processIdentifier
+            let others = NSRunningApplication
+                .runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.processIdentifier != mySelf }
+            if let existing = others.first {
+                existing.activate()
+                NSApp.terminate(nil)
+                return
+            }
+        }
+
         // MenuBarManager.setup(appState:) is called from macMLXApp once
         // the AppState is available (see macMLXApp.swift).
     }

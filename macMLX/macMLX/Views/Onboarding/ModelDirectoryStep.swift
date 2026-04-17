@@ -154,11 +154,13 @@ struct ModelDirectoryStep: View {
     private func scanLocations() async {
         isScanning = true
         let home = FileManager.default.homeDirectoryForCurrentUser
+        // Fix #3: scan only macMLX's own canonical locations.
+        // LM Studio (GGUF) and Ollama (packed GGUF) are format-incompatible
+        // with mlx-swift-lm — reading their dirs would only produce a warning
+        // we'd have to show the user. Focus on the Apple ecosystem path.
         let candidates: [(String, URL)] = [
-            ("~/models",          home.appending(path: "models")),
             ("~/.mac-mlx/models", home.appending(path: ".mac-mlx/models")),
-            ("~/.lmstudio/models", home.appending(path: ".lmstudio/models")),
-            ("~/.ollama/models",  home.appending(path: ".ollama/models")),
+            ("~/models",          home.appending(path: "models")),
         ]
 
         var found: [ScannedLocation] = []

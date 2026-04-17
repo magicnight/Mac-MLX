@@ -9,20 +9,12 @@ import MacMLXCore
 struct ChatView: View {
 
     @Environment(AppState.self) private var appState
-    @State private var viewModel: ChatViewModel?
 
+    // Fix #1: the view model is owned by AppState (not by this view's @State),
+    // so switching to another sidebar tab no longer tears down the VM and its
+    // streaming Task. Just read the shared instance here.
     var body: some View {
-        Group {
-            if let vm = viewModel {
-                ChatContent(viewModel: vm)
-            } else {
-                ProgressView("Loading…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .task {
-            viewModel = ChatViewModel(appState: appState)
-        }
+        ChatContent(viewModel: appState.chat)
     }
 }
 
