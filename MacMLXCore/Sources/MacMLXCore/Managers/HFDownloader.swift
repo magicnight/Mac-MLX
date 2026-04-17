@@ -210,51 +210,79 @@ public actor HFDownloader {
     /// or blocked can route through a mirror like hf-mirror.com (#21).
     private var baseURL: URL
 
+    // MARK: - Shared background session (process-wide)
+
+    /// Container binding the default background `URLSession` to its router.
+    /// Foundation forbids two live background sessions with the same
+    /// identifier in one process (second init logs an error and delivers
+    /// undefined behaviour), so we claim the identifier exactly once at
+    /// first use and hand the same pair to every subsequent `HFDownloader`
+    /// that doesn't inject its own `downloadSession`.
+    private struct BackgroundContainer {
+        let session: URLSession
+        let router: DownloadSessionRouter
+    }
+
+    private static let sharedBackground: BackgroundContainer = {
+        let router = DownloadSessionRouter()
+        let config = URLSessionConfiguration.background(
+            withIdentifier: "com.magicnight.macmlx.downloader"
+        )
+        // Don't relaunch the app to deliver completion events — user will
+        // see their downloads done the next time they open macMLX.
+        config.sessionSendsLaunchEvents = false
+        // Don't let macOS defer for power/network preferences.
+        config.isDiscretionary = false
+        // Soft-pause on network drops instead of erroring.
+        config.waitsForConnectivity = true
+        let session = URLSession(
+            configuration: config,
+            delegate: router,
+            delegateQueue: nil
+        )
+        return BackgroundContainer(session: session, router: router)
+    }()
+
     // MARK: - Init
 
     /// Designated initialiser.
     ///
     /// - Parameters:
     ///   - urlSession: Session used for metadata JSON calls. Defaults to
-    ///     `URLSession.shared`. Pass a `MockURLProtocol`-backed session in
-    ///     tests.
-    ///   - downloadSession: Session used for large-file downloads. When nil
-    ///     (production default), a `URLSessionConfiguration.background`
-    ///     session with a stable identifier is created so transfers survive
-    ///     App Nap and app quits. Pass a foreground session in tests to
-    ///     skip the process-wide background identifier claim (#8).
+    ///     `URLSession.shared`. Pass a `MockURLProtocol`-backed session
+    ///     in tests.
     ///   - baseURL: Hub endpoint. Change via `setBaseURL(_:)` for mirrors.
+    ///
+    /// The download path always uses the process-wide shared background
+    /// session (`sharedBackground`), which is lazily created on first use
+    /// and claims the background identifier exactly once. Tests that need
+    /// to exercise `download(...)` use the internal initialiser below to
+    /// inject a foreground session + router.
     public init(
         urlSession: URLSession = .shared,
-        downloadSession: URLSession? = nil,
         baseURL: URL = HFDownloader.defaultEndpoint
     ) {
         self.metadataSession = urlSession
         self.baseURL = baseURL
+        let shared = HFDownloader.sharedBackground
+        self.downloadSession = shared.session
+        self.router = shared.router
+    }
 
-        let router = DownloadSessionRouter()
-        self.router = router
-
-        if let downloadSession {
-            self.downloadSession = downloadSession
-        } else {
-            // Background session — `sessionSendsLaunchEvents = false` keeps
-            // us from being woken up when the app has been quit; the user
-            // will see their downloads complete next time they open us.
-            // `isDiscretionary = false` tells the scheduler not to defer
-            // for power/network preferences (macOS may otherwise delay).
-            let config = URLSessionConfiguration.background(
-                withIdentifier: "com.magicnight.macmlx.downloader"
-            )
-            config.sessionSendsLaunchEvents = false
-            config.isDiscretionary = false
-            config.waitsForConnectivity = true
-            self.downloadSession = URLSession(
-                configuration: config,
-                delegate: router,
-                delegateQueue: nil
-            )
-        }
+    /// Internal initialiser for tests — lets the test construct a
+    /// foreground `URLSession` whose delegate is a fresh router, so each
+    /// test is isolated and no test contends for the process-wide
+    /// background session identifier.
+    internal init(
+        metadataSession: URLSession,
+        downloadSession: URLSession,
+        downloadRouter: DownloadSessionRouter,
+        baseURL: URL = HFDownloader.defaultEndpoint
+    ) {
+        self.metadataSession = metadataSession
+        self.downloadSession = downloadSession
+        self.router = downloadRouter
+        self.baseURL = baseURL
     }
 
     // MARK: - Configuration
@@ -400,48 +428,69 @@ public actor HFDownloader {
             // prior cancellation. Safety: resumeData is opaque and tied
             // to a specific URL — using it for a different file would
             // fail at the URLSession layer. We match by filename.
-            let resumeDataForThisFile: Data? =
+            var pendingResumeData: Data? =
                 (resumeRecord?.currentFile == remoteFile.path) ? resumeRecord?.resumeData : nil
 
-            do {
-                let (tempURL, response) = try await downloadFile(
-                    request: URLRequest(url: resolveURL),
-                    resumeData: resumeDataForThisFile,
-                    onProgress: onProgress
-                )
-
-                if let httpResponse = response as? HTTPURLResponse,
-                   httpResponse.statusCode != 200 {
-                    throw DownloadError.badStatusCode(httpResponse.statusCode, url: resolveURL)
-                }
-
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.removeItem(at: destination)
-                }
-                try FileManager.default.moveItem(at: tempURL, to: destination)
-
-                // This file is done — any saved resume state for it is stale.
-                clearResumeRecord(for: modelID)
-
-            } catch let urlErr as URLError where urlErr.code == .cancelled {
-                // Capture resume data if URLSession was able to produce it.
-                // `URLError.downloadTaskResumeData` is Foundation's Swift-native
-                // accessor for the opaque blob (tail-end byte range + ETag)
-                // that the server needs for a Range continuation.
-                if let data = urlErr.downloadTaskResumeData {
-                    saveResumeRecord(
-                        for: modelID,
-                        record: ResumeRecord(
-                            currentFile: remoteFile.path,
-                            resumeData: data
-                        )
+            // Inner retry loop — we get at most one retry, used exclusively
+            // to recover from a stale resumeData blob (server rotated its
+            // ETag, Hub cycled the object on the CDN, etc.). Without this,
+            // a bad blob wedges the download in a permanent fail-loop.
+            var attempt = 0
+            retry: while true {
+                do {
+                    let (tempURL, response) = try await downloadFile(
+                        request: URLRequest(url: resolveURL),
+                        resumeData: pendingResumeData,
+                        onProgress: onProgress
                     )
+
+                    if let httpResponse = response as? HTTPURLResponse,
+                       httpResponse.statusCode != 200 {
+                        throw DownloadError.badStatusCode(httpResponse.statusCode, url: resolveURL)
+                    }
+
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.removeItem(at: destination)
+                    }
+                    try FileManager.default.moveItem(at: tempURL, to: destination)
+
+                    // This file is done — any saved resume state for it is stale.
+                    clearResumeRecord(for: modelID)
+                    break retry
+
+                } catch let urlErr as URLError where urlErr.code == .cancelled {
+                    // Capture resume data if URLSession was able to produce it.
+                    // `URLError.downloadTaskResumeData` is Foundation's Swift-native
+                    // accessor for the opaque blob (tail-end byte range + ETag)
+                    // that the server needs for a Range continuation.
+                    if let data = urlErr.downloadTaskResumeData {
+                        saveResumeRecord(
+                            for: modelID,
+                            record: ResumeRecord(
+                                currentFile: remoteFile.path,
+                                resumeData: data
+                            )
+                        )
+                    }
+                    throw urlErr
+
+                } catch let urlErr as URLError
+                    where attempt == 0 && pendingResumeData != nil &&
+                          Self.isStaleResumeError(urlErr) {
+                    // The prior resume blob is unusable — server changed,
+                    // blob expired, or we got a 416. Wipe the record and
+                    // retry once from scratch before giving up. This
+                    // prevents the download from being permanently wedged.
+                    clearResumeRecord(for: modelID)
+                    pendingResumeData = nil
+                    attempt += 1
+                    continue retry
+
+                } catch {
+                    // Any other error: don't save resume data, just bubble
+                    // up. Typical cases: HTTP 4xx/5xx, DNS, filesystem.
+                    throw error
                 }
-                throw urlErr
-            } catch {
-                // Non-cancel errors: don't bother saving resume data, just
-                // bubble up. (Typical cases: HTTP 4xx/5xx, DNS, filesystem.)
-                throw error
             }
 
             // Post-file tick: bump completedFiles, point currentFileName at
@@ -529,6 +578,29 @@ public actor HFDownloader {
     private func clearResumeRecord(for modelID: String) {
         let dir = resumeDirectory(for: modelID)
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Is this `URLError` the kind that suggests our resumeData blob has
+    /// gone stale on the server side (ETag rotated, blob expired, range
+    /// not satisfiable)?  Used by the retry-without-resume path so we
+    /// don't wedge permanently on a bad cached blob.
+    ///
+    /// Foundation doesn't expose a specific `cannotResumeDownload` code;
+    /// the symptoms of a stale blob surface as one of these server-shape
+    /// errors. We intentionally cast a wider net than strictly necessary
+    /// — a false positive just costs one extra fresh download; a false
+    /// negative wedges the file permanently.
+    private static func isStaleResumeError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .badServerResponse,           // ETag mismatch → 416 typically
+             .resourceUnavailable,         // object evicted from CDN
+             .fileDoesNotExist,            // URL 404 after our blob captured
+             .zeroByteResource,            // server now serves empty
+             .dataLengthExceedsMaximum:    // range-end past new size
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Private Helpers
@@ -655,7 +727,10 @@ private final class SpeedSampler: @unchecked Sendable {
 /// operation queue. The router's state (`handlers`, `savedLocations`) is
 /// mutated from that queue and read from the actor; a plain `NSLock`
 /// protects it.
-private final class DownloadSessionRouter: NSObject,
+/// Session-level delegate (see `HFDownloader.sharedBackground`). Marked
+/// `internal` so the test-only initialiser on `HFDownloader` can reference
+/// it; callers should never interact with it directly.
+internal final class DownloadSessionRouter: NSObject,
     URLSessionDownloadDelegate, @unchecked Sendable {
 
     struct Handlers {
@@ -672,6 +747,11 @@ private final class DownloadSessionRouter: NSObject,
     /// `didFinishDownloadingTo` — read back by `didCompleteWithError`.
     private var savedLocations: [Int: URL] = [:]
     private var responses: [Int: URLResponse] = [:]
+    /// Filesystem errors captured during the synchronous scratch-file move
+    /// inside `didFinishDownloadingTo` — read back in
+    /// `didCompleteWithError` so the caller sees the real cause (sandbox
+    /// denial, disk full, etc.) instead of a mysterious `URLError(.unknown)`.
+    private var moveErrors: [Int: Error] = [:]
 
     func register(taskID: Int, handlers: Handlers) {
         lock.lock(); defer { lock.unlock() }
@@ -711,17 +791,20 @@ private final class DownloadSessionRouter: NSObject,
             )
         do {
             try FileManager.default.moveItem(at: location, to: scratch)
+            lock.lock()
+            savedLocations[tid] = scratch
+            if let response = downloadTask.response {
+                responses[tid] = response
+            }
+            lock.unlock()
         } catch {
-            // Couldn't move the file — we'll bubble the error up via
-            // didCompleteWithError since savedLocations[tid] stays nil.
-            return
+            // Couldn't move the file (sandbox denial, disk full, etc.).
+            // Stash the real cause so didCompleteWithError surfaces it
+            // instead of falling into the generic `URLError(.unknown)` path.
+            lock.lock()
+            moveErrors[tid] = error
+            lock.unlock()
         }
-        lock.lock()
-        savedLocations[tid] = scratch
-        if let response = downloadTask.response {
-            responses[tid] = response
-        }
-        lock.unlock()
     }
 
     func urlSession(
@@ -734,15 +817,27 @@ private final class DownloadSessionRouter: NSObject,
         let h = handlers.removeValue(forKey: tid)
         let location = savedLocations.removeValue(forKey: tid)
         let response = responses.removeValue(forKey: tid) ?? task.response
+        let moveError = moveErrors.removeValue(forKey: tid)
         lock.unlock()
 
-        guard let h else { return }
-        if let error {
-            // Clean up any temp file we may have moved before the error fired.
+        // Orphaned task (handler gone — e.g. background-session replay on
+        // app relaunch, or register() failed): clean up the scratch file
+        // so we don't leak into /tmp, then drop.
+        guard let h else {
             if let location {
                 try? FileManager.default.removeItem(at: location)
             }
-            h.onComplete(.failure(error))
+            return
+        }
+
+        // Prefer a move error over a URLSession error — the move failure
+        // is usually the root cause (e.g. sandbox blocked the move, so
+        // URLSession "succeeds" but we can't actually deliver the file).
+        if let failure = moveError ?? error {
+            if let location {
+                try? FileManager.default.removeItem(at: location)
+            }
+            h.onComplete(.failure(failure))
         } else if let location, let response {
             h.onComplete(.success((location, response)))
         } else {
