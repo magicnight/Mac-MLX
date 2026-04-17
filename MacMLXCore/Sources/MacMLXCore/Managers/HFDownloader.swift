@@ -188,7 +188,23 @@ public actor HFDownloader {
 
     // MARK: - Dependencies
 
-    private let urlSession: URLSession
+    /// URLSession used for small metadata requests (search, file-list JSON).
+    /// Background sessions don't support data tasks, so this stays a regular
+    /// foreground session — typically `URLSession.shared`.
+    private let metadataSession: URLSession
+
+    /// URLSession used for the large binary downloads. In production this is
+    /// a `URLSessionConfiguration.background`-backed session so transfers
+    /// continue through App Nap and across full app quit-and-relaunch (#8).
+    /// Tests can inject a foreground session to avoid the process-wide
+    /// background session identifier.
+    private let downloadSession: URLSession
+
+    /// Routes URLSession delegate callbacks (progress + finish + error) to
+    /// per-task continuations and progress closures. Owned here so tasks
+    /// created on `downloadSession` can find their handlers.
+    private let router: DownloadSessionRouter
+
     /// Base URL for all Hub API + resolve requests. Configurable via
     /// `setBaseURL(_:)` so users in regions where huggingface.co is slow
     /// or blocked can route through a mirror like hf-mirror.com (#21).
@@ -196,9 +212,49 @@ public actor HFDownloader {
 
     // MARK: - Init
 
-    public init(urlSession: URLSession = .shared, baseURL: URL = HFDownloader.defaultEndpoint) {
-        self.urlSession = urlSession
+    /// Designated initialiser.
+    ///
+    /// - Parameters:
+    ///   - urlSession: Session used for metadata JSON calls. Defaults to
+    ///     `URLSession.shared`. Pass a `MockURLProtocol`-backed session in
+    ///     tests.
+    ///   - downloadSession: Session used for large-file downloads. When nil
+    ///     (production default), a `URLSessionConfiguration.background`
+    ///     session with a stable identifier is created so transfers survive
+    ///     App Nap and app quits. Pass a foreground session in tests to
+    ///     skip the process-wide background identifier claim (#8).
+    ///   - baseURL: Hub endpoint. Change via `setBaseURL(_:)` for mirrors.
+    public init(
+        urlSession: URLSession = .shared,
+        downloadSession: URLSession? = nil,
+        baseURL: URL = HFDownloader.defaultEndpoint
+    ) {
+        self.metadataSession = urlSession
         self.baseURL = baseURL
+
+        let router = DownloadSessionRouter()
+        self.router = router
+
+        if let downloadSession {
+            self.downloadSession = downloadSession
+        } else {
+            // Background session — `sessionSendsLaunchEvents = false` keeps
+            // us from being woken up when the app has been quit; the user
+            // will see their downloads complete next time they open us.
+            // `isDiscretionary = false` tells the scheduler not to defer
+            // for power/network preferences (macOS may otherwise delay).
+            let config = URLSessionConfiguration.background(
+                withIdentifier: "com.magicnight.macmlx.downloader"
+            )
+            config.sessionSendsLaunchEvents = false
+            config.isDiscretionary = false
+            config.waitsForConnectivity = true
+            self.downloadSession = URLSession(
+                configuration: config,
+                delegate: router,
+                delegateQueue: nil
+            )
+        }
     }
 
     // MARK: - Configuration
@@ -327,7 +383,7 @@ public actor HFDownloader {
             ))
 
             let sampler = SpeedSampler()
-            let delegate = ProgressDelegate { written, expected in
+            let onProgress: @Sendable (Int64, Int64) -> Void = { written, expected in
                 let bps = sampler.record(bytes: written)
                 progress?(DownloadProgress(
                     modelID: localModelID,
@@ -348,18 +404,11 @@ public actor HFDownloader {
                 (resumeRecord?.currentFile == remoteFile.path) ? resumeRecord?.resumeData : nil
 
             do {
-                let (tempURL, response): (URL, URLResponse)
-                if let resumeData = resumeDataForThisFile {
-                    (tempURL, response) = try await urlSession.download(
-                        resumeFrom: resumeData,
-                        delegate: delegate
-                    )
-                } else {
-                    (tempURL, response) = try await urlSession.download(
-                        for: URLRequest(url: resolveURL),
-                        delegate: delegate
-                    )
-                }
+                let (tempURL, response) = try await downloadFile(
+                    request: URLRequest(url: resolveURL),
+                    resumeData: resumeDataForThisFile,
+                    onProgress: onProgress
+                )
 
                 if let httpResponse = response as? HTTPURLResponse,
                    httpResponse.statusCode != 200 {
@@ -485,7 +534,7 @@ public actor HFDownloader {
     // MARK: - Private Helpers
 
     private func fetchData(from url: URL) async throws -> Data {
-        let (data, response) = try await urlSession.data(from: url)
+        let (data, response) = try await metadataSession.data(from: url)
         if let httpResponse = response as? HTTPURLResponse {
             let code = httpResponse.statusCode
             guard code == 200 else {
@@ -493,6 +542,55 @@ public actor HFDownloader {
             }
         }
         return data
+    }
+
+    /// Kick off a single-file download through `downloadSession` (which may
+    /// be a background session) and bridge its delegate callbacks to
+    /// async/await + structured-concurrency cancellation.
+    ///
+    /// - Task cancellation is honoured: if the enclosing Swift Task is
+    ///   cancelled, we call `URLSessionDownloadTask.cancel()`, which triggers
+    ///   `didCompleteWithError(URLError.cancelled)` — the caller's catch
+    ///   block then extracts resumeData from `URLError.downloadTaskResumeData`.
+    /// - The delegate's `didFinishDownloadingTo` callback hands us a temp URL
+    ///   that Foundation deletes the moment the callback returns, so the
+    ///   router moves it to a stable scratch path synchronously before
+    ///   resuming the continuation. Caller is responsible for moving the
+    ///   returned URL to its final destination.
+    private func downloadFile(
+        request: URLRequest,
+        resumeData: Data?,
+        onProgress: @escaping @Sendable (Int64, Int64) -> Void
+    ) async throws -> (URL, URLResponse) {
+        let task: URLSessionDownloadTask
+        if let resumeData {
+            task = downloadSession.downloadTask(withResumeData: resumeData)
+        } else {
+            task = downloadSession.downloadTask(with: request)
+        }
+
+        let router = self.router
+        let taskID = task.taskIdentifier
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(URL, URLResponse), Error>) in
+                router.register(
+                    taskID: taskID,
+                    handlers: DownloadSessionRouter.Handlers(
+                        onProgress: onProgress,
+                        onComplete: { result in
+                            continuation.resume(with: result)
+                        }
+                    )
+                )
+                task.resume()
+            }
+        } onCancel: {
+            // Calls delegate didCompleteWithError(URLError.cancelled) —
+            // resumeData (if any) ends up in the error's userInfo and
+            // eventually reaches the caller's catch block.
+            task.cancel()
+        }
     }
 }
 
@@ -538,21 +636,49 @@ private final class SpeedSampler: @unchecked Sendable {
     }
 }
 
-// MARK: - URLSessionDownloadDelegate bridge
+// MARK: - DownloadSessionRouter
 
-/// Tiny wrapper that translates Foundation's Obj-C delegate callbacks into
-/// our Swift `@Sendable` progress closure. Marked `@unchecked Sendable`
-/// because `NSObject` inheritance prevents Swift from inferring it
-/// automatically; the closure itself is `@Sendable` and the only stored
-/// property, so this is safe.
-private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+/// Session-level `URLSessionDownloadDelegate` that dispatches callbacks to
+/// per-task handlers registered by `HFDownloader.downloadFile(...)`.
+///
+/// Why a router instead of per-task delegates:
+/// - `URLSessionConfiguration.background` sessions require a session-level
+///   delegate (set at construction). Per-task delegates are not durable
+///   across app relaunch, whereas the session-level delegate is called
+///   again on the newly created session for any transfers the system
+///   completed in the background.
+/// - Having one object route to many in-flight transfers lets us keep the
+///   existing continuation-per-file bridge without spawning a fresh
+///   delegate object for every file.
+///
+/// Thread-safety: URLSession delegate callbacks arrive on a private OS
+/// operation queue. The router's state (`handlers`, `savedLocations`) is
+/// mutated from that queue and read from the actor; a plain `NSLock`
+/// protects it.
+private final class DownloadSessionRouter: NSObject,
+    URLSessionDownloadDelegate, @unchecked Sendable {
 
-    private let onProgress: @Sendable (Int64, Int64) -> Void
-
-    init(onProgress: @escaping @Sendable (Int64, Int64) -> Void) {
-        self.onProgress = onProgress
-        super.init()
+    struct Handlers {
+        let onProgress: @Sendable (Int64, Int64) -> Void
+        /// Called exactly once. Success delivers `(movedTempURL, response)`;
+        /// failure delivers the completion error (or a synthetic
+        /// `URLError(.unknown)` if the response vanished).
+        let onComplete: @Sendable (Result<(URL, URLResponse), Error>) -> Void
     }
+
+    private let lock = NSLock()
+    private var handlers: [Int: Handlers] = [:]
+    /// Temp URL we moved the finished download to in
+    /// `didFinishDownloadingTo` — read back by `didCompleteWithError`.
+    private var savedLocations: [Int: URL] = [:]
+    private var responses: [Int: URLResponse] = [:]
+
+    func register(taskID: Int, handlers: Handlers) {
+        lock.lock(); defer { lock.unlock() }
+        self.handlers[taskID] = handlers
+    }
+
+    // MARK: - URLSessionDownloadDelegate
 
     func urlSession(
         _ session: URLSession,
@@ -561,7 +687,11 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unc
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        onProgress(totalBytesWritten, totalBytesExpectedToWrite)
+        let tid = downloadTask.taskIdentifier
+        lock.lock()
+        let h = handlers[tid]
+        lock.unlock()
+        h?.onProgress(totalBytesWritten, totalBytesExpectedToWrite)
     }
 
     func urlSession(
@@ -569,9 +699,60 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unc
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        // Required by URLSessionDownloadDelegate but the async API
-        // (URLSession.download(for:delegate:)) handles the temp-URL handoff
-        // for us, so we don't move the file here.
+        // Foundation will delete `location` the instant this method returns,
+        // so we MUST move the file out synchronously. The destination is a
+        // unique path inside the process's temp directory; the HFDownloader
+        // actor then moves it to its final location in model directory.
+        let tid = downloadTask.taskIdentifier
+        let scratch = URL(filePath: NSTemporaryDirectory(), directoryHint: .isDirectory)
+            .appending(
+                path: "macmlx-dl-\(tid)-\(UUID().uuidString)",
+                directoryHint: .notDirectory
+            )
+        do {
+            try FileManager.default.moveItem(at: location, to: scratch)
+        } catch {
+            // Couldn't move the file — we'll bubble the error up via
+            // didCompleteWithError since savedLocations[tid] stays nil.
+            return
+        }
+        lock.lock()
+        savedLocations[tid] = scratch
+        if let response = downloadTask.response {
+            responses[tid] = response
+        }
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let tid = task.taskIdentifier
+        lock.lock()
+        let h = handlers.removeValue(forKey: tid)
+        let location = savedLocations.removeValue(forKey: tid)
+        let response = responses.removeValue(forKey: tid) ?? task.response
+        lock.unlock()
+
+        guard let h else { return }
+        if let error {
+            // Clean up any temp file we may have moved before the error fired.
+            if let location {
+                try? FileManager.default.removeItem(at: location)
+            }
+            h.onComplete(.failure(error))
+        } else if let location, let response {
+            h.onComplete(.success((location, response)))
+        } else {
+            // Finished without error but the finish delegate didn't land —
+            // shouldn't happen, but don't hang the continuation.
+            if let location {
+                try? FileManager.default.removeItem(at: location)
+            }
+            h.onComplete(.failure(URLError(.unknown)))
+        }
     }
 }
 
