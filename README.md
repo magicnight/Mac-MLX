@@ -1,5 +1,7 @@
 # macMLX
 
+**English** · [简体中文](README.zh-CN.md)
+
 > Native macOS LLM inference, powered by Apple MLX.
 
 macMLX brings local LLM inference to Apple Silicon with a first-class
@@ -30,11 +32,29 @@ proper CLI for developers.
 
 ## Installation
 
-Download `macMLX-vX.X.X.dmg` from [Releases](../../releases).
+Download `macMLX-vX.X.X.dmg` from [Releases](../../releases), mount it,
+and drag `macMLX.app` to `/Applications`.
 
-**First launch**: Right-click the app → Open → Open (one-time
-Gatekeeper bypass — the DMG isn't notarized; see the release notes for
-the exact `xattr` command if the dialog doesn't show an Open button).
+The DMG is **not notarized** (no paid Apple Developer account yet —
+[#19](../../issues/19)), so Gatekeeper blocks it on first launch. Pick
+one of the two unblocks:
+
+**Option A — terminal (recommended, always works):**
+
+```bash
+xattr -cr /Applications/macMLX.app    # clear quarantine attribute
+open /Applications/macMLX.app         # first launch
+```
+
+**Option B — right-click:** right-click `macMLX.app` → **Open** → then
+click **Open** again in the dialog. On newer macOS versions this
+fallback dialog sometimes doesn't appear — if so, use Option A.
+
+Want to see what Gatekeeper thinks of the app?
+
+```bash
+spctl --assess --verbose /Applications/macMLX.app
+```
 
 ## What's in v0.2
 
