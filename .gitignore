@@ -15,6 +15,9 @@ DerivedData/
 .build/
 .swiftpm/
 Packages/
+# Xcode-workspace shared SwiftPM state (editor config + Package.resolved) —
+# per-developer, not reproducible CI input. `.build/` already covers builds.
+**/xcshareddata/swiftpm/
 
 # Python — uv managed
 __pycache__/
