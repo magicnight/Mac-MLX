@@ -20,7 +20,8 @@ struct ServeCommand: AsyncParsableCommand {
 
     func run() async throws {
         let ctx = try await CLIContext.bootstrap()
-        let engine = MLXSwiftEngine()
+        // Honour `settings.preferredEngine` — keeps CLI + GUI consistent.
+        let engine = try ctx.makeEngine()
 
         if let modelName = model {
             let models = try await ctx.library.scan(ctx.settings.modelDirectory)

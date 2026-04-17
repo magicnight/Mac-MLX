@@ -16,7 +16,7 @@ enum ChatTUI {
     /// Reads lines from stdin (via `readLine()`), generates responses, and
     /// streams output to stdout. Exits on EOF or empty input.
     static func run(
-        engine: MLXSwiftEngine,
+        engine: any InferenceEngine,
         model: LocalModel,
         system: String?
     ) async throws {

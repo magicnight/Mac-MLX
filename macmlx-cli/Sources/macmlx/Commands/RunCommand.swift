@@ -14,13 +14,13 @@ struct RunCommand: AsyncParsableCommand {
     @Argument(help: "Single prompt for non-interactive use.")
     var prompt: String?
 
-    @Option(help: "Sampling temperature (default: 0.7).")
-    var temperature: Double = 0.7
+    @Option(help: "Sampling temperature. Falls back to the persisted per-model value (GUI Parameters Inspector), then 0.7.")
+    var temperature: Double?
 
-    @Option(name: .customLong("max-tokens"), help: "Maximum tokens to generate (default: 2048).")
-    var maxTokens: Int = 2048
+    @Option(name: .customLong("max-tokens"), help: "Maximum tokens to generate. Falls back to the persisted per-model value, then 2048.")
+    var maxTokens: Int?
 
-    @Option(help: "System prompt to prepend to the conversation.")
+    @Option(help: "System prompt. Falls back to the persisted per-model value.")
     var system: String?
 
     @Flag(name: .customLong("no-stream"), help: "Buffer the full response before printing.")
@@ -38,15 +38,22 @@ struct RunCommand: AsyncParsableCommand {
             throw ValidationError("Model not found: \(modelName). Run `macmlx list` to see available models.")
         }
 
-        let engine = MLXSwiftEngine()
+        // Honour `settings.preferredEngine` — same engine choice the GUI
+        // has. Deferred engines (SwiftLM / Python mlx-lm) throw CLIError.
+        let engine = try ctx.makeEngine()
         print("Loading \(local.displayName)…")
         try await engine.load(local)
         print("Model ready.")
 
-        let params = GenerationParameters(
-            temperature: temperature,
-            topP: 0.95,
-            maxTokens: maxTokens,
+        // Layer CLI flags over persisted per-model overrides, so a user
+        // who configured the model's temperature/top_p/system prompt in
+        // the GUI sees those same defaults here unless they override
+        // with explicit `--` flags.
+        let (params, resolvedSystem) = await ctx.resolveParameters(
+            for: local.id,
+            explicitTemperature: temperature,
+            explicitMaxTokens: maxTokens,
+            explicitSystem: system,
             stream: !noStream
         )
 
@@ -57,14 +64,19 @@ struct RunCommand: AsyncParsableCommand {
                 engine: engine,
                 model: local,
                 params: params,
-                system: system
+                system: resolvedSystem
             )
         } else if TTYDetect.isInteractive {
-            // Interactive TUI/REPL mode — v0.1 uses plain stdin REPL
-            try await ChatTUI.run(engine: engine, model: local, system: system)
+            // Interactive TUI/REPL mode — plain stdin REPL (see #18)
+            try await ChatTUI.run(engine: engine, model: local, system: resolvedSystem)
         } else {
             // Non-interactive stdin mode: read lines until EOF
-            try await runStdinLoop(engine: engine, model: local, params: params)
+            try await runStdinLoop(
+                engine: engine,
+                model: local,
+                params: params,
+                system: resolvedSystem
+            )
         }
     }
 
@@ -72,7 +84,7 @@ struct RunCommand: AsyncParsableCommand {
 
     private func runSingle(
         prompt: String,
-        engine: MLXSwiftEngine,
+        engine: any InferenceEngine,
         model: LocalModel,
         params: GenerationParameters,
         system: String?
@@ -124,9 +136,10 @@ struct RunCommand: AsyncParsableCommand {
 
     /// Read prompts from stdin line-by-line and respond to each.
     private func runStdinLoop(
-        engine: MLXSwiftEngine,
+        engine: any InferenceEngine,
         model: LocalModel,
-        params: GenerationParameters
+        params: GenerationParameters,
+        system: String?
     ) async throws {
         while let line = readLine(strippingNewline: true) {
             guard !line.isEmpty else { continue }

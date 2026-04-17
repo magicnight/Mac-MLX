@@ -29,15 +29,24 @@ struct ListCommand: AsyncParsableCommand {
             FileHandle.standardOutput.write(data)
             print()
         } else {
-            printTable(models)
+            printTable(models, dir: ctx.settings.modelDirectory)
         }
     }
 
     // MARK: - Plain text table
 
-    private func printTable(_ models: [LocalModel]) {
+    private func printTable(_ models: [LocalModel], dir: URL) {
         if models.isEmpty {
-            print("No models found in \(Self.modelDirDescription())")
+            // Display the **actual configured** model directory, not a
+            // hard-coded "~/models" guess. Pre-v0.3 this always printed
+            // the v0.1 default even if the user had moved the directory
+            // in GUI Settings.
+            let display = dir.path(percentEncoded: false)
+                .replacingOccurrences(
+                    of: FileManager.default.homeDirectoryForCurrentUser.path,
+                    with: "~"
+                )
+            print("No models found in \(display)")
             print("Run `macmlx pull <modelID>` to download a model.")
             return
         }
@@ -63,9 +72,4 @@ struct ListCommand: AsyncParsableCommand {
         }
     }
 
-    private static func modelDirDescription() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let defaultDir = home.appending(path: "models")
-        return defaultDir.path(percentEncoded: false)
-    }
 }
