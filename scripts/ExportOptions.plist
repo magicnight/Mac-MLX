@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Distribute as a standalone macOS app, not via App Store. -->
+    <key>method</key>
+    <string>mac-application</string>
+
+    <!-- We don't have an Apple Developer account; export unsigned and document
+         the right-click → Open Gatekeeper bypass in README. Sparkle EdDSA
+         signing handles update integrity instead. -->
+    <key>signingStyle</key>
+    <string>manual</string>
+
+    <key>destination</key>
+    <string>export</string>
+
+    <!-- Strip Swift symbols to reduce DMG size. -->
+    <key>stripSwiftSymbols</key>
+    <true/>
+</dict>
+</plist>

@@ -37,6 +37,7 @@ __pycache__/
 *.p12
 *.mobileprovision
 ExportOptions.plist
+!scripts/ExportOptions.plist
 sparkle_private_key*
 
 # Local dev overrides
