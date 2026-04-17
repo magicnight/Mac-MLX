@@ -71,6 +71,24 @@ private struct ChatContent: View {
             ParametersInspector()
                 .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
         }
+        // Edit sheet (#11). Bound to viewModel.editingMessageID so any
+        // right-click → Edit opens it; Save/Cancel dismiss.
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.editingMessageID != nil },
+                set: { if !$0 { viewModel.cancelEdit() } }
+            )
+        ) {
+            EditMessageSheet(
+                text: $viewModel.editingText,
+                onCancel: { viewModel.cancelEdit() },
+                onSave: {
+                    _ = Task { @MainActor in
+                        await viewModel.commitEdit()
+                    }
+                }
+            )
+        }
     }
 
     // MARK: - Toolbar
@@ -151,8 +169,25 @@ private struct ChatContent: View {
                     }
 
                     ForEach(viewModel.messages) { message in
-                        ChatMessageView(message: message)
-                            .id(message.id)
+                        let messageCopy = message
+                        ChatMessageView(
+                            message: message,
+                            onCopy: { viewModel.copyToPasteboard(messageCopy.content) },
+                            onEdit: message.role == .user
+                                ? { viewModel.startEdit(messageCopy) }
+                                : nil,
+                            onRegenerate: message.role == .assistant
+                                ? {
+                                    // Discard the returned Task so the
+                                    // closure resolves as () -> Void.
+                                    _ = Task { @MainActor in
+                                        await viewModel.regenerate(from: messageCopy.id)
+                                    }
+                                }
+                                : nil,
+                            onDelete: { viewModel.delete(messageCopy.id) }
+                        )
+                        .id(message.id)
                     }
 
                     // Anchor for scrolling

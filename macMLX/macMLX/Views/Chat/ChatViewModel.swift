@@ -6,6 +6,7 @@
 // generation via EngineCoordinator. Lives on AppState so it survives
 // sidebar tab switches (see #1).
 
+import AppKit
 import Foundation
 import MacMLXCore
 
@@ -119,26 +120,109 @@ final class ChatViewModel {
         }
     }
 
+    // MARK: - Edit state (#11)
+
+    /// ID of the message currently being edited (nil = no edit in progress).
+    /// ChatContent's .sheet presentation binds against this.
+    var editingMessageID: UUID? = nil
+    /// Live-edited buffer for the sheet. Copied out of the message on
+    /// `startEdit(_:)` and copied back on `commitEdit()`.
+    var editingText: String = ""
+
     // MARK: - Send
 
+    /// Submit `inputText` as a new user message and start streaming the
+    /// assistant's reply.
     func send() async {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty,
-              let currentModel = coordinator.currentModel else { return }
+              coordinator.currentModel != nil else { return }
 
         inputText = ""
+        messages.append(UIChatMessage(role: .user, content: text))
+        await generate()
+    }
+
+    // MARK: - Regenerate / Edit / Delete (#11)
+
+    /// Re-run inference for the assistant message identified by
+    /// `messageID`. Removes that message (and anything after it) then
+    /// re-submits the conversation up to the last user turn.
+    func regenerate(from messageID: UUID) async {
+        stopGeneration()
+        guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages.removeSubrange(idx...)
+        persist()
+        await generate()
+    }
+
+    /// Begin editing `message` — opens the edit sheet.
+    /// Only user messages are editable (assistant turns come from the
+    /// engine and regenerating is the equivalent action).
+    func startEdit(_ message: UIChatMessage) {
+        guard message.role == .user else { return }
+        editingMessageID = message.id
+        editingText = message.content
+    }
+
+    /// Cancel the in-flight edit without modifying messages.
+    func cancelEdit() {
+        editingMessageID = nil
+        editingText = ""
+    }
+
+    /// Commit the current edit. If the edited message is followed by
+    /// assistant turns, those are discarded and generation re-runs
+    /// against the new content — the natural "re-ask from here" flow.
+    func commitEdit() async {
+        guard let id = editingMessageID else { return }
+        let newContent = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        editingMessageID = nil
+        editingText = ""
+        guard !newContent.isEmpty,
+              let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        stopGeneration()
+        messages[idx].content = newContent
+
+        // Drop everything after the edited message (no stale assistant
+        // replies that no longer match the new question).
+        if idx + 1 < messages.count {
+            messages.removeSubrange((idx + 1)...)
+        }
+        persist()
+        // Only regenerate if we're at/past a user turn (should always be
+        // true here since edit only applies to user messages).
+        await generate()
+    }
+
+    /// Remove a message by ID. No automatic regeneration.
+    func delete(_ messageID: UUID) {
+        messages.removeAll { $0.id == messageID }
+        persist()
+    }
+
+    /// Copy `text` to the pasteboard. Exposed here so ChatMessageView
+    /// doesn't have to import AppKit.
+    func copyToPasteboard(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
+    // MARK: - Private generation driver
+
+    /// Build a GenerateRequest from the current messages + parameters,
+    /// append a placeholder assistant message, stream tokens into it,
+    /// and persist when done. Shared by `send()` and `regenerate(from:)`.
+    private func generate() async {
+        guard let currentModel = coordinator.currentModel else { return }
+
         isGenerating = true
 
-        // Append user message
-        messages.append(UIChatMessage(role: .user, content: text))
-
-        // Build request from current conversation history
         let coreMessages: [ChatMessage] = messages
             .filter { !$0.isGenerating }
             .map { ChatMessage(role: $0.role, content: $0.content) }
 
-        // Snapshot the Inspector's current parameters — subsequent slider
-        // drags during generation shouldn't rewrite this in-flight request.
         let params = parameters.parameters
         let request = GenerateRequest(
             model: currentModel.id,
@@ -147,12 +231,10 @@ final class ChatViewModel {
             parameters: params.asGenerationParameters()
         )
 
-        // Append placeholder assistant message
         let assistantMsg = UIChatMessage(role: .assistant, content: "", isGenerating: true)
         messages.append(assistantMsg)
         let assistantIdx = messages.count - 1
 
-        // Stream tokens
         generationTask = Task { [weak self] in
             guard let self else { return }
             let stream = self.coordinator.generate(request)
