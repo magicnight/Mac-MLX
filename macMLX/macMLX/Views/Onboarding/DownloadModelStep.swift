@@ -87,29 +87,43 @@ struct DownloadModelStep: View {
             modelList
 
             if isDownloading {
-                if let stats = downloadStats, stats.totalBytes > 0 {
-                    ProgressView(value: stats.fractionCompleted)
-                        .progressViewStyle(.linear)
+                if let stats = downloadStats {
+                    // Current-file bar — honest about per-file progress.
+                    if stats.currentFileTotalBytes > 0 {
+                        ProgressView(value: stats.currentFileFraction)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
                     HStack(spacing: 6) {
-                        Text(stats.humanProgress)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                        Text("·").foregroundStyle(.tertiary)
-                        Text(stats.humanPercent)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                        if let currentFile = stats.currentFileName {
+                        if stats.currentFileTotalBytes > 0 {
+                            Text(stats.currentFileHuman)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
                             Text("·").foregroundStyle(.tertiary)
-                            Text(currentFile)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                            Text(stats.currentFilePercent)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Text("·").foregroundStyle(.tertiary)
+                        } else {
+                            Text("Starting…")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Text("·").foregroundStyle(.tertiary)
                         }
+                        Text(stats.filesHuman)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    if let currentFile = stats.currentFileName {
+                        Text(currentFile)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 } else {
-                    // Pre-first-callback — show indeterminate until the URLSession
-                    // delegate emits the first chunk.
                     ProgressView("Starting download…")
                         .progressViewStyle(.linear)
                 }
@@ -213,7 +227,7 @@ struct DownloadModelStep: View {
         let handler: HFDownloader.ProgressHandler = { progress in
             Task { @MainActor in
                 downloadStats = progress
-                downloadProgress = progress.fractionCompleted
+                downloadProgress = progress.currentFileFraction
             }
         }
 

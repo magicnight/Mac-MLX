@@ -58,13 +58,16 @@ enum PullDashboard {
         print("Downloaded to: \(dest.path(percentEncoded: false))")
     }
 
-    /// `"45%  2.10 GB / 4.50 GB  (2/4)  model-00002-of-00004.safetensors"`
+    /// `"[2/4]  47%  2.10 GB / 4.50 GB  model-00002-of-00004.safetensors"`
+    /// — shows per-file progress (always accurate) + file counter (always accurate).
+    /// Overall bytes across all files is intentionally NOT displayed because HF
+    /// manifests omit LFS file sizes, making any aggregate denominator unreliable.
     private static func formatLine(_ p: DownloadProgress) -> String {
-        let pct = p.totalBytes > 0 ? p.humanPercent : "..."
-        let bytes = p.totalBytes > 0 ? p.humanProgress : "(unknown size)"
-        let files = "(\(p.completedFiles)/\(p.totalFiles))"
+        let files = "[\(p.completedFiles)/\(p.totalFiles)]"
+        let pct = p.currentFileTotalBytes > 0 ? p.currentFilePercent : "..."
+        let bytes = p.currentFileTotalBytes > 0 ? p.currentFileHuman : "(starting)"
         let current = p.currentFileName.map { " " + $0 } ?? ""
-        return "\(pct)  \(bytes)  \(files)\(current)"
+        return "\(files)  \(pct)  \(bytes)\(current)"
     }
 }
 

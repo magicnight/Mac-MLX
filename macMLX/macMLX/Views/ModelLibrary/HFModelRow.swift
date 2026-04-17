@@ -72,25 +72,41 @@ struct HFModelRow: View {
 
     @ViewBuilder
     private var progressSection: some View {
-        if let progress, progress.totalBytes > 0 {
-            // Known-size path: bar + bytes-of-bytes + percent.
+        if let progress {
             VStack(alignment: .leading, spacing: 3) {
-                ProgressView(value: progress.fractionCompleted)
-                    .progressViewStyle(.linear)
-                    .controlSize(.small)
+                // Current-file bar — shows real download speed on the big file.
+                if progress.currentFileTotalBytes > 0 {
+                    ProgressView(value: progress.currentFileFraction)
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                } else {
+                    // File size unknown (rare; server didn't send Content-Length)
+                    // — indeterminate bar so the user knows something's happening.
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                }
+
                 HStack(spacing: 8) {
-                    Text(progress.humanProgress)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(progress.humanPercent)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    if progress.currentFileTotalBytes > 0 {
+                        Text(progress.currentFileHuman)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(progress.currentFilePercent)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Starting…")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Text("\(progress.completedFiles)/\(progress.totalFiles) files")
+                    Text(progress.filesHuman)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+
                 if let currentFile = progress.currentFileName {
                     Text(currentFile)
                         .font(.caption2.monospaced())
@@ -100,8 +116,7 @@ struct HFModelRow: View {
                 }
             }
         } else {
-            // Either we haven't received the first callback yet, or HF didn't
-            // expose file sizes — fall back to indeterminate bar.
+            // Haven't received the first callback yet.
             ProgressView()
                 .progressViewStyle(.linear)
                 .controlSize(.small)
@@ -145,11 +160,11 @@ struct HFModelRow: View {
     )
     let inflightProgress = DownloadProgress(
         modelID: model.id,
-        bytesDownloaded: 2_100_000_000,
-        totalBytes: 4_500_000_000,
         completedFiles: 1,
         totalFiles: 4,
-        currentFileName: "model-00002-of-00004.safetensors"
+        currentFileName: "model-00002-of-00004.safetensors",
+        currentFileBytesDownloaded: 2_100_000_000,
+        currentFileTotalBytes: 4_500_000_000
     )
     return List {
         HFModelRow(model: model, isDownloaded: false, isDownloading: false, progress: nil, onDownload: {})

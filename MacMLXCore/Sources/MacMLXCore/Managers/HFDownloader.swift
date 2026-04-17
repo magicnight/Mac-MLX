@@ -40,48 +40,71 @@ public struct HFRemoteFile: Codable, Hashable, Sendable {
 
 // MARK: - DownloadProgress
 
-/// Snapshot of an in-flight model download. Sent on every chunk write
-/// so SwiftUI views can render a progress bar without rounding gaps.
+/// Snapshot of an in-flight model download.
+///
+/// Hugging Face's model manifest doesn't report file sizes for LFS-backed
+/// blobs (which is where the multi-GB weights live), so any "overall bytes"
+/// denominator would be grossly wrong during the big file's download. We
+/// surface **current-file** progress (always accurate — comes straight from
+/// `URLSession`'s `totalBytesExpectedToWrite`) and **file-count** progress
+/// (always accurate) separately, and let the UI decide which to emphasise.
 public struct DownloadProgress: Sendable, Hashable {
     public let modelID: String
-    public let bytesDownloaded: Int64
-    public let totalBytes: Int64
+
+    // File-count axis — always reliable.
     public let completedFiles: Int
     public let totalFiles: Int
+
+    // Current-file axis — bytes come from URLSessionDownloadDelegate and
+    // match the real Content-Length of the current HTTP response. Zero
+    // values mean "not yet started" or "size unknown".
     public let currentFileName: String?
+    public let currentFileBytesDownloaded: Int64
+    public let currentFileTotalBytes: Int64
 
     public init(
         modelID: String,
-        bytesDownloaded: Int64,
-        totalBytes: Int64,
         completedFiles: Int,
         totalFiles: Int,
-        currentFileName: String?
+        currentFileName: String?,
+        currentFileBytesDownloaded: Int64,
+        currentFileTotalBytes: Int64
     ) {
         self.modelID = modelID
-        self.bytesDownloaded = bytesDownloaded
-        self.totalBytes = totalBytes
         self.completedFiles = completedFiles
         self.totalFiles = totalFiles
         self.currentFileName = currentFileName
+        self.currentFileBytesDownloaded = currentFileBytesDownloaded
+        self.currentFileTotalBytes = currentFileTotalBytes
     }
 
-    /// 0.0 - 1.0. `0` if `totalBytes <= 0`. Clamped to `1.0` upper bound.
-    public var fractionCompleted: Double {
-        guard totalBytes > 0 else { return 0 }
-        return min(1.0, Double(bytesDownloaded) / Double(totalBytes))
+    /// Current-file fraction in [0, 1], or 0 if the file total isn't known yet.
+    public var currentFileFraction: Double {
+        guard currentFileTotalBytes > 0 else { return 0 }
+        return min(1.0, Double(currentFileBytesDownloaded) / Double(currentFileTotalBytes))
     }
 
-    /// `"2.10 GB / 4.50 GB"`-style label. Same base-10 convention as
-    /// `LocalModel.humanSize`.
-    public var humanProgress: String {
-        "\(formatBytesBase10(bytesDownloaded)) / \(formatBytesBase10(totalBytes))"
+    /// `"2.10 GB / 4.50 GB"` for the current file. Empty string if unknown.
+    public var currentFileHuman: String {
+        guard currentFileTotalBytes > 0 else { return "" }
+        return "\(formatBytesBase10(currentFileBytesDownloaded)) / \(formatBytesBase10(currentFileTotalBytes))"
     }
 
-    /// `"45%"`. Useful for compact rows.
-    public var humanPercent: String {
-        let pct = Int((fractionCompleted * 100).rounded())
-        return "\(pct)%"
+    /// `"47%"` for the current file. Empty if total unknown.
+    public var currentFilePercent: String {
+        guard currentFileTotalBytes > 0 else { return "" }
+        return "\(Int((currentFileFraction * 100).rounded()))%"
+    }
+
+    /// File-count fraction in [0, 1]. Useful as a coarse "overall" bar.
+    public var filesFraction: Double {
+        guard totalFiles > 0 else { return 0 }
+        return Double(completedFiles) / Double(totalFiles)
+    }
+
+    /// `"2 of 5 files"`.
+    public var filesHuman: String {
+        "\(completedFiles) of \(totalFiles) files"
     }
 }
 
@@ -183,13 +206,6 @@ public actor HFDownloader {
         let fileCount = remoteFiles.count
         guard fileCount > 0 else { return modelDir }
 
-        // Pre-compute total bytes so the progress bar has a stable denominator.
-        // Files without a known size contribute 0 and don't show in the bar
-        // (rare for HF — large weights always have sizes; tiny configs may not).
-        let totalKnownBytes: Int64 = remoteFiles.reduce(0) { $0 + ($1.size ?? 0) }
-
-        var aggregatedBytes: Int64 = 0
-
         for (index, remoteFile) in remoteFiles.enumerated() {
             let resolveURLString = "https://huggingface.co/\(modelID)/resolve/main/\(remoteFile.path)"
             guard let resolveURL = URL(string: resolveURLString) else {
@@ -200,22 +216,34 @@ public actor HFDownloader {
             let parentDir = destination.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
-            // Per-file progress bridge — captured by value to be Sendable.
-            let baseBytes = aggregatedBytes
-            let totalDenominator = totalKnownBytes
+            // Snapshot context — captured by value into the @Sendable closure.
             let localModelID = modelID
             let completedSoFar = index
             let totalFilesSnapshot = fileCount
             let currentFileNameSnapshot = remoteFile.path
 
-            let delegate = ProgressDelegate { writtenForThisFile, _ in
+            // Emit an initial "starting file" tick so the UI can flip to the
+            // new filename immediately, even before the first chunk arrives.
+            progress?(DownloadProgress(
+                modelID: localModelID,
+                completedFiles: completedSoFar,
+                totalFiles: totalFilesSnapshot,
+                currentFileName: currentFileNameSnapshot,
+                currentFileBytesDownloaded: 0,
+                currentFileTotalBytes: 0
+            ))
+
+            let delegate = ProgressDelegate { written, expected in
                 progress?(DownloadProgress(
                     modelID: localModelID,
-                    bytesDownloaded: baseBytes + writtenForThisFile,
-                    totalBytes: totalDenominator,
                     completedFiles: completedSoFar,
                     totalFiles: totalFilesSnapshot,
-                    currentFileName: currentFileNameSnapshot
+                    currentFileName: currentFileNameSnapshot,
+                    currentFileBytesDownloaded: written,
+                    // URLSession returns -1 (NSURLSessionTransferSizeUnknown)
+                    // if the server omitted Content-Length. Map to 0 so the
+                    // UI falls back to indeterminate display.
+                    currentFileTotalBytes: max(0, expected)
                 ))
             }
 
@@ -238,19 +266,16 @@ public actor HFDownloader {
                 throw DownloadError.writeFailed("Could not move \(remoteFile.path): \(error.localizedDescription)")
             }
 
-            // Bump aggregate by the actually downloaded size — fall back to
-            // the manifest size if we didn't observe a write callback (rare).
-            let actualSize: Int64 = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? Int64) ?? remoteFile.size ?? 0
-            aggregatedBytes += actualSize
-
-            // Final per-file tick so UI doesn't stall between files.
+            // Post-file tick: bump completedFiles, point currentFileName at
+            // the next file (or nil if this was the last).
+            let nextFileName = index + 1 < fileCount ? remoteFiles[index + 1].path : nil
             progress?(DownloadProgress(
-                modelID: modelID,
-                bytesDownloaded: aggregatedBytes,
-                totalBytes: max(totalKnownBytes, aggregatedBytes),
+                modelID: localModelID,
                 completedFiles: index + 1,
                 totalFiles: fileCount,
-                currentFileName: index + 1 == fileCount ? nil : remoteFiles[index + 1].path
+                currentFileName: nextFileName,
+                currentFileBytesDownloaded: 0,
+                currentFileTotalBytes: 0
             ))
         }
 
