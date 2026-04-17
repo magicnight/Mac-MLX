@@ -38,10 +38,38 @@ private struct LoadModelRequest: Decodable, Sendable {
 ///   POST /v1/chat/completions  (non-streaming + SSE streaming)
 ///   POST /x/models/load
 ///   POST /x/models/unload
+///
+/// Cold-swap (v0.3.3): when a `/v1/chat/completions` request names a
+/// model that isn't the currently-loaded one, the server resolves it
+/// via a caller-supplied `ModelResolver` closure, unloads the current
+/// model, loads the requested one, and proceeds. Concurrent requests
+/// for the same model share the load; concurrent requests for
+/// different models serialise on an actor-local in-flight-load Task.
 public actor HummingbirdServer {
+    // MARK: Types
+
+    /// Async lookup from an OpenAI-style model ID (the exact string the
+    /// caller put in the request's `model` field) to a `LocalModel` on
+    /// disk that the server can load. Returns `nil` if the ID isn't in
+    /// the user's model directory. The server maps that to an HTTP 404
+    /// with OpenAI's `model_not_found` code.
+    public typealias ModelResolver = @Sendable (String) async -> LocalModel?
+
     // MARK: State
 
     private let engine: any InferenceEngine
+
+    /// Caller-supplied resolver for cold-swap. Defaults to returning nil
+    /// (i.e. cold-swap disabled — server behaves as pre-v0.3.3: only
+    /// the explicitly-loaded model can answer). The CLI's
+    /// `ServeCommand` wires this up against `ModelLibraryManager.scan`.
+    private let modelResolver: ModelResolver
+
+    /// In-flight cold-swap Task, if any. Guards against thrashing when
+    /// two requests for different models arrive at once: the second one
+    /// awaits the first's completion before checking whether it can
+    /// reuse the newly-loaded model or needs its own swap.
+    private var loadInFlight: Task<Void, Error>?
 
     /// The running ServiceGroup — held so `stop()` can trigger graceful shutdown.
     private var serviceGroup: ServiceGroup?
@@ -63,8 +91,23 @@ public actor HummingbirdServer {
 
     // MARK: Init
 
+    /// Create a server without cold-swap support — a chat completion
+    /// request whose `model` field doesn't match the engine's loaded
+    /// model will fail at the engine layer.
     public init(engine: any InferenceEngine) {
         self.engine = engine
+        self.modelResolver = { _ in nil }
+    }
+
+    /// Create a server with cold-swap support — chat completion
+    /// requests naming a different model than currently loaded will
+    /// trigger an unload + load before the request proceeds.
+    public init(
+        engine: any InferenceEngine,
+        modelResolver: @escaping ModelResolver
+    ) {
+        self.engine = engine
+        self.modelResolver = modelResolver
     }
 
     // MARK: Lifecycle
@@ -231,6 +274,14 @@ public actor HummingbirdServer {
     }
 
     private func handleModels() async throws -> Response {
+        // Pre-v0.3.3 this only listed the currently loaded model, because
+        // that was the only one that could answer a chat completion. With
+        // cold-swap (v0.3.3), any model the resolver can find is a valid
+        // target, so we want `GET /v1/models` to reflect that. But we
+        // don't have a "list all" primitive on the resolver — it's a
+        // point-lookup. We keep listing the loaded model (compatibility)
+        // and document that external clients wanting a full list should
+        // use `macmlx list` or the GUI Models tab.
         let loaded = await engine.loadedModel
         var data: [[String: String]] = []
         if let model = loaded {
@@ -308,11 +359,95 @@ public actor HummingbirdServer {
             parameters: params
         )
 
+        // Cold-swap (v0.3.3). If the request names a different model than
+        // is currently loaded, try to resolve + load it on the fly. A
+        // missing model → 404, a load failure → 500. Concurrent requests
+        // for different models serialise on `loadInFlight`.
+        do {
+            try await ensureModelLoaded(chatReq.model)
+        } catch let err as ModelSwapError {
+            switch err {
+            case .modelNotFound(let id):
+                return errorResponse(
+                    status: .notFound,
+                    message: "Model not found: \(id). Download it via `macmlx pull \(id)` or check `macmlx list`.",
+                    code: "model_not_found"
+                )
+            case .loadFailed(let id, let reason):
+                return errorResponse(
+                    status: .internalServerError,
+                    message: "Failed to load \(id): \(reason)",
+                    code: "load_failed"
+                )
+            }
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: error.localizedDescription,
+                code: "load_failed"
+            )
+        }
+
         let wantsStream = chatReq.stream ?? false
         if wantsStream {
             return try await streamingChatResponse(genRequest: genRequest)
         } else {
             return try await nonStreamingChatResponse(genRequest: genRequest)
+        }
+    }
+
+    // MARK: - Cold-swap (v0.3.3)
+
+    /// Errors surfaced by `ensureModelLoaded`. Internal — handler maps
+    /// them onto OpenAI-style HTTP codes.
+    private enum ModelSwapError: Error {
+        case modelNotFound(id: String)
+        case loadFailed(id: String, reason: String)
+    }
+
+    /// Make sure the engine has `requestedID` loaded. No-op if it's
+    /// already current. If another model is current, unload + load;
+    /// if nothing is loaded, just load. If `requestedID` isn't on disk,
+    /// throw `.modelNotFound`.
+    ///
+    /// Serialisation strategy (reviewer-chosen option `a`): awaits any
+    /// in-flight swap before checking/starting its own. Two concurrent
+    /// requests for the same newly-wanted model therefore share the
+    /// same load — only one disk read, one memory bake-in.
+    private func ensureModelLoaded(_ requestedID: String) async throws {
+        // If a swap is already in flight, wait for it to finish first.
+        // This either (a) lands our model for free or (b) lands a
+        // different model that we then need to evict — both handled by
+        // the check below.
+        if let pending = loadInFlight {
+            _ = try? await pending.value
+            loadInFlight = nil
+        }
+
+        if await engine.loadedModel?.id == requestedID {
+            return
+        }
+
+        guard let target = await modelResolver(requestedID) else {
+            throw ModelSwapError.modelNotFound(id: requestedID)
+        }
+
+        // Kick off the swap as a Task we can store for concurrent
+        // callers to await. Errors propagate via the Task's value.
+        let swapTask = Task { [engine] in
+            try? await engine.unload()
+            try await engine.load(target)
+        }
+        loadInFlight = swapTask
+        do {
+            try await swapTask.value
+            loadInFlight = nil
+        } catch {
+            loadInFlight = nil
+            throw ModelSwapError.loadFailed(
+                id: requestedID,
+                reason: error.localizedDescription
+            )
         }
     }
 

@@ -35,7 +35,16 @@ struct ServeCommand: AsyncParsableCommand {
             print("Model loaded.")
         }
 
-        let server = HummingbirdServer(engine: engine)
+        // Cold-swap (v0.3.3): resolver lets the server pull any
+        // locally-downloaded model into memory on demand when an
+        // inbound `/v1/chat/completions` names an unloaded model.
+        let library = ctx.library
+        let modelDirectory = ctx.settings.modelDirectory
+        let resolver: HummingbirdServer.ModelResolver = { modelID in
+            let models = (try? await library.scan(modelDirectory)) ?? []
+            return models.first { $0.id == modelID || $0.displayName == modelID }
+        }
+        let server = HummingbirdServer(engine: engine, modelResolver: resolver)
         let actualPort = try await server.start(preferredPort: port)
 
         let startedAt = Date()

@@ -162,6 +162,81 @@ struct HummingbirdServerTests {
         #expect(content == "stub-response")
     }
 
+    // MARK: - Cold-swap (v0.3.3)
+    //
+    // Port assignments for these tests:
+    //   coldSwapLoadsResolvedModel           : 19_200
+    //   coldSwapReturns404WhenModelMissing   : 19_210
+
+    /// Helper — build a LocalModel backed by a throwaway path.
+    private func fixtureModel(id: String) -> LocalModel {
+        LocalModel(
+            id: id, displayName: id,
+            directory: URL(filePath: "/tmp/\(id)"),
+            sizeBytes: 0, format: .mlx,
+            quantization: nil, parameterCount: nil, architecture: nil
+        )
+    }
+
+    @Test
+    func coldSwapLoadsResolvedModel() async throws {
+        // Engine starts with no model loaded. Resolver knows about "other-model"
+        // and can produce a LocalModel for it. A chat request naming
+        // "other-model" should trigger a load and succeed.
+        let engine = StubInferenceEngine(engineID: .mlxSwift)
+        let resolver: HummingbirdServer.ModelResolver = { [fixtureModel] id in
+            id == "other-model" ? fixtureModel("other-model") : nil
+        }
+        let server = HummingbirdServer(engine: engine, modelResolver: resolver)
+        let port = try await server.start(preferredPort: 19_200)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "other-model",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": false,
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        let loaded = await engine.loadedModel?.id
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(loaded == "other-model", "engine should have loaded the resolver's model")
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(json["object"] as? String == "chat.completion")
+    }
+
+    @Test
+    func coldSwapReturns404WhenModelMissing() async throws {
+        // Engine starts with no model loaded. Resolver always returns nil
+        // (simulates a typo or not-downloaded model). Chat request should
+        // come back as OpenAI-style 404 `model_not_found`.
+        let engine = StubInferenceEngine(engineID: .mlxSwift)
+        let resolver: HummingbirdServer.ModelResolver = { _ in nil }
+        let server = HummingbirdServer(engine: engine, modelResolver: resolver)
+        let port = try await server.start(preferredPort: 19_210)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "never-existed",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": false,
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 404)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let err = try #require(json["error"] as? [String: Any])
+        #expect(err["code"] as? String == "model_not_found")
+    }
+
     @Test
     func portRetrySucceedsWhenPreferredPortBusy() async throws {
         // Occupy 19_100.

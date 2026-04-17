@@ -13,6 +13,54 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.3] - 2026-04-17
+
+Server-side change: the OpenAI-compatible `/v1/chat/completions`
+endpoint now auto-loads any locally-downloaded model on demand, so
+external clients (Claude Code, Cursor, Continue, raw `curl`, anything
+OpenAI-compatible) can point at `localhost:8000` and pick whichever
+model they need without pre-arranging a manual load.
+
+### Added
+- **Cold-swap model loading** on `HummingbirdServer` (v0.3.3). When a
+  chat completion arrives naming a model that isn't currently loaded,
+  the server resolves the ID against the user's model directory,
+  unloads whatever was current, loads the requested model, and
+  proceeds — no observable difference to the client except the first
+  request on a cold model takes longer.
+- `HummingbirdServer.ModelResolver` typealias + second init that
+  accepts it. Existing single-arg init still works (cold-swap off —
+  back-compat with any caller that relied on the pre-v0.3.3 "only
+  explicitly-loaded models answer" contract).
+- Concurrency guardrail: an actor-local `loadInFlight: Task` serialises
+  concurrent cold-swap requests. Two requests for the same not-yet-
+  loaded model share a single load (no double disk-read); requests
+  for different models queue cleanly instead of thrashing. Matches
+  strategy "a — serialise + wait" from the v0.3 UX plan.
+- +2 tests (`coldSwapLoadsResolvedModel`, `coldSwapReturns404WhenModelMissing`).
+  Both use a foreground HTTP round-trip through a `StubInferenceEngine`
+  + closure resolver, on ports 19_200 / 19_210.
+
+### Changed
+- `macmlx serve` (CLI) now wires the resolver up against
+  `ModelLibraryManager.scan(settings.modelDirectory)` so a running
+  serve sees every locally-downloaded model, not just the one passed
+  to `--model`. `--model` still loads-at-startup for cold-start
+  latency; omitting it now works (first chat completion loads on
+  demand).
+- `GET /v1/models` behaviour note: still returns only the loaded
+  model (compatibility), but the cold-swap feature means clients can
+  ask for any model by ID anyway. Future change: populate this
+  endpoint from the resolver's full list. Deferred — not every
+  resolver can enumerate.
+
+### Error shape
+Missing model → HTTP 404 with OpenAI-style
+`{"error": {"code": "model_not_found", …}}` body.
+Load failure → HTTP 500 with `load_failed`.
+
+---
+
 ## [0.3.2] - 2026-04-17
 
 Chat history management — the conversation-store backend that shipped
