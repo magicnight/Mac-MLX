@@ -6,6 +6,9 @@
 
 import SwiftUI
 import MacMLXCore
+#if canImport(Sparkle)
+import Sparkle
+#endif
 
 @main
 struct macMLXApp: App {
@@ -28,8 +31,44 @@ struct macMLXApp: App {
                 }
         }
         .windowResizability(.contentSize)
+        .commands {
+            #if canImport(Sparkle)
+            // Standard macOS "Check for Updates…" placement right after
+            // the "About macMLX" entry under the app menu.
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesMenuItem(updater: appDelegate.updater)
+            }
+            #endif
+        }
     }
 }
+
+#if canImport(Sparkle)
+/// Menu item that triggers Sparkle's "Check for Updates…" flow. The
+/// `canCheckForUpdates` publisher makes the item disabled while Sparkle
+/// is already mid-check.
+private struct CheckForUpdatesMenuItem: View {
+    private let updater: SPUUpdater
+    @State private var canCheckForUpdates: Bool = true
+
+    init(updater: SPUUpdater) {
+        self.updater = updater
+    }
+
+    var body: some View {
+        Button("Check for Updates…") {
+            updater.checkForUpdates()
+        }
+        .disabled(!canCheckForUpdates)
+        .task {
+            // Mirror Sparkle's published property into local state.
+            for await value in updater.publisher(for: \.canCheckForUpdates).values {
+                canCheckForUpdates = value
+            }
+        }
+    }
+}
+#endif
 
 /// Branches between Onboarding and MainWindow based on settings state.
 private struct RootView: View {
