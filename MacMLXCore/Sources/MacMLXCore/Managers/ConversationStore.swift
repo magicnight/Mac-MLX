@@ -108,6 +108,10 @@ public actor ConversationStore {
 
     /// Persist `conversation` to disk atomically. Creates the directory if
     /// missing. Bumps `updatedAt` to "now" before writing.
+    ///
+    /// Uses `JSONCoding.precisionEncoder` so rapid saves produce distinct
+    /// `updatedAt` values for `list()` sort stability. Decoder accepts
+    /// pre-v0.3 ISO-8601-string files for backward compat.
     public func save(_ conversation: Conversation) async throws {
         try ensureDirectory()
         var copy = conversation
@@ -116,10 +120,7 @@ public actor ConversationStore {
         if copy.title == "New Chat" {
             copy.title = copy.derivedTitle
         }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(copy)
+        let data = try JSONCoding.precisionEncoder().encode(copy)
         let url = fileURL(for: copy.id)
         try data.write(to: url, options: .atomic)
     }
@@ -135,8 +136,7 @@ public actor ConversationStore {
         .filter { $0.pathExtension == "json" }
         guard !urls.isEmpty else { return nil }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = JSONCoding.tolerantDecoder()
         var best: Conversation?
         for url in urls {
             guard let data = try? Data(contentsOf: url),
@@ -159,8 +159,7 @@ public actor ConversationStore {
         let urls = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = JSONCoding.tolerantDecoder()
         var loaded: [Conversation] = []
         for url in urls {
             if let data = try? Data(contentsOf: url),
