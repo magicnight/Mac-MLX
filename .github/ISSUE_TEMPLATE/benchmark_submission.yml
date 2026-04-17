@@ -1,0 +1,43 @@
+name: Benchmark Submission
+description: Share a macMLX benchmark result with the community leaderboard.
+title: "[benchmark] <model> on <chip>"
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your benchmark! This form is auto-filled by
+        macMLX — the `Share to Community` button on the Benchmark tab
+        opens this page with everything pre-populated.
+
+        **What we collect** (from the JSON below): chip model, total
+        memory, macOS version, macMLX + engine versions, the model you
+        benchmarked, and the measured numbers. No personal info, no
+        serials, no usernames — everything visible here is what gets
+        committed to the leaderboard.
+
+        You're free to edit the JSON or add context above. If you just
+        want to submit, press **Submit new issue** at the bottom.
+  - type: textarea
+    id: data
+    attributes:
+      label: Benchmark data (auto-generated)
+      description: |
+        Copy-pasted from the macMLX app via `Share to Community`.
+        A GitHub Action reads this block and appends the record to the
+        leaderboard dataset.
+      placeholder: |
+        ```json
+        { "id": "…", "modelID": "…", ... }
+        ```
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Optional context
+      description: |
+        Anything worth noting — thermals, running apps that might have
+        skewed the result, power adapter vs. battery, custom quant, etc.
+    validations:
+      required: false
