@@ -61,6 +61,7 @@ struct DownloadModelStep: View {
 
     @State private var selectedModelID: String = ""
     @State private var downloadProgress: Double? = nil
+    @State private var downloadStats: DownloadProgress? = nil
     @State private var isDownloading = false
     @State private var downloadError: String? = nil
 
@@ -86,15 +87,30 @@ struct DownloadModelStep: View {
             modelList
 
             if isDownloading {
-                if let progress = downloadProgress, progress >= 1.0 {
-                    ProgressView(value: 1.0)
+                if let stats = downloadStats, stats.totalBytes > 0 {
+                    ProgressView(value: stats.fractionCompleted)
                         .progressViewStyle(.linear)
-                    Text("100%")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text(stats.humanProgress)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(stats.humanPercent)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        if let currentFile = stats.currentFileName {
+                            Text("·").foregroundStyle(.tertiary)
+                            Text(currentFile)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
                 } else {
-                    // Indeterminate — MacMLXCore v0.1 onProgress is not @Sendable
-                    ProgressView("Downloading…")
+                    // Pre-first-callback — show indeterminate until the URLSession
+                    // delegate emits the first chunk.
+                    ProgressView("Starting download…")
                         .progressViewStyle(.linear)
                 }
             }
@@ -189,14 +205,23 @@ struct DownloadModelStep: View {
         isDownloading = true
         downloadError = nil
         downloadProgress = 0
+        downloadStats = nil
         let modelID = selectedModelID
+
+        // Bridge URLSession's background-queue callback to MainActor so
+        // SwiftUI sees the @State updates.
+        let handler: HFDownloader.ProgressHandler = { progress in
+            Task { @MainActor in
+                downloadStats = progress
+                downloadProgress = progress.fractionCompleted
+            }
+        }
+
         do {
-            // NOTE: onProgress closure is not @Sendable in MacMLXCore v0.1 API.
-            // Pass nil and show indeterminate progress; real progress tracking is v0.2.
             _ = try await appState.downloader.download(
                 modelID: modelID,
                 to: dir,
-                onProgress: nil
+                progress: handler
             )
             downloadProgress = 1.0
             // Give user a moment to see 100%

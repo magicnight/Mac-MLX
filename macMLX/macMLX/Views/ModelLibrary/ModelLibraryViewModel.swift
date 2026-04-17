@@ -37,6 +37,9 @@ final class ModelLibraryViewModel {
     // Actions in flight
     var loadingModelID: String? = nil
     var downloadingModelIDs: Set<String> = []
+    /// Latest download progress per model, keyed by HF modelID. Updated
+    /// from the URLSession delegate via a @MainActor hop.
+    var downloadProgress: [String: DownloadProgress] = [:]
 
     // MARK: - Private
 
@@ -113,11 +116,22 @@ final class ModelLibraryViewModel {
     func downloadModel(_ model: HFModel) async {
         downloadingModelIDs.insert(model.id)
         let dir = appState.currentSettings.modelDirectory
+
+        // Bridge the URLSession delegate's @Sendable callback (background
+        // queue) onto MainActor so SwiftUI observes the dictionary update.
+        let modelID = model.id
+        let handler: HFDownloader.ProgressHandler = { [weak self] progress in
+            guard let self else { return }
+            Task { @MainActor in
+                self.downloadProgress[modelID] = progress
+            }
+        }
+
         do {
             _ = try await appState.downloader.download(
                 modelID: model.id,
                 to: dir,
-                onProgress: nil  // v0.1: non-Sendable closure limitation
+                progress: handler
             )
             // Refresh local library after download completes
             await loadLocalModels()
@@ -125,6 +139,7 @@ final class ModelLibraryViewModel {
             hfError = "Download failed: \(error.localizedDescription)"
         }
         downloadingModelIDs.remove(model.id)
+        downloadProgress.removeValue(forKey: model.id)
     }
 
     func isDownloaded(_ model: HFModel) -> Bool {

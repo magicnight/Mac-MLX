@@ -189,6 +189,7 @@ private struct ModelLibraryContent: View {
                     model: model,
                     isDownloaded: viewModel.isDownloaded(model),
                     isDownloading: viewModel.downloadingModelIDs.contains(model.id),
+                    progress: viewModel.downloadProgress[model.id],
                     onDownload: {
                         Task { await viewModel.downloadModel(model) }
                     }
