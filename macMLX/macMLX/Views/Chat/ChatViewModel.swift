@@ -67,12 +67,25 @@ final class ChatViewModel {
     var messages: [UIChatMessage] = []
     var inputText: String = ""
     var isGenerating: Bool = false
-    var systemPrompt: String = "You are a helpful assistant."
+
+    /// Convenience passthrough to the parameters VM so existing ChatView
+    /// code that reads `viewModel.systemPrompt` keeps working. The source
+    /// of truth is `parameters.parameters.systemPrompt` (editable from the
+    /// Parameters Inspector).
+    var systemPrompt: String {
+        parameters.parameters.systemPrompt
+    }
 
     // MARK: - Private
 
     private let coordinator: EngineCoordinator
     private let store: ConversationStore
+    /// Parameters VM — source of truth for temperature / topP / maxTokens
+    /// / systemPrompt. ChatViewModel reads its `.parameters` snapshot on
+    /// every send so the user's latest slider tweaks take effect on the
+    /// next generation. Injected (not held as AppState ref) to avoid a
+    /// retain cycle.
+    private let parameters: ParametersViewModel
     /// Persistent header for the active conversation. Refreshed whenever
     /// we save (updatedAt bump) or start a new chat (fresh UUID).
     private var current: Conversation
@@ -80,9 +93,14 @@ final class ChatViewModel {
 
     // MARK: - Init
 
-    init(coordinator: EngineCoordinator, store: ConversationStore) {
+    init(
+        coordinator: EngineCoordinator,
+        store: ConversationStore,
+        parameters: ParametersViewModel
+    ) {
         self.coordinator = coordinator
         self.store = store
+        self.parameters = parameters
         // Start with a fresh empty conversation. persist() reads the
         // VM's `systemPrompt` each time it runs, so we don't need to
         // bake it into the initial Conversation here (doing so would
@@ -119,11 +137,14 @@ final class ChatViewModel {
             .filter { !$0.isGenerating }
             .map { ChatMessage(role: $0.role, content: $0.content) }
 
+        // Snapshot the Inspector's current parameters — subsequent slider
+        // drags during generation shouldn't rewrite this in-flight request.
+        let params = parameters.parameters
         let request = GenerateRequest(
             model: currentModel.id,
             messages: coreMessages,
-            systemPrompt: systemPrompt.isEmpty ? nil : systemPrompt,
-            parameters: GenerationParameters()
+            systemPrompt: params.systemPrompt.isEmpty ? nil : params.systemPrompt,
+            parameters: params.asGenerationParameters()
         )
 
         // Append placeholder assistant message
@@ -175,7 +196,7 @@ final class ChatViewModel {
         stopGeneration()
         messages = []
         inputText = ""
-        current = Conversation(systemPrompt: systemPrompt)
+        current = Conversation(systemPrompt: parameters.parameters.systemPrompt)
         // Don't persist the empty conversation — only written on first
         // real message.
     }
@@ -183,15 +204,15 @@ final class ChatViewModel {
     // MARK: - Private helpers
 
     /// Replace in-memory state with a loaded-from-disk conversation.
+    /// Does NOT restore the conversation's systemPrompt — per-conversation
+    /// systemPrompt override is v0.2 Batch 2 territory. For now the
+    /// Inspector-driven ModelParameters.systemPrompt is the source of truth.
     private func adopt(_ conversation: Conversation) {
         // If the user has already started typing in the current session
         // (non-empty messages), don't clobber their work.
         guard messages.isEmpty else { return }
         current = conversation
         messages = conversation.messages.map(UIChatMessage.init(stored:))
-        if !conversation.systemPrompt.isEmpty {
-            systemPrompt = conversation.systemPrompt
-        }
     }
 
     /// Serialise the current conversation to disk. Fire-and-forget — we
@@ -201,7 +222,7 @@ final class ChatViewModel {
         conv.messages = messages
             .filter { !$0.isGenerating }
             .map(\.asStored)
-        conv.systemPrompt = systemPrompt
+        conv.systemPrompt = parameters.parameters.systemPrompt
         conv.modelID = coordinator.currentModel?.id
         current = conv
 

@@ -25,6 +25,7 @@ private struct ChatContent: View {
     @Bindable var viewModel: ChatViewModel
     @Environment(AppState.self) private var appState
     @State private var scrollProxy: ScrollViewProxy? = nil
+    @State private var showInspector: Bool = false
 
     private var isModelLoaded: Bool {
         appState.coordinator.status.isLoaded
@@ -64,6 +65,12 @@ private struct ChatContent: View {
         .onChange(of: viewModel.messages.last?.content) { _, _ in
             scrollToBottom()
         }
+        // Parameters Inspector (#15) — collapsible right pane, toggled
+        // via the slider-icon button in chatToolbar.
+        .inspector(isPresented: $showInspector) {
+            ParametersInspector()
+                .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
+        }
     }
 
     // MARK: - Toolbar
@@ -91,6 +98,17 @@ private struct ChatContent: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            // Parameters Inspector toggle (#15)
+            Button {
+                showInspector.toggle()
+            } label: {
+                Label("Parameters", systemImage: "slider.horizontal.3")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.bordered)
+            .help("Parameters Inspector")
+            .keyboardShortcut("i", modifiers: [.command, .option])
 
             // New Chat button
             Button {

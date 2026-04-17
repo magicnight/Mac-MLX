@@ -20,6 +20,7 @@ public final class AppState {
     public let logs: LogManager
     public let coordinator: EngineCoordinator
     public let conversations: ConversationStore
+    public let parametersStore: ModelParametersStore
 
     /// Single app-scoped Chat view model. Owned here (not by ChatView's
     /// @State) so message history and the in-flight generation Task survive
@@ -27,6 +28,10 @@ public final class AppState {
     /// Internal rather than `public` because `ChatViewModel` is app-internal
     /// (unlike the `MacMLXCore` actor types above which are public).
     let chat: ChatViewModel
+
+    /// Per-model generation parameter overrides for the Parameters
+    /// Inspector panel (issue #15). Same retain story as `chat`.
+    let parameters: ParametersViewModel
 
     /// Snapshot of the most recently loaded settings. Updated after each
     /// `settings.load()` / `settings.update()` call so SwiftUI bindings have
@@ -39,14 +44,23 @@ public final class AppState {
         let settings = SettingsManager()
         let logs = LogManager()
         let coordinator = EngineCoordinator(logs: logs)
-        let conversations = ConversationStore()  // defaults to ~/.mac-mlx/conversations
+        let conversations = ConversationStore()  // ~/.mac-mlx/conversations
+        let parametersStore = ModelParametersStore()  // ~/.mac-mlx/model-params
+        let parameters = ParametersViewModel(store: parametersStore)
+
         self.settings = settings
         self.library = ModelLibraryManager()
         self.downloader = HFDownloader()
         self.logs = logs
         self.coordinator = coordinator
         self.conversations = conversations
-        self.chat = ChatViewModel(coordinator: coordinator, store: conversations)
+        self.parametersStore = parametersStore
+        self.parameters = parameters
+        self.chat = ChatViewModel(
+            coordinator: coordinator,
+            store: conversations,
+            parameters: parameters
+        )
     }
 
     // MARK: - Lifecycle
