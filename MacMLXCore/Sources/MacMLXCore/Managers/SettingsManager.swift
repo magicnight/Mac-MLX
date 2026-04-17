@@ -44,9 +44,20 @@ public struct Settings: Codable, Equatable, Sendable {
     // MARK: Factory
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
+    ///
+    /// **Model directory rationale**: we deliberately point at the user's
+    /// REAL home `~/.mac-mlx/models`, not `FileManager.default.homeDirectoryForCurrentUser`.
+    /// Under App Sandbox the latter resolves to the container
+    /// (`~/Library/Containers/<bundle-id>/Data/`), which is not user-visible
+    /// and buries downloaded models where Finder can't find them. macOS's
+    /// sandbox has a long-standing *dotfile exemption* — directories under
+    /// real `$HOME` whose name starts with `.` are writable from a sandboxed
+    /// app without needing `user-selected.read-write` entitlements or
+    /// security-scoped bookmarks. So `~/.mac-mlx/` both works under sandbox
+    /// AND is visible to power users.
     public static let `default`: Settings = .init(
-        modelDirectory: FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "models"),
+        modelDirectory: Settings.realUserHomeDirectory
+            .appending(path: ".mac-mlx/models"),
         preferredEngine: .mlxSwift,
         serverPort: 8000,
         autoStartServer: false,
@@ -57,6 +68,20 @@ public struct Settings: Codable, Equatable, Sendable {
         sparkleUpdateChannel: "release",
         logRetentionDays: 7
     )
+
+    /// Real user home directory, bypassing the sandbox container redirect.
+    /// `NSHomeDirectoryForUser(NSUserName())` consults the Directory Service
+    /// for the logged-in user's `pw_dir`, which is `/Users/<name>` even
+    /// inside a sandboxed process, unlike
+    /// `FileManager.default.homeDirectoryForCurrentUser` which under sandbox
+    /// returns the container path. Falls back to `NSHomeDirectory()` if
+    /// lookup fails (shouldn't happen on a configured Mac).
+    private static var realUserHomeDirectory: URL {
+        if let path = NSHomeDirectoryForUser(NSUserName()) {
+            return URL(filePath: path, directoryHint: .isDirectory)
+        }
+        return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
+    }
 
     // MARK: Init
 
