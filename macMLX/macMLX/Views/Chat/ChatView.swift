@@ -177,6 +177,9 @@ private struct ChatContent: View {
         Task {
             _ = await appState.coordinator.load(model)
             switchingToModelID = nil
+            // Start a fresh conversation so the new model doesn't inherit
+            // tokens produced by the previous model's tokenizer/template.
+            viewModel.createNew()
         }
     }
 
