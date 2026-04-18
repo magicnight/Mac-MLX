@@ -11,8 +11,11 @@ import MacMLXCore
 
 enum StdoutCapture {
     /// True once installed so repeat calls (e.g. from SwiftUI previews)
-    /// are no-ops instead of double-redirecting.
-    private static var installed = false
+    /// are no-ops instead of double-redirecting. `nonisolated(unsafe)`
+    /// is the right choice here: this flag is touched exactly once from
+    /// `macMLXApp.init()` on the main thread before any other code
+    /// runs, so there is no real concurrency exposure.
+    nonisolated(unsafe) private static var installed = false
 
     /// Redirect STDOUT_FILENO and STDERR_FILENO to a Pipe. Launch a
     /// background task that reads the pipe and forwards each line to:
