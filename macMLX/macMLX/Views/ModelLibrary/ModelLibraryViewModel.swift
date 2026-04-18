@@ -94,10 +94,33 @@ final class ModelLibraryViewModel {
     func loadLocalModels() async {
         isLoadingLocal = true
         localError = nil
+        let dir = modelDirectoryProvider()
+        await LogManager.shared.info(
+            "Scanning local models at: \(dir.path(percentEncoded: false))",
+            category: .system
+        )
         do {
-            let dir = modelDirectoryProvider()
-            localModels = try await library.scan(dir)
+            let found = try await library.scan(dir)
+            localModels = found
+            await LogManager.shared.info(
+                "Scan complete: \(found.count) local model(s) at \(dir.path(percentEncoded: false))",
+                category: .system
+            )
+            if found.isEmpty {
+                // List the raw subdirs so we can see whether scan is
+                // looking at the right path but finding the wrong kind
+                // of content (wrong format, empty dir, etc.)
+                let raw = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+                await LogManager.shared.warning(
+                    "Zero models found. Subdirs present: \(raw.prefix(20).joined(separator: ", "))",
+                    category: .system
+                )
+            }
         } catch {
+            await LogManager.shared.error(
+                "Scan failed at \(dir.path(percentEncoded: false)): \(error.localizedDescription)",
+                category: .system
+            )
             localError = error.localizedDescription
         }
         isLoadingLocal = false
