@@ -102,12 +102,70 @@ Nothing in v0.4 is sandbox-affected — the plan stands.
 
 ---
 
-## v0.6 — Speech I/O
+## v0.6 — Speech I/O (revised 2026-04-18)
 
-- WhisperKit (Core ML) for mic input in chat
-- AVSpeechSynthesizer for assistant reply read-back
-- Native MLX Whisper deferred until `mlx-swift-lm` ships audio
-  models
+**Plan changed**: the original proposal (WhisperKit + AVSpeechSynthesizer)
+is superseded by [DePasqualeOrg/mlx-swift-audio](https://github.com/DePasqualeOrg/mlx-swift-audio)
+— a native-MLX audio stack covering both directions:
+
+- **STT**: Whisper, Fun-ASR (latter is strong on Chinese)
+- **TTS**: Kokoro, Chatterbox / Chatterbox Turbo, CosyVoice 2 / 3,
+  Marvis (streaming), Orpheus (emotion tags), OuteTTS
+
+Replacing WhisperKit with MLX Whisper keeps the architecture
+100% MLX-native — no Core ML detour, no Python, consistent with
+our engine philosophy.
+
+### Scope for v0.6
+
+- **STT**: `MLXAudio.Whisper` (multilingual) + `MLXAudio.FunASR` for
+  Chinese. Push-to-talk in ChatInputView, auto-stop on silence.
+- **TTS**: Default to **Marvis** (streaming audio for low-latency
+  chat reply) or **Chatterbox** (voice cloning from a user-recorded
+  reference clip). Kokoro intentionally excluded from the core
+  target — see licensing below.
+- **UI**: Mic button in `ChatInputView`, playback button on every
+  assistant bubble, user-configurable auto-speak toggle in
+  Parameters Inspector.
+- **Package wiring**: Add `mlx-swift-audio` as a dependency pinned
+  to a commit SHA (not `main`) since the upstream warns
+  "expect breaking changes." Import only the `MLXAudio` product
+  (avoids GPL-3 espeak-ng transitive from Kokoro).
+
+### Licensing gotcha
+
+Kokoro depends on `espeak-ng` which is **GPL-3**. If we link
+Kokoro, GPL-3 terms propagate. The upstream package splits
+correctly: `MLXAudio` core is MIT-compatible, `Kokoro` is a
+separate product. We only take `MLXAudio`. If a user specifically
+wants Kokoro later, that's a separate add-on target.
+
+### Risks
+
+- **Early-development upstream**: DePasqualeOrg is actively breaking
+  APIs. Require a smoke-test CI job that re-resolves the pin
+  weekly so we notice regressions before users do.
+- **espeak-ng C-library builds**: even core MLXAudio has some
+  transitive C code — verify the xcframework situation on first
+  pull, document any DMG-packaging adjustments.
+- **Model sizes**: Whisper large-v3 ≈ 3 GB, Fun-ASR ≈ 1 GB.
+  Probably default to small/medium and expose a size selector.
+
+### ⚠️ Do not use `Adamiito0909/mlx-swift-audio`
+
+A user asked about this repo (2026-04-18). It's a **copycat with
+likely malware-drop pattern**:
+
+- 6 stars, pushed same day the user checked
+- Not a fork (`parent: null`) but code clearly copied from
+  DePasqualeOrg's
+- README aggressively promotes downloading
+  `examples/TTS App/TTS App.xcodeproj/project.xcworkspace/mlx-swift-audio-1.3-beta.5.zip`
+  — a `.zip` deep inside an Xcode workspace folder, which is a
+  classic drive-by download vector
+
+Avoid it. Use `DePasqualeOrg/mlx-swift-audio` exclusively. Consider
+GitHub-reporting the copycat as impersonation.
 
 ---
 
