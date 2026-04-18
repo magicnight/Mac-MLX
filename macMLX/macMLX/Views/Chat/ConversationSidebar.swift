@@ -1,14 +1,15 @@
 // ConversationSidebar.swift
 // macMLX
 //
-// Conversation history sidebar for the Chat tab (v0.3.2).
+// Conversation history sidebar for the Chat tab.
 //
-// Why a hand-built sidebar rather than nesting a second
-// `NavigationSplitView`: the outer `MainWindowView` already owns one
-// NavigationSplitView for the app-level tabs (Models / Chat / Benchmark
-// / Settings). Nesting NavSplitViews produces awkward double
-// disclosure chevrons and confusing focus behaviour on macOS. A plain
-// collapsible pane composed into Chat's layout gives us full control.
+// Manual VStack (no List(selection:)) because macOS List with a
+// selection binding has a long-standing quirk: right-clicking an
+// already-selected row stashes the contextMenu's Button action in a
+// different event loop, swallowing state mutations like
+// `deletingID = convo.id` before a confirmationDialog can present.
+// Custom Button rows avoid that whole subsystem — each row handles
+// its own click and contextMenu in a plain SwiftUI context.
 
 import SwiftUI
 import MacMLXCore
@@ -23,8 +24,6 @@ struct ConversationSidebar: View {
     @State private var renamingID: UUID?
     /// Buffer for the inline rename TextField.
     @State private var renameDraft: String = ""
-    /// Pending delete confirmation target.
-    @State private var deletingID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,27 +33,6 @@ struct ConversationSidebar: View {
         }
         .frame(minWidth: 200, idealWidth: 240)
         .background(Color(.windowBackgroundColor))
-        // Attached to the root VStack (not to the List inside `list`)
-        // so the modifier survives List rebuilds triggered by
-        // selection changes + conversations re-sort on updatedAt. Fixes
-        // the "left-click then right-click delete swallowed" bug.
-        .confirmationDialog(
-            "Delete this conversation?",
-            isPresented: Binding(
-                get: { deletingID != nil },
-                set: { if !$0 { deletingID = nil } }
-            ),
-            presenting: deletingID
-        ) { id in
-            Button("Delete", role: .destructive) {
-                Task {
-                    await viewModel.deleteConversation(id)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("Chat history will be permanently removed.")
-        }
     }
 
     // MARK: - Header
@@ -87,22 +65,17 @@ struct ConversationSidebar: View {
                 systemImage: "bubble.left.and.bubble.right",
                 description: Text("Send a message to start your first conversation.")
             )
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(selection: Binding(
-                get: { viewModel.currentConversationID },
-                set: { newID in
-                    guard let newID else { return }
-                    Task { await viewModel.switchTo(newID) }
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(viewModel.conversations) { convo in
+                        row(convo)
+                    }
                 }
-            )) {
-                ForEach(viewModel.conversations) { convo in
-                    row(convo)
-                        .tag(convo.id)
-                        .listRowSeparator(.hidden)
-                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
             }
-            .listStyle(.sidebar)
         }
     }
 
@@ -117,33 +90,60 @@ struct ConversationSidebar: View {
             })
             .textFieldStyle(.roundedBorder)
             .onExitCommand { cancelRename() }
+            .padding(.horizontal, 6)
             .padding(.vertical, 2)
         } else {
+            conversationRow(convo)
+        }
+    }
+
+    @ViewBuilder
+    private func conversationRow(_ convo: Conversation) -> some View {
+        let isSelected = convo.id == viewModel.currentConversationID
+
+        Button {
+            // Left-click switches to this conversation. `switchTo(_:)`
+            // is a no-op if it's already the current conversation.
+            Task { await viewModel.switchTo(convo.id) }
+        } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(convo.title)
                     .font(.body)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
                 Text(convo.updatedAt, style: .relative)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
             }
-            .padding(.vertical, 4)
-            .contextMenu {
-                Button {
-                    startRename(convo)
-                } label: {
-                    Label("Rename…", systemImage: "pencil")
-                }
-                Button(role: .destructive) {
-                    deletingID = convo.id
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-            .onTapGesture(count: 2) {
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Color.accentColor : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
                 startRename(convo)
+            } label: {
+                Label("Rename…", systemImage: "pencil")
             }
+            Button(role: .destructive) {
+                // Delete immediately — users can reopen from backups
+                // on disk if wanted, but removing the confirmation
+                // dialog is the simplest way to guarantee the click
+                // is honoured even when the row is currently selected.
+                Task { await viewModel.deleteConversation(convo.id) }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .onTapGesture(count: 2) {
+            startRename(convo)
         }
     }
 
