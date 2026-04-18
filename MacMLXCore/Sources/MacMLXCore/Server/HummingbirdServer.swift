@@ -242,6 +242,12 @@ public actor HummingbirdServer {
             maxAge: .seconds(3600)
         ))
 
+        // Request logging — see RequestLoggingMiddleware at the bottom
+        // of this file. Must come before routes so every inbound request
+        // (including ones that will 404 at route-matching time) is
+        // observed.
+        router.add(middleware: RequestLoggingMiddleware())
+
         // Capture self for use in route closures.
         // The actor reference is Sendable, so this is safe under Swift 6.
         let server = self
@@ -701,5 +707,35 @@ public actor HummingbirdServer {
             headers: headers,
             body: .init(byteBuffer: ByteBuffer(bytes: data))
         )
+    }
+}
+
+// MARK: - Request logging middleware
+
+/// Logs every incoming HTTP request at .debug level. 404 responses
+/// are re-logged at .warning with the path, so a client hitting
+/// an unmapped route (e.g. `/v1/completions` which we don't support)
+/// produces a visible Logs-tab entry for debugging.
+private struct RequestLoggingMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        let method = request.method.rawValue
+        let path = request.uri.path
+        await LogManager.shared.debug(
+            "→ \(method) \(path)",
+            category: .http
+        )
+        let response = try await next(request, context)
+        if response.status == .notFound {
+            await LogManager.shared.warning(
+                "404 \(method) \(path) — unhandled route",
+                category: .http
+            )
+        }
+        return response
     }
 }
