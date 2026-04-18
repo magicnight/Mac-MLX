@@ -43,6 +43,16 @@ public final class AppState {
     /// same rationale as `chat`.
     let benchmark: BenchmarkViewModel
 
+    /// Long-lived model-library VM. Owned by AppState (not
+    /// ModelLibraryView's @State) so tab switches don't tear down
+    /// in-flight HF downloads — same pattern as `chat` (issue #1).
+    ///
+    /// IUO because the VM's `modelDirectoryProvider` closure needs a
+    /// live reference to `self` to read `currentSettings`, which Swift
+    /// forbids during stored-property init. We assign it on the last
+    /// line of `init()` once all other properties are valid.
+    private(set) var modelLibrary: ModelLibraryViewModel!
+
     /// Snapshot of the most recently loaded settings. Updated after each
     /// `settings.load()` / `settings.update()` call so SwiftUI bindings have
     /// something synchronous to observe.
@@ -92,6 +102,19 @@ public final class AppState {
         coordinator.onModelLoaded = { [parameters] model in
             await parameters.loadForModel(model.id)
         }
+
+        // Constructed last: the provider closure captures `self` so all
+        // other stored properties must already be valid. Weak-self keeps
+        // the ownership graph acyclic (AppState -> VM -> closure -> self
+        // would otherwise leak).
+        self.modelLibrary = ModelLibraryViewModel(
+            library: library,
+            coordinator: coordinator,
+            downloader: self.downloader,
+            modelDirectoryProvider: { [weak self] in
+                self?.currentSettings.modelDirectory ?? Settings.default.modelDirectory
+            }
+        )
     }
 
     // MARK: - Lifecycle

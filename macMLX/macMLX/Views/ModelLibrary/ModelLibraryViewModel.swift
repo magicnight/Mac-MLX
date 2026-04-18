@@ -47,13 +47,30 @@ final class ModelLibraryViewModel {
 
     // MARK: - Private
 
-    private let appState: AppState
+    // Explicit dependencies rather than a back-reference to AppState —
+    // AppState owns this VM, so holding AppState here would create a
+    // retain cycle. Mirrors ChatViewModel's wiring.
+    private let library: ModelLibraryManager
+    private let coordinator: EngineCoordinator
+    private let downloader: HFDownloader
+    /// Read the current model directory on demand. A closure (not a
+    /// stored URL) so settings changes are observed live without this
+    /// VM having to subscribe to SettingsManager.
+    private let modelDirectoryProvider: @MainActor () -> URL
     private var searchTask: Task<Void, Never>? = nil
 
     // MARK: - Init
 
-    init(appState: AppState) {
-        self.appState = appState
+    init(
+        library: ModelLibraryManager,
+        coordinator: EngineCoordinator,
+        downloader: HFDownloader,
+        modelDirectoryProvider: @escaping @MainActor () -> URL
+    ) {
+        self.library = library
+        self.coordinator = coordinator
+        self.downloader = downloader
+        self.modelDirectoryProvider = modelDirectoryProvider
     }
 
     // MARK: - Local
@@ -63,15 +80,15 @@ final class ModelLibraryViewModel {
     /// "No Local Models" empty-state so users can tell at a glance
     /// whether the app is looking at the directory they expect.
     var scanDirectory: URL {
-        appState.currentSettings.modelDirectory
+        modelDirectoryProvider()
     }
 
     func loadLocalModels() async {
         isLoadingLocal = true
         localError = nil
         do {
-            let dir = appState.currentSettings.modelDirectory
-            localModels = try await appState.library.scan(dir)
+            let dir = modelDirectoryProvider()
+            localModels = try await library.scan(dir)
         } catch {
             localError = error.localizedDescription
         }
@@ -80,12 +97,12 @@ final class ModelLibraryViewModel {
 
     func loadModel(_ model: LocalModel) async {
         loadingModelID = model.id
-        _ = await appState.coordinator.load(model)
+        _ = await coordinator.load(model)
         loadingModelID = nil
     }
 
     func unloadModel() async {
-        await appState.coordinator.unload()
+        await coordinator.unload()
     }
 
     func deleteModel(_ model: LocalModel) {
@@ -98,7 +115,7 @@ final class ModelLibraryViewModel {
     }
 
     var loadedModelID: String? {
-        appState.coordinator.currentModel?.id
+        coordinator.currentModel?.id
     }
 
     // MARK: - HF Search
@@ -114,7 +131,7 @@ final class ModelLibraryViewModel {
             isSearchingHF = true
             hfError = nil
             do {
-                let results = try await appState.downloader.search(query: query, limit: 20)
+                let results = try await downloader.search(query: query, limit: 20)
                 guard !Task.isCancelled else { return }
                 hfModels = results
             } catch {
@@ -130,7 +147,7 @@ final class ModelLibraryViewModel {
         guard downloadTasks[model.id] == nil else { return }
 
         downloadingModelIDs.insert(model.id)
-        let dir = appState.currentSettings.modelDirectory
+        let dir = modelDirectoryProvider()
 
         // Bridge the URLSession delegate's @Sendable callback (background
         // queue) onto MainActor so SwiftUI observes the dictionary update.
@@ -149,7 +166,7 @@ final class ModelLibraryViewModel {
                 downloadTasks.removeValue(forKey: modelID)
             }
             do {
-                _ = try await appState.downloader.download(
+                _ = try await downloader.download(
                     modelID: modelID,
                     to: dir,
                     progress: handler

@@ -9,30 +9,22 @@ import MacMLXCore
 struct ModelLibraryView: View {
 
     @Environment(AppState.self) private var appState
-    @State private var viewModel: ModelLibraryViewModel?
 
     var body: some View {
-        Group {
-            if let vm = viewModel {
-                ModelLibraryContent(viewModel: vm)
-            } else {
-                ProgressView("Loading…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // VM now lives on AppState so tab switches no longer tear down
+        // the downloadProgress dictionary mid-download (issue #1
+        // follow-up in v0.3.6).
+        ModelLibraryContent(viewModel: appState.modelLibrary)
+            .task {
+                await appState.modelLibrary.loadLocalModels()
             }
-        }
-        .task {
-            let vm = ModelLibraryViewModel(appState: appState)
-            viewModel = vm
-            await vm.loadLocalModels()
-        }
-        // Auto-rescan when the user changes the model directory in
-        // Settings — pre-v0.3.1 user had to press Refresh manually after
-        // Settings changes, which made it feel like Refresh was broken.
-        .onChange(of: appState.currentSettings.modelDirectory) { _, _ in
-            if let vm = viewModel {
-                Task { await vm.loadLocalModels() }
+            // Auto-rescan when the user changes the model directory in
+            // Settings — pre-v0.3.1 user had to press Refresh manually
+            // after Settings changes, which made it feel like Refresh
+            // was broken.
+            .onChange(of: appState.currentSettings.modelDirectory) { _, _ in
+                Task { await appState.modelLibrary.loadLocalModels() }
             }
-        }
     }
 }
 
