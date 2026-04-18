@@ -70,6 +70,7 @@ struct MenuBarPopoverView: View {
 
     private var statsGrid: some View {
         VStack(alignment: .leading, spacing: 6) {
+            statRow(label: "Server", value: serverLabel)
             statRow(label: "Status", value: statusLabel)
             statRow(label: "Model", value: modelLabel)
             statRow(label: "Memory", value: memoryLabel)
@@ -100,17 +101,31 @@ struct MenuBarPopoverView: View {
     }
 
     private var startStopButton: some View {
-        let isRunning = appState.coordinator.status.isLoaded
-        return Button(isRunning ? "Stop" : "Start") {
+        // Button drives the HTTP server lifecycle (not the engine).
+        // Engine load/unload is done from the Models tab in the main window.
+        let isRunning = appState.server != nil
+        let isToggling = appState.isServerToggling
+        return Button {
             Task {
                 if isRunning {
-                    await appState.coordinator.unload()
+                    await appState.stopServer()
+                } else {
+                    await appState.startServer()
                 }
-                // "Start" requires a model selection — handled in main window.
             }
+        } label: {
+            HStack(spacing: 6) {
+                if isToggling {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: isRunning ? "stop.circle.fill" : "play.circle.fill")
+                }
+                Text(isRunning ? "Stop Server" : "Start Server")
+            }
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity)
         .buttonStyle(.bordered)
+        .disabled(isToggling)
     }
 
     private var openButton: some View {
@@ -138,13 +153,13 @@ struct MenuBarPopoverView: View {
     // MARK: - Computed labels
 
     private var statusColor: Color {
-        switch appState.coordinator.status {
-        case .idle:       return .gray
-        case .loading:    return .orange
-        case .ready:      return .green
-        case .generating: return .green
-        case .error:      return .red
-        }
+        // Green = server running, orange = toggling, gray = stopped,
+        // red = any engine error. Engine state takes precedence only
+        // when it's in the error state — a loaded-but-server-stopped
+        // app is "gray/stopped" from the menu-bar glance perspective.
+        if case .error = appState.coordinator.status { return .red }
+        if appState.isServerToggling { return .orange }
+        return appState.server != nil ? .green : .gray
     }
 
     private var statusLabel: String {
@@ -170,6 +185,13 @@ struct MenuBarPopoverView: View {
     private var tokensLabel: String {
         let count = appState.coordinator.tokensGeneratedTotal
         return count == 0 ? "0" : count.formatted(.number)
+    }
+
+    private var serverLabel: String {
+        if let port = appState.serverPort {
+            return "http://localhost:" + String(port)
+        }
+        return "Stopped"
     }
 }
 

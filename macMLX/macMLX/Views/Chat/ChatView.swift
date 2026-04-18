@@ -4,6 +4,7 @@
 // Streaming chat interface. Replaces the Stage 4 Task 6 stub.
 
 import SwiftUI
+import AppKit
 import MacMLXCore
 
 struct ChatView: View {
@@ -36,6 +37,10 @@ private struct ChatContent: View {
     /// Model currently being loaded via the toolbar switcher — keeps the
     /// menu greyed while load is in flight so the user can't stack swaps.
     @State private var switchingToModelID: String? = nil
+    /// Transient "just copied" flag for the copy-model-ID button — flips
+    /// the icon to a checkmark for ~1.2s after the user hits the button
+    /// (or ⇧⌘C) so they have visual feedback that it worked.
+    @State private var justCopiedModelID: Bool = false
 
     private var isModelLoaded: Bool {
         appState.coordinator.status.isLoaded
@@ -161,6 +166,38 @@ private struct ChatContent: View {
         .disabled(viewModel.isGenerating || switchingToModelID != nil)
     }
 
+    /// Small copy-to-pasteboard button rendered next to the model switcher.
+    /// Only shown when a model is loaded; copies the raw model ID so the
+    /// user can paste it into external tool configs (Cursor, Continue,
+    /// Open WebUI, etc.). Flips to a checkmark for 1.2s after copy so
+    /// the action isn't silent.
+    @ViewBuilder
+    private var copyModelButton: some View {
+        if let modelID = appState.coordinator.currentModel?.id {
+            Button {
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(modelID, forType: .string)
+                withAnimation(.easeOut(duration: 0.15)) {
+                    justCopiedModelID = true
+                }
+                // Flip back after 1.2s so the checkmark doesn't linger.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(1200))
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        justCopiedModelID = false
+                    }
+                }
+            } label: {
+                Image(systemName: justCopiedModelID ? "checkmark" : "doc.on.doc")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Copy model ID (\(modelID))")
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+        }
+    }
+
     private var currentModelLabel: String {
         if let id = switchingToModelID {
             return "Loading \(id)…"
@@ -177,6 +214,9 @@ private struct ChatContent: View {
         Task {
             _ = await appState.coordinator.load(model)
             switchingToModelID = nil
+            // Start a fresh conversation so the new model doesn't inherit
+            // tokens produced by the previous model's tokenizer/template.
+            viewModel.createNew()
         }
     }
 
@@ -205,7 +245,10 @@ private struct ChatContent: View {
             // Picker that only displayed the loaded model with no way to
             // switch. Now a real Menu: lists local models, checkmarks the
             // one loaded, loads on tap.
-            modelSwitcher
+            HStack(spacing: 4) {
+                modelSwitcher
+                copyModelButton
+            }
 
             Spacer()
 
@@ -277,8 +320,6 @@ private struct ChatContent: View {
                                 : nil,
                             onRegenerate: message.role == .assistant
                                 ? {
-                                    // Discard the returned Task so the
-                                    // closure resolves as () -> Void.
                                     _ = Task { @MainActor in
                                         await viewModel.regenerate(from: messageCopy.id)
                                     }

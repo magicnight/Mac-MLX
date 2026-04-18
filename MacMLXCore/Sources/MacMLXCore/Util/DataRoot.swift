@@ -24,15 +24,17 @@ import Foundation
 /// (onboarding, settings view) do the right thing under sandbox.
 public enum DataRoot {
 
-    /// Real user home directory (`/Users/<name>`), bypassing the sandbox
-    /// container redirect. Falls back to `NSHomeDirectory()` only if the
-    /// Directory-Service lookup fails (shouldn't happen on a configured
-    /// Mac).
+    /// Real user home `/Users/<login>` — constructed from NSUserName()
+    /// rather than looked up via NSHomeDirectoryForUser.
+    ///
+    /// Under App Sandbox, NSHomeDirectoryForUser(NSUserName()) and
+    /// NSHomeDirectory() BOTH return the sandbox container home
+    /// (`~/Library/Containers/<bundle-id>/Data/`), despite what the
+    /// Foundation docs imply. We construct the real `/Users/<login>`
+    /// path directly from the login name (which is not redirected)
+    /// so the GUI and CLI read/write the same `.mac-mlx` directory.
     public static var userHome: URL {
-        if let path = NSHomeDirectoryForUser(NSUserName()) {
-            return URL(filePath: path, directoryHint: .isDirectory)
-        }
-        return URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
+        URL(filePath: "/Users/\(NSUserName())", directoryHint: .isDirectory)
     }
 
     /// `~/.mac-mlx/` — the app's data root. Dotfile-exempt under sandbox.

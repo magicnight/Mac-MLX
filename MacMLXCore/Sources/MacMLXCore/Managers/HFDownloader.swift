@@ -344,6 +344,95 @@ public actor HFDownloader {
         }
     }
 
+    /// Total size of all files in the model repo, in bytes.
+    ///
+    /// HF's `/api/models/{id}` endpoint omits `size` for LFS-backed
+    /// files (which is where all the multi-GB weights live), so summing
+    /// `siblings[*].size` gives zero for most real models. We fall back
+    /// to HEAD on `/{id}/resolve/main/{path}` for any sibling without a
+    /// declared size; HF responds with `x-linked-size` (LFS blob size
+    /// before CDN redirect) or `content-length`. Weight-file filter
+    /// keeps the request count bounded — configs/tokenisers are small
+    /// and sometimes declared, so their absence doesn't matter.
+    public func sizeBytes(for modelID: String) async throws -> Int64 {
+        let files = try await files(for: modelID)
+        // Step 1: declared sizes we already have.
+        var total: Int64 = files.compactMap(\.size).reduce(0, +)
+
+        // Step 2: for any sibling without a declared size, HEAD-resolve it.
+        // Cap the concurrency so we don't flood the Hub — 4 is consistent
+        // with the search-enrichment TaskGroup in ModelLibraryViewModel.
+        let missing = files.filter { $0.size == nil }
+        guard !missing.isEmpty else { return total }
+
+        let baseURL = self.baseURL
+        let session = self.metadataSession
+
+        let fetched: [Int64] = await withTaskGroup(of: Int64?.self) { group in
+            var inflight = 0
+            let maxInflight = 4
+            var iterator = missing.makeIterator()
+
+            func enqueue() {
+                guard let file = iterator.next() else { return }
+                inflight += 1
+                group.addTask {
+                    await Self.headSize(
+                        session: session,
+                        baseURL: baseURL,
+                        modelID: modelID,
+                        path: file.path
+                    )
+                }
+            }
+            while inflight < maxInflight { enqueue() }
+            var collected: [Int64] = []
+            while let size = await group.next() {
+                inflight -= 1
+                if let size { collected.append(size) }
+                enqueue()
+            }
+            return collected
+        }
+        total += fetched.reduce(0, +)
+        return total
+    }
+
+    /// Issue a HEAD against `{baseURL}/{modelID}/resolve/main/{path}` and
+    /// return the bytes count. Tries `x-linked-size` first (LFS), falls
+    /// back to `content-length`. Returns nil on any failure so the
+    /// caller can silently proceed.
+    private static func headSize(
+        session: URLSession,
+        baseURL: URL,
+        modelID: String,
+        path: String
+    ) async -> Int64? {
+        let url = baseURL.appending(path: "\(modelID)/resolve/main/\(path)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        // Ask HF not to follow the LFS redirect — we want the header,
+        // not the payload. HF honours this via the Accept header; most
+        // public-CDN blobs set x-linked-size on the 302 itself.
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return nil }
+            if let linkedSize = http.value(forHTTPHeaderField: "x-linked-size"),
+               let parsed = Int64(linkedSize) {
+                return parsed
+            }
+            if let contentLength = http.value(forHTTPHeaderField: "content-length"),
+               let parsed = Int64(contentLength),
+               parsed > 0 {
+                return parsed
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
     /// Download all files of a model into `directory/<modelName>/`.
     ///
     /// - Parameters:
@@ -673,42 +762,61 @@ public actor HFDownloader {
 
 // MARK: - SpeedSampler (exponential moving average throughput)
 
-/// Computes a smoothed bytes-per-second rate over consecutive URLSession
+/// Computes a smoothed bytes-per-second rate over URLSession
 /// didWriteData callbacks for a single file. Internally locked because the
 /// delegate may fire from any URLSession worker queue; EMA state is tiny so
 /// a plain `NSLock` is the right primitive.
-private final class SpeedSampler: @unchecked Sendable {
-    /// Smoothing factor — 0.3 weights the most recent sample, 0.7 keeps
-    /// the previous average. Small enough to mask spikes, large enough to
-    /// follow real throughput changes (network hiccups, LFS CDN ramps).
-    private let alpha = 0.3
+internal final class SpeedSampler: @unchecked Sendable {
+    /// Smoothing factor — weights the most recent sample against the
+    /// previous average. Small enough to mask single-window spikes while
+    /// still following real throughput changes within a handful of
+    /// windows (network hiccups, LFS CDN ramps).
+    private let alpha: Double
+    /// Minimum elapsed time between EMA updates. URLSession fires progress
+    /// every few ms during LFS downloads; we only need ~2 Hz cadence for
+    /// a stable ETA display, so hold the previous value in between.
+    private let minSampleInterval: TimeInterval
 
+    private let clock: @Sendable () -> Date
     private let lock = NSLock()
-    private var lastWallclock: Date?
-    private var lastTotalBytes: Int64 = 0
+    private var windowStart: Date?
+    private var windowStartBytes: Int64 = 0
     private var ema: Double = 0
 
-    /// Feed a new `totalBytesWritten` sample and return the current EMA
-    /// throughput in bytes/sec. Returns 0 on the first call (one sample
-    /// isn't enough for a rate).
+    init(
+        alpha: Double = 0.15,
+        minSampleInterval: TimeInterval = 0.5,
+        clock: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.alpha = alpha
+        self.minSampleInterval = minSampleInterval
+        self.clock = clock
+    }
+
+    /// Feed a new `totalBytesWritten` sample. Returns the smoothed EMA
+    /// throughput in bytes/sec, or the previous value if we're still
+    /// inside the throttle window. Returns 0 on the first call (one
+    /// sample isn't enough for a rate).
     func record(bytes: Int64) -> Double {
         lock.lock(); defer { lock.unlock() }
-        let now = Date()
-        guard let last = lastWallclock else {
-            lastWallclock = now
-            lastTotalBytes = bytes
+        let now = clock()
+        guard let start = windowStart else {
+            windowStart = now
+            windowStartBytes = bytes
             return 0
         }
-        let dt = now.timeIntervalSince(last)
-        guard dt > 0 else { return ema }  // duplicate callback, no time elapsed
-        let dbytes = Double(bytes - lastTotalBytes)
+        let dt = now.timeIntervalSince(start)
+        // Throttle: hold the previous EMA until at least minSampleInterval
+        // has elapsed. Caller gets a stable number for the whole window.
+        guard dt >= minSampleInterval else { return ema }
+        let dbytes = Double(bytes - windowStartBytes)
         guard dbytes >= 0 else { return ema }  // shouldn't happen but guard anyway
         let instantaneous = dbytes / dt
         ema = ema == 0
             ? instantaneous
-            : (alpha * instantaneous + (1 - alpha) * ema)
-        lastWallclock = now
-        lastTotalBytes = bytes
+            : alpha * instantaneous + (1 - alpha) * ema
+        windowStart = now
+        windowStartBytes = bytes
         return ema
     }
 }

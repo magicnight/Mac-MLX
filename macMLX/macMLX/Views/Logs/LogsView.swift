@@ -109,8 +109,9 @@ struct LogsView: View {
 
             TableColumn("Message") { msg in
                 Text(msg.text)
-                    .lineLimit(3)
                     .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

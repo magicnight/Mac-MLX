@@ -1,14 +1,15 @@
 // ConversationSidebar.swift
 // macMLX
 //
-// Conversation history sidebar for the Chat tab (v0.3.2).
+// Conversation history sidebar for the Chat tab.
 //
-// Why a hand-built sidebar rather than nesting a second
-// `NavigationSplitView`: the outer `MainWindowView` already owns one
-// NavigationSplitView for the app-level tabs (Models / Chat / Benchmark
-// / Settings). Nesting NavSplitViews produces awkward double
-// disclosure chevrons and confusing focus behaviour on macOS. A plain
-// collapsible pane composed into Chat's layout gives us full control.
+// Manual VStack (no List(selection:)) because macOS List with a
+// selection binding has a long-standing quirk: right-clicking an
+// already-selected row stashes the contextMenu's Button action in a
+// different event loop, swallowing state mutations like
+// `deletingID = convo.id` before a confirmationDialog can present.
+// Custom Button rows avoid that whole subsystem — each row handles
+// its own click and contextMenu in a plain SwiftUI context.
 
 import SwiftUI
 import MacMLXCore
@@ -23,8 +24,6 @@ struct ConversationSidebar: View {
     @State private var renamingID: UUID?
     /// Buffer for the inline rename TextField.
     @State private var renameDraft: String = ""
-    /// Pending delete confirmation target.
-    @State private var deletingID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,38 +65,21 @@ struct ConversationSidebar: View {
                 systemImage: "bubble.left.and.bubble.right",
                 description: Text("Send a message to start your first conversation.")
             )
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(selection: Binding(
-                get: { viewModel.currentConversationID },
-                set: { newID in
-                    guard let newID else { return }
-                    Task { await viewModel.switchTo(newID) }
-                }
-            )) {
-                ForEach(viewModel.conversations) { convo in
-                    row(convo)
-                        .tag(convo.id)
-                        .listRowSeparator(.hidden)
-                }
-            }
-            .listStyle(.sidebar)
-            .confirmationDialog(
-                "Delete this conversation?",
-                isPresented: Binding(
-                    get: { deletingID != nil },
-                    set: { if !$0 { deletingID = nil } }
-                ),
-                presenting: deletingID
-            ) { id in
-                Button("Delete", role: .destructive) {
-                    Task {
-                        await viewModel.deleteConversation(id)
+            // Manual ScrollView + LazyVStack — `List.sidebar` style
+            // outside a NavigationSplitView renders empty, and we
+            // don't want List(selection:) which swallowed contextMenu
+            // actions on focused rows. Plain Views + onTapGesture +
+            // contextMenu on the row itself is the reliable pattern.
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(viewModel.conversations) { convo in
+                        row(convo)
                     }
                 }
-                Button("Cancel", role: .cancel) {}
-            } message: { _ in
-                Text("Chat history will be permanently removed.")
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
             }
         }
     }
@@ -113,32 +95,55 @@ struct ConversationSidebar: View {
             })
             .textFieldStyle(.roundedBorder)
             .onExitCommand { cancelRename() }
+            .padding(.horizontal, 6)
             .padding(.vertical, 2)
         } else {
+            conversationRow(convo)
+        }
+    }
+
+    @ViewBuilder
+    private func conversationRow(_ convo: Conversation) -> some View {
+        let isSelected = convo.id == viewModel.currentConversationID
+
+        HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(convo.title)
                     .font(.body)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
                 Text(convo.updatedAt, style: .relative)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
             }
-            .padding(.vertical, 4)
-            .contextMenu {
-                Button {
-                    startRename(convo)
-                } label: {
-                    Label("Rename…", systemImage: "pencil")
-                }
-                Button(role: .destructive) {
-                    deletingID = convo.id
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-            .onTapGesture(count: 2) {
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor : Color.clear)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+        // Single tap for row switch. Double-tap rename dropped — gesture
+        // disambiguation with count:1/count:2 + contextMenu on macOS
+        // SwiftUI was intermittently swallowing the contextMenu's Delete
+        // button action when the row was currently selected. Rename is
+        // now context-menu only (Finder convention).
+        .onTapGesture {
+            Task { await viewModel.switchTo(convo.id) }
+        }
+        .contextMenu {
+            Button {
                 startRename(convo)
+            } label: {
+                Label("Rename…", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                Task { await viewModel.deleteConversation(convo.id) }
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }

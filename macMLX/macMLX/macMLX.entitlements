@@ -2,26 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- App Sandbox is also set via ENABLE_APP_SANDBOX build setting.
-         Repeating here keeps the entitlements file self-descriptive. -->
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
+    <!-- App Sandbox disabled.
+         Rationale: macMLX reads and writes `~/.mac-mlx/` (models,
+         settings, logs, conversations, benchmarks, model-params) in a
+         directory that must be shared with the unsandboxed CLI binary.
+         Apple's "dotfile exemption" for `~/.<path>` is not reliable
+         across macOS versions — sandboxed apps routinely hit
+         "permission denied" when reading `~/.mac-mlx/models/` unless
+         the user picks the path via NSOpenPanel first, which is a
+         terrible UX for a tool that ships with a default model
+         directory.
 
-    <!-- Outbound network: Hugging Face Hub model downloads via HFDownloader. -->
-    <key>com.apple.security.network.client</key>
-    <true/>
+         LM Studio, Ollama, and oMLX all ship unsandboxed for the
+         same reason. Gatekeeper + (future) notarisation remain the
+         user-trust layer for a DMG-distributed app.
 
-    <!-- Inbound network: HummingbirdServer binds localhost:8000+ for the
-         OpenAI-compatible API and serves requests from sibling CLIs, IDE
-         integrations, and external tools. -->
-    <key>com.apple.security.network.server</key>
-    <true/>
-
-    <!-- User-selected directories: the Settings view's NSOpenPanel lets
-         users point macMLX at their existing model directories
-         (~/models, ~/.lmstudio/models, etc.) outside the app container.
-         Security-scoped bookmarks persist the access across launches. -->
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
+         ENABLE_APP_SANDBOX build-setting is also set to NO. -->
 </dict>
 </plist>

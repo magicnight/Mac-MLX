@@ -52,7 +52,7 @@ public actor LogManager {
 
     // MARK: Shared instance
 
-    /// Production singleton — backed by `LoggerStore.shared`.
+    /// Production singleton — backed by a size-capped LoggerStore.
     public static let shared = LogManager()
 
     // MARK: State
@@ -66,14 +66,48 @@ public actor LogManager {
 
     // MARK: Init
 
-    /// Production initialiser — uses `LoggerStore.shared`.
+    /// Production initialiser — creates (or reopens) a size-capped
+    /// LoggerStore at the standard macMLX data directory.
+    ///
+    /// Why not `LoggerStore.shared`: the default shared store has no
+    /// user-tunable size limit, so months of chat-engine token traces
+    /// can fill many GB. We keep a 100 MB FIFO cap (Pulse evicts the
+    /// oldest entries once the cap is reached) — plenty for a week's
+    /// worth of real-world events without unbounded disk growth.
     public init() {
-        self.store = LoggerStore.shared
+        self.store = Self.makeCappedStore()
     }
 
     /// Test / preview initialiser — caller provides a custom store.
     public init(store: LoggerStore) {
         self.store = store
+    }
+
+    /// Build the production LoggerStore with a 100 MB size cap.
+    /// Falls back to `LoggerStore.shared` if our explicit store fails
+    /// to open (e.g. disk full, sandbox denied the directory) — better
+    /// to log to the default than crash the app.
+    private static func makeCappedStore() -> LoggerStore {
+        let storeURL = DataRoot.macMLX("logs/macmlx.pulse")
+        // Parent directory must exist before Pulse opens the store.
+        try? FileManager.default.createDirectory(
+            at: storeURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var configuration = LoggerStore.Configuration()
+        // 100 MB FIFO. Pulse's SQLite-backed store auto-evicts oldest
+        // entries once the file size approaches this cap, so logs
+        // never grow unbounded even under heavy token-level tracing.
+        configuration.sizeLimit = 100 * 1024 * 1024
+        do {
+            return try LoggerStore(
+                storeURL: storeURL,
+                options: [.create],
+                configuration: configuration
+            )
+        } catch {
+            return LoggerStore.shared
+        }
     }
 
     // MARK: Logging

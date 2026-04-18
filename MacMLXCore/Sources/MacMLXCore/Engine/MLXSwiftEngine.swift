@@ -101,6 +101,23 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// - Throws: ``EngineError/modelLoadFailed(reason:)`` if loading fails for any reason.
     public func load(_ model: LocalModel) async throws {
         status = .loading(model: model.id)
+
+        // Preflight: catch Gemma 4 MoE checkpoints before handing off to
+        // LLMModelFactory, which surfaces a cryptic "Unhandled keys"
+        // error (see mlx-swift-lm#219).
+        let configURL = model.directory.appending(
+            path: "config.json", directoryHint: .notDirectory)
+        if Self.isUnsupportedGemma4MoE(configURL: configURL) {
+            let reason = "Gemma 4 Mixture-of-Experts variants (e.g. `a4b`) are not yet "
+                + "supported by mlx-swift-lm 3.31.x. Tracking upstream at "
+                + "https://github.com/ml-explore/mlx-swift-lm/issues/219. "
+                + "Use a dense Gemma 4 checkpoint (E2B / E4B) in the meantime."
+            status = .error(reason)
+            modelContainer = nil
+            loadedModel = nil
+            throw EngineError.modelLoadFailed(reason: reason)
+        }
+
         do {
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: model.directory,
@@ -115,6 +132,39 @@ public actor MLXSwiftEngine: InferenceEngine {
             modelContainer = nil
             loadedModel = nil
             throw EngineError.modelLoadFailed(reason: reason)
+        }
+    }
+
+    // MARK: Preflight
+
+    /// Inspect the model's `config.json` for Gemma 4 MoE markers. Returns
+    /// `true` when the config declares Mixture-of-Experts fields that
+    /// mlx-swift-lm 3.31.x does not yet implement (see mlx-swift-lm#219).
+    ///
+    /// Kept internal so tests can exercise it. Any IO / JSON error is
+    /// treated as "not MoE" — preflight should never hijack load errors
+    /// from unrelated causes; we only want to catch the specific
+    /// Gemma 4 MoE-on-3.31.x case.
+    static func isUnsupportedGemma4MoE(configURL: URL) -> Bool {
+        guard let data = try? Data(contentsOf: configURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return false
+        }
+        // Gemma 4 configs sometimes nest their text fields under "text_config".
+        let containers: [[String: Any]] = [
+            root,
+            root["text_config"] as? [String: Any] ?? [:],
+        ]
+        let isGemma4 = containers.contains { container in
+            guard let modelType = container["model_type"] as? String else { return false }
+            return modelType.hasPrefix("gemma4") || modelType.hasPrefix("gemma_4")
+        }
+        guard isGemma4 else { return false }
+        return containers.contains { container in
+            if let n = container["num_experts"] as? Int, n > 0 { return true }
+            if let n = container["num_local_experts"] as? Int, n > 0 { return true }
+            return false
         }
     }
 

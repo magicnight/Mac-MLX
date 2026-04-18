@@ -11,29 +11,26 @@ struct ChatInputView: View {
     let onSend: () -> Void
     let onStop: () -> Void
 
-    // Approximate max height for 5 lines of text
-    private let maxHeight: CGFloat = 110
-
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            // Multi-line input
-            TextEditor(text: $text)
-                .font(.body)
-                .frame(minHeight: 36, maxHeight: maxHeight)
-                .fixedSize(horizontal: false, vertical: true)
-                .scrollContentBackground(.hidden)
-                .background(.clear)
-                .disabled(isGenerating || !isModelLoaded)
-                .overlay(alignment: .topLeading) {
-                    if text.isEmpty {
-                        Text(isModelLoaded ? "Message…" : "Load a model first")
-                            .foregroundStyle(.tertiary)
-                            .font(.body)
-                            .padding(.top, 8)
-                            .padding(.leading, 4)
-                            .allowsHitTesting(false)
-                    }
-                }
+            // Auto-growing TextField keeps the cursor vertically centered
+            // on a single line and expands to up to 5 lines. macOS 14+.
+            TextField(
+                isModelLoaded ? "Message…" : "Load a model first",
+                text: $text,
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .lineLimit(1...5)
+            .font(.body)
+            .disabled(isGenerating || !isModelLoaded)
+            .onSubmit {
+                // Cmd+Return still sends via the Send button's keyboard
+                // shortcut. Plain Return inserts newline (default for
+                // axis:.vertical). Shift+Return is identical — TextField
+                // handles it.
+                if canSend { onSend() }
+            }
 
             // Send / Stop button
             if isGenerating {

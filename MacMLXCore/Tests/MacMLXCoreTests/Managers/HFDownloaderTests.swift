@@ -147,6 +147,38 @@ struct HFDownloaderTests {
         }
     }
 
+    @Test func sizeBytesUsesDeclaredSiblings() async throws {
+        // Siblings all have explicit sizes — sizeBytes should sum them
+        // directly and never HEAD anything.
+        let json = """
+        {
+          "id": "mlx-community/all-declared",
+          "siblings": [
+            {"rfilename": "config.json", "size": 512},
+            {"rfilename": "tokenizer.json", "size": 2048},
+            {"rfilename": "model.safetensors", "size": 4294967296}
+          ]
+        }
+        """.data(using: .utf8)!
+
+        // Count requests so we can assert no HEAD traffic was issued.
+        let headCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        MockURLProtocol.handler = { request in
+            let url = request.url ?? URL(string: "https://example.com")!
+            if request.httpMethod == "HEAD" {
+                headCount.withLock { $0 += 1 }
+            }
+            return (httpResponse(url: url, statusCode: 200), json)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let downloader = HFDownloader(urlSession: makeMockSession())
+        let total = try await downloader.sizeBytes(for: "mlx-community/all-declared")
+
+        #expect(total == 512 + 2048 + 4_294_967_296)
+        #expect(headCount.withLock { $0 } == 0)
+    }
+
     @Test func filesSingleSiblingNoSize() async throws {
         let json = """
         {

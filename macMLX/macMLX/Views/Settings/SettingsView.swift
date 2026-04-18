@@ -39,7 +39,14 @@ struct SettingsView: View {
                 Task { await appState.updateSettings { $0.serverPort = newValue } }
             }
             .onChange(of: autoStartServer) { _, newValue in
-                Task { await appState.updateSettings { $0.autoStartServer = newValue } }
+                Task {
+                    await appState.updateSettings { $0.autoStartServer = newValue }
+                    if newValue {
+                        await appState.startServer()
+                    } else {
+                        await appState.stopServer()
+                    }
+                }
             }
 
             downloadsSection

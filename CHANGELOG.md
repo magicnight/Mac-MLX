@@ -13,6 +13,250 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.6] - 2026-04-18
+
+Bug-fix and UX-polish release covering thirteen user-reported issues
+across the Models, Chat, and Logs surfaces. No schema changes.
+
+### Added
+- **Collapsible `<think>` renderer** in the Chat view. Qwen3,
+  DeepSeek-R1 and Gemma-style reasoning blocks now render as a
+  default-expanded disclosure with a small braille spinner while
+  streaming and an italic secondary-color body when finished. Click
+  the chevron to collapse; re-click to expand. Handles the Qwen3
+  implicit-opener case where the chat template injects `<think>` in
+  the prompt and only `</think>answer` shows up in the stream.
+- **Model size badge** on Hugging Face search results. Shows a
+  hard-drive glyph + size (e.g. `4.5 GB`) once the sibling-enrichment
+  fetch resolves. Sizes that the Hub leaves `null` (LFS-backed
+  weights) fall back to HEAD against `/{id}/resolve/main/{file}`
+  and prefer `x-linked-size` over `content-length`.
+- **Persistent HF size cache** at `~/.mac-mlx/hf-cache/sizes.json`
+  with a 7-day TTL. Re-searching for a model you've already seen
+  surfaces its size instantly instead of re-hitting the Hub.
+- **Copy-model-name button** next to the model switcher in the Chat
+  toolbar. Keyboard shortcut ⇧⌘C. Useful when pasting the ID into
+  Cursor / Continue / Open WebUI configs.
+- **Generate() diagnostic logging** under the `inference` category —
+  starts / chunk count / token count / errors. A user reporting
+  "no output" can inspect the Logs tab and see whether the stream
+  yielded zero chunks, threw mid-stream, or completed empty.
+- **Empty-output fallback message** in the assistant bubble when the
+  stream completes with zero chunks and empty content — the user
+  sees `[No output — model returned zero tokens…]` instead of an
+  ambiguous blank bubble.
+- **Friendly Gemma 4 MoE error** at model-load time. Loading a
+  `gemma-4-*-a4b-*` Mixture-of-Experts checkpoint previously threw
+  a cryptic `Unhandled keys [experts, router, …]` error; now a
+  preflight inspects `config.json` and surfaces an explicit message
+  pointing at [mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219)
+  with a hint to use dense E2B / E4B variants until the upstream
+  port lands.
+
+### Changed
+- **HF download state survives tab switches.** `ModelLibraryViewModel`
+  lives on `AppState` (same pattern `ChatViewModel` uses) so switching
+  from Models to Chat mid-download no longer resets the progress bar.
+- **Smoother speed + ETA display.** `SpeedSampler` throttles EMA
+  updates to ≈2 Hz and lowers the smoothing factor (alpha 0.3 → 0.15),
+  eliminating the multi-Hz digit flicker.
+- **Stricter HF search matching.** Typing `gemma-4` no longer returns
+  gemma-3 / gemma-2 results. We post-filter the Hub response so every
+  whitespace/hyphen-split query token must appear in the repo name
+  (org prefix excluded).
+- **Bottom-anchored sparse chat.** Short conversations sit above the
+  input box like every other chat app instead of cramming the top.
+- **Vertically-centered input cursor.** Replaced the multi-line
+  `TextEditor` (cursor anchored top) with `TextField(axis: .vertical)`,
+  which keeps the cursor on the single-line baseline and auto-grows
+  up to five lines. macOS 14+ API.
+- **Switching models auto-creates a new chat.** Prevents the new model
+  from inheriting tokens produced by the previous model's chat
+  template. The old conversation is preserved in the sidebar.
+- **Conversation sidebar rebuilt.** Hand-built scroll + tap rows
+  replace `List(selection:)` — macOS SwiftUI's selection binding
+  silently swallowed right-click Delete actions on the currently
+  selected row. New implementation uses plain views with
+  `.onTapGesture` + `.contextMenu`, and deletes immediately instead
+  of presenting a confirmation dialog (matches Mail / iMessage).
+- **HF tab layout.** Eliminated the blank strip between the toolbar
+  and the results list.
+- **Pulse log store capped at 100 MB.** `LogManager` owns its own
+  `LoggerStore` with an explicit `sizeLimit = 100 MB` — Pulse
+  auto-evicts oldest entries once the cap is reached.
+- **Initial library scan after bootstrap.** Users who skip the
+  onboarding wizard now see their existing downloaded models in
+  the Models tab on first open without having to toggle anything
+  in Settings.
+
+### Fixed
+- Conversation delete context menu is honoured regardless of whether
+  the row is currently selected.
+- `<think>` blocks that contain the entire response no longer hide
+  the content behind a collapsed disclosure — blocks default to
+  expanded.
+
+### Post-QA hot patches (2026-04-18 afternoon)
+
+These landed after hands-on QA surfaced regressions in the initial
+drop:
+
+- **App Sandbox disabled.** Sandboxed reads of `~/.mac-mlx/models/`
+  were being denied ("permission to view it") even though it's our
+  own dotfile data root. Apple's "dotfile exemption" for `~/.<path>`
+  is not reliable across macOS versions. Turn sandbox off to
+  converge the GUI and CLI on the same `~/.mac-mlx/` — matches LM
+  Studio / Ollama / oMLX. Gatekeeper remains the user-trust layer.
+- **DataRoot now returns the real user home under sandbox.**
+  `NSHomeDirectoryForUser(NSUserName())` was returning the sandbox
+  container home (`~/Library/Containers/.../Data/`) rather than the
+  real `/Users/<user>` despite the Foundation docs. Construct the
+  path directly from `/Users/` + `NSUserName()`. Relevant if anyone
+  re-enables sandbox in the future.
+- **HTTP server now auto-starts in the GUI.** The `autoStartServer`
+  setting existed since v0.1 but nothing in the GUI read it — users
+  toggling "Auto-start server on launch" saw no effect. Wire a full
+  `HummingbirdServer` lifecycle onto `AppState`: `startServer()` /
+  `stopServer()`, observable `server` / `serverPort` /
+  `isServerToggling` state, `bootstrap()` auto-starts when the
+  setting is on (rehydrating last-loaded model first), and the
+  Settings toggle now drives start/stop on change.
+- **Chat rendering fixed.** Task 7's VStack+ForEach `renderedContent`
+  collapsed to zero size under the bubble's padding/background stack
+  when the response was a single plain-text segment — so the most
+  common case (model replies "Hi!") rendered as an invisible bubble.
+  Single-`.text` segments now go through `inlineMarkdown` directly,
+  matching pre-v0.3.6 rendering exactly. The segmented VStack only
+  kicks in when there's an actual think block.
+- **Task 9 GeometryReader reverted.** Bottom-anchoring sparse
+  messages via `GeometryReader { geo in … .frame(minHeight: geo.size.height) }`
+  interacted badly with ScrollView's unbounded vertical space —
+  `geo.size.height` reported zero, collapsing the entire message
+  list. Reverted to a plain `LazyVStack`. Input-cursor centering
+  (the user's real complaint) is handled separately by
+  `TextField(axis: .vertical)`.
+- **Sidebar row rebuilt three times before landing.** Final form is
+  plain VStack + single `.onTapGesture` + `.contextMenu`, inside a
+  `ScrollView` + `LazyVStack`. `List(.sidebar)` and `List(selection:)`
+  both had modes where rows disappeared or right-click actions got
+  swallowed. The true cause of the delete-on-focused-row bug turned
+  out to be `switchTo(_:)` calling `persistNow()`, which bumped the
+  outgoing conversation's `updatedAt` — the sidebar's
+  `updatedAt`-desc sort then reordered between the left-click and
+  the follow-up right-click, so Delete targeted a different row.
+  `switchTo` no longer persists (sends, edits, and renames all
+  persist on their own).
+- **Port no longer shows as 8,000.** SwiftUI's `Text` interpolates
+  `Int` with locale-aware thousand separators, so the Settings
+  "HTTP Server" section was rendering `"http://localhost:8,000/v1"`.
+  Switch the Stepper label and Base URL line to `String(serverPort)`
+  to bypass locale formatting.
+- **Models tab force-refreshes on scan completion.** The `@Observable`
+  registrar occasionally missed the async `localModels` mutation on
+  the hoisted `ModelLibraryViewModel`, leaving the tab showing
+  "No Local Models" despite a successful scan. Force a view-identity
+  change via `.id(appState.modelLibrary.localModels.count)` so
+  SwiftUI rebuilds the subtree when results arrive.
+- **Input cursor vertically centered.** Replaced `TextEditor` (cursor
+  anchored top) with `TextField(axis: .vertical)` — cursor sits on
+  the single-line baseline, auto-grows up to five lines. macOS 14+.
+- **Content-preview log line.** `ChatViewModel.generate()` now dumps
+  the first 240 chars of each completed response at `.debug` level
+  so users reporting "no output despite chars=N" can see exactly
+  what the stream produced (wrapper tags, invisible tokens, etc.).
+- **Local model scan logs the path + subdirs.** Zero-result scans
+  now log a warning listing the raw subdir names so it's clear
+  whether the scan is looking at the wrong path, hit a permission
+  error, or the content doesn't match any model format.
+
+### Post-QA hot patches — server & external-client compat
+
+These landed during a second QA pass when the user tried pointing
+external tools (Zed, Immersive Translate, Open WebUI) at the
+macMLX HTTP server:
+
+- **CORS middleware** on every response. Browser-based clients
+  enforce `Access-Control-Allow-Origin` on fetch and returned
+  "NetworkError / fetch error" before. Allow-origin `.all` is the
+  right setting for a localhost-only server — the reach boundary is
+  the 127.0.0.1 bind, not the origin header.
+- **Request-logging middleware.** Every inbound request logs at
+  `.debug` level (`→ METHOD PATH`) under the `http` category. 404
+  responses (both returned and thrown as `HTTPError(.notFound)`)
+  re-log at `.warning` with a `"unhandled route"` tag — so when a
+  client reports a generic "fetch error" the Logs tab shows exactly
+  which endpoint it tried.
+- **Discovery & alias routes.** Probe paths several clients hit
+  before committing to real endpoints:
+  `GET /`, `GET /v1`, `GET /v1/health`, `GET /v1/status` all return
+  a tiny JSON ack. `POST /`, `POST /v1`, `POST /v1/completions`, and
+  `POST /v1/chat/completions/chat/completions` (for users who mis-
+  configure base URL as the full endpoint path) all route to the
+  same chat-completions handler.
+- **Ollama API compatibility layer** (non-exhaustive but covers
+  probe + chat): `GET /api/version`, `GET /api/tags`,
+  `POST /api/show`, `POST /api/chat`, `POST /api/generate`. Chat
+  and generate support **NDJSON streaming** (default when
+  `stream` is omitted — Ollama's convention, opposite of OpenAI).
+  Covers Zed's Ollama provider, Immersive Translate, and the
+  Ollama CLI's probe pattern.
+- **Duplicate system-message bug fixed.** `handleChatCompletions`
+  was leaving system messages in the messages array AND extracting
+  the same text into systemPrompt — `GenerateRequest.allMessages`
+  then re-prepended the systemPrompt so the engine saw
+  `[system, system, user, …]`. Qwen3 / Gemma / DeepSeek's strict
+  Jinja templates reject consecutive systems with a
+  `Jinja.TemplateException`, which surfaced as a 500
+  "Model failed to load: Jinja.TemplateException error 1" on the
+  client. Filter system out of the downstream messages array.
+- **Generation serialised across requests.** MLX model state
+  (tokenizer, KV cache, allocator) isn't safe across overlapping
+  generate calls. Hummingbird actor serialises method entry but
+  `generate` returns an AsyncStream iterated outside the actor —
+  so parallel clients stomped on each other and either crashed or
+  hung. Added a FIFO binary semaphore around every chat/completion
+  code path (OpenAI and Ollama, streaming and non-streaming).
+  Requests queue under load instead of crashing.
+- **GUI auto-start server** honours `settings.autoStartServer`.
+  Rehydrates last-loaded model before starting so the server
+  survives app restart in a useful state.
+- **Menu-bar Start/Stop Server button.** Popover now exposes a
+  server-level Start/Stop with a "Server" row showing the base
+  URL (or "Stopped"). Status dot reflects server health (green
+  running / gray stopped / orange toggling / red engine error).
+- **Copy-model-name button** in the Chat toolbar (⇧⌘C) for pasting
+  the loaded model ID into external tool configs.
+- **Cold-swap routed through EngineCoordinator.** External API
+  requests triggering a cold-swap used to go straight to
+  `engine.load()`, bypassing the coordinator so the GUI / menu bar
+  still showed "no model loaded" while the engine was generating.
+  `HummingbirdServer` now takes an optional `LoadHook` closure; GUI
+  installs one that routes through `coordinator.load(_:)` so
+  observable state (`currentModel`, `status`, `onModelLoaded`) stays
+  in sync.
+
+### Notes
+- **Gemma 4 MoE not runnable.** Confirmed upstream gap
+  ([ml-explore/mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219)).
+  Dense E2B / E4B variants work fine.
+- **Raw MLX stdout capture** (so library-level prints land in the
+  Logs tab) is v0.3.7 — needs file-descriptor redirection at launch.
+- **Model-update detection** (warn when a downloaded model has been
+  updated on the Hub) is also v0.3.7.
+
+### Tests
+- New `SpeedSamplerTests` (4 cases) — throttle window, EMA lag on
+  rate jump, convergence, negative-bytes guard.
+- New `MessageSegmentTests` (9 cases) — balanced tags, streaming
+  open, Qwen3 implicit opener, multiple blocks, edge cases.
+- New `MLXSwiftEnginePreflightTests` (5 cases) — Gemma 4 MoE
+  detection, dense-Gemma not flagged, Mixtral not flagged,
+  nested `text_config`, missing config.
+- HFDownloader gets one declared-sizes test; HEAD-fallback path
+  verified at runtime (MockURLProtocol hangs on HEAD requests).
+
+---
+
 ## [0.3.5] - 2026-04-17
 
 CLI TUI refresh: the three dashboards (`macmlx pull` / `macmlx serve`

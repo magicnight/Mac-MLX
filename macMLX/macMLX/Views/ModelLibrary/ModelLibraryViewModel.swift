@@ -47,13 +47,38 @@ final class ModelLibraryViewModel {
 
     // MARK: - Private
 
-    private let appState: AppState
+    // Explicit dependencies rather than a back-reference to AppState —
+    // AppState owns this VM, so holding AppState here would create a
+    // retain cycle. Mirrors ChatViewModel's wiring.
+    private let library: ModelLibraryManager
+    private let coordinator: EngineCoordinator
+    private let downloader: HFDownloader
+    private let sizeCache: HFSizeCache
+    /// Read the current model directory on demand. A closure (not a
+    /// stored URL) so settings changes are observed live without this
+    /// VM having to subscribe to SettingsManager.
+    private let modelDirectoryProvider: @MainActor () -> URL
     private var searchTask: Task<Void, Never>? = nil
+    /// Separately tracked so a follow-up `searchHF()` can cancel a
+    /// still-running size enrichment before it races the new results.
+    /// Without this, a stale enrichment pass could write a size into a
+    /// row that happens to share an `id` with the superseded result set.
+    private var enrichTask: Task<Void, Never>? = nil
 
     // MARK: - Init
 
-    init(appState: AppState) {
-        self.appState = appState
+    init(
+        library: ModelLibraryManager,
+        coordinator: EngineCoordinator,
+        downloader: HFDownloader,
+        sizeCache: HFSizeCache,
+        modelDirectoryProvider: @escaping @MainActor () -> URL
+    ) {
+        self.library = library
+        self.coordinator = coordinator
+        self.downloader = downloader
+        self.sizeCache = sizeCache
+        self.modelDirectoryProvider = modelDirectoryProvider
     }
 
     // MARK: - Local
@@ -63,16 +88,39 @@ final class ModelLibraryViewModel {
     /// "No Local Models" empty-state so users can tell at a glance
     /// whether the app is looking at the directory they expect.
     var scanDirectory: URL {
-        appState.currentSettings.modelDirectory
+        modelDirectoryProvider()
     }
 
     func loadLocalModels() async {
         isLoadingLocal = true
         localError = nil
+        let dir = modelDirectoryProvider()
+        await LogManager.shared.info(
+            "Scanning local models at: \(dir.path(percentEncoded: false))",
+            category: .system
+        )
         do {
-            let dir = appState.currentSettings.modelDirectory
-            localModels = try await appState.library.scan(dir)
+            let found = try await library.scan(dir)
+            localModels = found
+            await LogManager.shared.info(
+                "Scan complete: \(found.count) local model(s) at \(dir.path(percentEncoded: false))",
+                category: .system
+            )
+            if found.isEmpty {
+                // List the raw subdirs so we can see whether scan is
+                // looking at the right path but finding the wrong kind
+                // of content (wrong format, empty dir, etc.)
+                let raw = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+                await LogManager.shared.warning(
+                    "Zero models found. Subdirs present: \(raw.prefix(20).joined(separator: ", "))",
+                    category: .system
+                )
+            }
         } catch {
+            await LogManager.shared.error(
+                "Scan failed at \(dir.path(percentEncoded: false)): \(error.localizedDescription)",
+                category: .system
+            )
             localError = error.localizedDescription
         }
         isLoadingLocal = false
@@ -80,12 +128,12 @@ final class ModelLibraryViewModel {
 
     func loadModel(_ model: LocalModel) async {
         loadingModelID = model.id
-        _ = await appState.coordinator.load(model)
+        _ = await coordinator.load(model)
         loadingModelID = nil
     }
 
     func unloadModel() async {
-        await appState.coordinator.unload()
+        await coordinator.unload()
     }
 
     func deleteModel(_ model: LocalModel) {
@@ -98,13 +146,37 @@ final class ModelLibraryViewModel {
     }
 
     var loadedModelID: String? {
-        appState.coordinator.currentModel?.id
+        coordinator.currentModel?.id
+    }
+
+    // MARK: - Search matching
+
+    /// HF's `?search=` endpoint does fuzzy prefix matching — "gemma-4"
+    /// returns gemma-3 and gemma-2. We post-filter so every token the
+    /// user typed must appear in the repo name (not the org prefix).
+    /// Tokens split on non-alphanumerics, so `gemma-4` → ["gemma", "4"],
+    /// `qwen3 8b` → ["qwen3", "8b"].
+    private static func tokenize(_ query: String) -> [String] {
+        query
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map { $0.lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func matches(_ model: HFModel, tokens: [String]) -> Bool {
+        guard !tokens.isEmpty else { return true }
+        let name = (model.id.split(separator: "/").last.map(String.init) ?? model.id).lowercased()
+        return tokens.allSatisfy { name.contains($0) }
     }
 
     // MARK: - HF Search
 
     func searchHF() {
         searchTask?.cancel()
+        // Cancel any in-flight enrichment BEFORE a new search assigns
+        // `hfModels`, so a stale fetch can't write a size into a row
+        // belonging to the superseded result set.
+        enrichTask?.cancel()
         guard !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty else {
             hfModels = []
             return
@@ -114,9 +186,16 @@ final class ModelLibraryViewModel {
             isSearchingHF = true
             hfError = nil
             do {
-                let results = try await appState.downloader.search(query: query, limit: 20)
+                let results = try await downloader.search(query: query, limit: 20)
                 guard !Task.isCancelled else { return }
-                hfModels = results
+                let tokens = Self.tokenize(query)
+                hfModels = results.filter { Self.matches($0, tokens: tokens) }
+                // Kick off enrichment as its own tracked task so a
+                // subsequent searchHF() can cancel it cleanly instead of
+                // awaiting inline and blocking the search state machine.
+                enrichTask = Task { [weak self] in
+                    await self?.enrichSizes()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 hfError = error.localizedDescription
@@ -125,12 +204,66 @@ final class ModelLibraryViewModel {
         }
     }
 
+    /// Parallel size-fetch for the currently-listed HF results. Cap the
+    /// concurrency so we don't hammer the Hub with a burst of 20
+    /// simultaneous requests when the user types rapidly. The VM is
+    /// @MainActor, so mutations into `hfModels[idx].sizeBytes` are race-free.
+    private func enrichSizes() async {
+        let ids = hfModels.map(\.id)
+        let downloader = self.downloader
+        let cache = self.sizeCache
+
+        // Fast pass: apply any already-cached sizes synchronously before
+        // we kick off network fetches. This makes re-searches feel instant.
+        for id in ids {
+            if let size = await cache.get(id),
+               let idx = hfModels.firstIndex(where: { $0.id == id }) {
+                hfModels[idx].sizeBytes = size
+            }
+        }
+
+        // Only fetch sizes for models that are still unset.
+        let missingIDs = hfModels.filter { $0.sizeBytes == nil }.map(\.id)
+        guard !missingIDs.isEmpty else { return }
+
+        await withTaskGroup(of: (String, Int64?).self) { group in
+            var inflight = 0
+            let maxInflight = 4
+            var iterator = missingIDs.makeIterator()
+
+            func enqueue() {
+                guard let next = iterator.next() else { return }
+                inflight += 1
+                group.addTask {
+                    let size = try? await downloader.sizeBytes(for: next)
+                    return (next, size)
+                }
+            }
+            while inflight < maxInflight { enqueue() }
+
+            while let (id, size) = await group.next() {
+                inflight -= 1
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
+                if let size, size > 0 {
+                    if let idx = hfModels.firstIndex(where: { $0.id == id }) {
+                        hfModels[idx].sizeBytes = size
+                    }
+                    await cache.put(id, size: size)
+                }
+                if !Task.isCancelled { enqueue() }
+            }
+        }
+    }
+
     func downloadModel(_ model: HFModel) {
         // Already downloading? Cancel-then-start would be confusing; no-op.
         guard downloadTasks[model.id] == nil else { return }
 
         downloadingModelIDs.insert(model.id)
-        let dir = appState.currentSettings.modelDirectory
+        let dir = modelDirectoryProvider()
 
         // Bridge the URLSession delegate's @Sendable callback (background
         // queue) onto MainActor so SwiftUI observes the dictionary update.
@@ -149,7 +282,7 @@ final class ModelLibraryViewModel {
                 downloadTasks.removeValue(forKey: modelID)
             }
             do {
-                _ = try await appState.downloader.download(
+                _ = try await downloader.download(
                     modelID: modelID,
                     to: dir,
                     progress: handler
