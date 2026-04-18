@@ -128,6 +128,12 @@ public final class AppState {
         coordinator.switchTo(loaded.preferredEngine)
         await applyHFEndpoint(loaded.hfEndpoint)
         await logs.log("App bootstrapped", level: .info, category: .system)
+        // Kick off an initial library scan now that settings are loaded —
+        // otherwise the Models tab's .task fires against the default
+        // Settings snapshot before bootstrap completes, and users who
+        // skipped the onboarding wizard see an empty Models list until
+        // they toggle Settings (which re-triggers the scan via onChange).
+        await modelLibrary.loadLocalModels()
     }
 
     /// Persist + activate a new Hugging Face Hub endpoint. Safe to call
