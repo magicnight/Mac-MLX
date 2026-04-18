@@ -264,41 +264,55 @@ private struct ChatContent: View {
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    // System prompt display
-                    if !viewModel.systemPrompt.isEmpty {
-                        systemPromptRow
-                    }
+                // When the message list is short, the LazyVStack sizes
+                // to its content and sits at the top of the ScrollView —
+                // resulting in a big empty area above the input box. By
+                // wrapping it in a GeometryReader-sized container and
+                // bottom-aligning, sparse chats anchor just above the
+                // input (feels balanced), while long chats scroll
+                // normally because the content exceeds minHeight and
+                // the Spacer collapses.
+                GeometryReader { geo in
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            // System prompt display
+                            if !viewModel.systemPrompt.isEmpty {
+                                systemPromptRow
+                            }
 
-                    ForEach(viewModel.messages) { message in
-                        let messageCopy = message
-                        ChatMessageView(
-                            message: message,
-                            onCopy: { viewModel.copyToPasteboard(messageCopy.content) },
-                            onEdit: message.role == .user
-                                ? { viewModel.startEdit(messageCopy) }
-                                : nil,
-                            onRegenerate: message.role == .assistant
-                                ? {
-                                    // Discard the returned Task so the
-                                    // closure resolves as () -> Void.
-                                    _ = Task { @MainActor in
-                                        await viewModel.regenerate(from: messageCopy.id)
-                                    }
-                                }
-                                : nil,
-                            onDelete: { viewModel.delete(messageCopy.id) },
-                            onTruncate: { viewModel.truncateAfter(messageCopy.id) }
-                        )
-                        .id(message.id)
-                    }
+                            ForEach(viewModel.messages) { message in
+                                let messageCopy = message
+                                ChatMessageView(
+                                    message: message,
+                                    onCopy: { viewModel.copyToPasteboard(messageCopy.content) },
+                                    onEdit: message.role == .user
+                                        ? { viewModel.startEdit(messageCopy) }
+                                        : nil,
+                                    onRegenerate: message.role == .assistant
+                                        ? {
+                                            // Discard the returned Task so the
+                                            // closure resolves as () -> Void.
+                                            _ = Task { @MainActor in
+                                                await viewModel.regenerate(from: messageCopy.id)
+                                            }
+                                        }
+                                        : nil,
+                                    onDelete: { viewModel.delete(messageCopy.id) },
+                                    onTruncate: { viewModel.truncateAfter(messageCopy.id) }
+                                )
+                                .id(message.id)
+                            }
 
-                    // Anchor for scrolling
-                    Color.clear
-                        .frame(height: 1)
-                        .id("bottom")
+                            // Anchor for scrolling
+                            Color.clear
+                                .frame(height: 1)
+                                .id("bottom")
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .bottom)
                 }
-                .padding(.vertical, 8)
             }
             .onAppear { scrollProxy = proxy }
         }
