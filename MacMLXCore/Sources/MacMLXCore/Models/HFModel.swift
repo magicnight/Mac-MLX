@@ -12,6 +12,11 @@ public struct HFModel: Codable, Hashable, Identifiable, Sendable {
     public let likes: Int?
     public let tags: [String]
     public let lastModified: Date?
+    /// Total repo size in bytes (sum of `siblings[*].size`). `nil` until
+    /// the size-enrichment fetch completes, since the `/api/models` search
+    /// endpoint doesn't return it. Marked `var` so the UI layer can fill
+    /// it in after an out-of-band `HFDownloader.sizeBytes(for:)` call.
+    public var sizeBytes: Int64?
 
     public init(
         id: String,
@@ -19,7 +24,8 @@ public struct HFModel: Codable, Hashable, Identifiable, Sendable {
         downloads: Int? = nil,
         likes: Int? = nil,
         tags: [String] = [],
-        lastModified: Date? = nil
+        lastModified: Date? = nil,
+        sizeBytes: Int64? = nil
     ) {
         self.id = id
         self.author = author
@@ -27,6 +33,18 @@ public struct HFModel: Codable, Hashable, Identifiable, Sendable {
         self.likes = likes
         self.tags = tags
         self.lastModified = lastModified
+        self.sizeBytes = sizeBytes
+    }
+
+    /// `"2.5 GB"`, `"820 MB"`, `"—"` when size is unknown. Uses the
+    /// same base-10 convention as `DownloadProgress.currentFileHuman`.
+    public var sizeHuman: String {
+        guard let bytes = sizeBytes, bytes > 0 else { return "—" }
+        let b = Double(bytes)
+        if b >= 1_000_000_000 { return String(format: "%.1f GB", b / 1_000_000_000) }
+        if b >= 1_000_000     { return String(format: "%.0f MB", b / 1_000_000) }
+        if b >= 1_000         { return String(format: "%.0f KB", b / 1_000) }
+        return "\(bytes) B"
     }
 }
 

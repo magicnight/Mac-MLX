@@ -344,6 +344,15 @@ public actor HFDownloader {
         }
     }
 
+    /// Sum of all file sizes in the model repo. Uses the same siblings
+    /// envelope as `files(for:)`, so the Hub round-trip is unchanged.
+    /// Returns 0 if the Hub didn't populate sizes (LFS blobs sometimes
+    /// omit them) — callers can treat 0 as "unknown".
+    public func sizeBytes(for modelID: String) async throws -> Int64 {
+        let files = try await files(for: modelID)
+        return files.compactMap(\.size).reduce(0, +)
+    }
+
     /// Download all files of a model into `directory/<modelName>/`.
     ///
     /// - Parameters:

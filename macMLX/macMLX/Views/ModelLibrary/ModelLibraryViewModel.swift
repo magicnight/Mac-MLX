@@ -58,6 +58,11 @@ final class ModelLibraryViewModel {
     /// VM having to subscribe to SettingsManager.
     private let modelDirectoryProvider: @MainActor () -> URL
     private var searchTask: Task<Void, Never>? = nil
+    /// Separately tracked so a follow-up `searchHF()` can cancel a
+    /// still-running size enrichment before it races the new results.
+    /// Without this, a stale enrichment pass could write a size into a
+    /// row that happens to share an `id` with the superseded result set.
+    private var enrichTask: Task<Void, Never>? = nil
 
     // MARK: - Init
 
@@ -142,6 +147,10 @@ final class ModelLibraryViewModel {
 
     func searchHF() {
         searchTask?.cancel()
+        // Cancel any in-flight enrichment BEFORE a new search assigns
+        // `hfModels`, so a stale fetch can't write a size into a row
+        // belonging to the superseded result set.
+        enrichTask?.cancel()
         guard !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty else {
             hfModels = []
             return
@@ -155,11 +164,57 @@ final class ModelLibraryViewModel {
                 guard !Task.isCancelled else { return }
                 let tokens = Self.tokenize(query)
                 hfModels = results.filter { Self.matches($0, tokens: tokens) }
+                // Kick off enrichment as its own tracked task so a
+                // subsequent searchHF() can cancel it cleanly instead of
+                // awaiting inline and blocking the search state machine.
+                enrichTask = Task { [weak self] in
+                    await self?.enrichSizes()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 hfError = error.localizedDescription
             }
             isSearchingHF = false
+        }
+    }
+
+    /// Parallel size-fetch for the currently-listed HF results. Cap the
+    /// concurrency so we don't hammer the Hub with a burst of 20
+    /// simultaneous requests when the user types rapidly. The VM is
+    /// @MainActor, so mutations into `hfModels[idx].sizeBytes` are race-free.
+    private func enrichSizes() async {
+        let ids = hfModels.map(\.id)
+        let downloader = self.downloader
+        await withTaskGroup(of: (String, Int64?).self) { group in
+            var inflight = 0
+            let maxInflight = 4
+            var iterator = ids.makeIterator()
+            // Prime the pool.
+            while inflight < maxInflight, let next = iterator.next() {
+                inflight += 1
+                group.addTask {
+                    let size = try? await downloader.sizeBytes(for: next)
+                    return (next, size)
+                }
+            }
+            while let (id, size) = await group.next() {
+                // A newer search cancelled us — stop writing into the
+                // (now-unrelated) `hfModels` array and abandon the rest
+                // of the pending fetches.
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
+                if let size, let idx = hfModels.firstIndex(where: { $0.id == id }) {
+                    hfModels[idx].sizeBytes = size
+                }
+                if !Task.isCancelled, let next = iterator.next() {
+                    group.addTask {
+                        let size = try? await downloader.sizeBytes(for: next)
+                        return (next, size)
+                    }
+                }
+            }
         }
     }
 

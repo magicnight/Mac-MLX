@@ -66,6 +66,14 @@ struct HFModelRow: View {
                     .foregroundStyle(.secondary)
                     .labelStyle(.titleAndIcon)
             }
+            // Show size only when enrichment has resolved so rows don't
+            // flicker a placeholder while the parallel fetch is in flight.
+            if model.sizeBytes != nil {
+                Label(model.sizeHuman, systemImage: "internaldrive")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+            }
         }
     }
 
