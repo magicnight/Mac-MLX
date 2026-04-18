@@ -41,6 +41,12 @@ public final class EngineCoordinator {
     // MARK: - Private state
 
     private var engine: (any InferenceEngine)?
+
+    /// Current active engine, exposed to lifecycle consumers like the
+    /// HummingbirdServer that need an `any InferenceEngine` reference.
+    /// Nonisolated-read-only snapshot — callers should not mutate.
+    public var activeEngine: (any InferenceEngine)? { engine }
+
     private let logs: LogManager
 
     // MARK: - Init
