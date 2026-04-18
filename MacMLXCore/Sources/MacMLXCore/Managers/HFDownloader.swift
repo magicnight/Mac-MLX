@@ -673,42 +673,61 @@ public actor HFDownloader {
 
 // MARK: - SpeedSampler (exponential moving average throughput)
 
-/// Computes a smoothed bytes-per-second rate over consecutive URLSession
+/// Computes a smoothed bytes-per-second rate over URLSession
 /// didWriteData callbacks for a single file. Internally locked because the
 /// delegate may fire from any URLSession worker queue; EMA state is tiny so
 /// a plain `NSLock` is the right primitive.
-private final class SpeedSampler: @unchecked Sendable {
-    /// Smoothing factor — 0.3 weights the most recent sample, 0.7 keeps
-    /// the previous average. Small enough to mask spikes, large enough to
-    /// follow real throughput changes (network hiccups, LFS CDN ramps).
-    private let alpha = 0.3
+internal final class SpeedSampler: @unchecked Sendable {
+    /// Smoothing factor — weights the most recent sample against the
+    /// previous average. Small enough to mask single-window spikes while
+    /// still following real throughput changes within a handful of
+    /// windows (network hiccups, LFS CDN ramps).
+    private let alpha: Double
+    /// Minimum elapsed time between EMA updates. URLSession fires progress
+    /// every few ms during LFS downloads; we only need ~2 Hz cadence for
+    /// a stable ETA display, so hold the previous value in between.
+    private let minSampleInterval: TimeInterval
 
+    private let clock: @Sendable () -> Date
     private let lock = NSLock()
-    private var lastWallclock: Date?
-    private var lastTotalBytes: Int64 = 0
+    private var windowStart: Date?
+    private var windowStartBytes: Int64 = 0
     private var ema: Double = 0
 
-    /// Feed a new `totalBytesWritten` sample and return the current EMA
-    /// throughput in bytes/sec. Returns 0 on the first call (one sample
-    /// isn't enough for a rate).
+    init(
+        alpha: Double = 0.15,
+        minSampleInterval: TimeInterval = 0.5,
+        clock: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.alpha = alpha
+        self.minSampleInterval = minSampleInterval
+        self.clock = clock
+    }
+
+    /// Feed a new `totalBytesWritten` sample. Returns the smoothed EMA
+    /// throughput in bytes/sec, or the previous value if we're still
+    /// inside the throttle window. Returns 0 on the first call (one
+    /// sample isn't enough for a rate).
     func record(bytes: Int64) -> Double {
         lock.lock(); defer { lock.unlock() }
-        let now = Date()
-        guard let last = lastWallclock else {
-            lastWallclock = now
-            lastTotalBytes = bytes
+        let now = clock()
+        guard let start = windowStart else {
+            windowStart = now
+            windowStartBytes = bytes
             return 0
         }
-        let dt = now.timeIntervalSince(last)
-        guard dt > 0 else { return ema }  // duplicate callback, no time elapsed
-        let dbytes = Double(bytes - lastTotalBytes)
+        let dt = now.timeIntervalSince(start)
+        // Throttle: hold the previous EMA until at least minSampleInterval
+        // has elapsed. Caller gets a stable number for the whole window.
+        guard dt >= minSampleInterval else { return ema }
+        let dbytes = Double(bytes - windowStartBytes)
         guard dbytes >= 0 else { return ema }  // shouldn't happen but guard anyway
         let instantaneous = dbytes / dt
         ema = ema == 0
             ? instantaneous
-            : (alpha * instantaneous + (1 - alpha) * ema)
-        lastWallclock = now
-        lastTotalBytes = bytes
+            : alpha * instantaneous + (1 - alpha) * ema
+        windowStart = now
+        windowStartBytes = bytes
         return ema
     }
 }
