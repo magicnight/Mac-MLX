@@ -175,7 +175,7 @@ public final class AppState {
     /// to `LogManager`.
     public func startServer() async {
         guard server == nil, !isServerToggling else { return }
-        guard let engine = coordinator.activeEngine else {
+        guard let engine = await coordinator.activeEngine else {
             await logs.log(
                 "Cannot start server: no engine loaded",
                 level: .warning,
