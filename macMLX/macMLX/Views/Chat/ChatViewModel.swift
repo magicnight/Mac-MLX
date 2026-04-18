@@ -383,6 +383,12 @@ final class ChatViewModel {
                     "Generation finished: chunks=\(chunkCount), chars=\(totalChars), tokens=\(self.messages[assistantIdx].tokenCount ?? 0)",
                     category: .inference
                 )
+                let preview = String(self.messages[assistantIdx].content.prefix(240))
+                    .replacingOccurrences(of: "\n", with: "\\n")
+                await LogManager.shared.debug(
+                    "Content preview (first 240 chars): \(preview)",
+                    category: .inference
+                )
             } catch {
                 await LogManager.shared.error(
                     "Generation failed after \(chunkCount) chunks: \(error.localizedDescription)",
