@@ -169,6 +169,72 @@ drop:
   whether the scan is looking at the wrong path, hit a permission
   error, or the content doesn't match any model format.
 
+### Post-QA hot patches — server & external-client compat
+
+These landed during a second QA pass when the user tried pointing
+external tools (Zed, Immersive Translate, Open WebUI) at the
+macMLX HTTP server:
+
+- **CORS middleware** on every response. Browser-based clients
+  enforce `Access-Control-Allow-Origin` on fetch and returned
+  "NetworkError / fetch error" before. Allow-origin `.all` is the
+  right setting for a localhost-only server — the reach boundary is
+  the 127.0.0.1 bind, not the origin header.
+- **Request-logging middleware.** Every inbound request logs at
+  `.debug` level (`→ METHOD PATH`) under the `http` category. 404
+  responses (both returned and thrown as `HTTPError(.notFound)`)
+  re-log at `.warning` with a `"unhandled route"` tag — so when a
+  client reports a generic "fetch error" the Logs tab shows exactly
+  which endpoint it tried.
+- **Discovery & alias routes.** Probe paths several clients hit
+  before committing to real endpoints:
+  `GET /`, `GET /v1`, `GET /v1/health`, `GET /v1/status` all return
+  a tiny JSON ack. `POST /`, `POST /v1`, `POST /v1/completions`, and
+  `POST /v1/chat/completions/chat/completions` (for users who mis-
+  configure base URL as the full endpoint path) all route to the
+  same chat-completions handler.
+- **Ollama API compatibility layer** (non-exhaustive but covers
+  probe + chat): `GET /api/version`, `GET /api/tags`,
+  `POST /api/show`, `POST /api/chat`, `POST /api/generate`. Chat
+  and generate support **NDJSON streaming** (default when
+  `stream` is omitted — Ollama's convention, opposite of OpenAI).
+  Covers Zed's Ollama provider, Immersive Translate, and the
+  Ollama CLI's probe pattern.
+- **Duplicate system-message bug fixed.** `handleChatCompletions`
+  was leaving system messages in the messages array AND extracting
+  the same text into systemPrompt — `GenerateRequest.allMessages`
+  then re-prepended the systemPrompt so the engine saw
+  `[system, system, user, …]`. Qwen3 / Gemma / DeepSeek's strict
+  Jinja templates reject consecutive systems with a
+  `Jinja.TemplateException`, which surfaced as a 500
+  "Model failed to load: Jinja.TemplateException error 1" on the
+  client. Filter system out of the downstream messages array.
+- **Generation serialised across requests.** MLX model state
+  (tokenizer, KV cache, allocator) isn't safe across overlapping
+  generate calls. Hummingbird actor serialises method entry but
+  `generate` returns an AsyncStream iterated outside the actor —
+  so parallel clients stomped on each other and either crashed or
+  hung. Added a FIFO binary semaphore around every chat/completion
+  code path (OpenAI and Ollama, streaming and non-streaming).
+  Requests queue under load instead of crashing.
+- **GUI auto-start server** honours `settings.autoStartServer`.
+  Rehydrates last-loaded model before starting so the server
+  survives app restart in a useful state.
+- **Menu-bar Start/Stop Server button.** Popover now exposes a
+  server-level Start/Stop with a "Server" row showing the base
+  URL (or "Stopped"). Status dot reflects server health (green
+  running / gray stopped / orange toggling / red engine error).
+- **Copy-model-name button** in the Chat toolbar (⇧⌘C) for pasting
+  the loaded model ID into external tool configs.
+- **Cold-swap routed through EngineCoordinator.** External API
+  requests triggering a cold-swap used to go straight to
+  `engine.load()`, bypassing the coordinator so the GUI / menu bar
+  still showed "no model loaded" while the engine was generating.
+  `HummingbirdServer` now takes an optional `LoadHook` closure; GUI
+  installs one that routes through `coordinator.load(_:)` so
+  observable state (`currentModel`, `status`, `onModelLoaded`) stays
+  in sync.
+
 ### Notes
 - **Gemma 4 MoE not runnable.** Confirmed upstream gap
   ([ml-explore/mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219)).
