@@ -12,7 +12,7 @@ struct ThinkBlockView: View {
     /// visually quieter.
     let isStreaming: Bool
 
-    @State private var expanded: Bool = false
+    @State private var expanded: Bool = true
     @State private var animationFrame: Int = 0
 
     private static let spinnerFrames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
