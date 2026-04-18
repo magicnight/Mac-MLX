@@ -9,6 +9,7 @@ struct LocalModelRow: View {
     let model: LocalModel
     let isLoaded: Bool
     let isLoading: Bool
+    let hasUpdateAvailable: Bool
     let onLoad: () -> Void
     let onUnload: () -> Void
     let onDelete: () -> Void
@@ -47,6 +48,13 @@ struct LocalModelRow: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
                         .background(Color.green.opacity(0.12), in: Capsule())
+
+                    if hasUpdateAvailable {
+                        Label("Update available", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .labelStyle(.titleAndIcon)
+                    }
                 }
             }
 
@@ -94,6 +102,7 @@ struct LocalModelRow: View {
             model: model,
             isLoaded: true,
             isLoading: false,
+            hasUpdateAvailable: false,
             onLoad: {},
             onUnload: {},
             onDelete: {}
@@ -102,6 +111,7 @@ struct LocalModelRow: View {
             model: model,
             isLoaded: false,
             isLoading: false,
+            hasUpdateAvailable: true,
             onLoad: {},
             onUnload: {},
             onDelete: {}

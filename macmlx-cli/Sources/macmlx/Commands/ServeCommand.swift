@@ -44,6 +44,19 @@ struct ServeCommand: AsyncParsableCommand {
             let models = (try? await library.scan(modelDirectory)) ?? []
             return models.first { $0.id == modelID || $0.displayName == modelID }
         }
+        // Refuse to double-bind if another macMLX process (GUI or CLI)
+        // is already serving. `kill(pid, 0)` is the POSIX "is this PID
+        // alive?" probe — returns 0 when the process exists. A stale
+        // PID file (process gone) falls through and gets overwritten.
+        if let existing = try? PIDFile.read(),
+           kill(existing.pid, 0) == 0 {
+            let ownerLabel = existing.owner == .gui ? "GUI" : "CLI"
+            throw ValidationError("""
+                Another macMLX server is already running on :\(existing.port) (\(ownerLabel), PID \(existing.pid)).
+                Close the \(ownerLabel) or run `macmlx stop` first.
+                """)
+        }
+
         let server = HummingbirdServer(engine: engine, modelResolver: resolver)
         let actualPort = try await server.start(preferredPort: port)
 
@@ -52,7 +65,8 @@ struct ServeCommand: AsyncParsableCommand {
             pid: getpid(),
             port: actualPort,
             modelID: model,
-            startedAt: startedAt
+            startedAt: startedAt,
+            owner: .cli
         )
         try PIDFile.write(record)
 

@@ -13,6 +13,48 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.7] - 2026-04-18
+
+Maintenance release — four items agreed after the v0.3.6 post-QA pass.
+
+### Added
+- **MLX stdout/stderr → Logs tab.** `StdoutCapture.install()` dups
+  the process's STDOUT/STDERR to a Pipe at launch, tees each line
+  to both the original fd (terminal visibility preserved) and
+  `LogManager.shared.debug(category: .system)`. Users reporting
+  "model is slow" can now see what `mlx-swift-lm` is printing
+  without attaching a debugger.
+- **HF model-update detection.** Downloaded models now get a
+  `.macmlx-meta.json` sidecar recording the Hub's commit SHA +
+  `lastModified` at download time. Models tab throttle-checks
+  (once per 24 h) each sidecar against `/api/models/{id}`. Rows
+  whose Hub head has advanced get an orange "Update available"
+  badge. Delete-and-re-download is the update action for now.
+- **Shared `~/.mac-mlx/macmlx.pid`.** `PIDFile` moved from the CLI
+  target into `MacMLXCore`; `Record.owner` enum (`.gui | .cli`)
+  distinguishes the two. GUI writes the file on `startServer()`,
+  clears it on `stopServer()`. CLI's `macmlx serve` pre-flights
+  with `kill(pid, 0)` and refuses to double-bind when a live
+  record exists, naming the owner in the error so users know
+  which process to close. `macmlx ps` now shows "Owner: GUI | CLI".
+
+### Changed
+- **GitHub Actions pinned to Node.js 24.** `actions/checkout` and
+  `actions/cache` bumped from `@v4` (Node 20, deprecated) to `@v5`
+  (Node 24). Silences the deprecation warning that surfaced on the
+  v0.3.6 release run.
+
+### Notes
+- **Full Ollama-style daemon mode** (CLI commands proxied through
+  the GUI's HTTP API rather than spinning their own engine) remains
+  a future scope. This release just gets them to stop stepping on
+  each other at the port-binding layer.
+- **Backward compatibility**: pre-v0.3.7 PID files (no `owner` key)
+  decode as `.cli`. Pre-v0.3.7 downloads without sidecars simply
+  don't get an update-check until the user re-downloads them once.
+
+---
+
 ## [0.3.6] - 2026-04-18
 
 Bug-fix and UX-polish release covering thirteen user-reported issues

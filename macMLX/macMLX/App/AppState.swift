@@ -221,6 +221,18 @@ public final class AppState {
             )
             server = instance
             serverPort = actualPort
+            // Share discovery with CLI (issue #—, v0.3.7): the CLI's
+            // `serve` command reads this file and refuses to double-bind
+            // when the GUI is already serving. `try?` because losing
+            // the pid file is non-fatal — the server itself started fine.
+            let record = PIDFile.Record(
+                pid: Int32(ProcessInfo.processInfo.processIdentifier),
+                port: actualPort,
+                modelID: coordinator.currentModel?.id,
+                startedAt: Date(),
+                owner: .gui
+            )
+            try? PIDFile.write(record)
             await logs.log(
                 "HTTP server started on http://localhost:\(actualPort)/v1",
                 level: .info,
@@ -243,6 +255,9 @@ public final class AppState {
         await instance.stop()
         server = nil
         serverPort = nil
+        // Release the shared discovery file so CLI `serve` stops
+        // reporting the GUI as the owner. `try?` — absent file is fine.
+        try? PIDFile.clear()
         await logs.log(
             "HTTP server stopped",
             level: .info,

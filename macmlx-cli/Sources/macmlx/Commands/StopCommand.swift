@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import MacMLXCore
 
 struct StopCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

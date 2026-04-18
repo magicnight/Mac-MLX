@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import MacMLXCore
 
 struct PSCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -38,6 +39,7 @@ struct PSCommand: AsyncParsableCommand {
         } else {
             print("macmlx serve is running")
             print("  PID:     \(record.pid)")
+            print("  Owner:   \(record.owner.rawValue.uppercased())")
             print("  Port:    \(record.port)")
             print("  Model:   \(record.modelID ?? "(none)")")
             print("  Uptime:  \(uptimeStr)")

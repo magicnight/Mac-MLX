@@ -45,6 +45,12 @@ final class ModelLibraryViewModel {
     /// (URLError.cancelled is thrown), wiring up issue #5's Cancel button.
     private var downloadTasks: [String: Task<Void, Never>] = [:]
 
+    /// Model IDs for which an update is available on HF.
+    var modelsWithUpdate: Set<String> = []
+
+    private var lastUpdateCheck: Date?
+    private let updateCheckInterval: TimeInterval = 24 * 60 * 60  // 1 day
+
     // MARK: - Private
 
     // Explicit dependencies rather than a back-reference to AppState —
@@ -124,6 +130,42 @@ final class ModelLibraryViewModel {
             localError = error.localizedDescription
         }
         isLoadingLocal = false
+        // Fire-and-forget HF update check — throttled to once a day
+        // internally so repeated tab visits don't hammer the Hub.
+        checkForModelUpdates()
+    }
+
+    /// Fire in the background if it's been more than a day since the
+    /// last check. No-op otherwise.
+    func checkForModelUpdates() {
+        if let last = lastUpdateCheck,
+           Date().timeIntervalSince(last) < updateCheckInterval {
+            return
+        }
+        lastUpdateCheck = Date()
+        let snapshot = localModels
+        let downloader = self.downloader
+        Task { [weak self] in
+            var withUpdate = Set<String>()
+            await withTaskGroup(of: (String, Bool).self) { group in
+                for model in snapshot {
+                    guard let meta = DownloadedModelMeta.load(from: model.directory) else { continue }
+                    group.addTask {
+                        let status = await downloader.updateStatus(for: meta)
+                        if case .updateAvailable = status {
+                            return (model.id, true)
+                        }
+                        return (model.id, false)
+                    }
+                }
+                while let (id, hasUpdate) = await group.next() {
+                    if hasUpdate { withUpdate.insert(id) }
+                }
+            }
+            await MainActor.run {
+                self?.modelsWithUpdate = withUpdate
+            }
+        }
     }
 
     func loadModel(_ model: LocalModel) async {

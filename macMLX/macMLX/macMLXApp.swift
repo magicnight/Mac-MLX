@@ -13,7 +13,15 @@ import Sparkle
 @main
 struct macMLXApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var appState = AppState()
+    @State private var appState: AppState
+
+    init() {
+        // Redirect MLX library prints into the Logs tab. Must happen
+        // before any MLX code runs — AppState.init creates the engine
+        // immediately, which triggers the first mlx-swift prints.
+        StdoutCapture.install()
+        _appState = State(initialValue: AppState())
+    }
 
     var body: some Scene {
         // Identified WindowGroup so the menu bar "Open" button can call
