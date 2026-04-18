@@ -288,6 +288,36 @@ public actor HummingbirdServer {
             return try await server.handleUnloadModel(request: request, context: context)
         }
 
+        // Root + /v1 "discovery" routes. OpenAI-compat clients (Open WebUI,
+        // Cursor custom model, etc.) often probe these before committing
+        // to the real endpoints; returning a tiny JSON body is friendlier
+        // than letting them 404 and show "fetch error".
+        router.get("/") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleRootInfo()
+        }
+        // Hummingbird normalises trailing slashes, so `/v1` and `/v1/`
+        // resolve to the same route — registering both throws at
+        // runtime ("GET already has a handler"). A single registration
+        // covers both shapes.
+        router.get("/v1") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleRootInfo()
+        }
+
+        // Health-check alias. Many clients probe /v1/health rather than
+        // the bare /health we already expose.
+        router.get("/v1/health") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleHealth()
+        }
+
+        // Status alias under /v1 for clients that don't know about /x/.
+        router.get("/v1/status") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleStatus()
+        }
+
         return router
     }
 
@@ -295,6 +325,23 @@ public actor HummingbirdServer {
 
     private func handleHealth() throws -> Response {
         return try jsonResponse(["status": "ok"])
+    }
+
+    /// Minimal discovery payload. Returned at `/`, `/v1`, `/v1/` so
+    /// OpenAI-compat clients that probe the root don't see a bare 404.
+    private func handleRootInfo() throws -> Response {
+        return try jsonResponseAny([
+            "object": "api",
+            "name": "macMLX",
+            "version": "0.3.6",
+            "openai_compatible": true,
+            "endpoints": [
+                "/v1/models",
+                "/v1/chat/completions",
+                "/v1/health",
+                "/v1/status"
+            ]
+        ])
     }
 
     private func handleModels() async throws -> Response {
@@ -729,13 +776,21 @@ private struct RequestLoggingMiddleware: RouterMiddleware {
             "→ \(method) \(path)",
             category: .http
         )
-        let response = try await next(request, context)
-        if response.status == .notFound {
+        do {
+            let response = try await next(request, context)
+            if response.status == .notFound {
+                await LogManager.shared.warning(
+                    "404 \(method) \(path) — unhandled route",
+                    category: .http
+                )
+            }
+            return response
+        } catch let httpError as HTTPError where httpError.status == .notFound {
             await LogManager.shared.warning(
-                "404 \(method) \(path) — unhandled route",
+                "404 \(method) \(path) — unhandled route (thrown)",
                 category: .http
             )
+            throw httpError
         }
-        return response
     }
 }
