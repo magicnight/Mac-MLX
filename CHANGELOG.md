@@ -13,6 +13,111 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.6] - 2026-04-18
+
+Bug-fix and UX-polish release covering thirteen user-reported issues
+across the Models, Chat, and Logs surfaces. No schema changes.
+
+### Added
+- **Collapsible `<think>` renderer** in the Chat view. Qwen3,
+  DeepSeek-R1 and Gemma-style reasoning blocks now render as a
+  default-expanded disclosure with a small braille spinner while
+  streaming and an italic secondary-color body when finished. Click
+  the chevron to collapse; re-click to expand. Handles the Qwen3
+  implicit-opener case where the chat template injects `<think>` in
+  the prompt and only `</think>answer` shows up in the stream.
+- **Model size badge** on Hugging Face search results. Shows a
+  hard-drive glyph + size (e.g. `4.5 GB`) once the sibling-enrichment
+  fetch resolves. Sizes that the Hub leaves `null` (LFS-backed
+  weights) fall back to HEAD against `/{id}/resolve/main/{file}`
+  and prefer `x-linked-size` over `content-length`.
+- **Persistent HF size cache** at `~/.mac-mlx/hf-cache/sizes.json`
+  with a 7-day TTL. Re-searching for a model you've already seen
+  surfaces its size instantly instead of re-hitting the Hub.
+- **Copy-model-name button** next to the model switcher in the Chat
+  toolbar. Keyboard shortcut ⇧⌘C. Useful when pasting the ID into
+  Cursor / Continue / Open WebUI configs.
+- **Generate() diagnostic logging** under the `inference` category —
+  starts / chunk count / token count / errors. A user reporting
+  "no output" can inspect the Logs tab and see whether the stream
+  yielded zero chunks, threw mid-stream, or completed empty.
+- **Empty-output fallback message** in the assistant bubble when the
+  stream completes with zero chunks and empty content — the user
+  sees `[No output — model returned zero tokens…]` instead of an
+  ambiguous blank bubble.
+- **Friendly Gemma 4 MoE error** at model-load time. Loading a
+  `gemma-4-*-a4b-*` Mixture-of-Experts checkpoint previously threw
+  a cryptic `Unhandled keys [experts, router, …]` error; now a
+  preflight inspects `config.json` and surfaces an explicit message
+  pointing at [mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219)
+  with a hint to use dense E2B / E4B variants until the upstream
+  port lands.
+
+### Changed
+- **HF download state survives tab switches.** `ModelLibraryViewModel`
+  lives on `AppState` (same pattern `ChatViewModel` uses) so switching
+  from Models to Chat mid-download no longer resets the progress bar.
+- **Smoother speed + ETA display.** `SpeedSampler` throttles EMA
+  updates to ≈2 Hz and lowers the smoothing factor (alpha 0.3 → 0.15),
+  eliminating the multi-Hz digit flicker.
+- **Stricter HF search matching.** Typing `gemma-4` no longer returns
+  gemma-3 / gemma-2 results. We post-filter the Hub response so every
+  whitespace/hyphen-split query token must appear in the repo name
+  (org prefix excluded).
+- **Bottom-anchored sparse chat.** Short conversations sit above the
+  input box like every other chat app instead of cramming the top.
+- **Vertically-centered input cursor.** Replaced the multi-line
+  `TextEditor` (cursor anchored top) with `TextField(axis: .vertical)`,
+  which keeps the cursor on the single-line baseline and auto-grows
+  up to five lines. macOS 14+ API.
+- **Switching models auto-creates a new chat.** Prevents the new model
+  from inheriting tokens produced by the previous model's chat
+  template. The old conversation is preserved in the sidebar.
+- **Conversation sidebar rebuilt.** Hand-built scroll + tap rows
+  replace `List(selection:)` — macOS SwiftUI's selection binding
+  silently swallowed right-click Delete actions on the currently
+  selected row. New implementation uses plain views with
+  `.onTapGesture` + `.contextMenu`, and deletes immediately instead
+  of presenting a confirmation dialog (matches Mail / iMessage).
+- **HF tab layout.** Eliminated the blank strip between the toolbar
+  and the results list.
+- **Pulse log store capped at 100 MB.** `LogManager` owns its own
+  `LoggerStore` with an explicit `sizeLimit = 100 MB` — Pulse
+  auto-evicts oldest entries once the cap is reached.
+- **Initial library scan after bootstrap.** Users who skip the
+  onboarding wizard now see their existing downloaded models in
+  the Models tab on first open without having to toggle anything
+  in Settings.
+
+### Fixed
+- Conversation delete context menu is honoured regardless of whether
+  the row is currently selected.
+- `<think>` blocks that contain the entire response no longer hide
+  the content behind a collapsed disclosure — blocks default to
+  expanded.
+
+### Notes
+- **Gemma 4 MoE not runnable.** Confirmed upstream gap
+  ([ml-explore/mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219)).
+  Dense E2B / E4B variants work fine.
+- **Raw MLX stdout capture** (so library-level prints land in the
+  Logs tab) is v0.3.7 — needs file-descriptor redirection at launch.
+- **Model-update detection** (warn when a downloaded model has been
+  updated on the Hub) is also v0.3.7.
+
+### Tests
+- New `SpeedSamplerTests` (4 cases) — throttle window, EMA lag on
+  rate jump, convergence, negative-bytes guard.
+- New `MessageSegmentTests` (9 cases) — balanced tags, streaming
+  open, Qwen3 implicit opener, multiple blocks, edge cases.
+- New `MLXSwiftEnginePreflightTests` (5 cases) — Gemma 4 MoE
+  detection, dense-Gemma not flagged, Mixtral not flagged,
+  nested `text_config`, missing config.
+- HFDownloader gets one declared-sizes test; HEAD-fallback path
+  verified at runtime (MockURLProtocol hangs on HEAD requests).
+
+---
+
 ## [0.3.5] - 2026-04-17
 
 CLI TUI refresh: the three dashboards (`macmlx pull` / `macmlx serve`
