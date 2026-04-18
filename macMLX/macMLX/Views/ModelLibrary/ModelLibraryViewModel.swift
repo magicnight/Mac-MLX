@@ -48,6 +48,11 @@ final class ModelLibraryViewModel {
     /// Model IDs for which an update is available on HF.
     var modelsWithUpdate: Set<String> = []
 
+    /// Model IDs the user has pinned — ModelPool won't LRU-evict these.
+    /// v0.4 MVP: in-memory only, reset on app launch. Disk persistence
+    /// is deferred per the plan's "Out of scope" section.
+    var pinnedModelIDs: Set<String> = []
+
     private var lastUpdateCheck: Date?
     private let updateCheckInterval: TimeInterval = 24 * 60 * 60  // 1 day
 
@@ -176,6 +181,19 @@ final class ModelLibraryViewModel {
 
     func unloadModel() async {
         await coordinator.unload()
+    }
+
+    /// Flip pin state for a single model. Propagates to the pool so the
+    /// LRU sweeper respects the new state immediately, then updates the
+    /// observable `pinnedModelIDs` so the SwiftUI row re-renders.
+    func togglePin(_ model: LocalModel) async {
+        let nowPinned = !pinnedModelIDs.contains(model.id)
+        await coordinator.setPinned(model.id, nowPinned)
+        if nowPinned {
+            pinnedModelIDs.insert(model.id)
+        } else {
+            pinnedModelIDs.remove(model.id)
+        }
     }
 
     func deleteModel(_ model: LocalModel) {

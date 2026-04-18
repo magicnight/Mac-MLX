@@ -9,9 +9,11 @@ struct LocalModelRow: View {
     let model: LocalModel
     let isLoaded: Bool
     let isLoading: Bool
+    let isPinned: Bool
     let hasUpdateAvailable: Bool
     let onLoad: () -> Void
     let onUnload: () -> Void
+    let onTogglePin: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -75,6 +77,13 @@ struct LocalModelRow: View {
                     .controlSize(.small)
             }
 
+            Button(action: onTogglePin) {
+                Image(systemName: isPinned ? "pin.fill" : "pin")
+                    .foregroundStyle(isPinned ? .orange : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(isPinned ? "Pinned — won't auto-evict" : "Pin to keep resident")
+
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")
             }
@@ -102,18 +111,22 @@ struct LocalModelRow: View {
             model: model,
             isLoaded: true,
             isLoading: false,
+            isPinned: true,
             hasUpdateAvailable: false,
             onLoad: {},
             onUnload: {},
+            onTogglePin: {},
             onDelete: {}
         )
         LocalModelRow(
             model: model,
             isLoaded: false,
             isLoading: false,
+            isPinned: false,
             hasUpdateAvailable: true,
             onLoad: {},
             onUnload: {},
+            onTogglePin: {},
             onDelete: {}
         )
     }

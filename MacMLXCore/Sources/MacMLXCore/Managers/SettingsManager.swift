@@ -62,6 +62,13 @@ public struct Settings: Codable, Equatable, Sendable {
     /// enforcement lands in v0.4.0.1.
     public var kvCacheColdGB: Int
 
+    /// ModelPool byte budget, expressed in gigabytes (Apple's 10^9 GB
+    /// convention). When resident models' summed estimated footprint
+    /// exceeds this, the pool LRU-evicts non-pinned entries. Default
+    /// is 50% of the machine's physical RAM, clamped to a 4 GB floor
+    /// for small-memory Macs.
+    public var maxResidentMemoryGB: Int
+
     // MARK: Factory
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
@@ -81,7 +88,8 @@ public struct Settings: Codable, Equatable, Sendable {
         logRetentionDays: 7,
         hfEndpoint: "https://huggingface.co",
         kvCacheHotMB: 512,
-        kvCacheColdGB: 20
+        kvCacheColdGB: 20,
+        maxResidentMemoryGB: max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
     )
 
     // MARK: Init
@@ -99,7 +107,8 @@ public struct Settings: Codable, Equatable, Sendable {
         logRetentionDays: Int,
         hfEndpoint: String = "https://huggingface.co",
         kvCacheHotMB: Int = 512,
-        kvCacheColdGB: Int = 20
+        kvCacheColdGB: Int = 20,
+        maxResidentMemoryGB: Int = max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
     ) {
         self.modelDirectory = modelDirectory
         self.preferredEngine = preferredEngine
@@ -114,6 +123,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.hfEndpoint = hfEndpoint
         self.kvCacheHotMB = kvCacheHotMB
         self.kvCacheColdGB = kvCacheColdGB
+        self.maxResidentMemoryGB = maxResidentMemoryGB
     }
 
     // MARK: - Codable (backward-compat decode)
@@ -135,6 +145,7 @@ public struct Settings: Codable, Equatable, Sendable {
         case hfEndpoint
         case kvCacheHotMB
         case kvCacheColdGB
+        case maxResidentMemoryGB
     }
 
     public init(from decoder: Decoder) throws {
@@ -153,6 +164,9 @@ public struct Settings: Codable, Equatable, Sendable {
             ?? "https://huggingface.co"
         self.kvCacheHotMB = try c.decodeIfPresent(Int.self, forKey: .kvCacheHotMB) ?? 512
         self.kvCacheColdGB = try c.decodeIfPresent(Int.self, forKey: .kvCacheColdGB) ?? 20
+        self.maxResidentMemoryGB =
+            (try c.decodeIfPresent(Int.self, forKey: .maxResidentMemoryGB))
+            ?? max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
     }
 }
 

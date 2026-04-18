@@ -160,12 +160,16 @@ private struct ModelLibraryContent: View {
                             model: model,
                             isLoaded: viewModel.loadedModelID == model.id,
                             isLoading: viewModel.loadingModelID == model.id,
+                            isPinned: viewModel.pinnedModelIDs.contains(model.id),
                             hasUpdateAvailable: viewModel.modelsWithUpdate.contains(model.id),
                             onLoad: {
                                 Task { await viewModel.loadModel(model) }
                             },
                             onUnload: {
                                 Task { await viewModel.unloadModel() }
+                            },
+                            onTogglePin: {
+                                Task { await viewModel.togglePin(model) }
                             },
                             onDelete: {
                                 viewModel.deleteModel(model)
