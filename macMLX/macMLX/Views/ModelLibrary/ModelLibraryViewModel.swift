@@ -118,6 +118,26 @@ final class ModelLibraryViewModel {
         coordinator.currentModel?.id
     }
 
+    // MARK: - Search matching
+
+    /// HF's `?search=` endpoint does fuzzy prefix matching — "gemma-4"
+    /// returns gemma-3 and gemma-2. We post-filter so every token the
+    /// user typed must appear in the repo name (not the org prefix).
+    /// Tokens split on non-alphanumerics, so `gemma-4` → ["gemma", "4"],
+    /// `qwen3 8b` → ["qwen3", "8b"].
+    private static func tokenize(_ query: String) -> [String] {
+        query
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map { $0.lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func matches(_ model: HFModel, tokens: [String]) -> Bool {
+        guard !tokens.isEmpty else { return true }
+        let name = (model.id.split(separator: "/").last.map(String.init) ?? model.id).lowercased()
+        return tokens.allSatisfy { name.contains($0) }
+    }
+
     // MARK: - HF Search
 
     func searchHF() {
@@ -133,7 +153,8 @@ final class ModelLibraryViewModel {
             do {
                 let results = try await downloader.search(query: query, limit: 20)
                 guard !Task.isCancelled else { return }
-                hfModels = results
+                let tokens = Self.tokenize(query)
+                hfModels = results.filter { Self.matches($0, tokens: tokens) }
             } catch {
                 guard !Task.isCancelled else { return }
                 hfError = error.localizedDescription
