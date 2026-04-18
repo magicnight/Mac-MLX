@@ -1,33 +1,67 @@
 import Foundation
 
-/// Coordinates between `macmlx serve` and `macmlx stop`/`macmlx ps` via a
-/// JSON file at `~/.mac-mlx/macmlx.pid`.
+/// Coordinates server discovery between the GUI (`macMLX.app`) and
+/// CLI (`macmlx`) — both write to `~/.mac-mlx/macmlx.pid` so either
+/// side can tell whether the other is already serving on port 8000.
 ///
-/// The PID file stores the process ID, port, optional loaded model ID, and
-/// start time. It is written by `serve` on startup and removed on clean exit.
+/// `Record.owner` distinguishes the two: GUI sets `.gui`, CLI sets
+/// `.cli`. `macmlx ps` renders the owner; `macmlx serve` refuses to
+/// start when a record whose PID is still alive is found.
 ///
-/// NOTE: Race conditions between concurrent `serve` invocations are not
-/// handled in v0.1 — the last writer wins. Document and skip.
+/// Backward compat: pre-v0.3.7 PID files lacked the `owner` key and
+/// were always written by the CLI. Decoding defaults missing `owner`
+/// to `.cli` so upgrading in place doesn't require manually deleting
+/// the pid file.
 public enum PIDFile {
     /// Persistent record stored in the PID file.
     public struct Record: Codable, Sendable {
+        /// Which process wrote this record — used by `macmlx serve`
+        /// to name the conflicting owner in its error message, and
+        /// by `macmlx ps` to show the user which side is serving.
+        public enum Owner: String, Codable, Sendable {
+            case gui
+            case cli
+        }
+
         public var pid: Int32
         public var port: Int
         public var modelID: String?
         public var startedAt: Date
+        public var owner: Owner
 
-        public init(pid: Int32, port: Int, modelID: String?, startedAt: Date) {
+        public init(
+            pid: Int32,
+            port: Int,
+            modelID: String?,
+            startedAt: Date,
+            owner: Owner
+        ) {
             self.pid = pid
             self.port = port
             self.modelID = modelID
             self.startedAt = startedAt
+            self.owner = owner
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case pid, port, modelID, startedAt, owner
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.pid = try c.decode(Int32.self, forKey: .pid)
+            self.port = try c.decode(Int.self, forKey: .port)
+            self.modelID = try c.decodeIfPresent(String.self, forKey: .modelID)
+            self.startedAt = try c.decode(Date.self, forKey: .startedAt)
+            self.owner = (try c.decodeIfPresent(Owner.self, forKey: .owner)) ?? .cli
         }
     }
 
-    /// URL of the PID file: `~/.mac-mlx/macmlx.pid`.
+    /// URL of the PID file. Uses `DataRoot.macMLX` so the GUI (which
+    /// runs without sandbox since v0.3.6) and CLI both resolve to the
+    /// same real-home `~/.mac-mlx/` path.
     public static var url: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".mac-mlx/macmlx.pid")
+        DataRoot.macMLX.appending(path: "macmlx.pid", directoryHint: .notDirectory)
     }
 
     /// Write `record` to the PID file atomically.

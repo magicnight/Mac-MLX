@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import MacMLXCore
 @testable import macmlx
 
 /// Tests for the `macmlx ps` command.
@@ -15,7 +16,8 @@ struct PSCommandTests {
             pid: 12345,
             port: 8000,
             modelID: "Qwen3-8B-4bit",
-            startedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            owner: .cli
         )
 
         let encoder = JSONEncoder()
@@ -39,7 +41,8 @@ struct PSCommandTests {
             pid: 99,
             port: 8001,
             modelID: nil,
-            startedAt: Date()
+            startedAt: Date(),
+            owner: .cli
         )
 
         let encoder = JSONEncoder()
