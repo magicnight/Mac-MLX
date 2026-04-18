@@ -101,31 +101,33 @@ struct ConversationSidebar: View {
     private func conversationRow(_ convo: Conversation) -> some View {
         let isSelected = convo.id == viewModel.currentConversationID
 
-        Button {
-            // Left-click switches to this conversation. `switchTo(_:)`
-            // is a no-op if it's already the current conversation.
-            Task { await viewModel.switchTo(convo.id) }
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(convo.title)
-                    .font(.body)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
-                Text(convo.updatedAt, style: .relative)
-                    .font(.caption2)
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isSelected ? Color.accentColor : Color.clear)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+        VStack(alignment: .leading, spacing: 2) {
+            Text(convo.title)
+                .font(.body)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            Text(convo.updatedAt, style: .relative)
+                .font(.caption2)
+                .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor : Color.clear)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+        // Plain view + gestures — Button + contextMenu on macOS SwiftUI
+        // routes right-click events to the Button's own gesture
+        // recogniser, swallowing contextMenu item actions. Using a plain
+        // view lets macOS's native right-click machinery route Delete
+        // to the contextMenu reliably.
+        .onTapGesture(count: 2) { startRename(convo) }
+        .onTapGesture {
+            Task { await viewModel.switchTo(convo.id) }
+        }
         .contextMenu {
             Button {
                 startRename(convo)
@@ -133,17 +135,10 @@ struct ConversationSidebar: View {
                 Label("Rename…", systemImage: "pencil")
             }
             Button(role: .destructive) {
-                // Delete immediately — users can reopen from backups
-                // on disk if wanted, but removing the confirmation
-                // dialog is the simplest way to guarantee the click
-                // is honoured even when the row is currently selected.
                 Task { await viewModel.deleteConversation(convo.id) }
             } label: {
                 Label("Delete", systemImage: "trash")
             }
-        }
-        .onTapGesture(count: 2) {
-            startRename(convo)
         }
     }
 
