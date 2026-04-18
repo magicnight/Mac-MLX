@@ -21,7 +21,10 @@ struct ServerSection: View {
                     in: 1024...65535,
                     step: 1
                 ) {
-                    Text("\(serverPort)")
+                    // Use `String(...)` not `"\(serverPort)"` — SwiftUI's
+                    // Text localises Int interpolation and inserts a
+                    // thousand separator (8,000 instead of 8000).
+                    Text(String(serverPort))
                         .font(.system(.body, design: .monospaced))
                         .frame(minWidth: 50, alignment: .trailing)
                 }
@@ -33,7 +36,7 @@ struct ServerSection: View {
                 Text("Base URL")
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("http://localhost:\(serverPort)/v1")
+                Text("http://localhost:" + String(serverPort) + "/v1")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
