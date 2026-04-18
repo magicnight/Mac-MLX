@@ -149,18 +149,45 @@ struct ChatMessageView: View {
     /// - `.returnPartiallyParsedIfPossible` remains the right failure
     ///   policy for streaming: a chunk arriving mid-`**bold**` parses
     ///   cleanly as partial bold, no flicker between tokens.
+
+    /// Renders the message with `<think>` blocks broken out into
+    /// collapsible sub-views. User and system messages bypass
+    /// segmentation (they never emit think tags in practice; showing
+    /// one as literal text is fine if a user pastes it).
     @ViewBuilder
     private var renderedContent: some View {
-        let text = messageContent
-        if message.role == .assistant,
-           let attributed = try? AttributedString(
-               markdown: text,
-               options: AttributedString.MarkdownParsingOptions(
-                   allowsExtendedAttributes: false,
-                   interpretedSyntax: .inlineOnlyPreservingWhitespace,
-                   failurePolicy: .returnPartiallyParsedIfPossible
-               )
-           ) {
+        if message.role == .assistant {
+            let segments = MessageSegmenter.parse(messageContent)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                    switch seg {
+                    case .text(let s):
+                        inlineMarkdown(s)
+                    case .think(let s, let isClosed):
+                        ThinkBlockView(
+                            content: s,
+                            isStreaming: !isClosed && message.isGenerating
+                        )
+                    }
+                }
+            }
+        } else {
+            Text(messageContent)
+        }
+    }
+
+    /// Inline Markdown pass, extracted so every assistant text segment
+    /// can reuse it. Same parse options as pre-v0.3.6 behaviour.
+    @ViewBuilder
+    private func inlineMarkdown(_ text: String) -> some View {
+        if let attributed = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                allowsExtendedAttributes: false,
+                interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                failurePolicy: .returnPartiallyParsedIfPossible
+            )
+        ) {
             Text(attributed)
         } else {
             Text(text)
