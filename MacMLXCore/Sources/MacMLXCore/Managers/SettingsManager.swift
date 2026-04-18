@@ -46,6 +46,22 @@ public struct Settings: Codable, Equatable, Sendable {
     /// this at a mirror like "https://hf-mirror.com" (#21).
     public var hfEndpoint: String
 
+    /// Hot prompt-cache capacity in megabytes — in-memory only.
+    ///
+    /// MVP note: `PromptCacheStore`'s `hotCapacity` is an *entry* count,
+    /// not a byte budget. We persist the MB value for forward-compat so
+    /// a byte-accurate budget can land in v0.4.0.1 without a settings
+    /// migration. Today the engine ignores this value and uses the
+    /// default 8-entry cap.
+    public var kvCacheHotMB: Int
+
+    /// Cold prompt-cache disk cap in gigabytes.
+    ///
+    /// MVP note: automatic cold-tier pruning is not yet implemented —
+    /// rely on Settings → "Clear All KV Caches" to reclaim space. Real
+    /// enforcement lands in v0.4.0.1.
+    public var kvCacheColdGB: Int
+
     // MARK: Factory
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
@@ -63,7 +79,9 @@ public struct Settings: Codable, Equatable, Sendable {
         swiftLMPath: nil,
         sparkleUpdateChannel: "release",
         logRetentionDays: 7,
-        hfEndpoint: "https://huggingface.co"
+        hfEndpoint: "https://huggingface.co",
+        kvCacheHotMB: 512,
+        kvCacheColdGB: 20
     )
 
     // MARK: Init
@@ -79,7 +97,9 @@ public struct Settings: Codable, Equatable, Sendable {
         swiftLMPath: String?,
         sparkleUpdateChannel: String,
         logRetentionDays: Int,
-        hfEndpoint: String = "https://huggingface.co"
+        hfEndpoint: String = "https://huggingface.co",
+        kvCacheHotMB: Int = 512,
+        kvCacheColdGB: Int = 20
     ) {
         self.modelDirectory = modelDirectory
         self.preferredEngine = preferredEngine
@@ -92,6 +112,47 @@ public struct Settings: Codable, Equatable, Sendable {
         self.sparkleUpdateChannel = sparkleUpdateChannel
         self.logRetentionDays = logRetentionDays
         self.hfEndpoint = hfEndpoint
+        self.kvCacheHotMB = kvCacheHotMB
+        self.kvCacheColdGB = kvCacheColdGB
+    }
+
+    // MARK: - Codable (backward-compat decode)
+
+    /// Pre-v0.4 settings files don't have `kvCacheHotMB` /
+    /// `kvCacheColdGB` — decode them as optionals and fall back to the
+    /// defaults so existing installs keep working across upgrades.
+    private enum CodingKeys: String, CodingKey {
+        case modelDirectory
+        case preferredEngine
+        case serverPort
+        case autoStartServer
+        case lastLoadedModel
+        case onboardingComplete
+        case pythonPath
+        case swiftLMPath
+        case sparkleUpdateChannel
+        case logRetentionDays
+        case hfEndpoint
+        case kvCacheHotMB
+        case kvCacheColdGB
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.modelDirectory = try c.decode(URL.self, forKey: .modelDirectory)
+        self.preferredEngine = try c.decode(EngineID.self, forKey: .preferredEngine)
+        self.serverPort = try c.decode(Int.self, forKey: .serverPort)
+        self.autoStartServer = try c.decode(Bool.self, forKey: .autoStartServer)
+        self.lastLoadedModel = try c.decodeIfPresent(String.self, forKey: .lastLoadedModel)
+        self.onboardingComplete = try c.decode(Bool.self, forKey: .onboardingComplete)
+        self.pythonPath = try c.decodeIfPresent(String.self, forKey: .pythonPath)
+        self.swiftLMPath = try c.decodeIfPresent(String.self, forKey: .swiftLMPath)
+        self.sparkleUpdateChannel = try c.decode(String.self, forKey: .sparkleUpdateChannel)
+        self.logRetentionDays = try c.decode(Int.self, forKey: .logRetentionDays)
+        self.hfEndpoint = try c.decodeIfPresent(String.self, forKey: .hfEndpoint)
+            ?? "https://huggingface.co"
+        self.kvCacheHotMB = try c.decodeIfPresent(Int.self, forKey: .kvCacheHotMB) ?? 512
+        self.kvCacheColdGB = try c.decodeIfPresent(Int.self, forKey: .kvCacheColdGB) ?? 20
     }
 }
 

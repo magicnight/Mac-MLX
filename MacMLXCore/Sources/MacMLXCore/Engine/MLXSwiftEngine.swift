@@ -1,7 +1,20 @@
 import Foundation
+import MLX
 import MLXLLM
 import MLXLMCommon
 @preconcurrency import Tokenizers
+
+// MARK: - Sendable-box helpers
+
+/// Lightweight unchecked-Sendable wrapper used to pass non-Sendable
+/// mlx-swift-lm values (`LMInput`, `AsyncStream<TokenGeneration>`) across
+/// isolation boundaries when we know the handoff is safe — we `consume`
+/// them into the actor via `ModelContainer.perform(nonSendable:_:)` and
+/// the actor owns them exclusively afterwards.
+private struct NonSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
 
 // MARK: - Tokenizer loader
 
@@ -88,9 +101,18 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     private var modelContainer: ModelContainer?
 
+    /// Two-tier prompt cache (hot dict + cold safetensors sidecar). Used
+    /// by `runGeneration` to reuse KV state across successive turns on
+    /// the same model. See `PromptCacheStore` for the tiering policy.
+    private let promptCacheStore: PromptCacheStore
+
     // MARK: Initialiser
 
-    public init() {}
+    public init() {
+        self.promptCacheStore = PromptCacheStore(
+            root: DataRoot.macMLX("kv-cache")
+        )
+    }
 
     // MARK: InferenceEngine
 
@@ -205,14 +227,39 @@ public actor MLXSwiftEngine: InferenceEngine {
         true
     }
 
+    // MARK: Prompt cache management
+
+    /// Drop both tiers of the prompt cache. Wired up to the Settings
+    /// → "Clear All KV Caches" button via `EngineCoordinator`.
+    public func clearPromptCache() async {
+        await promptCacheStore.clearAll()
+    }
+
     // MARK: Private generation helper
 
     /// Actor-isolated generation driver called from within `generate(_:)`.
+    ///
+    /// Flow:
+    /// 1. Prepare the `LMInput` (tokenisation + chat template application).
+    /// 2. Hash the full input-token sequence into a `PromptCacheKey`.
+    /// 3. Look up a prior cache snapshot in `promptCacheStore`. On hit,
+    ///    reuse its `[KVCache]` so the shared prefix skips prefill. On
+    ///    miss, allocate a fresh cache via `model.newCache(...)`.
+    /// 4. Drive the low-level `generateTokens(input:cache:...)` call so
+    ///    we see raw token IDs and can build the extended key
+    ///    `inputTokens + generatedTokenIDs` after the stream ends.
+    /// 5. The `KVCache` protocol is class-bound — the same reference we
+    ///    passed in is mutated in-place during generation, so at the
+    ///    end we can save that same reference under the extended key.
     private func runGeneration(
         _ request: GenerateRequest,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
         guard let container = modelContainer else {
+            continuation.finish(throwing: EngineError.modelNotLoaded)
+            return
+        }
+        guard let loadedModelSnapshot = loadedModel else {
             continuation.finish(throwing: EngineError.modelNotLoaded)
             return
         }
@@ -261,27 +308,88 @@ public actor MLXSwiftEngine: InferenceEngine {
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
 
-        // Generate and stream chunks.
-        let stream = try await container.generate(input: lmInput, parameters: generateParams)
+        // Flat Int token array for key construction. `LMInput.text.tokens`
+        // is an `MLXArray`; `asArray(Int.self)` materialises to Swift.
+        let inputTokens = lmInput.text.tokens.asArray(Int.self)
+        let modelID = loadedModelSnapshot.id
+        let priorKey = PromptCacheKey(modelID: modelID, tokens: inputTokens)
 
+        // Try the store. On hit we reuse the restored cache; on miss we
+        // let the iterator allocate a fresh one inside `generateTokens`.
+        let priorSnapshot = await promptCacheStore.get(priorKey)
+        let priorCache: [any KVCache]?
+        if let snapshot = priorSnapshot {
+            priorCache = snapshot.caches
+            await LogManager.shared.debug(
+                "Prompt cache HIT — restored \(priorKey.tokenCount) tokens (model=\(modelID))",
+                category: .inference
+            )
+        } else {
+            priorCache = nil
+            await LogManager.shared.debug(
+                "Prompt cache MISS — cold prefill of \(priorKey.tokenCount) tokens (model=\(modelID))",
+                category: .inference
+            )
+        }
+
+        // Build the working cache. When we have a prior snapshot we pass
+        // that reference straight through; otherwise we ask the model to
+        // allocate a fresh `[KVCache]`. We hold onto the same array so we
+        // can save it after generation (KVCache is class-bound, so the
+        // iterator populates our instances in place).
+        //
+        // `KVCache` is not `Sendable`, and `LMInput` is not `Sendable`
+        // either. Route both through the `perform(nonSendable:_:)`
+        // overload on `ModelContainer`, which explicitly accepts a
+        // non-Sendable value by `consuming` it into the actor.
+        let tokenizer = await container.tokenizer
+        let priorCacheBox: PromptCacheSnapshot? = priorCache.map { PromptCacheSnapshot($0) }
+        let inputBox = NonSendableBox(lmInput)
+
+        let setup: (cache: PromptCacheSnapshot, stream: AsyncStream<TokenGeneration>) =
+            try await container.perform(nonSendable: inputBox) { context, inputBox in
+                let cache: [any KVCache] = priorCacheBox?.caches
+                    ?? context.model.newCache(parameters: generateParams)
+                let stream = try MLXLMCommon.generateTokens(
+                    input: inputBox.value,
+                    cache: cache,
+                    parameters: generateParams,
+                    context: context
+                )
+                return (PromptCacheSnapshot(cache), stream)
+            }
+        let workingCache = setup.cache.caches
+        let stream = setup.stream
+
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        var generatedTokenIDs: [Int] = []
         var completionInfo: GenerateCompletionInfo?
 
-        for await generation in stream {
-            switch generation {
-            case .chunk(let text):
-                let chunk = GenerateChunk(text: text)
-                if case .terminated = continuation.yield(chunk) {
-                    return
+        for await event in stream {
+            switch event {
+            case .token(let token):
+                generatedTokenIDs.append(token)
+                detokenizer.append(token: token)
+                if let piece = detokenizer.next() {
+                    let chunk = GenerateChunk(text: piece)
+                    if case .terminated = continuation.yield(chunk) {
+                        return
+                    }
                 }
             case .info(let info):
                 completionInfo = info
-            case .toolCall:
-                // Tool calls not supported yet — out of scope through v0.3.
-                // Re-visit when there's a concrete tool-use feature to
-                // wire into (e.g. OpenAI-compatible function-calling).
-                break
             }
         }
+
+        // Save the post-generation cache under the extended key. The
+        // same `workingCache` reference has been mutated in-place by the
+        // iterator, so it now reflects prompt + generated tokens.
+        let finalTokens = inputTokens + generatedTokenIDs
+        let newKey = PromptCacheKey(modelID: modelID, tokens: finalTokens)
+        await promptCacheStore.put(
+            key: newKey,
+            snapshot: PromptCacheSnapshot(workingCache)
+        )
 
         // Emit the final chunk with usage + finish reason.
         if let info = completionInfo {

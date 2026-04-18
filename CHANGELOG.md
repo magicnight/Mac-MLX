@@ -9,7 +9,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-(nothing yet)
+### Added
+- **Prompt cache tiering** (v0.4.0 engine parity, part 1 of 3).
+  Successive chat turns on the same model now reuse the KV cache
+  when the new prompt extends the previous one — the shared prefix
+  skips prefill. In-memory hot tier (LRU, 8 entries in MVP) backed
+  by on-disk cold tier at `~/.mac-mlx/kv-cache/`, 16-way sharded
+  safetensors round-tripped through mlx-swift-lm's `savePromptCache`
+  / `loadPromptCache`. Coding-assistant workflows (Claude Code,
+  Cursor, Zed re-sending conversation history each turn) see
+  reduced time-to-first-token on repeat prefixes.
+- Settings → "KV Cache" section with hot/cold budget steppers and
+  a "Clear All KV Caches" button. Steppers currently inform future
+  byte-accurate budgeting (v0.4.0.1) — today's enforcement is the
+  8-entry hot LRU cap plus manual Clear.
+- Debug-level Logs tab entries `Prompt cache HIT — restored N
+  tokens` / `Prompt cache MISS — cold prefill of N tokens` under
+  the `engine` category, so you can see cache effectiveness.
 
 ---
 
