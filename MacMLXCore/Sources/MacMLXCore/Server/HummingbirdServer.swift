@@ -428,14 +428,20 @@ public actor HummingbirdServer {
             )
         }
 
-        // Map messages, dropping unknown roles.
+        // Extract system prompt from the first system message. This also
+        // removes it from the downstream messages array — GenerateRequest
+        // re-prepends the systemPrompt via its allMessages computed
+        // property, so leaving it in both places produces a duplicate
+        // system turn, which Qwen3 / Gemma / other strict Jinja chat
+        // templates reject with a TemplateException.
+        let systemPrompt = chatReq.messages.first(where: { $0.role == "system" })?.content
+
+        // Map the rest (user / assistant), dropping unknown roles and
+        // the now-separated system turns.
         let messages: [ChatMessage] = chatReq.messages.compactMap { msg in
-            guard let role = MessageRole(rawValue: msg.role) else { return nil }
+            guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
             return ChatMessage(role: role, content: msg.content)
         }
-
-        // Extract system prompt from the first system message.
-        let systemPrompt = chatReq.messages.first(where: { $0.role == "system" })?.content
 
         let params = GenerationParameters(
             temperature: chatReq.temperature ?? 0.7,
