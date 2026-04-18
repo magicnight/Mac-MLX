@@ -160,6 +160,7 @@ private struct ModelLibraryContent: View {
                             model: model,
                             isLoaded: viewModel.loadedModelID == model.id,
                             isLoading: viewModel.loadingModelID == model.id,
+                            hasUpdateAvailable: viewModel.modelsWithUpdate.contains(model.id),
                             onLoad: {
                                 Task { await viewModel.loadModel(model) }
                             },

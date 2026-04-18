@@ -344,6 +344,52 @@ public actor HFDownloader {
         }
     }
 
+    /// Fetch files + commit metadata in a single Hub request.
+    /// Used by `download(...)` to write the `.macmlx-meta.json`
+    /// sidecar without a second round-trip.
+    public func downloadMeta(for modelID: String) async throws -> (
+        files: [HFRemoteFile],
+        sha: String?,
+        lastModified: Date?
+    ) {
+        let url = baseURL.appending(path: "api/models/\(modelID)")
+        let data = try await fetchData(from: url)
+        let envelope = try JSONDecoder.huggingFace.decode(ModelDetailsEnvelope.self, from: data)
+        let files = envelope.siblings.map { HFRemoteFile(path: $0.rfilename, size: $0.size, lfs: false) }
+        return (files, envelope.sha, envelope.lastModified)
+    }
+
+    /// Snapshot of how a local download compares to the Hub's current
+    /// head.
+    public enum UpdateStatus: Sendable, Equatable {
+        case upToDate
+        case updateAvailable(commitSHA: String?, lastModified: Date?)
+        case unknown
+    }
+
+    public func updateStatus(for meta: DownloadedModelMeta) async -> UpdateStatus {
+        do {
+            let url = baseURL.appending(path: "api/models/\(meta.modelID)")
+            let data = try await fetchData(from: url)
+            let envelope = try JSONDecoder.huggingFace.decode(
+                ModelDetailsEnvelope.self, from: data
+            )
+            if let localSHA = meta.commitSHA, let remoteSHA = envelope.sha {
+                return localSHA == remoteSHA
+                    ? .upToDate
+                    : .updateAvailable(commitSHA: remoteSHA, lastModified: envelope.lastModified)
+            }
+            if let localTime = meta.lastModifiedAtDownload, let remoteTime = envelope.lastModified {
+                return remoteTime > localTime
+                    ? .updateAvailable(commitSHA: envelope.sha, lastModified: remoteTime)
+                    : .upToDate
+            }
+            return .unknown
+        } catch {
+            return .unknown
+        }
+    }
+
     /// Total size of all files in the model repo, in bytes.
     ///
     /// HF's `/api/models/{id}` endpoint omits `size` for LFS-backed
@@ -461,7 +507,7 @@ public actor HFDownloader {
 
         try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
-        let remoteFiles = try await files(for: modelID)
+        let (remoteFiles, remoteSHA, remoteLastModified) = try await downloadMeta(for: modelID)
         let fileCount = remoteFiles.count
         guard fileCount > 0 else { return modelDir }
 
@@ -608,6 +654,18 @@ public actor HFDownloader {
                 currentFileTotalBytes: 0
             ))
         }
+
+        // Persist the sidecar so a later `updateStatus(for:)` call can
+        // compare the Hub's head against what we snapshotted at download
+        // time. Best-effort: a write failure shouldn't fail the download
+        // itself — the user just won't get an "Update available" badge
+        // for this model until they re-download.
+        let meta = DownloadedModelMeta(
+            modelID: modelID,
+            commitSHA: remoteSHA,
+            lastModifiedAtDownload: remoteLastModified
+        )
+        try? meta.save(to: modelDir)
 
         // All files complete — clear any leftover record (covers the edge
         // case where user cancelled file 2, then later resumed and
@@ -968,6 +1026,8 @@ internal final class DownloadSessionRouter: NSObject,
 
 private struct ModelDetailsEnvelope: Decodable {
     let siblings: [SiblingEntry]
+    let sha: String?
+    let lastModified: Date?
 
     struct SiblingEntry: Decodable {
         let rfilename: String
