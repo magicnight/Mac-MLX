@@ -227,6 +227,14 @@ public actor MLXSwiftEngine: InferenceEngine {
         true
     }
 
+    // MARK: Prompt cache management
+
+    /// Drop both tiers of the prompt cache. Wired up to the Settings
+    /// → "Clear All KV Caches" button via `EngineCoordinator`.
+    public func clearPromptCache() async {
+        await promptCacheStore.clearAll()
+    }
+
     // MARK: Private generation helper
 
     /// Actor-isolated generation driver called from within `generate(_:)`.

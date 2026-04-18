@@ -56,6 +56,22 @@ public actor PromptCacheStore {
         order.append(key)
     }
 
+    /// Blow away both tiers. Hot dict is cleared, the cold-tier
+    /// directory is removed wholesale and re-created empty. Invoked
+    /// from the Settings → "Clear All KV Caches" button via
+    /// `MLXSwiftEngine.clearPromptCache()` and
+    /// `EngineCoordinator.clearPromptCache()`.
+    public func clearAll() {
+        hot.removeAll()
+        order.removeAll()
+        let root = self.root
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+    }
+
     /// Return a cache snapshot, preferring the hot tier. On cold-hit,
     /// promote into hot (possibly evicting another entry).
     public func get(_ key: PromptCacheKey) -> PromptCacheSnapshot? {

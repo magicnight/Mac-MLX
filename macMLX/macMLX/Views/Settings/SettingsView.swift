@@ -18,6 +18,8 @@ struct SettingsView: View {
     @State private var serverPort: Int = 8000
     @State private var autoStartServer: Bool = false
     @State private var hfEndpoint: String = "https://huggingface.co"
+    @State private var kvCacheHotMB: Int = 512
+    @State private var kvCacheColdGB: Int = 20
 
     var body: some View {
         Form {
@@ -47,6 +49,22 @@ struct SettingsView: View {
                         await appState.stopServer()
                     }
                 }
+            }
+
+            KVCacheSection(
+                hotMB: $kvCacheHotMB,
+                coldGB: $kvCacheColdGB,
+                onClearCache: {
+                    Task {
+                        await appState.coordinator.clearPromptCache()
+                    }
+                }
+            )
+            .onChange(of: kvCacheHotMB) { _, newValue in
+                Task { await appState.updateSettings { $0.kvCacheHotMB = newValue } }
+            }
+            .onChange(of: kvCacheColdGB) { _, newValue in
+                Task { await appState.updateSettings { $0.kvCacheColdGB = newValue } }
             }
 
             downloadsSection
@@ -151,6 +169,8 @@ struct SettingsView: View {
         serverPort = s.serverPort
         autoStartServer = s.autoStartServer
         hfEndpoint = s.hfEndpoint
+        kvCacheHotMB = s.kvCacheHotMB
+        kvCacheColdGB = s.kvCacheColdGB
     }
 
     private func showModelDirectoryPicker() {

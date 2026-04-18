@@ -116,6 +116,19 @@ public final class EngineCoordinator {
         }
     }
 
+    /// Blow away the prompt cache — both hot and cold tiers. Exposed
+    /// to Settings' "Clear All KV Caches" button.
+    ///
+    /// Today only the in-process `MLXSwiftEngine` carries a prompt
+    /// cache; the SwiftLM / Python-MLX detection-only stubs don't, so
+    /// downcasting and no-op-on-mismatch is the right shape. When
+    /// another engine grows a cache this will move onto the
+    /// `InferenceEngine` protocol.
+    public func clearPromptCache() async {
+        guard let engine = engine as? MLXSwiftEngine else { return }
+        await engine.clearPromptCache()
+    }
+
     /// Release the loaded model.
     public func unload() async {
         guard let engine else { return }
