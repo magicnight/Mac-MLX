@@ -34,6 +34,27 @@ struct ConversationSidebar: View {
         }
         .frame(minWidth: 200, idealWidth: 240)
         .background(Color(.windowBackgroundColor))
+        // Attached to the root VStack (not to the List inside `list`)
+        // so the modifier survives List rebuilds triggered by
+        // selection changes + conversations re-sort on updatedAt. Fixes
+        // the "left-click then right-click delete swallowed" bug.
+        .confirmationDialog(
+            "Delete this conversation?",
+            isPresented: Binding(
+                get: { deletingID != nil },
+                set: { if !$0 { deletingID = nil } }
+            ),
+            presenting: deletingID
+        ) { id in
+            Button("Delete", role: .destructive) {
+                Task {
+                    await viewModel.deleteConversation(id)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Chat history will be permanently removed.")
+        }
     }
 
     // MARK: - Header
@@ -82,23 +103,6 @@ struct ConversationSidebar: View {
                 }
             }
             .listStyle(.sidebar)
-            .confirmationDialog(
-                "Delete this conversation?",
-                isPresented: Binding(
-                    get: { deletingID != nil },
-                    set: { if !$0 { deletingID = nil } }
-                ),
-                presenting: deletingID
-            ) { id in
-                Button("Delete", role: .destructive) {
-                    Task {
-                        await viewModel.deleteConversation(id)
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: { _ in
-                Text("Chat history will be permanently removed.")
-            }
         }
     }
 
