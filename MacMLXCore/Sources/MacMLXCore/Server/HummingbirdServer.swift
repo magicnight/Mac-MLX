@@ -276,6 +276,27 @@ public actor HummingbirdServer {
             return try await server.handleChatCompletions(request: request, context: context)
         }
 
+        // POST /v1 alias — some OpenAI-compat clients ("Custom API"
+        // configs in older front-ends, LM-Studio-style probes, etc.)
+        // POST their full chat payload straight to the base URL root
+        // rather than /v1/chat/completions. Route them through the
+        // same handler. Covers `POST /v1`, `POST /`, and the legacy
+        // `/v1/completions` text-completion path (we serve the same
+        // chat-format response — sufficient for "did this model work?"
+        // connectivity tests).
+        router.post("/v1") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleChatCompletions(request: request, context: context)
+        }
+        router.post("/") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleChatCompletions(request: request, context: context)
+        }
+        router.post("/v1/completions") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleChatCompletions(request: request, context: context)
+        }
+
         // POST /x/models/load
         router.post("/x/models/load") { request, context -> Response in
             await server.incrementRequest()
