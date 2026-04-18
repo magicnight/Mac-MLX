@@ -333,7 +333,13 @@ final class ChatViewModel {
     /// append a placeholder assistant message, stream tokens into it,
     /// and persist when done. Shared by `send()` and `regenerate(from:)`.
     private func generate() async {
-        guard let currentModel = coordinator.currentModel else { return }
+        guard let currentModel = coordinator.currentModel else {
+            await LogManager.shared.warning(
+                "generate() aborted: no currentModel on coordinator",
+                category: .inference
+            )
+            return
+        }
 
         isGenerating = true
 
@@ -349,6 +355,11 @@ final class ChatViewModel {
             parameters: params.asGenerationParameters()
         )
 
+        await LogManager.shared.info(
+            "Starting generation for \(currentModel.id) (messages=\(coreMessages.count), maxTokens=\(params.maxTokens))",
+            category: .inference
+        )
+
         let assistantMsg = UIChatMessage(role: .assistant, content: "", isGenerating: true)
         messages.append(assistantMsg)
         let assistantIdx = messages.count - 1
@@ -356,20 +367,39 @@ final class ChatViewModel {
         generationTask = Task { [weak self] in
             guard let self else { return }
             let stream = self.coordinator.generate(request)
+            var chunkCount = 0
+            var totalChars = 0
             do {
                 for try await chunk in stream {
                     guard !Task.isCancelled else { break }
+                    chunkCount += 1
+                    totalChars += chunk.text.count
                     self.messages[assistantIdx].content += chunk.text
                     if let usage = chunk.usage {
                         self.messages[assistantIdx].tokenCount = usage.completionTokens
                     }
                 }
+                await LogManager.shared.info(
+                    "Generation finished: chunks=\(chunkCount), chars=\(totalChars), tokens=\(self.messages[assistantIdx].tokenCount ?? 0)",
+                    category: .inference
+                )
             } catch {
+                await LogManager.shared.error(
+                    "Generation failed after \(chunkCount) chunks: \(error.localizedDescription)",
+                    category: .inference
+                )
                 self.messages[assistantIdx].content += "\n[Error: \(error.localizedDescription)]"
             }
             self.messages[assistantIdx].isGenerating = false
             self.isGenerating = false
             self.persist()
+
+            // Visible fallback when the stream truly produced nothing.
+            // Otherwise the user sees an empty bubble with no feedback —
+            // ambiguous between "pending" and "completed-with-zero-output".
+            if chunkCount == 0 && self.messages[assistantIdx].content.isEmpty {
+                self.messages[assistantIdx].content = "[No output — model returned zero tokens. Check Logs tab for details.]"
+            }
         }
         await generationTask?.value
     }
