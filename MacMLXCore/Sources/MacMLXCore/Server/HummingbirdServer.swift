@@ -665,9 +665,13 @@ public actor HummingbirdServer {
             }
         }
 
-        // For v0.3.6 we only implement non-streaming Ollama chat. Most
-        // probe-style clients use stream=false. A streaming impl would
-        // need NDJSON chunking rather than SSE.
+        // Ollama defaults stream=true when omitted (opposite of OpenAI).
+        // Zed, Immersive Translate, and most Ollama CLIs expect NDJSON
+        // streaming unless they explicitly opt out.
+        let wantsStream = req.stream ?? true
+        if wantsStream {
+            return try await streamingOllamaChatResponse(model: req.model, genRequest: genRequest)
+        }
         return try await nonStreamingOllamaChatResponse(model: req.model, genRequest: genRequest)
     }
 
@@ -688,6 +692,77 @@ public actor HummingbirdServer {
             ] as [String: Any],
             "done": true
         ])
+    }
+
+    /// Streaming Ollama /api/chat — NDJSON (one JSON object per line,
+    /// newline-delimited). Each line contains a partial assistant
+    /// message; final line has `done:true`. This is the default when
+    /// an Ollama-compat client doesn't explicitly set `stream:false`,
+    /// so covers Zed, Immersive Translate, Ollama CLI, and most other
+    /// Ollama-speaking tools.
+    private func streamingOllamaChatResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
+        let stream = await engine.generate(genRequest)
+        let startedAt = Date()
+        let server = self
+
+        let responseBody = ResponseBody { writer in
+            var chunkCount = 0
+            do {
+                for try await chunk in stream {
+                    chunkCount += 1
+                    let payload: [String: Any] = [
+                        "model": model,
+                        "created_at": ISO8601DateFormatter().string(from: Date()),
+                        "message": [
+                            "role": "assistant",
+                            "content": chunk.text
+                        ] as [String: Any],
+                        "done": false
+                    ]
+                    let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                    var buf = ByteBuffer()
+                    buf.writeBytes(jsonData)
+                    buf.writeString("\n")
+                    try await writer.write(buf)
+                }
+            } catch {
+                let msg = error.localizedDescription
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("{\"error\":\"\(msg)\",\"done\":true}\n")
+                try? await writer.write(buf)
+                try? await writer.finish(nil)
+                await server.incrementTokens(chunkCount)
+                return
+            }
+
+            // Final frame: empty content + done:true with timing stats.
+            let totalNanos = Int(Date().timeIntervalSince(startedAt) * 1_000_000_000)
+            let donePayload: [String: Any] = [
+                "model": model,
+                "created_at": ISO8601DateFormatter().string(from: Date()),
+                "message": [
+                    "role": "assistant",
+                    "content": ""
+                ] as [String: Any],
+                "done": true,
+                "done_reason": "stop",
+                "total_duration": totalNanos
+            ]
+            let doneData = try JSONSerialization.data(withJSONObject: donePayload)
+            var doneBuf = ByteBuffer()
+            doneBuf.writeBytes(doneData)
+            doneBuf.writeString("\n")
+            try await writer.write(doneBuf)
+            try await writer.finish(nil)
+            await server.incrementTokens(chunkCount)
+        }
+
+        var headers = HTTPFields()
+        headers[.contentType] = "application/x-ndjson"
+        headers[.cacheControl] = "no-cache"
+        headers[.connection] = "keep-alive"
+        return Response(status: .ok, headers: headers, body: responseBody)
     }
 
     /// Ollama `/api/generate` — text completion. Translate to our
@@ -732,6 +807,10 @@ public actor HummingbirdServer {
             }
         }
 
+        let wantsStream = req.stream ?? true
+        if wantsStream {
+            return try await streamingOllamaGenerateResponse(model: req.model, genRequest: genRequest)
+        }
         let stream = await engine.generate(genRequest)
         var fullText = ""
         for try await chunk in stream {
@@ -743,6 +822,65 @@ public actor HummingbirdServer {
             "response": fullText,
             "done": true
         ])
+    }
+
+    /// Streaming Ollama /api/generate — NDJSON, each line
+    /// `{"model":...,"response":"partial","done":false}`.
+    private func streamingOllamaGenerateResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
+        let stream = await engine.generate(genRequest)
+        let startedAt = Date()
+        let server = self
+
+        let responseBody = ResponseBody { writer in
+            var chunkCount = 0
+            do {
+                for try await chunk in stream {
+                    chunkCount += 1
+                    let payload: [String: Any] = [
+                        "model": model,
+                        "created_at": ISO8601DateFormatter().string(from: Date()),
+                        "response": chunk.text,
+                        "done": false
+                    ]
+                    let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                    var buf = ByteBuffer()
+                    buf.writeBytes(jsonData)
+                    buf.writeString("\n")
+                    try await writer.write(buf)
+                }
+            } catch {
+                let msg = error.localizedDescription
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("{\"error\":\"\(msg)\",\"done\":true}\n")
+                try? await writer.write(buf)
+                try? await writer.finish(nil)
+                await server.incrementTokens(chunkCount)
+                return
+            }
+            let totalNanos = Int(Date().timeIntervalSince(startedAt) * 1_000_000_000)
+            let donePayload: [String: Any] = [
+                "model": model,
+                "created_at": ISO8601DateFormatter().string(from: Date()),
+                "response": "",
+                "done": true,
+                "done_reason": "stop",
+                "total_duration": totalNanos
+            ]
+            let doneData = try JSONSerialization.data(withJSONObject: donePayload)
+            var doneBuf = ByteBuffer()
+            doneBuf.writeBytes(doneData)
+            doneBuf.writeString("\n")
+            try await writer.write(doneBuf)
+            try await writer.finish(nil)
+            await server.incrementTokens(chunkCount)
+        }
+
+        var headers = HTTPFields()
+        headers[.contentType] = "application/x-ndjson"
+        headers[.cacheControl] = "no-cache"
+        headers[.connection] = "keep-alive"
+        return Response(status: .ok, headers: headers, body: responseBody)
     }
 
     // MARK: - Cold-swap (v0.3.3)
