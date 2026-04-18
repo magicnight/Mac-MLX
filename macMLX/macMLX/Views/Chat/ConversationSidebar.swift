@@ -67,20 +67,20 @@ struct ConversationSidebar: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            // List without a `selection:` binding. Left-click fires
-            // switchTo via the row's Button action; selection highlight
-            // is purely visual (convo.id == currentConversationID).
-            // No selection binding means no List focus-trap that
-            // swallows contextMenu Delete actions.
-            List {
-                ForEach(viewModel.conversations) { convo in
-                    row(convo)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
+            // Manual ScrollView + LazyVStack — `List.sidebar` style
+            // outside a NavigationSplitView renders empty, and we
+            // don't want List(selection:) which swallowed contextMenu
+            // actions on focused rows. Plain Views + onTapGesture +
+            // contextMenu on the row itself is the reliable pattern.
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(viewModel.conversations) { convo in
+                        row(convo)
+                    }
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
         }
     }
 
