@@ -27,6 +27,38 @@ private struct LoadModelRequest: Decodable, Sendable {
     let model_path: String
 }
 
+/// Ollama-compatible chat request body. Simpler than OpenAI's —
+/// no `stream_options`, system message expressed the same way.
+private struct OllamaChatRequest: Decodable, Sendable {
+    struct Message: Decodable, Sendable {
+        let role: String
+        let content: String
+    }
+    struct Options: Decodable, Sendable {
+        let temperature: Double?
+        let top_p: Double?
+        let num_predict: Int?  // Ollama's name for max_tokens
+    }
+    let model: String
+    let messages: [Message]
+    let stream: Bool?
+    let options: Options?
+}
+
+/// Ollama-compatible /api/generate body (single-prompt completion).
+private struct OllamaGenerateRequest: Decodable, Sendable {
+    struct Options: Decodable, Sendable {
+        let temperature: Double?
+        let top_p: Double?
+        let num_predict: Int?
+    }
+    let model: String
+    let prompt: String
+    let system: String?
+    let stream: Bool?
+    let options: Options?
+}
+
 // MARK: - HummingbirdServer
 
 /// OpenAI-compatible HTTP server backed by an `InferenceEngine`.
@@ -339,6 +371,41 @@ public actor HummingbirdServer {
             return try await server.handleStatus()
         }
 
+        // Ollama-compatible API surface. Zed's "Ollama" provider, some
+        // translation extensions, and misc CLIs probe these paths. We
+        // translate to and from the equivalent OpenAI shape internally
+        // so the same engine handles both protocols.
+        router.get("/api/version") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleOllamaVersion()
+        }
+        router.get("/api/tags") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleOllamaTags()
+        }
+        router.post("/api/chat") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleOllamaChat(request: request, context: context)
+        }
+        router.post("/api/generate") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleOllamaGenerate(request: request, context: context)
+        }
+        router.post("/api/show") { _, _ -> Response in
+            await server.incrementRequest()
+            return try await server.handleOllamaShow()
+        }
+
+        // Defensive: some users misconfigure client base URL as
+        // `http://localhost:8000/v1/chat/completions` (full endpoint path)
+        // instead of `http://localhost:8000/v1` (base). The client then
+        // appends `/chat/completions` on top, producing the doubled path.
+        // Route the doubled form to the same handler.
+        router.post("/v1/chat/completions/chat/completions") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleChatCompletions(request: request, context: context)
+        }
+
         return router
     }
 
@@ -492,6 +559,190 @@ public actor HummingbirdServer {
         } else {
             return try await nonStreamingChatResponse(genRequest: genRequest)
         }
+    }
+
+    // MARK: - Ollama compatibility
+
+    /// Ollama `/api/version` — tiny JSON describing our API level.
+    /// Clients use this as a reachability probe before issuing real
+    /// requests; returning a value that looks like Ollama is enough.
+    private func handleOllamaVersion() throws -> Response {
+        return try jsonResponse([
+            "version": "0.3.6-macmlx"
+        ])
+    }
+
+    /// Ollama `/api/tags` — list of locally-available models. We
+    /// translate from our existing `/v1/models` shape into Ollama's
+    /// `{"models":[{name, size, modified_at, digest, details}]}` shape.
+    private func handleOllamaTags() async throws -> Response {
+        // Reuse the same "what's loaded + what the resolver can see"
+        // logic as handleModels. For Ollama the list should be of
+        // locally-available models regardless of load state.
+        let currentID = await engine.loadedModel?.id
+        var entries: [[String: Any]] = []
+        if let currentID {
+            entries.append([
+                "name": currentID,
+                "model": currentID,
+                "modified_at": ISO8601DateFormatter().string(from: Date()),
+                "size": 0,
+                "digest": "",
+                "details": [
+                    "format": "mlx",
+                    "family": "",
+                    "parameter_size": "",
+                    "quantization_level": ""
+                ] as [String: Any]
+            ])
+        }
+        return try jsonResponseAny([
+            "models": entries
+        ])
+    }
+
+    /// Ollama `/api/show` — minimal metadata response. Returns an empty-ish
+    /// envelope so probing clients don't 404.
+    private func handleOllamaShow() throws -> Response {
+        return try jsonResponseAny([
+            "modelfile": "",
+            "parameters": "",
+            "template": "",
+            "details": [
+                "format": "mlx",
+                "family": "",
+                "parameter_size": "",
+                "quantization_level": ""
+            ] as [String: Any]
+        ])
+    }
+
+    /// Ollama `/api/chat` — translates to OpenAI-shape internally then
+    /// serialises the response back into Ollama's envelope.
+    private func handleOllamaChat(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            return errorResponse(status: .badRequest, message: "Empty request body", code: "invalid_request_error")
+        }
+        let req: OllamaChatRequest
+        do {
+            req = try JSONDecoder().decode(OllamaChatRequest.self, from: data)
+        } catch {
+            return errorResponse(status: .badRequest, message: "Invalid JSON: \(error.localizedDescription)", code: "invalid_request_error")
+        }
+
+        let systemPrompt = req.messages.first(where: { $0.role == "system" })?.content
+        let messages: [ChatMessage] = req.messages.compactMap { msg in
+            guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
+            return ChatMessage(role: role, content: msg.content)
+        }
+
+        let params = GenerationParameters(
+            temperature: req.options?.temperature ?? 0.7,
+            topP: req.options?.top_p ?? 0.95,
+            maxTokens: req.options?.num_predict ?? 2048,
+            stream: req.stream ?? false
+        )
+
+        let genRequest = GenerateRequest(
+            model: req.model,
+            messages: messages,
+            systemPrompt: systemPrompt,
+            parameters: params
+        )
+
+        do {
+            try await ensureModelLoaded(req.model)
+        } catch let err as ModelSwapError {
+            switch err {
+            case .modelNotFound(let id):
+                return errorResponse(status: .notFound, message: "Model not found: \(id)", code: "model_not_found")
+            case .loadFailed(let id, let reason):
+                return errorResponse(status: .internalServerError, message: "Failed to load \(id): \(reason)", code: "model_load_failed")
+            }
+        }
+
+        // For v0.3.6 we only implement non-streaming Ollama chat. Most
+        // probe-style clients use stream=false. A streaming impl would
+        // need NDJSON chunking rather than SSE.
+        return try await nonStreamingOllamaChatResponse(model: req.model, genRequest: genRequest)
+    }
+
+    /// Non-streaming Ollama /api/chat response. Shape:
+    /// `{"model":"…","created_at":"…","message":{"role":"assistant","content":"…"},"done":true}`.
+    private func nonStreamingOllamaChatResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
+        let stream = await engine.generate(genRequest)
+        var fullText = ""
+        for try await chunk in stream {
+            fullText += chunk.text
+        }
+        return try jsonResponseAny([
+            "model": model,
+            "created_at": ISO8601DateFormatter().string(from: Date()),
+            "message": [
+                "role": "assistant",
+                "content": fullText
+            ] as [String: Any],
+            "done": true
+        ])
+    }
+
+    /// Ollama `/api/generate` — text completion. Translate to our
+    /// chat shape by wrapping the prompt in a single user message.
+    private func handleOllamaGenerate(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            return errorResponse(status: .badRequest, message: "Empty request body", code: "invalid_request_error")
+        }
+        let req: OllamaGenerateRequest
+        do {
+            req = try JSONDecoder().decode(OllamaGenerateRequest.self, from: data)
+        } catch {
+            return errorResponse(status: .badRequest, message: "Invalid JSON: \(error.localizedDescription)", code: "invalid_request_error")
+        }
+
+        let params = GenerationParameters(
+            temperature: req.options?.temperature ?? 0.7,
+            topP: req.options?.top_p ?? 0.95,
+            maxTokens: req.options?.num_predict ?? 2048,
+            stream: req.stream ?? false
+        )
+
+        let genRequest = GenerateRequest(
+            model: req.model,
+            messages: [ChatMessage(role: .user, content: req.prompt)],
+            systemPrompt: req.system,
+            parameters: params
+        )
+
+        do {
+            try await ensureModelLoaded(req.model)
+        } catch let err as ModelSwapError {
+            switch err {
+            case .modelNotFound(let id):
+                return errorResponse(status: .notFound, message: "Model not found: \(id)", code: "model_not_found")
+            case .loadFailed(let id, let reason):
+                return errorResponse(status: .internalServerError, message: "Failed to load \(id): \(reason)", code: "model_load_failed")
+            }
+        }
+
+        let stream = await engine.generate(genRequest)
+        var fullText = ""
+        for try await chunk in stream {
+            fullText += chunk.text
+        }
+        return try jsonResponseAny([
+            "model": req.model,
+            "created_at": ISO8601DateFormatter().string(from: Date()),
+            "response": fullText,
+            "done": true
+        ])
     }
 
     // MARK: - Cold-swap (v0.3.3)
