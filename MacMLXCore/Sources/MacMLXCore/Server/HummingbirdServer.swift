@@ -103,6 +103,43 @@ public actor HummingbirdServer {
     /// reuse the newly-loaded model or needs its own swap.
     private var loadInFlight: Task<Void, Error>?
 
+    /// Binary generation lock. MLX model state (tokenizer, KV cache,
+    /// MLX allocator) is not safe to share across concurrent
+    /// `generate()` calls — the actor serialises method entry, but
+    /// `generate` returns an AsyncStream whose iteration happens
+    /// outside the actor. Parallel clients (Zed + Immersive Translate
+    /// + curl, say) therefore stomp on each other and either crash
+    /// or hang. `generationLocked` + `generationWaiters` implement a
+    /// FIFO semaphore across response-body iteration, so at most one
+    /// generation streams at a time.
+    private var generationLocked: Bool = false
+    private var generationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Await the generation lock. Callers MUST pair this with
+    /// `releaseGenerationLock()` once their response-body iteration
+    /// finishes (success or error).
+    func acquireGenerationLock() async {
+        if !generationLocked {
+            generationLocked = true
+            return
+        }
+        await withCheckedContinuation { cont in
+            generationWaiters.append(cont)
+        }
+        // FIFO wake-up already sets us as the new owner.
+    }
+
+    /// Release the generation lock and hand off to the next waiter
+    /// (if any).
+    func releaseGenerationLock() {
+        if !generationWaiters.isEmpty {
+            let next = generationWaiters.removeFirst()
+            next.resume()
+            return
+        }
+        generationLocked = false
+    }
+
     /// The running ServiceGroup — held so `stop()` can trigger graceful shutdown.
     private var serviceGroup: ServiceGroup?
     private var serverTask: Task<Void, Error>?
@@ -678,6 +715,9 @@ public actor HummingbirdServer {
     /// Non-streaming Ollama /api/chat response. Shape:
     /// `{"model":"…","created_at":"…","message":{"role":"assistant","content":"…"},"done":true}`.
     private func nonStreamingOllamaChatResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
+        await acquireGenerationLock()
+        defer { Task { [weak self] in await self?.releaseGenerationLock() } }
+
         let stream = await engine.generate(genRequest)
         var fullText = ""
         for try await chunk in stream {
@@ -701,11 +741,14 @@ public actor HummingbirdServer {
     /// so covers Zed, Immersive Translate, Ollama CLI, and most other
     /// Ollama-speaking tools.
     private func streamingOllamaChatResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
+        await acquireGenerationLock()
+
         let stream = await engine.generate(genRequest)
         let startedAt = Date()
         let server = self
 
         let responseBody = ResponseBody { writer in
+            defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
             do {
                 for try await chunk in stream {
@@ -811,6 +854,10 @@ public actor HummingbirdServer {
         if wantsStream {
             return try await streamingOllamaGenerateResponse(model: req.model, genRequest: genRequest)
         }
+
+        await acquireGenerationLock()
+        defer { Task { [weak self] in await self?.releaseGenerationLock() } }
+
         let stream = await engine.generate(genRequest)
         var fullText = ""
         for try await chunk in stream {
@@ -827,11 +874,14 @@ public actor HummingbirdServer {
     /// Streaming Ollama /api/generate — NDJSON, each line
     /// `{"model":...,"response":"partial","done":false}`.
     private func streamingOllamaGenerateResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
+        await acquireGenerationLock()
+
         let stream = await engine.generate(genRequest)
         let startedAt = Date()
         let server = self
 
         let responseBody = ResponseBody { writer in
+            defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
             do {
                 for try await chunk in stream {
@@ -939,6 +989,11 @@ public actor HummingbirdServer {
     }
 
     private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
+        // Serialise: MLX engine state isn't safe across overlapping
+        // generations. Release on ALL exit paths (success, catch, throw).
+        await acquireGenerationLock()
+        defer { Task { [weak self] in await self?.releaseGenerationLock() } }
+
         // Hop into the engine actor to call generate, then iterate the returned stream.
         let stream = await engine.generate(genRequest)
         var fullText = ""
@@ -994,7 +1049,11 @@ public actor HummingbirdServer {
     }
 
     private func streamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
-        // Hop into the engine actor to call generate, then stream the result.
+        // Serialise streaming too — body closure runs outside the actor,
+        // so we acquire here and release inside the closure after the
+        // last chunk is written.
+        await acquireGenerationLock()
+
         let stream = await engine.generate(genRequest)
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
@@ -1002,6 +1061,7 @@ public actor HummingbirdServer {
         let server = self
 
         let responseBody = ResponseBody { writer in
+            defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
             do {
                 for try await chunk in stream {
