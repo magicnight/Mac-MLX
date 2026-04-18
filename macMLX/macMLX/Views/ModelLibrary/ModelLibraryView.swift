@@ -15,6 +15,10 @@ struct ModelLibraryView: View {
         // the downloadProgress dictionary mid-download (issue #1
         // follow-up in v0.3.6).
         ModelLibraryContent(viewModel: appState.modelLibrary)
+            // Force a view-identity change when scan results arrive so
+            // SwiftUI re-renders even if the @Observable registrar
+            // misses the async mutation on the hoisted VM.
+            .id(appState.modelLibrary.localModels.count)
             .task {
                 await appState.modelLibrary.loadLocalModels()
             }
