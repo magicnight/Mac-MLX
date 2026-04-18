@@ -43,13 +43,13 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Pin Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app
 
       - name: Cache SPM checkouts + build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             MacMLXCore/.build
@@ -84,13 +84,13 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Pin Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app
 
       - name: Cache Xcode DerivedData
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/Library/Developer/Xcode/DerivedData
