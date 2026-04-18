@@ -125,81 +125,87 @@ private struct ModelLibraryContent: View {
 
     @ViewBuilder
     private var localTab: some View {
-        if viewModel.isLoadingLocal {
-            ProgressView("Scanning model directory…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let err = viewModel.localError {
-            errorView(message: err)
-        } else {
-            let filtered = viewModel.localModels.filter {
-                viewModel.searchQuery.isEmpty
-                || $0.displayName.localizedCaseInsensitiveContains(viewModel.searchQuery)
-            }
-
-            if filtered.isEmpty {
-                ContentUnavailableView(
-                    "No Local Models",
-                    systemImage: "tray",
-                    description: Text(
-                        viewModel.searchQuery.isEmpty
-                            // Spell out the actual scanned path. Fixes the
-                            // "I copied models but they don't show up"
-                            // confusion when Settings points at a stale
-                            // directory (e.g. leftover v0.1 `~/models`).
-                            ? "No models found in \(Self.displayPath(viewModel.scanDirectory)).\nDownload from the Hugging Face tab, or set the directory in Settings."
-                            : "No models match \"\(viewModel.searchQuery)\""
-                    )
-                )
+        Group {
+            if viewModel.isLoadingLocal {
+                ProgressView("Scanning model directory…")
+            } else if let err = viewModel.localError {
+                errorView(message: err)
             } else {
-                List(filtered) { model in
-                    LocalModelRow(
-                        model: model,
-                        isLoaded: viewModel.loadedModelID == model.id,
-                        isLoading: viewModel.loadingModelID == model.id,
-                        onLoad: {
-                            Task { await viewModel.loadModel(model) }
-                        },
-                        onUnload: {
-                            Task { await viewModel.unloadModel() }
-                        },
-                        onDelete: {
-                            viewModel.deleteModel(model)
-                        }
-                    )
+                let filtered = viewModel.localModels.filter {
+                    viewModel.searchQuery.isEmpty
+                    || $0.displayName.localizedCaseInsensitiveContains(viewModel.searchQuery)
                 }
-                .listStyle(.inset)
+
+                if filtered.isEmpty {
+                    ContentUnavailableView(
+                        "No Local Models",
+                        systemImage: "tray",
+                        description: Text(
+                            viewModel.searchQuery.isEmpty
+                                // Spell out the actual scanned path. Fixes the
+                                // "I copied models but they don't show up"
+                                // confusion when Settings points at a stale
+                                // directory (e.g. leftover v0.1 `~/models`).
+                                ? "No models found in \(Self.displayPath(viewModel.scanDirectory)).\nDownload from the Hugging Face tab, or set the directory in Settings."
+                                : "No models match \"\(viewModel.searchQuery)\""
+                        )
+                    )
+                } else {
+                    List(filtered) { model in
+                        LocalModelRow(
+                            model: model,
+                            isLoaded: viewModel.loadedModelID == model.id,
+                            isLoading: viewModel.loadingModelID == model.id,
+                            onLoad: {
+                                Task { await viewModel.loadModel(model) }
+                            },
+                            onUnload: {
+                                Task { await viewModel.unloadModel() }
+                            },
+                            onDelete: {
+                                viewModel.deleteModel(model)
+                            }
+                        )
+                    }
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
+                }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - HF tab
 
     @ViewBuilder
     private var hfTab: some View {
-        if viewModel.isSearchingHF {
-            ProgressView("Searching Hugging Face…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let err = viewModel.hfError {
-            errorView(message: err)
-        } else if viewModel.hfModels.isEmpty {
-            ContentUnavailableView(
-                "Search for Models",
-                systemImage: "magnifyingglass",
-                description: Text("Type a model name to search mlx-community on Hugging Face.")
-            )
-        } else {
-            List(viewModel.hfModels) { model in
-                HFModelRow(
-                    model: model,
-                    isDownloaded: viewModel.isDownloaded(model),
-                    isDownloading: viewModel.downloadingModelIDs.contains(model.id),
-                    progress: viewModel.downloadProgress[model.id],
-                    onDownload: { viewModel.downloadModel(model) },
-                    onCancel: { viewModel.cancelDownload(model) }
+        Group {
+            if viewModel.isSearchingHF {
+                ProgressView("Searching Hugging Face…")
+            } else if let err = viewModel.hfError {
+                errorView(message: err)
+            } else if viewModel.hfModels.isEmpty {
+                ContentUnavailableView(
+                    "Search for Models",
+                    systemImage: "magnifyingglass",
+                    description: Text("Type a model name to search mlx-community on Hugging Face.")
                 )
+            } else {
+                List(viewModel.hfModels) { model in
+                    HFModelRow(
+                        model: model,
+                        isDownloaded: viewModel.isDownloaded(model),
+                        isDownloading: viewModel.downloadingModelIDs.contains(model.id),
+                        progress: viewModel.downloadProgress[model.id],
+                        onDownload: { viewModel.downloadModel(model) },
+                        onCancel: { viewModel.cancelDownload(model) }
+                    )
+                }
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
             }
-            .listStyle(.inset)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Path display
