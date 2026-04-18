@@ -96,6 +96,79 @@ across the Models, Chat, and Logs surfaces. No schema changes.
   the content behind a collapsed disclosure — blocks default to
   expanded.
 
+### Post-QA hot patches (2026-04-18 afternoon)
+
+These landed after hands-on QA surfaced regressions in the initial
+drop:
+
+- **App Sandbox disabled.** Sandboxed reads of `~/.mac-mlx/models/`
+  were being denied ("permission to view it") even though it's our
+  own dotfile data root. Apple's "dotfile exemption" for `~/.<path>`
+  is not reliable across macOS versions. Turn sandbox off to
+  converge the GUI and CLI on the same `~/.mac-mlx/` — matches LM
+  Studio / Ollama / oMLX. Gatekeeper remains the user-trust layer.
+- **DataRoot now returns the real user home under sandbox.**
+  `NSHomeDirectoryForUser(NSUserName())` was returning the sandbox
+  container home (`~/Library/Containers/.../Data/`) rather than the
+  real `/Users/<user>` despite the Foundation docs. Construct the
+  path directly from `/Users/` + `NSUserName()`. Relevant if anyone
+  re-enables sandbox in the future.
+- **HTTP server now auto-starts in the GUI.** The `autoStartServer`
+  setting existed since v0.1 but nothing in the GUI read it — users
+  toggling "Auto-start server on launch" saw no effect. Wire a full
+  `HummingbirdServer` lifecycle onto `AppState`: `startServer()` /
+  `stopServer()`, observable `server` / `serverPort` /
+  `isServerToggling` state, `bootstrap()` auto-starts when the
+  setting is on (rehydrating last-loaded model first), and the
+  Settings toggle now drives start/stop on change.
+- **Chat rendering fixed.** Task 7's VStack+ForEach `renderedContent`
+  collapsed to zero size under the bubble's padding/background stack
+  when the response was a single plain-text segment — so the most
+  common case (model replies "Hi!") rendered as an invisible bubble.
+  Single-`.text` segments now go through `inlineMarkdown` directly,
+  matching pre-v0.3.6 rendering exactly. The segmented VStack only
+  kicks in when there's an actual think block.
+- **Task 9 GeometryReader reverted.** Bottom-anchoring sparse
+  messages via `GeometryReader { geo in … .frame(minHeight: geo.size.height) }`
+  interacted badly with ScrollView's unbounded vertical space —
+  `geo.size.height` reported zero, collapsing the entire message
+  list. Reverted to a plain `LazyVStack`. Input-cursor centering
+  (the user's real complaint) is handled separately by
+  `TextField(axis: .vertical)`.
+- **Sidebar row rebuilt three times before landing.** Final form is
+  plain VStack + single `.onTapGesture` + `.contextMenu`, inside a
+  `ScrollView` + `LazyVStack`. `List(.sidebar)` and `List(selection:)`
+  both had modes where rows disappeared or right-click actions got
+  swallowed. The true cause of the delete-on-focused-row bug turned
+  out to be `switchTo(_:)` calling `persistNow()`, which bumped the
+  outgoing conversation's `updatedAt` — the sidebar's
+  `updatedAt`-desc sort then reordered between the left-click and
+  the follow-up right-click, so Delete targeted a different row.
+  `switchTo` no longer persists (sends, edits, and renames all
+  persist on their own).
+- **Port no longer shows as 8,000.** SwiftUI's `Text` interpolates
+  `Int` with locale-aware thousand separators, so the Settings
+  "HTTP Server" section was rendering `"http://localhost:8,000/v1"`.
+  Switch the Stepper label and Base URL line to `String(serverPort)`
+  to bypass locale formatting.
+- **Models tab force-refreshes on scan completion.** The `@Observable`
+  registrar occasionally missed the async `localModels` mutation on
+  the hoisted `ModelLibraryViewModel`, leaving the tab showing
+  "No Local Models" despite a successful scan. Force a view-identity
+  change via `.id(appState.modelLibrary.localModels.count)` so
+  SwiftUI rebuilds the subtree when results arrive.
+- **Input cursor vertically centered.** Replaced `TextEditor` (cursor
+  anchored top) with `TextField(axis: .vertical)` — cursor sits on
+  the single-line baseline, auto-grows up to five lines. macOS 14+.
+- **Content-preview log line.** `ChatViewModel.generate()` now dumps
+  the first 240 chars of each completed response at `.debug` level
+  so users reporting "no output despite chars=N" can see exactly
+  what the stream produced (wrapper tags, invisible tokens, etc.).
+- **Local model scan logs the path + subdirs.** Zero-result scans
+  now log a warning listing the raw subdir names so it's clear
+  whether the scan is looking at the wrong path, hit a permission
+  error, or the content doesn't match any model format.
+
 ### Notes
 - **Gemma 4 MoE not runnable.** Confirmed upstream gap
   ([ml-explore/mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219)).
