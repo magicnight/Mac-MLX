@@ -139,15 +139,15 @@ final class ChatViewModel {
         conversations = (try? await store.list()) ?? []
     }
 
-    /// Switch the active conversation. Saves the current state first
-    /// (not destructive) and adopts the target. Cancels any in-flight
-    /// generation.
+    /// Switch the active conversation. Does NOT persist the current
+    /// conversation — that would bump its updatedAt and force the
+    /// sidebar to re-sort, causing rows to jump positions between a
+    /// user's left-click and follow-up right-click. Any change worth
+    /// saving (new message, edit, etc.) is already persisted by
+    /// whichever action made it. Cancels any in-flight generation.
     func switchTo(_ conversationID: UUID) async {
         guard conversationID != current.id else { return }
         stopGeneration()
-        // Flush current to disk before loading a different one so the
-        // user doesn't lose a half-typed-but-auto-saved pass.
-        persistNow()
 
         // Find target in our cached list first; fall back to a fresh
         // `list()` in case the cache is stale.
