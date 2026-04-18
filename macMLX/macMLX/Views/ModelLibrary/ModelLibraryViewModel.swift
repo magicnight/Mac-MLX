@@ -53,6 +53,7 @@ final class ModelLibraryViewModel {
     private let library: ModelLibraryManager
     private let coordinator: EngineCoordinator
     private let downloader: HFDownloader
+    private let sizeCache: HFSizeCache
     /// Read the current model directory on demand. A closure (not a
     /// stored URL) so settings changes are observed live without this
     /// VM having to subscribe to SettingsManager.
@@ -70,11 +71,13 @@ final class ModelLibraryViewModel {
         library: ModelLibraryManager,
         coordinator: EngineCoordinator,
         downloader: HFDownloader,
+        sizeCache: HFSizeCache,
         modelDirectoryProvider: @escaping @MainActor () -> URL
     ) {
         self.library = library
         self.coordinator = coordinator
         self.downloader = downloader
+        self.sizeCache = sizeCache
         self.modelDirectoryProvider = modelDirectoryProvider
     }
 
@@ -185,35 +188,49 @@ final class ModelLibraryViewModel {
     private func enrichSizes() async {
         let ids = hfModels.map(\.id)
         let downloader = self.downloader
+        let cache = self.sizeCache
+
+        // Fast pass: apply any already-cached sizes synchronously before
+        // we kick off network fetches. This makes re-searches feel instant.
+        for id in ids {
+            if let size = await cache.get(id),
+               let idx = hfModels.firstIndex(where: { $0.id == id }) {
+                hfModels[idx].sizeBytes = size
+            }
+        }
+
+        // Only fetch sizes for models that are still unset.
+        let missingIDs = hfModels.filter { $0.sizeBytes == nil }.map(\.id)
+        guard !missingIDs.isEmpty else { return }
+
         await withTaskGroup(of: (String, Int64?).self) { group in
             var inflight = 0
             let maxInflight = 4
-            var iterator = ids.makeIterator()
-            // Prime the pool.
-            while inflight < maxInflight, let next = iterator.next() {
+            var iterator = missingIDs.makeIterator()
+
+            func enqueue() {
+                guard let next = iterator.next() else { return }
                 inflight += 1
                 group.addTask {
                     let size = try? await downloader.sizeBytes(for: next)
                     return (next, size)
                 }
             }
+            while inflight < maxInflight { enqueue() }
+
             while let (id, size) = await group.next() {
-                // A newer search cancelled us — stop writing into the
-                // (now-unrelated) `hfModels` array and abandon the rest
-                // of the pending fetches.
+                inflight -= 1
                 if Task.isCancelled {
                     group.cancelAll()
                     break
                 }
-                if let size, let idx = hfModels.firstIndex(where: { $0.id == id }) {
-                    hfModels[idx].sizeBytes = size
-                }
-                if !Task.isCancelled, let next = iterator.next() {
-                    group.addTask {
-                        let size = try? await downloader.sizeBytes(for: next)
-                        return (next, size)
+                if let size, size > 0 {
+                    if let idx = hfModels.firstIndex(where: { $0.id == id }) {
+                        hfModels[idx].sizeBytes = size
                     }
+                    await cache.put(id, size: size)
                 }
+                if !Task.isCancelled { enqueue() }
             }
         }
     }

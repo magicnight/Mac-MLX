@@ -17,6 +17,7 @@ public final class AppState {
     public let settings: SettingsManager
     public let library: ModelLibraryManager
     public let downloader: HFDownloader
+    public let hfSizeCache: HFSizeCache
     public let logs: LogManager
     public let coordinator: EngineCoordinator
     public let conversations: ConversationStore
@@ -73,6 +74,7 @@ public final class AppState {
         self.settings = settings
         self.library = library
         self.downloader = HFDownloader()
+        self.hfSizeCache = HFSizeCache()
         self.logs = logs
         self.coordinator = coordinator
         self.conversations = conversations
@@ -111,6 +113,7 @@ public final class AppState {
             library: library,
             coordinator: coordinator,
             downloader: self.downloader,
+            sizeCache: self.hfSizeCache,
             modelDirectoryProvider: { [weak self] in
                 self?.currentSettings.modelDirectory ?? Settings.default.modelDirectory
             }
