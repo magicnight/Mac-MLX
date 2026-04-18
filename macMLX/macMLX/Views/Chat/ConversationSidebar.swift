@@ -101,17 +101,19 @@ struct ConversationSidebar: View {
     private func conversationRow(_ convo: Conversation) -> some View {
         let isSelected = convo.id == viewModel.currentConversationID
 
-        VStack(alignment: .leading, spacing: 2) {
-            Text(convo.title)
-                .font(.body)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
-            Text(convo.updatedAt, style: .relative)
-                .font(.caption2)
-                .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(convo.title)
+                    .font(.body)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                Text(convo.updatedAt, style: .relative)
+                    .font(.caption2)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : .secondary)
+            }
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(
@@ -119,12 +121,11 @@ struct ConversationSidebar: View {
                 .fill(isSelected ? Color.accentColor : Color.clear)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6))
-        // Plain view + gestures — Button + contextMenu on macOS SwiftUI
-        // routes right-click events to the Button's own gesture
-        // recogniser, swallowing contextMenu item actions. Using a plain
-        // view lets macOS's native right-click machinery route Delete
-        // to the contextMenu reliably.
-        .onTapGesture(count: 2) { startRename(convo) }
+        // Single tap for row switch. Double-tap rename dropped — gesture
+        // disambiguation with count:1/count:2 + contextMenu on macOS
+        // SwiftUI was intermittently swallowing the contextMenu's Delete
+        // button action when the row was currently selected. Rename is
+        // now context-menu only (Finder convention).
         .onTapGesture {
             Task { await viewModel.switchTo(convo.id) }
         }
