@@ -200,7 +200,21 @@ public final class AppState {
             let models = (try? await library.scan(modelDirectory)) ?? []
             return models.first { $0.id == modelID || $0.displayName == modelID }
         }
-        let instance = HummingbirdServer(engine: engine, modelResolver: resolver)
+        // Route cold-swap through EngineCoordinator so the GUI and
+        // menu bar reflect the newly-loaded model (currentModel,
+        // status, onModelLoaded callback all fire correctly).
+        let coord = self.coordinator
+        let loadHook: HummingbirdServer.LoadHook = { model in
+            let result = await coord.load(model)
+            if case .failure(let err) = result {
+                throw err
+            }
+        }
+        let instance = HummingbirdServer(
+            engine: engine,
+            modelResolver: resolver,
+            loadHook: loadHook
+        )
         do {
             let actualPort = try await instance.start(
                 preferredPort: currentSettings.serverPort

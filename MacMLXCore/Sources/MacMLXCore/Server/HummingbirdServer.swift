@@ -87,6 +87,13 @@ public actor HummingbirdServer {
     /// with OpenAI's `model_not_found` code.
     public typealias ModelResolver = @Sendable (String) async -> LocalModel?
 
+    /// Optional hook the caller can install to perform the actual
+    /// load through a layer above the raw engine (e.g. GUI's
+    /// `EngineCoordinator`, which also maintains observable state
+    /// for the menu bar / toolbar / parameters inspector). When nil,
+    /// cold-swap goes straight to `engine.unload()` + `engine.load()`.
+    public typealias LoadHook = @Sendable (LocalModel) async throws -> Void
+
     // MARK: State
 
     private let engine: any InferenceEngine
@@ -96,6 +103,11 @@ public actor HummingbirdServer {
     /// the explicitly-loaded model can answer). The CLI's
     /// `ServeCommand` wires this up against `ModelLibraryManager.scan`.
     private let modelResolver: ModelResolver
+
+    /// Optional hook used by cold-swap instead of raw engine calls.
+    /// GUI sets this to route through `EngineCoordinator.load(_:)` so
+    /// `currentModel`, `status`, and `onModelLoaded` stay in sync.
+    private let loadHook: LoadHook?
 
     /// In-flight cold-swap Task, if any. Guards against thrashing when
     /// two requests for different models arrive at once: the second one
@@ -166,6 +178,7 @@ public actor HummingbirdServer {
     public init(engine: any InferenceEngine) {
         self.engine = engine
         self.modelResolver = { _ in nil }
+        self.loadHook = nil
     }
 
     /// Create a server with cold-swap support — chat completion
@@ -177,6 +190,23 @@ public actor HummingbirdServer {
     ) {
         self.engine = engine
         self.modelResolver = modelResolver
+        self.loadHook = nil
+    }
+
+    /// Create a server with cold-swap + a custom load hook. GUI uses
+    /// this to route the load through `EngineCoordinator` so menu
+    /// bar / toolbar state reflects the newly-loaded model. Hook
+    /// receives the resolved `LocalModel`; caller's implementation
+    /// is responsible for unloading the current model first if its
+    /// lifecycle model requires that.
+    public init(
+        engine: any InferenceEngine,
+        modelResolver: @escaping ModelResolver,
+        loadHook: @escaping LoadHook
+    ) {
+        self.engine = engine
+        self.modelResolver = modelResolver
+        self.loadHook = loadHook
     }
 
     // MARK: Lifecycle
@@ -971,9 +1001,17 @@ public actor HummingbirdServer {
 
         // Kick off the swap as a Task we can store for concurrent
         // callers to await. Errors propagate via the Task's value.
+        // When a loadHook is installed (GUI path), route through it
+        // so observable state (currentModel, status, callbacks) stays
+        // in sync. Otherwise fall back to raw engine calls (CLI path).
+        let hook = loadHook
         let swapTask = Task { [engine] in
-            try? await engine.unload()
-            try await engine.load(target)
+            if let hook {
+                try await hook(target)
+            } else {
+                try? await engine.unload()
+                try await engine.load(target)
+            }
         }
         loadInFlight = swapTask
         do {
