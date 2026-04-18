@@ -224,6 +224,24 @@ public actor HummingbirdServer {
     private func buildRouter() -> Router<BasicRequestContext> {
         let router = Router<BasicRequestContext>()
 
+        // CORS — browser-based clients (Open WebUI, ChatGPT Next Web,
+        // Cursor's embedded webview, etc.) enforce CORS on fetch and
+        // fail with "fetch error" if Access-Control-Allow-Origin is
+        // missing or not `*`. curl ignores CORS, which is why the
+        // terminal worked while the UI didn't. `.all` is the right
+        // setting for a localhost-only API bound to 127.0.0.1 — the
+        // inbound reachability boundary is already the loopback
+        // interface, not the origin check.
+        router.add(middleware: CORSMiddleware(
+            allowOrigin: .all,
+            allowHeaders: [
+                .accept, .authorization, .contentType, .origin, .userAgent
+            ],
+            allowMethods: [.get, .post, .head, .options, .put, .delete],
+            allowCredentials: false,
+            maxAge: .seconds(3600)
+        ))
+
         // Capture self for use in route closures.
         // The actor reference is Sendable, so this is safe under Swift 6.
         let server = self
