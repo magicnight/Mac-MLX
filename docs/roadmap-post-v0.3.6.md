@@ -79,26 +79,163 @@ user is always in control.
 
 ---
 
-## v0.4 — Vision-Language Models (already scoped)
+## v0.4 — Engine parity with oMLX (revised 2026-04-18)
 
-See `.omc/plans/v0.4-vlm-plan.md`. Main work:
+**Plan change**: v0.4 was originally "Vision-Language Models." After
+comparing against [oMLX](https://github.com/jundot/omlx) (10.6k stars,
+more mature engine) we decided the higher-leverage investment is
+closing the inference-engine gap first. VLM moves to v0.4.1. Research
+notes below each item came from a 2026-04-18 investigation (see
+`.omc/plans/v0.3.7-research-notes.md` for raw reports).
 
-- MLXVLM integration for Qwen2.5-VL / Qwen3-VL / Gemma-3 /
-  SmolVLM / Pixtral / Idefics3 / FastVLM / LFM2-VL / glm_ocr /
-  mistral3 (16 architectures)
+### v0.4.0 — Tiered KV cache + multi-model pool + MCP server
+
+Three independent features, same release. Each has low-to-medium risk
+because the underlying `mlx-swift-lm` APIs already exist.
+
+#### Tiered KV cache (hot RAM + cold SSD)
+
+- **Why it matters:** Coding assistants (Claude Code, Cursor, Zed)
+  re-send the entire conversation history on every request. Caching
+  the shared prefix cuts prefill to near-zero on re-asks and matches
+  oMLX's headline feature. 3–10× perceived speedup for real workflows.
+- **Swift-side primitives already shipped in `mlx-swift-lm`:**
+  `KVCache.swift` exposes `savePromptCache(url:cache:metadata:)`,
+  `loadPromptCache(url:)`, `trimPromptCache(_:numTokens:)`,
+  `canTrimPromptCache(_:)`. Round-trips safetensors in the same
+  format Python mlx-lm uses.
+- **What we build:**
+  - vLLM-style chained SHA-256 block hashing keyed on
+    `(modelID, parentHash, tokenIDs, extraKeys)` at 256-token
+    granularity (matches oMLX, matches vLLM, proven design).
+  - Prefix-hash LRU on `~/.mac-mlx/kv-cache/` (16-subdir fanout by
+    first hex char of hash).
+  - Hot tier = last K `[KVCache]` structs in memory, keyed by hash.
+    Cold tier = safetensors on disk. Background-writer `DispatchQueue`
+    flushes to disk without MLX synchronization (critical for perf).
+  - Longest-common-prefix matcher: given new tokens `T`, walk the
+    hash chain to find the deepest cached prefix, trim the cache to
+    that length, prefill only the delta.
+  - Defaults: 8 GB hot, 100 GB cold, configurable in Settings.
+- **Risk:** LOW. No model-architecture changes; pure Swift plumbing
+  over stable APIs with existing test coverage (`KVCacheTests.swift`
+  in the mlx-swift-lm tree).
+
+#### Multi-model pool with auto-swap
+
+- **Why it matters:** Users pin a "small daily model" + an
+  "occasionally-used big model" and have both reachable without
+  manual load/unload. Today our cold-swap unloads before load, which
+  means the small model has to be re-loaded on every switch.
+- **Swift-side primitives already shipped:** `ModelContainer` is
+  `Sendable` so multiple instances in one process are explicitly
+  supported. `MLX.GPU.setCacheLimit` + `Memory.memoryLimit` /
+  `Memory.cacheLimit` for budget control. `WiredMemoryUtils` +
+  `WiredBudgetPolicy` already coordinate concurrent `generate()`
+  across containers.
+- **What we build:**
+  - `actor ModelPool { var entries: [String: PooledContainer] }` with
+    LRU + explicit pin flag + estimated size from safetensors
+    pre-scan.
+  - Sequential loads under a lock (disk bandwidth is the bottleneck;
+    parallel loads just thrash).
+  - Memory-pressure watcher (`DispatchSource.makeMemoryPressureSource`
+    OR `os_proc_available_memory`) evicts LRU containers. On
+    eviction call `MLX.GPU.clearCache()` — unified memory does not
+    release weights until this runs.
+  - OpenAI/Ollama API routes dispatch on request's `model` field to
+    the right container; cold-load on miss under the same lock.
+  - Settings UI: "max resident memory" slider (default 50% of
+    `HardwareInfo.totalMemoryGB`), per-model pin toggle on the
+    Models tab.
+- **Risk:** LOW. All APIs exist; MLX allocator is process-wide but
+  documented as safe for multi-container use.
+
+#### MCP server MVP
+
+- **Why it matters:** Claude Code / Cursor / Zed all speak MCP; the
+  moment we expose MCP tools, we're reachable from their ecosystems
+  without client-side plumbing per tool. oMLX is MCP-*client* only;
+  macMLX starting as MCP-*server* is a complementary niche.
+- **SDK:** [`modelcontextprotocol/swift-sdk`](https://github.com/modelcontextprotocol/swift-sdk)
+  (1,350 stars, MIT→Apache-2.0, Swift 6 strict concurrency, stdio +
+  streamable-HTTP + SSE). Pin `from: "0.11.0"` — pre-1.0 API is
+  still settling. Wrap usage behind a thin `MCPBridge` type so the
+  pin can move without touching callers.
+- **What we build:**
+  - New CLI subcommand: `macmlx mcp serve` — spawns a
+    `Server(name: "macmlx")` over stdio, registers two tools:
+    - `chat(model: String, messages: [...], ...)` — wraps
+      `InferenceEngine.generate` with OpenAI-shaped input/output.
+    - `list_models()` — returns currently-downloaded models.
+  - Users add it to Claude Desktop's `claude_desktop_config.json`:
+    ```json
+    {
+      "mcpServers": {
+        "macmlx": { "command": "macmlx", "args": ["mcp", "serve"] }
+      }
+    }
+    ```
+- **Risk:** MEDIUM. Pre-1.0 SDK could break. Isolate behind
+  `MCPBridge` so upgrading is a one-file change.
+- **MCP client** (configuring external MCPs from inside macMLX so
+  the chat can tool-call) is deferred to v0.5.1 — needs tool-call
+  UI in the chat view first.
+
+### v0.4.1 — VLM (moved from v0.4.0)
+
+Original v0.4 scope intact, just shifted one dot:
+
+- MLXVLM integration for 16 architectures (Qwen2.5/3-VL, Gemma-3,
+  SmolVLM/2, Paligemma, Pixtral, Idefics3, FastVLM, LFM2-VL,
+  glm_ocr, mistral3)
 - Image picker in ChatInputView (NSOpenPanel + drag-drop + paste)
 - OpenAI multimodal `content`-array parsing in HummingbirdServer
 - Images persisted to `~/.mac-mlx/conversations/<uuid>/images/`
 
-Nothing in v0.4 is sandbox-affected — the plan stands.
+Separate release cadence keeps v0.4.0's engine-parity work on a
+tight testing loop before adding visual modality churn.
 
 ---
 
-## v0.5 — LoRA + Export
+## v0.5 — Continuous batching (depends on upstream) + LoRA + MCP client
 
-- LoRA adapter loading (drop in existing HuggingFace adapters, no
-  training UI)
-- Conversation / dataset export to JSONL (ChatML + ShareGPT formats)
+### Continuous batching
+
+**Upstream blocker:** `mlx-swift-lm`'s `TokenIterator` is strictly
+single-request. All 85 model architectures in the tree call
+`createAttentionMask(h:cache:)` with a single `[KVCache]` — adding a
+batched path means auditing or wrapping every model. Apple has
+shipped this for Python (`mlx-lm` PRs #941, #1101, #1129, #873,
+#1090) but nothing analogous is merged in Swift yet.
+
+**Approach:** Two-track.
+- **Track A (preferred):** Wait / nudge Apple to port `BatchGenerator`
+  to `mlx-swift-lm`. File an upstream issue. If they merge within
+  2–3 months, our work collapses to the scheduler layer — FCFS
+  waiting queue, token-budget admission, request demuxing — which
+  oMLX has already demonstrated in ~300 Python LOC. Port to Swift
+  is a weekend.
+- **Track B (fallback):** Swift-side Llama/Qwen-only fork of
+  `BatchTokenIterator` + `BatchKVCache` on top of `MLXFast.scaledDotProductAttention`
+  (which already takes arbitrary leading batch dim). Expect 2–3
+  weeks plus ongoing merge pain against upstream single-batch model
+  code. Only pursue if upstream stalls and our traction justifies.
+
+Shipping target depends entirely on which track activates.
+
+### LoRA adapter loading
+
+Same as pre-revision plan: drop-in HuggingFace adapter support, no
+training UI. No dependency on continuous batching — land
+independently within v0.5.x.
+
+### MCP client
+
+Counterpart to v0.4.0's server role. Users configure external MCP
+servers (mirror of `claude_desktop_config.json` format at
+`~/.mac-mlx/mcp.json`); chat models tool-call through them. Requires
+tool-call UI in chat view, which is incidental v0.5 work anyway.
 
 ---
 
