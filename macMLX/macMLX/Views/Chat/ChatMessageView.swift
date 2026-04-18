@@ -158,16 +158,30 @@ struct ChatMessageView: View {
     private var renderedContent: some View {
         if message.role == .assistant {
             let segments = MessageSegmenter.parse(messageContent)
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
-                    switch seg {
-                    case .text(let s):
-                        inlineMarkdown(s)
-                    case .think(let s, let isClosed):
-                        ThinkBlockView(
-                            content: s,
-                            isStreaming: !isClosed && message.isGenerating
-                        )
+            // Fast path: plain-text response (no think block). Return the
+            // Text directly so the bubble's padding+background layout
+            // matches the pre-v0.3.6 rendering exactly — wrapping a single
+            // Text in a VStack can cause it to collapse visibly under the
+            // outer HStack bubble layout.
+            if segments.count == 1, case .text(let s) = segments.first {
+                inlineMarkdown(s)
+            } else if segments.isEmpty {
+                // Empty content while streaming hasn't yielded anything
+                // yet — render a non-zero Text so the bubble has a
+                // measurable frame.
+                Text(" ")
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                        switch seg {
+                        case .text(let s):
+                            inlineMarkdown(s)
+                        case .think(let s, let isClosed):
+                            ThinkBlockView(
+                                content: s,
+                                isStreaming: !isClosed && message.isGenerating
+                            )
+                        }
                     }
                 }
             }
