@@ -26,6 +26,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Debug-level Logs tab entries `Prompt cache HIT — restored N
   tokens` / `Prompt cache MISS — cold prefill of N tokens` under
   the `engine` category, so you can see cache effectiveness.
+- **Multi-model pool** (v0.4.0 engine parity, part 2 of 3). Load
+  multiple models at once — previously the engine had to unload
+  the old model before loading a new one, which meant every API
+  cold-swap paid the full weight-read cost. Pool is bounded by a
+  user-configurable resident memory cap (Settings → Model Pool;
+  default 50% of total RAM). Least-recently-used non-pinned
+  models auto-evict when the cap is exceeded. Pin a model from
+  its row in the Models tab (pin icon) to keep it resident
+  regardless of LRU order. Pinned state is in-memory for this
+  release; persistence across restarts is a follow-up.
 
 ---
 

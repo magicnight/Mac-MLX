@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var hfEndpoint: String = "https://huggingface.co"
     @State private var kvCacheHotMB: Int = 512
     @State private var kvCacheColdGB: Int = 20
+    @State private var maxResidentMemoryGB: Int = 8
 
     var body: some View {
         Form {
@@ -66,6 +67,16 @@ struct SettingsView: View {
             .onChange(of: kvCacheColdGB) { _, newValue in
                 Task { await appState.updateSettings { $0.kvCacheColdGB = newValue } }
             }
+
+            ModelPoolSection(maxResidentGB: $maxResidentMemoryGB)
+                .onChange(of: maxResidentMemoryGB) { _, newValue in
+                    Task {
+                        await appState.updateSettings { $0.maxResidentMemoryGB = newValue }
+                        await appState.coordinator.setPoolBudget(
+                            bytes: Int64(newValue) * 1_000_000_000
+                        )
+                    }
+                }
 
             downloadsSection
 
@@ -171,6 +182,7 @@ struct SettingsView: View {
         hfEndpoint = s.hfEndpoint
         kvCacheHotMB = s.kvCacheHotMB
         kvCacheColdGB = s.kvCacheColdGB
+        maxResidentMemoryGB = s.maxResidentMemoryGB
     }
 
     private func showModelDirectoryPicker() {
