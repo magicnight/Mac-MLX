@@ -196,14 +196,84 @@ Tag format: `v0.1.0`
 CFBundleVersion = `$GITHUB_RUN_NUMBER` (integer, auto-increments)
 CFBundleShortVersionString = tag without `v` prefix (e.g. `0.1.0`)
 
-## Homebrew Tap (v0.2+)
+## Homebrew Tap (CLI)
 
-```ruby
-class MacMlx < Formula
-  desc "Native macOS LLM inference powered by MLX"
-  homepage "https://github.com/magicnight/mac-mlx"
-  url "https://github.com/magicnight/mac-mlx/releases/download/v0.1.0/macMLX-v0.1.0.dmg"
-  sha256 "..."
-  version "0.1.0"
-end
+The `macmlx` CLI ships through a Homebrew tap so developers can install
+it with one command:
+
+```bash
+brew tap magicnight/mac-mlx
+brew install macmlx
 ```
+
+The GUI app stays on the GitHub Releases DMG path — Homebrew is CLI-only
+to avoid dragging cask packaging into the same pipeline.
+
+### Pieces
+
+| Where | What |
+|-------|------|
+| `Formula/macmlx.rb` (this repo) | Source-of-truth template with `@@VERSION@@`, `@@URL@@`, `@@SHA256@@` placeholders. |
+| `scripts/package-cli.sh` | Builds Release `macmlx`, strips it, packages `dist/macmlx-${TAG}-arm64.tar.gz` + `.sha256`. |
+| `scripts/render-formula.sh` | Fills the template with the rendered tarball URL + sha and writes `dist/macmlx.rb`. |
+| `.github/workflows/release.yml` | On `v*.*.*` tag: runs both scripts, attaches tarball + rendered formula to the Release, and (if `HOMEBREW_TAP_TOKEN` is set) pushes the formula to the tap repo. |
+| `magicnight/homebrew-mac-mlx` (separate repo) | Tap repo Homebrew clones. Holds `Formula/macmlx.rb`. Other than that, it's empty. |
+
+### Tarball layout
+
+The tarball contains a single top-level executable so the formula's
+`bin.install "macmlx"` works without unpacking nested directories:
+
+```
+macmlx-v0.3.8-arm64.tar.gz
+└── macmlx        (Mach-O arm64, stripped, dynamic Swift stdlib)
+```
+
+### Bootstrapping the tap repo (one-time)
+
+1. Create an empty public repo `magicnight/homebrew-mac-mlx` (the
+   `homebrew-` prefix is mandatory; Homebrew uses it to resolve
+   `brew tap magicnight/mac-mlx`).
+2. Add a minimal `README.md` explaining the install command.
+3. Cut a release in this repo (`git tag v0.X.Y && git push --tags`).
+   The release workflow will produce `dist/macmlx.rb` and attach it to
+   the GitHub Release.
+4. Either copy `macmlx.rb` into `Formula/macmlx.rb` of the tap repo
+   manually, or:
+5. Generate a fine-grained GitHub PAT with `Contents: Read+Write` on
+   `magicnight/homebrew-mac-mlx`, store it as `HOMEBREW_TAP_TOKEN` in
+   this repo's secrets, and re-run the release. The "Publish formula to
+   Homebrew tap" step will commit the formula automatically on every
+   subsequent release.
+
+### Why a separate tap repo?
+
+Homebrew's tap discovery is hard-coded: `brew tap <user>/<name>`
+expects `github.com/<user>/homebrew-<name>`. Nesting the formula inside
+the main repo wouldn't be discoverable. Keeping the tap repo otherwise
+empty means the formula stays a single sourced-from-here artifact —
+no drift risk, no separate test setup.
+
+### Sanity check before release
+
+```bash
+# Smoke-test the renderer against the current tag.
+GITHUB_REF_NAME=v0.0.0-dev \
+MACMLX_CLI_SHA256=0000000000000000000000000000000000000000000000000000000000000000 \
+    ./scripts/render-formula.sh
+cat dist/macmlx.rb
+
+# Lint the rendered formula. Requires `brew` locally.
+brew audit --strict --new dist/macmlx.rb || true
+```
+
+`brew audit --new` only warns; the formula doesn't ship into
+homebrew-core so we accept its tap-formula leniencies.
+
+## Homebrew Cask (GUI, deferred)
+
+A `cask` for `macMLX.app` is **not** in scope. Casks add notarization
+requirements (`brew install --cask` validates `xattr` / Gatekeeper
+state on macOS 14+), which we don't have until issue #19 lands. Users
+who want GUI distribution via Homebrew can revisit this once the DMG
+is signed + notarized.
