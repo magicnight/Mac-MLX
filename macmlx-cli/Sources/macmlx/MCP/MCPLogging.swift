@@ -23,6 +23,12 @@ public struct StderrLogHandler: LogHandler {
         set { metadata[key] = newValue }
     }
 
+    /// Required by `LogHandler` but unused — swift-log provides a
+    /// default implementation that forwards into `log(event:)`. We
+    /// implement `log(event:)` directly to silence the deprecation
+    /// warning the default route emits, and leave this body so the
+    /// protocol witness still resolves cleanly on toolchains that
+    /// haven't picked up the `log(event:)` requirement.
     public func log(
         level: Logger.Level,
         message: Logger.Message,
@@ -32,6 +38,16 @@ public struct StderrLogHandler: LogHandler {
         function: String,
         line: UInt
     ) {
+        write(level: level, label: label, message: "\(message)")
+    }
+
+    /// Preferred swift-log entry point. Routes structured events to
+    /// stderr in a single formatted line.
+    public func log(event: LogEvent) {
+        write(level: event.level, label: label, message: "\(event.message)")
+    }
+
+    private func write(level: Logger.Level, label: String, message: String) {
         let formatted = "[\(level)] \(label): \(message)\n"
         if let data = formatted.data(using: .utf8) {
             FileHandle.standardError.write(data)
