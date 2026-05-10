@@ -59,6 +59,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `macmlx serve` and `macmlx run`). Drop into Claude Desktop's
   `claude_desktop_config.json` as
   `{ "mcpServers": { "macmlx": { "command": "macmlx", "args": ["mcp", "serve"] } } }`.
+- **VLM UI + Persistence + HTTP** (v0.4.1, part 3 of 3). Lights up
+  the user-facing surfaces for vision-language models. Closes the
+  v0.4.1 work begun in PRs #33 (Foundation) and #34 (Engine).
+  - **Chat input image picker.** New paperclip button in the chat
+    input opens SwiftUI's `.fileImporter` (image UTTypes only:
+    jpeg / png / webp / gif / heic / bmp), populating a horizontal
+    thumbnail strip above the text field. Click the × on a thumbnail
+    to drop it. The button is disabled when the loaded model isn't
+    a VLM, with an explanatory tooltip ("Load a vision-capable model
+    (Qwen-VL, Gemma-3, SmolVLM, …) to attach images"). Image-only
+    messages (no text) are now valid sends on a VLM.
+  - **Inline thumbnails on chat bubbles.** `ChatMessageView` renders
+    a 96pt LazyVGrid of attached images above the text bubble for
+    any turn that has images. Click a thumbnail to open the file in
+    Preview via `NSWorkspace`.
+  - **Conversation persistence.** `StoredMessage.images` round-trips
+    through `ConversationStore`. On save, every external image URL
+    is copied into `<conversations>/<conv-uuid>/images/` and the
+    stored URL is rewritten to point there — chats survive the user
+    moving the picked file. On `delete(id:)`, the per-conversation
+    directory is torn down so images don't leak. Pre-v0.4.1
+    conversations decode unchanged (missing key → empty array).
+  - **OpenAI multimodal HTTP.** `/v1/chat/completions` now accepts
+    OpenAI's `content` array shape:
+    ```json
+    {"role":"user","content":[
+      {"type":"text","text":"What's this?"},
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,…"}}
+    ]}
+    ```
+    Plain-string `content` continues to work — the decoder tries
+    string first, falls through to `[Part]`. base64 data URLs
+    decode to tmpfile-backed `ImageAttachment` values; caps: 10 MB
+    per image, 4 images per message; `http(s)://` and `file://`
+    URLs are not fetched (defence-in-depth on a localhost-bound
+    server). Ollama's `/api/chat` / `/api/generate` stay text-only
+    — Ollama's wire format uses a separate top-level
+    `images: [base64]` field; revisit in a follow-up.
 - **VLM Engine** (v0.4.1, part 2 of 3). MLXSwiftEngine now branches
   on `model.format` to load text-only models through
   `MLXLLM.LLMModelFactory` and vision-language models through
