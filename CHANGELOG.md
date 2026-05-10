@@ -36,6 +36,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   its row in the Models tab (pin icon) to keep it resident
   regardless of LRU order. Pinned state is in-memory for this
   release; persistence across restarts is a follow-up.
+- **MCP server** (v0.4.0 engine parity, part 3 of 3). New CLI
+  subcommand `macmlx mcp serve` exposes macMLX's local MLX
+  inference to MCP clients (Claude Desktop, Cursor, Zed, Claude
+  Code, …) over stdio. Two tools ship in this MVP:
+  - `list_models` — returns every locally-downloaded model with
+    its id / displayName / sizeBytes / format / quantization /
+    parameterCount / architecture.
+  - `chat` — runs a buffered chat completion against a model id,
+    lazy-loading the engine on first call and lazy-swapping the
+    loaded model when the requested id changes. Optional
+    `temperature` / `max_tokens` / `system` arguments. System
+    prompt handling matches HummingbirdServer's OpenAI-compat
+    path so Qwen3 / Gemma / DeepSeek strict Jinja templates don't
+    reject the prompt.
+
+  Built on [`modelcontextprotocol/swift-sdk`](https://github.com/modelcontextprotocol/swift-sdk)
+  v0.12.x — pinned per-minor since the SDK is still pre-1.0. CLI-
+  only dependency, so the GUI release stays lean. Logs (SDK +
+  ours) go to stderr so stdout stays a pure JSON-RPC stream.
+  Honours `Settings.preferredEngine` (same engine selection as
+  `macmlx serve` and `macmlx run`). Drop into Claude Desktop's
+  `claude_desktop_config.json` as
+  `{ "mcpServers": { "macmlx": { "command": "macmlx", "args": ["mcp", "serve"] } } }`.
 
 ---
 
