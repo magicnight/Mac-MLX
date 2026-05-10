@@ -10,6 +10,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **MCP Client Config** (v0.5 MCP track, part 1 of 2). Pure-Swift
+  data layer for connecting macMLX to external MCP servers (mirror
+  of v0.4.0's MCP server role, but reversed: now we *are* the host
+  and chat models tool-call out to other people's MCP servers).
+  - `MCPClientConfig` Codable struct mirroring Claude Desktop's
+    `~/.claude_desktop_config.json` `mcpServers` shape — users
+    with existing MCP setups can copy the file across without
+    reformatting.
+  - `MCPClientConfigStore` actor reads / writes
+    `~/.mac-mlx/mcp.json`. Missing-file → empty config (no error
+    on first run). Malformed JSON → empty config; the bad bytes
+    stay on disk for the user to fix manually.
+  - 7 new unit tests cover Claude Desktop schema decode, JSON
+    round-trip, missing-file behaviour, and malformed-JSON fall-
+    through. Subprocess pool + chat-side tool-call routing follow
+    in v0.5 MCP track part 2.
 - **LoRA Parameters Inspector picker** (v0.5, part 4 of 4). User-
   facing surface for selecting and applying LoRA adapters.
   - `AppState.adapterStore` actor + `availableAdapters: [LocalAdapter]`
