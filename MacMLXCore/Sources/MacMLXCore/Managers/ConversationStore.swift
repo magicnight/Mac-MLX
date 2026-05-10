@@ -26,19 +26,42 @@ public struct StoredMessage: Codable, Hashable, Identifiable, Sendable {
     public var content: String
     public let timestamp: Date
     public var tokenCount: Int?
+    /// Image attachments tied to this turn. Empty for text-only — the
+    /// common case. URLs point into
+    /// `<conversations>/<conv-uuid>/images/...` once the conversation
+    /// has been saved (see `ConversationStore.save(_:)`).
+    /// Backwards-compatible: pre-v0.4.1 JSON without an `images` key
+    /// decodes with an empty array.
+    public var images: [ImageAttachment]
 
     public init(
         id: UUID = UUID(),
         role: MessageRole,
         content: String,
         timestamp: Date = Date(),
-        tokenCount: Int? = nil
+        tokenCount: Int? = nil,
+        images: [ImageAttachment] = []
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
         self.tokenCount = tokenCount
+        self.images = images
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, content, timestamp, tokenCount, images
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.role = try c.decode(MessageRole.self, forKey: .role)
+        self.content = try c.decode(String.self, forKey: .content)
+        self.timestamp = try c.decode(Date.self, forKey: .timestamp)
+        self.tokenCount = try c.decodeIfPresent(Int.self, forKey: .tokenCount)
+        self.images = try c.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
     }
 }
 
@@ -109,6 +132,16 @@ public actor ConversationStore {
     /// Persist `conversation` to disk atomically. Creates the directory if
     /// missing. Bumps `updatedAt` to "now" before writing.
     ///
+    /// Image attachments referenced by any message get copied (best-
+    /// effort) into `<directory>/<conv-uuid>/images/<image-uuid>.<ext>`
+    /// the first time we see them, so the saved JSON URLs are stable
+    /// across user moves of the picked file. Already-internal URLs
+    /// (already pointing at the conversation's images dir) are left
+    /// in place. A copy failure logs to stderr and falls through —
+    /// the conversation still saves with the original URL, which the
+    /// reader will tolerate (image just won't load if the source
+    /// disappears).
+    ///
     /// Uses `JSONCoding.precisionEncoder` so rapid saves produce distinct
     /// `updatedAt` values for `list()` sort stability. Decoder accepts
     /// pre-v0.3 ISO-8601-string files for backward compat.
@@ -120,9 +153,47 @@ public actor ConversationStore {
         if copy.title == "New Chat" {
             copy.title = copy.derivedTitle
         }
+        copy.messages = copy.messages.map { internaliseImages(of: $0, conversationID: copy.id) }
+
         let data = try JSONCoding.precisionEncoder().encode(copy)
         let url = fileURL(for: copy.id)
         try data.write(to: url, options: .atomic)
+    }
+
+    /// Copy any image attachments that live outside the conversation's
+    /// own `images/` directory into it, and rewrite the URLs. Idempotent:
+    /// images already inside the conversation directory are kept verbatim.
+    private func internaliseImages(
+        of message: StoredMessage,
+        conversationID: UUID
+    ) -> StoredMessage {
+        guard !message.images.isEmpty else { return message }
+        let imagesDir = imagesDirectory(for: conversationID)
+
+        let updated: [ImageAttachment] = message.images.map { att in
+            // Already internal? — leave it alone.
+            if att.fileURL.path.hasPrefix(imagesDir.path) {
+                return att
+            }
+            // Try to copy. On any error, fall through to the original
+            // attachment so the save still succeeds.
+            do {
+                try fileManager.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+                let ext = att.fileURL.pathExtension.isEmpty ? "img" : att.fileURL.pathExtension
+                let dest = imagesDir.appending(
+                    path: "\(UUID().uuidString).\(ext)", directoryHint: .notDirectory)
+                try fileManager.copyItem(at: att.fileURL, to: dest)
+                return ImageAttachment(fileURL: dest, mimeType: att.mimeType)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[ConversationStore] image copy failed for \(att.fileURL.path): \(error)\n".utf8
+                ))
+                return att
+            }
+        }
+        var out = message
+        out.images = updated
+        return out
     }
 
     /// Return the most-recently-updated conversation, or nil if the store
@@ -170,16 +241,36 @@ public actor ConversationStore {
         return loaded.sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    /// Remove a conversation from disk. Idempotent — no error if missing.
+    /// Remove a conversation from disk along with any internalised
+    /// image attachments. Idempotent — no error if missing.
     public func delete(id: UUID) async throws {
         let url = fileURL(for: id)
         try? fileManager.removeItem(at: url)
+        // Also remove the per-conversation directory if it exists
+        // (images live under it; pre-v0.4.1 conversations didn't
+        // create one and this no-ops cleanly).
+        let convDir = conversationDirectory(for: id)
+        try? fileManager.removeItem(at: convDir)
     }
 
     // MARK: - Private
 
     private func fileURL(for id: UUID) -> URL {
         directory.appending(path: "\(id.uuidString).json", directoryHint: .notDirectory)
+    }
+
+    /// Per-conversation directory holding sidecar resources (images,
+    /// future audio attachments). Created on demand in
+    /// `internaliseImages(of:conversationID:)` and torn down by
+    /// `delete(id:)`.
+    private func conversationDirectory(for id: UUID) -> URL {
+        directory.appending(path: id.uuidString, directoryHint: .isDirectory)
+    }
+
+    /// Path used for image attachments of a given conversation.
+    private func imagesDirectory(for id: UUID) -> URL {
+        conversationDirectory(for: id)
+            .appending(path: "images", directoryHint: .isDirectory)
     }
 
     private func ensureDirectory() throws {
