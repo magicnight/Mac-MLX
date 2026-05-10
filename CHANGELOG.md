@@ -10,6 +10,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Settings audio fields** (v0.6 audio foundation). Schema-only —
+  no runtime audio yet, just persistence so the v0.6 STT / TTS
+  feature work has settled storage to talk to. Five new keys with
+  audio-off defaults: `audioEnabled`, `sttModel`, `ttsModel`,
+  `ttsVoice`, `ttsAutoSpeak`. Backwards-compatible decode: pre-v0.6
+  `~/.mac-mlx/settings.json` files load unchanged (every new key
+  decodes via `decodeIfPresent` and falls back to "audio off"). 3
+  new tests cover defaults / round-trip / legacy-JSON decode.
 - **MCP Client Config** (v0.5 MCP track, part 1 of 2). Pure-Swift
   data layer for connecting macMLX to external MCP servers (mirror
   of v0.4.0's MCP server role, but reversed: now we *are* the host
