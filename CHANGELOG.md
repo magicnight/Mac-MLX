@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] - 2026-05-10
+
+The biggest minor since v0.3 — **engine parity with oMLX (KV cache,
+multi-model pool, MCP server)** + **vision-language models** + **LoRA
+adapter inference (HuggingFace PEFT format, drop-in)**. Audio schema
+is in place; STT / TTS runtime lands in v0.6.
+
 ### Added
 - **Settings audio fields** (v0.6 audio foundation). Schema-only —
   no runtime audio yet, just persistence so the v0.6 STT / TTS
