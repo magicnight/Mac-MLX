@@ -14,8 +14,9 @@ func cliConfigurationHasExpectedCommandName() {
 }
 
 @Test
-func cliHasSixSubcommands() {
-    #expect(MacmlxCommand.configuration.subcommands.count == 6)
+func cliHasSevenSubcommands() {
+    // serve, pull, run, list, ps, stop, mcp (added in v0.4.0)
+    #expect(MacmlxCommand.configuration.subcommands.count == 7)
 }
 
 @Test
@@ -27,6 +28,7 @@ func cliSubcommandsIncludeAllExpected() {
     #expect(names.contains("list"))
     #expect(names.contains("ps"))
     #expect(names.contains("stop"))
+    #expect(names.contains("mcp"))
 }
 
 @Test
@@ -57,4 +59,15 @@ func pullCommandName() {
 @Test
 func runCommandName() {
     #expect(RunCommand.configuration.commandName == "run")
+}
+
+@Test
+func mcpCommandName() {
+    #expect(MCPCommand.configuration.commandName == "mcp")
+}
+
+@Test
+func mcpHasServeSubcommand() {
+    let names = MCPCommand.configuration.subcommands.map { $0.configuration.commandName }
+    #expect(names.contains("serve"))
 }
