@@ -29,6 +29,34 @@ public struct MCPModelEntry: Sendable, Codable, Equatable {
     public let architecture: String?
 }
 
+/// One wire-format message in the MCP `chat` tool input.
+///
+/// Sendable + Codable so it round-trips cleanly through the SDK's
+/// JSON-Value encoder and through XCTest assertions. Mirrors the shape
+/// MCP clients (Claude Desktop, Cursor, Zed) already speak when calling
+/// OpenAI-compatible chat APIs.
+public struct MCPChatMessage: Sendable, Codable, Equatable {
+    public let role: String
+    public let content: String
+
+    public init(role: String, content: String) {
+        self.role = role
+        self.content = content
+    }
+}
+
+/// Errors surfaced by the bridge to MCP callers.
+public enum MCPBridgeError: Error, CustomStringConvertible {
+    case modelNotFound(String)
+
+    public var description: String {
+        switch self {
+        case .modelNotFound(let id):
+            return "Model not found: \(id). Run `macmlx list` to see available models."
+        }
+    }
+}
+
 /// Hosts the long-lived state for a `macmlx mcp serve` process.
 ///
 /// Designed as an actor because the MCP SDK's handler closures run on
@@ -37,17 +65,25 @@ public struct MCPModelEntry: Sendable, Codable, Equatable {
 /// reference. Owns:
 ///
 /// - the `ModelSource` (typically a `ModelLibraryManager` adapter)
-/// - the lazy `InferenceEngine` (created on the first `chat` call)
+/// - an `EngineFactory` that lazily produces the `InferenceEngine` on
+///   the first `chat` call (mirrors the engine-construction pattern in
+///   `RunCommand` / `ServeCommand` so `Settings.preferredEngine` is
+///   honoured)
 ///
 /// The MCP SDK's `Server` is built and started via `start(transport:)`
-/// — see Task 5 of the v0.4 MCP plan. The bridge stays decoupled from
-/// the SDK in this file so the MVP can be unit-tested without piping
+/// (Task 5 of the v0.4 MCP plan). The bridge stays decoupled from the
+/// SDK in this file so the MVP can be unit-tested without piping
 /// JSON-RPC end-to-end.
 public actor MCPBridge {
-    private let library: ModelSource
+    public typealias EngineFactory = @Sendable () throws -> any InferenceEngine
 
-    public init(library: ModelSource) {
+    private let library: ModelSource
+    private let engineFactory: EngineFactory
+    private var engine: (any InferenceEngine)?
+
+    public init(library: ModelSource, engineFactory: @escaping EngineFactory) {
         self.library = library
+        self.engineFactory = engineFactory
     }
 
     /// Implements the MCP `list_models` tool.
@@ -67,5 +103,79 @@ public actor MCPBridge {
                 architecture: m.architecture
             )
         }
+    }
+
+    /// Implements the MCP `chat` tool.
+    ///
+    /// Buffers the entire generation into a single string before
+    /// returning — MCP tool calls don't have a streaming surface in
+    /// 0.12.x, so this is the right shape until the SDK adds chunked
+    /// tool responses (revisit in v0.5+). Lazy-loads the engine and
+    /// swaps the loaded model on demand.
+    public func chat(
+        model: String,
+        messages: [MCPChatMessage],
+        temperature: Double?,
+        maxTokens: Int?,
+        system: String?
+    ) async throws -> String {
+        let engine = try await engine(for: model)
+
+        var chatMessages = messages.compactMap { wire -> ChatMessage? in
+            guard let role = MessageRole(rawValue: wire.role) else { return nil }
+            return ChatMessage(role: role, content: wire.content)
+        }
+        // Explicit `system` field wins; otherwise lift a leading system
+        // message into `systemPrompt`. Matches HummingbirdServer's
+        // OpenAI-compat handling, which prevents the [system, system,
+        // user, …] sequence that broke Qwen3 / Gemma / DeepSeek's
+        // strict Jinja templates in v0.3.6.
+        var systemPrompt: String? = system
+        if systemPrompt == nil,
+           chatMessages.first?.role == .system {
+            systemPrompt = chatMessages.removeFirst().content
+        } else if systemPrompt != nil {
+            chatMessages.removeAll(where: { $0.role == .system })
+        }
+
+        var params = GenerationParameters()
+        if let temperature { params.temperature = temperature }
+        if let maxTokens { params.maxTokens = maxTokens }
+        params.stream = false
+
+        let request = GenerateRequest(
+            model: model,
+            messages: chatMessages,
+            systemPrompt: systemPrompt,
+            parameters: params
+        )
+
+        var buffer = ""
+        for try await chunk in engine.generate(request) {
+            buffer.append(chunk.text)
+        }
+        return buffer
+    }
+
+    /// Lazy-create the engine and lazy-swap the loaded model.
+    ///
+    /// First `chat` call constructs the engine via `engineFactory`
+    /// (which honours `Settings.preferredEngine`); subsequent calls
+    /// reuse the same engine instance and only re-`load` when the
+    /// requested model differs from the currently-loaded one.
+    private func engine(for modelID: String) async throws -> any InferenceEngine {
+        let models = try await library.scan()
+        guard let local = models.first(where: { $0.id == modelID || $0.displayName == modelID }) else {
+            throw MCPBridgeError.modelNotFound(modelID)
+        }
+
+        let engine = try (self.engine ?? engineFactory())
+        self.engine = engine
+
+        let current = await engine.loadedModel
+        if current?.id != local.id {
+            try await engine.load(local)
+        }
+        return engine
     }
 }
