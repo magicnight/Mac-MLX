@@ -23,6 +23,24 @@ public final class AppState {
     public let conversations: ConversationStore
     public let parametersStore: ModelParametersStore
 
+    /// LoRA adapter directory scan (v0.5+). Backs the parameters-
+    /// inspector adapter picker and the engine's per-load adapter
+    /// resolution.
+    public let adapterStore: AdapterStore
+
+    /// Latest in-memory adapter list, refreshed on `bootstrap()` and
+    /// after manual rescans. SwiftUI binds the parameters-inspector
+    /// picker against this — the empty-array initial value is safe
+    /// (the picker just shows "None" until the scan completes).
+    public private(set) var availableAdapters: [LocalAdapter] = []
+
+    /// Path under `~/.mac-mlx/adapters/` where users drop LoRA
+    /// adapters. The cache subdir `.cache/` (created by
+    /// `MLXSwiftEngine.applyAdapter` after a PEFT → mlx conversion)
+    /// is intentionally on the same root so `du -sh ~/.mac-mlx/adapters`
+    /// reports the user's storage cost truthfully.
+    public var adaptersDirectory: URL { DataRoot.macMLX("adapters") }
+
     /// Local benchmark history store (issue #22). Persists to
     /// `~/.mac-mlx/benchmarks/` with the same dotfile-exemption pattern
     /// as the other stores.
@@ -81,6 +99,7 @@ public final class AppState {
         let parametersStore = ModelParametersStore()  // ~/.mac-mlx/model-params
         let benchmarks = BenchmarkStore()            // ~/.mac-mlx/benchmarks
         let parameters = ParametersViewModel(store: parametersStore)
+        let adapterStore = AdapterStore()            // ~/.mac-mlx/adapters
 
         self.settings = settings
         self.library = library
@@ -92,6 +111,7 @@ public final class AppState {
         self.parametersStore = parametersStore
         self.benchmarks = benchmarks
         self.parameters = parameters
+        self.adapterStore = adapterStore
         self.chat = ChatViewModel(
             coordinator: coordinator,
             store: conversations,
@@ -112,8 +132,38 @@ public final class AppState {
         // persisted per-model temperature / top_p / system prompt were
         // all ignored. Hooking into EngineCoordinator.onModelLoaded
         // makes the overrides always active.
-        coordinator.onModelLoaded = { [parameters] model in
+        coordinator.onModelLoaded = { [parameters, adapterStore, coordinator, logs] model in
             await parameters.loadForModel(model.id)
+
+            // v0.5+: if the user has a LoRA adapter pinned in this
+            // model's parameters, scan + apply it on top of the base
+            // model. Failures log + drop — the model still works
+            // text-only, just without the adapter.
+            let resolvedParams = await parameters.parameters
+            guard let adapterName = resolvedParams.adapterName,
+                  !adapterName.isEmpty
+            else { return }
+
+            let adaptersDir = DataRoot.macMLX("adapters")
+            let scanned = (try? await adapterStore.scan(adaptersDir)) ?? []
+            guard let adapter = scanned.first(where: { $0.name == adapterName }) else {
+                await logs.log(
+                    "LoRA adapter '\(adapterName)' configured for \(model.id) but not found under \(adaptersDir.path)",
+                    level: .warning,
+                    category: .engine
+                )
+                return
+            }
+            guard let engine = await coordinator.activeEngine else { return }
+            do {
+                try await engine.applyAdapter(adapter)
+            } catch {
+                await logs.log(
+                    "LoRA adapter '\(adapterName)' failed to apply: \(error.localizedDescription)",
+                    level: .error,
+                    category: .engine
+                )
+            }
         }
 
         // Constructed last: the provider closure captures `self` so all
@@ -142,6 +192,7 @@ public final class AppState {
         coordinator.switchTo(loaded.preferredEngine)
         await applyHFEndpoint(loaded.hfEndpoint)
         await logs.log("App bootstrapped", level: .info, category: .system)
+        await refreshAdapters()
         // Kick off an initial library scan now that settings are loaded —
         // otherwise the Models tab's .task fires against the default
         // Settings snapshot before bootstrap completes, and users who
@@ -166,6 +217,22 @@ public final class AppState {
             }
             await startServer()
         }
+    }
+
+    /// Re-scan `~/.mac-mlx/adapters/` and refresh `availableAdapters`.
+    /// Called automatically once during `bootstrap()`. The parameters
+    /// inspector exposes a "Refresh" button that calls this directly
+    /// so users can drop a new adapter into the directory and pick it
+    /// up without restarting the app.
+    public func refreshAdapters() async {
+        let dir = adaptersDirectory
+        let scanned = (try? await adapterStore.scan(dir)) ?? []
+        availableAdapters = scanned
+        await logs.log(
+            "Adapters scan: \(scanned.count) found in \(dir.path)",
+            level: .debug,
+            category: .system
+        )
     }
 
     // MARK: - Server lifecycle
