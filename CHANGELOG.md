@@ -10,7 +10,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **LoRA Foundation** (v0.5, part 1 of 2). Pure-Swift Core layer
+- **LoRA PEFT → mlx Converter** (v0.5, part 2 of 3). Pure-Swift
+  in-process converter that turns a HuggingFace PEFT-format adapter
+  directory into the mlx-swift-lm native format that
+  `MLXLMCommon.LoRAContainer.from(directory:)` expects. Three
+  translations: PEFT `r` / `lora_alpha` / `target_modules` →
+  mlx `lora_parameters.{rank, scale, keys}` (scale = alpha/rank);
+  PEFT keys `base_model.model.<path>.lora_A.weight` → mlx
+  `<path>.lora_a` (drop wrapper, lowercase, drop `.weight`);
+  PEFT tensor shapes `[r, in]` / `[out, r]` → mlx `[in, r]` /
+  `[r, out]` (transpose). `num_layers` auto-inferred from the
+  deepest `model.layers.<N>` index in the input keys. 8 pure-Swift
+  unit tests cover key rewrite + layer-index extraction + config
+  translation; 6 MLX-backed XCTest tests cover end-to-end
+  filesystem round-trip (gated on Metal — skip cleanly under
+  `swift test`, run under `xcodebuild`). Engine application of the
+  converted adapter (parameters-inspector picker + Settings
+  adapters section) lands in v0.5 part 3.
+- **LoRA Foundation** (v0.5, part 1 of 3). Pure-Swift Core layer
   for HuggingFace LoRA adapter discovery — no engine integration
   yet, no UI. `LocalAdapter` value type holds adapter metadata
   parsed from PEFT's `adapter_config.json` (`base_model_name_or_path`,
@@ -19,8 +36,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   contain both `adapter_config.json` and `adapter_model.safetensors`
   — best-effort, malformed configs / missing weights silently drop.
   10 new unit tests cover decode + scan paths. Engine application
-  of adapter weights via `LoRATrain.convert` + `loadLoRAWeights`
-  and the parameters-inspector picker land in v0.5 part 2.
+  via `MLXLMCommon.LoRAContainer.from(directory:)` (after PEFT →
+  mlx conversion) and the parameters-inspector picker land in
+  v0.5 part 3.
 - **Prompt cache tiering** (v0.4.0 engine parity, part 1 of 3).
   Successive chat turns on the same model now reuse the KV cache
   when the new prompt extends the previous one — the shared prefix
