@@ -10,6 +10,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **LoRA Engine integration** (v0.5, part 3 of 4). Engine-side
+  glue tying the v0.5 LoRA Foundation (#36) and PEFT → mlx
+  Converter (#37) together so a downloaded HuggingFace adapter
+  works end-to-end via the InferenceEngine protocol.
+  - `InferenceEngine.applyAdapter(_:)` — new protocol method with
+    a default `extension`-level no-op so test stubs and future
+    CPU/Python engines compile unchanged. Implementations that
+    DO support adapters wire it to their LoRA loader.
+  - `MLXSwiftEngine.applyAdapter(_:)` — auto-routes PEFT-format
+    adapters through `LoRAAdapterConverter` (cached at
+    `~/.mac-mlx/adapters/.cache/<adapter-name>/` so repeat loads
+    skip conversion), then calls
+    `LoRAContainer.from(directory:)` and
+    `LanguageModel.load(adapter:)`. Throws
+    `EngineError.adapterApplyFailed(reason:)` on either step.
+  - `EngineCoordinator.load(_, adapter:)` — optional adapter
+    parameter; default `nil` keeps every existing call site
+    unchanged. When provided, the adapter is applied immediately
+    after the base model loads.
+  - `AdapterStore.scan(_:)` now detects mlx-native format
+    (`adapters.safetensors` + mlx-schema `adapter_config.json`)
+    in addition to PEFT, with mlx-native taking precedence when
+    both files coexist (caller already has the converter output
+    side-by-side with the source).
+  - `LocalAdapter.format: Format` (`peft` / `mlx`) drives the
+    engine's auto-conversion branch. Backwards-compatible decode
+    defaults pre-v0.5 records to `.peft`.
+  - `ModelParameters.adapterName: String?` persists the user's
+    adapter pick per model. Custom decoder defaults to nil so
+    pre-v0.5 `~/.mac-mlx/model-params/*.json` files load unchanged.
+  - 4 new tests (2 LocalAdapter format/round-trip, 2 AdapterStore
+    mlx detection / dual-format precedence). 137/137 Core green.
+  - Parameters-inspector picker UI lands in v0.5 part 4.
 - **LoRA PEFT → mlx Converter** (v0.5, part 2 of 3). Pure-Swift
   in-process converter that turns a HuggingFace PEFT-format adapter
   directory into the mlx-swift-lm native format that

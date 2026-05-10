@@ -252,6 +252,73 @@ public actor MLXSwiftEngine: InferenceEngine {
         status = .idle
     }
 
+    /// Apply a LoRA adapter (v0.5+) to the currently-loaded model.
+    ///
+    /// PEFT-format adapters are auto-converted to mlx-native format
+    /// via `LoRAAdapterConverter`, with the conversion output cached
+    /// at `~/.mac-mlx/adapters/.cache/<adapter-name>/` so repeat
+    /// loads reuse the converted bytes. mlx-native adapters skip the
+    /// converter and load directly.
+    public func applyAdapter(_ adapter: LocalAdapter) async throws {
+        guard let container = loadedSupport.container else {
+            throw EngineError.modelNotLoaded
+        }
+
+        // Resolve the directory the LoRAContainer should read from.
+        // PEFT → run the converter into a sibling cache dir; mlx-
+        // native → use the adapter's own directory.
+        let mlxDirectory: URL
+        switch adapter.format {
+        case .mlx:
+            mlxDirectory = adapter.directory
+        case .peft:
+            mlxDirectory = try await convertedDirectory(for: adapter)
+        }
+
+        // Hand the mlx-format directory to LoRAContainer.from then
+        // load it into the model. Both calls happen inside the
+        // ModelContainer's actor so we serialise correctly with any
+        // concurrent generation.
+        do {
+            try await container.perform { context in
+                let loraContainer = try LoRAContainer.from(directory: mlxDirectory)
+                try context.model.load(adapter: loraContainer)
+            }
+        } catch {
+            throw EngineError.adapterApplyFailed(reason: error.localizedDescription)
+        }
+
+        await LogManager.shared.info(
+            "LoRA adapter applied: \(adapter.name) (format=\(adapter.format.rawValue))",
+            category: .inference
+        )
+    }
+
+    /// Convert a PEFT-format adapter to the mlx-native cache layout.
+    /// Cached at `~/.mac-mlx/adapters/.cache/<adapter-name>/` so repeat
+    /// loads of the same adapter reuse the conversion result.
+    private func convertedDirectory(for adapter: LocalAdapter) async throws -> URL {
+        let cacheDir = DataRoot.macMLX("adapters/.cache")
+            .appending(path: adapter.name, directoryHint: .isDirectory)
+        let configURL = cacheDir.appending(path: "adapter_config.json", directoryHint: .notDirectory)
+        let weightsURL = cacheDir.appending(path: "adapters.safetensors", directoryHint: .notDirectory)
+
+        if FileManager.default.fileExists(atPath: configURL.path),
+           FileManager.default.fileExists(atPath: weightsURL.path) {
+            return cacheDir
+        }
+
+        do {
+            try LoRAAdapterConverter.convertPEFTAdapter(
+                source: adapter.directory,
+                destination: cacheDir
+            )
+        } catch {
+            throw EngineError.adapterApplyFailed(reason: "PEFT → mlx conversion failed: \(error)")
+        }
+        return cacheDir
+    }
+
     /// Stream tokens for a generation request.
     ///
     /// This method is `nonisolated` so the `AsyncThrowingStream` is returned
