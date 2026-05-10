@@ -54,10 +54,27 @@ public actor ModelLibraryManager {
 
             switch format {
             case .mlx:
+                // Peek `config.json` `model_type` — upgrade to .mlxVLM
+                // when the directory contains a vision-language model.
+                let upgradedFormat = upgradeFormatIfVLM(directory: itemURL)
                 let model = buildLocalModel(
                     dirName: dirName,
                     dirURL: itemURL,
-                    fileURLs: fileURLs
+                    fileURLs: fileURLs,
+                    format: upgradedFormat
+                )
+                results.append(model)
+
+            case .mlxVLM:
+                // `ModelFormat.detect(in:)` never returns this directly
+                // — it's set by `upgradeFormatIfVLM` above. Reachable
+                // only via tests that hand-craft a format. Fall through
+                // to the same path as `.mlx`.
+                let model = buildLocalModel(
+                    dirName: dirName,
+                    dirURL: itemURL,
+                    fileURLs: fileURLs,
+                    format: .mlxVLM
                 )
                 results.append(model)
 
@@ -84,7 +101,8 @@ public actor ModelLibraryManager {
     private func buildLocalModel(
         dirName: String,
         dirURL: URL,
-        fileURLs: [URL]
+        fileURLs: [URL],
+        format: ModelFormat = .mlx
     ) -> LocalModel {
         // Sum all .safetensors files for reported size
         let sizeBytes: Int64 = fileURLs
@@ -104,11 +122,52 @@ public actor ModelLibraryManager {
             displayName: dirName,
             directory: dirURL,
             sizeBytes: sizeBytes,
-            format: .mlx,
+            format: format,
             quantization: quantization,
             parameterCount: nil, // Deferred — requires config.json parser (v0.3+)
             architecture: nil    // Deferred — requires config.json parser (v0.3+)
         )
+    }
+
+    /// `model_type` values mlx-swift-lm's `MLXVLM` library supports.
+    ///
+    /// Source of truth: `Libraries/MLXVLM/Models/*.swift` registry in
+    /// the mlx-swift-lm checkout. Refresh this set when bumping the
+    /// SPM dependency. Stored lowercased — comparisons are
+    /// case-insensitive against `config.json`.
+    private static let knownVLMTypes: Set<String> = [
+        "qwen2_vl",
+        "qwen2_5_vl",
+        "qwen3_vl",
+        "qwen3_5_vl",
+        "gemma3",
+        "smolvlm",
+        "smolvlm2",
+        "paligemma",
+        "pixtral",
+        "idefics3",
+        "fast_vlm",
+        "lfm2_vl",
+        "glm_ocr",
+        "mistral3",
+    ]
+
+    /// Peek `config.json`'s `model_type`. Returns `.mlxVLM` if the
+    /// type matches a known VLM family; otherwise `.mlx`.
+    ///
+    /// Best-effort: any read or parse failure (missing file, malformed
+    /// JSON, missing `model_type` key) falls back to `.mlx` — the scan
+    /// must not blow up because of one unparseable config.
+    private func upgradeFormatIfVLM(directory: URL) -> ModelFormat {
+        let configURL = directory.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let modelType = json["model_type"] as? String,
+              Self.knownVLMTypes.contains(modelType.lowercased())
+        else {
+            return .mlx
+        }
+        return .mlxVLM
     }
 
     /// Extracts a quantization string from a directory name.
