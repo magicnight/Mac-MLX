@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 @preconcurrency import Tokenizers
 
 // MARK: - Sendable-box helpers
@@ -99,11 +100,37 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     // MARK: Private state
 
-    private var modelContainer: ModelContainer?
+    /// What's currently loaded — text-only LLM (`MLXLLM`), vision-
+    /// language VLM (`MLXVLM`), or nothing. Both modalities wrap a
+    /// `ModelContainer`; the case discriminates which factory built
+    /// it so generation can choose the right code path (LLM gets the
+    /// prompt cache; VLM bypasses it for now — multimodal cache keys
+    /// would need to fold image bytes into the hash, deferred to a
+    /// follow-up).
+    private enum LoadedSupport {
+        case none
+        case llm(ModelContainer)
+        case vlm(ModelContainer)
+
+        var container: ModelContainer? {
+            switch self {
+            case .none: return nil
+            case .llm(let c): return c
+            case .vlm(let c): return c
+            }
+        }
+
+        var isVLM: Bool {
+            if case .vlm = self { return true }
+            return false
+        }
+    }
+
+    private var loadedSupport: LoadedSupport = .none
 
     /// Two-tier prompt cache (hot dict + cold safetensors sidecar). Used
     /// by `runGeneration` to reuse KV state across successive turns on
-    /// the same model. See `PromptCacheStore` for the tiering policy.
+    /// the same LLM. VLM generations bypass it.
     private let promptCacheStore: PromptCacheStore
 
     // MARK: Initialiser
@@ -135,23 +162,51 @@ public actor MLXSwiftEngine: InferenceEngine {
                 + "https://github.com/ml-explore/mlx-swift-lm/issues/219. "
                 + "Use a dense Gemma 4 checkpoint (E2B / E4B) in the meantime."
             status = .error(reason)
-            modelContainer = nil
+            loadedSupport = .none
             loadedModel = nil
             throw EngineError.modelLoadFailed(reason: reason)
         }
 
         do {
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: model.directory,
-                using: HuggingFaceTokenizerLoader()
-            )
-            modelContainer = container
+            let support: LoadedSupport
+            switch model.format {
+            case .mlx:
+                let container = try await LLMModelFactory.shared.loadContainer(
+                    from: model.directory,
+                    using: HuggingFaceTokenizerLoader()
+                )
+                support = .llm(container)
+
+            case .mlxVLM:
+                let container = try await VLMModelFactory.shared.loadContainer(
+                    from: model.directory,
+                    using: HuggingFaceTokenizerLoader()
+                )
+                support = .vlm(container)
+
+            case .gguf, .unknown:
+                // Surfaced via the Models tab — these formats never
+                // reach the engine in practice, but throw a clean
+                // error if someone hand-constructs a `LocalModel`.
+                let reason = "Unsupported model format: \(model.format.rawValue). " +
+                    "MLXSwiftEngine handles `mlx` (text) and `mlxVLM` (vision-language) only."
+                status = .error(reason)
+                loadedSupport = .none
+                loadedModel = nil
+                throw EngineError.modelLoadFailed(reason: reason)
+            }
+            loadedSupport = support
             loadedModel = model
             status = .ready(model: model.id)
+        } catch let engineError as EngineError {
+            // Already shaped — preserve the typed error.
+            loadedSupport = .none
+            loadedModel = nil
+            throw engineError
         } catch {
             let reason = error.localizedDescription
             status = .error(reason)
-            modelContainer = nil
+            loadedSupport = .none
             loadedModel = nil
             throw EngineError.modelLoadFailed(reason: reason)
         }
@@ -192,7 +247,7 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     /// Release the loaded model from memory.
     public func unload() async throws {
-        modelContainer = nil
+        loadedSupport = .none
         loadedModel = nil
         status = .idle
     }
@@ -255,7 +310,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         _ request: GenerateRequest,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
-        guard let container = modelContainer else {
+        let support = loadedSupport
+        guard let container = support.container else {
             continuation.finish(throwing: EngineError.modelNotLoaded)
             return
         }
@@ -263,6 +319,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             continuation.finish(throwing: EngineError.modelNotLoaded)
             return
         }
+        let isVLM = support.isVLM
 
         let params = request.parameters
 
@@ -275,6 +332,11 @@ public actor MLXSwiftEngine: InferenceEngine {
         )
 
         // Map our ChatMessage array to MLXLMCommon Chat.Message array.
+        // For VLM models, fold each message's `images` into the `Chat.Message`
+        // image bag — the VLM's `UserInputProcessor` injects image tokens at
+        // the right position when it builds the prompt. For LLM models we
+        // drop attachments with a debug-level warning so `[image attached]`
+        // stub strings don't sneak into the chat template.
         let chatMessages: [Chat.Message] = request.allMessages.map { msg in
             let role: Chat.Message.Role
             switch msg.role {
@@ -282,7 +344,20 @@ public actor MLXSwiftEngine: InferenceEngine {
             case .assistant: role = .assistant
             case .system:    role = .system
             }
-            return Chat.Message(role: role, content: msg.content)
+            if isVLM {
+                let images: [UserInput.Image] = msg.images.map { .url($0.fileURL) }
+                return Chat.Message(role: role, content: msg.content, images: images)
+            } else {
+                if !msg.images.isEmpty {
+                    Task.detached { [count = msg.images.count] in
+                        await LogManager.shared.debug(
+                            "Dropping \(count) image attachment(s) on text-only model — load a VLM (Qwen-VL, Gemma-3, SmolVLM, …) to use images.",
+                            category: .inference
+                        )
+                    }
+                }
+                return Chat.Message(role: role, content: msg.content)
+            }
         }
 
         let userInput = UserInput(chat: chatMessages)
@@ -308,10 +383,40 @@ public actor MLXSwiftEngine: InferenceEngine {
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
 
+        if isVLM {
+            // VLM path: bypass the prompt cache (the cache key would
+            // need to fold image content hashes into the chained hash
+            // — deferred to a follow-up).
+            try await runVLMGeneration(
+                lmInput: lmInput,
+                container: container,
+                generateParams: generateParams,
+                into: continuation
+            )
+        } else {
+            try await runLLMGeneration(
+                lmInput: lmInput,
+                container: container,
+                generateParams: generateParams,
+                modelID: loadedModelSnapshot.id,
+                into: continuation
+            )
+        }
+    }
+
+    /// Text-only path: tokenise, look up the prompt cache, prefill only
+    /// the new suffix, and stream tokens. Saves the extended cache back
+    /// to `promptCacheStore` once the stream completes.
+    private func runLLMGeneration(
+        lmInput: LMInput,
+        container: ModelContainer,
+        generateParams: GenerateParameters,
+        modelID: String,
+        into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
+    ) async throws {
         // Flat Int token array for key construction. `LMInput.text.tokens`
         // is an `MLXArray`; `asArray(Int.self)` materialises to Swift.
         let inputTokens = lmInput.text.tokens.asArray(Int.self)
-        let modelID = loadedModelSnapshot.id
         let priorKey = PromptCacheKey(modelID: modelID, tokens: inputTokens)
 
         // Try the store. On hit we reuse the restored cache; on miss we
@@ -391,23 +496,75 @@ public actor MLXSwiftEngine: InferenceEngine {
             snapshot: PromptCacheSnapshot(workingCache)
         )
 
-        // Emit the final chunk with usage + finish reason.
-        if let info = completionInfo {
-            let finishReason: FinishReason
-            switch info.stopReason {
-            case .length:
-                finishReason = .length
-            case .stop, .cancelled:
-                finishReason = .stop
-            }
-            let usage = TokenUsage(
-                promptTokens: info.promptTokenCount,
-                completionTokens: info.generationTokenCount
+        emitFinalChunk(completionInfo: completionInfo, into: continuation)
+        continuation.finish()
+    }
+
+    /// Vision-language path: prepare the multimodal input (which already
+    /// includes processed image embeddings via the VLM's UserInputProcessor),
+    /// allocate a fresh KV cache, and stream tokens. Bypasses the prompt
+    /// cache — multimodal cache keys are a follow-up.
+    private func runVLMGeneration(
+        lmInput: LMInput,
+        container: ModelContainer,
+        generateParams: GenerateParameters,
+        into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
+    ) async throws {
+        let tokenizer = await container.tokenizer
+        let inputBox = NonSendableBox(lmInput)
+
+        let stream: AsyncStream<TokenGeneration> = try await container.perform(nonSendable: inputBox) { context, inputBox in
+            let cache = context.model.newCache(parameters: generateParams)
+            return try MLXLMCommon.generateTokens(
+                input: inputBox.value,
+                cache: cache,
+                parameters: generateParams,
+                context: context
             )
-            let finalChunk = GenerateChunk(text: "", finishReason: finishReason, usage: usage)
-            continuation.yield(finalChunk)
         }
 
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        var completionInfo: GenerateCompletionInfo?
+
+        for await event in stream {
+            switch event {
+            case .token(let token):
+                detokenizer.append(token: token)
+                if let piece = detokenizer.next() {
+                    let chunk = GenerateChunk(text: piece)
+                    if case .terminated = continuation.yield(chunk) {
+                        return
+                    }
+                }
+            case .info(let info):
+                completionInfo = info
+            }
+        }
+
+        emitFinalChunk(completionInfo: completionInfo, into: continuation)
         continuation.finish()
+    }
+
+    /// Shared "final chunk" emit (usage + finish reason). Both LLM and
+    /// VLM paths funnel through this so the wire-format chunk shape
+    /// stays identical.
+    private func emitFinalChunk(
+        completionInfo: GenerateCompletionInfo?,
+        into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
+    ) {
+        guard let info = completionInfo else { return }
+        let finishReason: FinishReason
+        switch info.stopReason {
+        case .length:
+            finishReason = .length
+        case .stop, .cancelled:
+            finishReason = .stop
+        }
+        let usage = TokenUsage(
+            promptTokens: info.promptTokenCount,
+            completionTokens: info.generationTokenCount
+        )
+        let finalChunk = GenerateChunk(text: "", finishReason: finishReason, usage: usage)
+        continuation.yield(finalChunk)
     }
 }
