@@ -16,7 +16,7 @@ on:
 jobs:
   build:
     name: Build, Sign & Release
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
 
     permissions:
@@ -29,8 +29,11 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pin Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      # Match ci.yml — Xcode 26.4.1 GA (Swift 6.3) tolerates the
+      # CIContext Sendable annotation in mlx-swift-lm's MLXVLM
+      # (Xcode 16.4 / Swift 6.0 fails with strict-concurrency error).
+      - name: Pin Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - name: Show toolchain
         run: |
