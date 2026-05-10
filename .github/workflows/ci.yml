@@ -40,13 +40,17 @@ env:
 jobs:
   spm:
     name: SPM Build & Test
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
-      - name: Pin Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      # Xcode 26.4.1 ships Swift 6.3, which (unlike 6.0 in Xcode 16.4)
+      # tolerates mlx-swift-lm's `private let context = CIContext()` in
+      # MLXVLM/MediaProcessing.swift under strict concurrency. Pinning to
+      # the GA build (not the 26.5 beta) so toolchain churn stays low.
+      - name: Pin Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - name: Cache SPM checkouts + build
         uses: actions/cache@v5
@@ -81,13 +85,17 @@ jobs:
 
   app:
     name: Xcode App Build
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
-      - name: Pin Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      # Xcode 26.4.1 ships Swift 6.3, which (unlike 6.0 in Xcode 16.4)
+      # tolerates mlx-swift-lm's `private let context = CIContext()` in
+      # MLXVLM/MediaProcessing.swift under strict concurrency. Pinning to
+      # the GA build (not the 26.5 beta) so toolchain churn stays low.
+      - name: Pin Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - name: Cache Xcode DerivedData
         uses: actions/cache@v5
