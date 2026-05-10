@@ -56,14 +56,15 @@ Want to see what Gatekeeper thinks of the app?
 spctl --assess --verbose /Applications/macMLX.app
 ```
 
-## Feature highlights (v0.2 → v0.3.5)
+## Feature highlights (v0.2 → v0.3.7)
 
-Twelve-ish shipped releases since the v0.1 MVP. Pick the ones that matter:
+Fifteen-ish shipped releases since the v0.1 MVP. Pick the ones that matter:
 
 **Downloads**
 - Resumable downloads survive cancels AND app quits (background URLSession + persisted resume data) — #5/#6/#8
 - Live speed (MB/s) + ETA + per-file progress bar — #7
 - Configurable Hugging Face endpoint for mirrors like `https://hf-mirror.com` (GUI + CLI, both) — #21
+- **HF update detection** — downloaded models track the Hub commit SHA via a `.macmlx-meta.json` sidecar; Models tab surfaces an "Update available" badge when the Hub head advances (throttled to once / 24h) — v0.3.7
 
 **Chat**
 - Conversation sidebar: switch between saved chats, rename, delete, **rewind to here** (truncate after any message) — v0.3.2
@@ -71,18 +72,24 @@ Twelve-ish shipped releases since the v0.1 MVP. Pick the ones that matter:
 - Right-click any message: Copy / Edit / Regenerate / Delete — #11
 - Per-model **Parameters Inspector** (⌘⌥I) — temperature, top_p, max tokens, system prompt persist to disk — #15
 - Chat model switcher in toolbar loads on tap — v0.3.1
+- **Collapsible `<think>` renderer** for Qwen3 / DeepSeek-R1 / Gemma reasoning blocks — v0.3.6
 
 **Benchmark** — v0.3.0 tab for local tok/s, TTFT, peak memory, and history, with `Share to Community` to a GitHub-issue leaderboard — #22
 
-**Logs** — v0.3.4 tab reads Pulse's store directly: search, level filter, live tail, clear
+**Logs** — v0.3.4 tab reads Pulse's store directly: search, level filter, live tail, clear. **MLX stdout / stderr** are teed into the log store at launch (v0.3.7) so library-level prints from `mlx-swift-lm` are visible without a debugger.
 
-**API (OpenAI-compat)**
+**API (OpenAI- and Ollama-compat)**
 - Cold-swap: `/v1/chat/completions` auto-loads any locally-downloaded model by ID, serialises concurrent swaps — v0.3.3
 - `/x/status` reports real RSS
+- **CORS middleware + request logger + alias routes** + probe endpoints (`GET /`, `/v1`, `/v1/health`, `/v1/status`) — v0.3.6
+- **Ollama API compatibility layer** — `GET /api/tags`, `GET /api/version`, `POST /api/chat`, `POST /api/generate`, `POST /api/show` with NDJSON streaming (default when `stream` omitted). Covers Zed, Immersive Translate, Open WebUI's Ollama provider — v0.3.6
+- **Generation serialised across requests** — FIFO binary semaphore around every chat/completion path prevents parallel clients from crashing the engine — v0.3.6
 
-**CLI** — native ANSI dashboards (`macmlx pull`, `serve`, `run`), honours `preferredEngine` + per-model `ModelParameters` + HF mirror settings — v0.3.1 / v0.3.3 / v0.3.5
+**CLI** — native ANSI dashboards (`macmlx pull`, `serve`, `run`), honours `preferredEngine` + per-model `ModelParameters` + HF mirror settings. GUI and CLI now share `~/.mac-mlx/macmlx.pid` and refuse to double-bind :8000 — v0.3.1 / v0.3.3 / v0.3.5 / v0.3.7
 
-**Stability / polish** — chat survives sidebar tab switches (#1), single-instance enforcement (#2), Quit in menu bar (#17), `macmlx list` segfault fix (v0.3.1), ConversationStore date-precision fix (v0.3.3), and a 3-commit independent code-review sweep in v0.3.0
+**Sandbox off** — v0.3.6 disabled App Sandbox so `~/.mac-mlx/` reads/writes no longer redirect to the container home. Matches LM Studio / Ollama / oMLX. Gatekeeper remains the user-trust layer.
+
+**Stability / polish** — chat survives sidebar tab switches (#1), single-instance enforcement (#2), Quit in menu bar (#17), `macmlx list` segfault fix (v0.3.1), ConversationStore date-precision fix (v0.3.3), and 13 user-reported bugs plus a dozen post-QA hot patches in v0.3.6
 
 Full per-tag breakdown: [CHANGELOG.md](CHANGELOG.md).
 
@@ -127,11 +134,11 @@ Any OpenAI-compatible client works — point it at
 
 | Engine | Status | Notes |
 |--------|--------|-------|
-| **MLX Swift** (default) | ✅ Shipping | Apple's `mlx-swift-lm`, in-process. Supports models up to ~70B on 64 GB+ Macs. |
-| **SwiftLM** (100B+ MoE) | 🕒 Deferred to v0.3 | Subprocess launch blocked by App Sandbox policy; revisit when there's a concrete user ask ([#12](../../issues/12)). |
-| **Python mlx-lm** | 🕒 Deferred to v0.3 | Same sandbox blocker ([#13](../../issues/13)). |
+| **MLX Swift** (default) | ✅ Shipping | Apple's `mlx-swift-lm`, in-process. Supports models up to ~70B on 64 GB+ Macs. Tiered KV prompt cache + multi-model pool since v0.4.0. |
+| **SwiftLM** (100B+ MoE) | 🔓 Reopenable | Subprocess path was blocked by App Sandbox until v0.3.6; with sandbox off, [#12](../../issues/12) / [#13](../../issues/13) are candidates for v0.5/v0.6 — not yet committed. Fills the [mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219) MoE gap. |
+| **Python mlx-lm** | 🔓 Reopenable | Same subprocess path. Max model coverage from mlx-community's Python-only checkpoints in exchange for `uv` on PATH. |
 
-Settings → Engine shows Install Guide links for the deferred engines;
+Settings → Engine shows Install Guide links for the non-default engines;
 selecting them today surfaces a graceful "engine not available" state.
 
 ## Architecture
@@ -182,7 +189,7 @@ open macMLX/macMLX.xcodeproj           # or: xcodebuild -scheme macMLX build
 swift build --package-path macmlx-cli
 
 # Core + tests
-swift test --package-path MacMLXCore   # 90 tests, runs in ~3s
+swift test --package-path MacMLXCore   # runs in ~3s
 ```
 
 ## Roadmap
@@ -191,30 +198,45 @@ swift test --package-path MacMLXCore   # 90 tests, runs in ~3s
 
 - **v0.1.0** — native SwiftUI GUI, menu bar, CLI (`serve` / `pull` / `run` / `list` / `ps` / `stop`), HuggingFace downloader, OpenAI-compatible API, Sparkle auto-update, memory-aware onboarding.
 - **v0.2.0** — Download + chat polish (10 issues): resumable downloads, HF mirrors, Markdown rendering, message edit/regenerate, Parameters Inspector.
-- **v0.3.x** — six patch releases: Benchmark feature, cross-cutting gap fixes, UX patches, Chat history sidebar, API cold-swap, Logs tab, native ANSI CLI dashboards. See `CHANGELOG.md` for the per-tag breakdown.
+- **v0.3.0 → v0.3.5** — Benchmark feature, cross-cutting gap fixes, UX patches, Chat history sidebar, API cold-swap, Logs tab, native ANSI CLI dashboards.
+- **v0.3.6** — 13 user-reported bugs + post-QA hot patches: collapsible `<think>` renderer, sandbox disabled, CORS + request logger + alias routes, Ollama API compatibility layer with NDJSON streaming, GUI/CLI state coordination via `LoadHook`, FIFO generation semaphore, chat rendering fixes, sidebar rebuild.
+- **v0.3.7** — maintenance release: CI pinned to Node.js 24 (`actions/checkout@v5` / `actions/cache@v5`), MLX stdout/stderr teed into the Logs tab, HF model-update detection via `.macmlx-meta.json` sidecar, shared `~/.mac-mlx/macmlx.pid` between GUI and CLI.
 
-### Next (v0.3.6 — maintenance patch)
+See `CHANGELOG.md` for the per-tag breakdown.
 
-- `macmlx --version` auto-bumped from the release tag
-- `macmlx search <query>` command (queries `mlx-community` by default)
-- Release binary slim-down via `strip -S` + dynamic Swift stdlib
-- CLI `--log-level` + `--log-stderr` flags so Pulse logging surfaces from the terminal
+### In progress (v0.4.0 — engine parity with oMLX)
 
-### Next minor (v0.4.0)
+Pivot from the original VLM-first plan: after comparing macMLX against [oMLX](https://github.com/jundot/omlx) (10.6k★), the higher-leverage investment is closing the inference-engine gap first. VLM moves to v0.4.1. Three independent sub-features, same release:
 
-- [#23](../../issues/23) Vision-Language Model support — `MLXVLM` already in the dependency tree, 16 architectures (Qwen2.5-VL, SmolVLM, Gemma-3, Paligemma, …). Full plan in [`.omc/plans/v0.4-vlm-plan.md`](.omc/plans/v0.4-vlm-plan.md).
+- **Tiered KV cache (hot RAM + cold SSD)** — shipped to `main` (PR #26). Successive chat turns on the same model reuse the KV cache when the new prompt extends the previous one. Hot tier = last-K snapshots in an LRU dict; cold tier = safetensors at `~/.mac-mlx/kv-cache/` (16-way sharded) round-tripped through mlx-swift-lm's `savePromptCache` / `loadPromptCache`. Settings → "KV Cache" section exposes hot/cold budgets + Clear All. Coding-assistant workflows (Claude Code / Cursor / Zed re-sending history every turn) see reduced TTFT on repeat prefixes.
+- **Multi-model pool with auto-swap** — in PR #27. `ModelPool` actor holds `[String: InferenceEngine]` keyed by model ID, bounded by a user-configurable resident-memory cap (Settings → Model Pool; default 50% of total RAM). Non-pinned models auto-evict LRU when over budget. Pin a model from its row in the Models tab (orange pin icon) to keep it resident. Cold-swap between pinned models no longer re-reads weights.
+- **MCP server MVP** — next. `macmlx mcp serve` CLI subcommand over stdio via [`modelcontextprotocol/swift-sdk`](https://github.com/modelcontextprotocol/swift-sdk) v0.11.x, exposing `list_models` and `chat` tools. Drop into Claude Desktop / Cursor's `mcpServers` config and run local MLX inference through their tool ecosystems.
+
+Full plan: [`docs/roadmap-post-v0.3.6.md`](docs/roadmap-post-v0.3.6.md).
+
+### Next minor (v0.4.1 — VLM)
+
+Original v0.4 scope intact, shifted one dot:
+
+- [#23](../../issues/23) Vision-Language Model support via `MLXVLM` (already in the dependency tree). 16 architectures: Qwen2.5-VL, Qwen3-VL, Gemma-3, SmolVLM/2, Paligemma, Pixtral, Idefics3, FastVLM, LFM2-VL, glm_ocr, mistral3. Image picker (NSOpenPanel + drag-drop + paste), OpenAI multimodal `content`-array parsing, images persisted to `~/.mac-mlx/conversations/<uuid>/images/`.
 
 ### Later (v0.5+)
 
-- **v0.5** — LoRA adapter loading (drop in existing HF adapters, no training) + conversation/dataset export
-- **v0.6** — Speech I/O: WhisperKit for ASR (mic input in chat) + AVSpeechSynthesizer for TTS (play assistant replies)
-- [#20](../../issues/20) Homebrew tap for the CLI (scheduled around v0.3.6–v0.4 once the CLI tarball lands as a release asset)
+- **v0.5** — Continuous batching (blocked on upstream `mlx-swift-lm` shipping `BatchGenerator` + `BatchKVCache` — tracked against Python mlx-lm PRs [#941](https://github.com/ml-explore/mlx-lm/pull/941) / [#1101](https://github.com/ml-explore/mlx-lm/pull/1101)), LoRA adapter loading (drop in existing HF adapters, no training), MCP *client* (configure external MCP servers from inside macMLX so chat models tool-call through them).
+- **v0.6** — Speech I/O via [`DePasqualeOrg/mlx-swift-audio`](https://github.com/DePasqualeOrg/mlx-swift-audio) (replaces the original WhisperKit plan). MLX-native STT (Whisper, Fun-ASR for Chinese) + TTS (Marvis streaming, Chatterbox voice cloning, CosyVoice 2). Kokoro deliberately excluded to avoid GPL-3 espeak-ng.
+- **v0.7** — Community Benchmarks service. Opt-in `POST /v1/benchmarks` endpoint aggregates anonymised `BenchmarkResult` + `HardwareInfo` by chip × model × quant × macOS version into a public leaderboard on this website and inside the app.
 
-### Deferred / blocked
+### Reopenable after sandbox removal (v0.3.6)
 
-- [#19](../../issues/19) Signed + notarized DMG — needs a paid Apple Developer account
-- Full native-MLX Whisper in Swift — upstream `mlx-swift-lm` doesn't ship audio models yet; WhisperKit (Core ML) covers the UX in the meantime
-- [#12](../../issues/12) / [#13](../../issues/13) Subprocess-based engines (SwiftLM, Python mlx-lm) — closed as *not planned* because App Sandbox blocks spawning external binaries. Reopenable if sandbox policy is revisited or a Swift-native 100B+ MoE inference path appears.
+App Sandbox was disabled in v0.3.6; several previously-closed "not planned" items are feasible again. None are committed yet:
+
+- [#12](../../issues/12) Python `mlx-lm` engine via subprocess — max model coverage at the cost of `uv` on PATH + slower first-token.
+- [#13](../../issues/13) SwiftLM binary engine via subprocess — 100B+ MoE coverage where `mlx-swift-lm` can't handle (Gemma 4 MoE, Llama 4 MoE, DeepSeek-V3).
+- [#20](../../issues/20) Homebrew tap for the CLI — unblocked once the CLI tarball ships as a release asset.
+
+### Still deferred / blocked
+
+- [#19](../../issues/19) Signed + notarized DMG — needs a paid Apple Developer account.
 
 ## Contributing
 
