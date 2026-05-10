@@ -8,10 +8,15 @@ import ServiceLifecycle
 // MARK: - OpenAI-compatible request/response types
 
 /// OpenAI-compatible chat completion request body.
+///
+/// `Message.content` accepts either a plain string (text-only chat) or
+/// an OpenAI multimodal content array of `{type, text|image_url}` parts
+/// (v0.4.1+ — VLM models can read images this way). The decoder tries
+/// string first, falls back to `[Part]`. See `MultimodalContent` below.
 private struct ChatCompletionRequest: Decodable, Sendable {
     struct Message: Decodable, Sendable {
         let role: String
-        let content: String
+        let content: MultimodalContent
     }
 
     let model: String
@@ -20,6 +25,111 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     let temperature: Double?
     let top_p: Double?
     let max_tokens: Int?
+}
+
+/// OpenAI multimodal content payload. Either a plain string (text-only
+/// — backwards compat with every existing client) or an array of typed
+/// parts (`text` and `image_url`). The decoder tries the string form
+/// first; on failure it falls through to an array of parts so we don't
+/// reject older clients that send a bare string.
+private enum MultimodalContent: Decodable, Sendable {
+    case string(String)
+    case parts([Part])
+
+    struct Part: Decodable, Sendable {
+        let type: String                  // "text" or "image_url"
+        let text: String?
+        let image_url: ImageURL?
+    }
+    struct ImageURL: Decodable, Sendable {
+        /// Either a `data:image/...;base64,XXXX` URL (only form we
+        /// currently decode — see `extractImages()`) or `http(s)://`.
+        /// `file://` is rejected by `extractImages()` for defence-in-
+        /// depth even though the server is localhost-bound.
+        let url: String
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .string(s)
+            return
+        }
+        let parts = try container.decode([Part].self)
+        self = .parts(parts)
+    }
+
+    /// Concatenated text view — what the model sees as the prompt
+    /// content for this turn. Image parts are ignored (their bytes
+    /// flow into the engine separately via `extractImages()`).
+    var text: String {
+        switch self {
+        case .string(let s):
+            return s
+        case .parts(let parts):
+            return parts.compactMap { $0.type == "text" ? $0.text : nil }
+                .joined(separator: "\n")
+        }
+    }
+
+    /// Decode any base64 data URLs into `ImageAttachment` values backed
+    /// by tmpfile copies. Caps:
+    /// - 4 images per call (further parts silently dropped)
+    /// - 10 MB per image (oversized parts silently dropped)
+    /// - data URL only — `http(s)://` and `file://` are not fetched
+    func extractImages() -> [ImageAttachment] {
+        guard case .parts(let parts) = self else { return [] }
+        var out: [ImageAttachment] = []
+        for part in parts {
+            guard part.type == "image_url",
+                  let urlStr = part.image_url?.url,
+                  let attachment = MultimodalContent.decodeDataURL(urlStr)
+            else { continue }
+            out.append(attachment)
+            if out.count >= 4 { break }
+        }
+        return out
+    }
+
+    /// Best-effort base64 data-URL → on-disk image. Returns nil on
+    /// any malformed input or unsupported MIME so callers can simply
+    /// drop the part.
+    private static func decodeDataURL(_ urlStr: String) -> ImageAttachment? {
+        guard urlStr.hasPrefix("data:") else { return nil }
+        let body = urlStr.dropFirst("data:".count)
+        let split = body.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+        guard split.count == 2 else { return nil }
+        let header = String(split[0])  // e.g. "image/png;base64"
+        let payload = String(split[1])
+        guard header.hasSuffix(";base64") else { return nil }
+        let mime = String(header.dropLast(";base64".count))
+
+        let ext: String
+        switch mime.lowercased() {
+        case "image/jpeg", "image/jpg": ext = "jpg"
+        case "image/png":               ext = "png"
+        case "image/webp":              ext = "webp"
+        case "image/gif":               ext = "gif"
+        case "image/heic":              ext = "heic"
+        case "image/bmp":               ext = "bmp"
+        default:                        return nil
+        }
+
+        guard let bytes = Data(base64Encoded: payload, options: .ignoreUnknownCharacters) else {
+            return nil
+        }
+        // 10 MB per image cap.
+        if bytes.count > 10 * 1024 * 1024 { return nil }
+
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macmlx-http-img-\(UUID().uuidString).\(ext)")
+        do {
+            try bytes.write(to: tmp)
+            return ImageAttachment(fileURL: tmp, mimeType: mime)
+        } catch {
+            return nil
+        }
+    }
 }
 
 /// Request body for `/x/models/load`.
@@ -568,13 +678,19 @@ public actor HummingbirdServer {
         // property, so leaving it in both places produces a duplicate
         // system turn, which Qwen3 / Gemma / other strict Jinja chat
         // templates reject with a TemplateException.
-        let systemPrompt = chatReq.messages.first(where: { $0.role == "system" })?.content
+        let systemPrompt = chatReq.messages.first(where: { $0.role == "system" })?.content.text
 
         // Map the rest (user / assistant), dropping unknown roles and
-        // the now-separated system turns.
+        // the now-separated system turns. Multimodal `content` arrays
+        // are split here: text parts → `content`, image_url data URLs
+        // → `images` via `extractImages()`. See MultimodalContent.
         let messages: [ChatMessage] = chatReq.messages.compactMap { msg in
             guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
-            return ChatMessage(role: role, content: msg.content)
+            return ChatMessage(
+                role: role,
+                content: msg.content.text,
+                images: msg.content.extractImages()
+            )
         }
 
         let params = GenerationParameters(
