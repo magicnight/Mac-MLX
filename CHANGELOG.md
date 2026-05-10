@@ -59,6 +59,31 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `macmlx serve` and `macmlx run`). Drop into Claude Desktop's
   `claude_desktop_config.json` as
   `{ "mcpServers": { "macmlx": { "command": "macmlx", "args": ["mcp", "serve"] } } }`.
+- **VLM Engine** (v0.4.1, part 2 of 3). MLXSwiftEngine now branches
+  on `model.format` to load text-only models through
+  `MLXLLM.LLMModelFactory` and vision-language models through
+  `MLXVLM.VLMModelFactory`. Runtime modality stored in a new
+  `LoadedSupport` enum (`.none / .llm / .vlm`).
+  - `runGeneration(_:)` splits into `runLLMGeneration` (existing
+    prompt-cache flow — hot/cold KV tier, suffix prefill, save
+    extended cache after stream) and `runVLMGeneration` (fresh KV
+    cache per call; bypasses the prompt cache for now since
+    multimodal cache keys would need to fold image bytes into the
+    chained hash).
+  - `Chat.Message` mapping respects modality: VLM models receive
+    `ChatMessage.images` as `UserInput.Image.url(URL)` so the VLM's
+    `UserInputProcessor` can inject image tokens; LLM models drop
+    accidental attachments with a debug-level Pulse warning.
+  - `MLXVLM` added to `MacMLXCore` package dependencies (sibling
+    product of `MLXLLM` already in our `mlx-swift-lm` 3.31.x pin —
+    no new SPM dependency tree).
+  - Three new unit tests cover unsupported-format rejection
+    (gguf, unknown, missing-VLM-directory). 111/111 Core tests
+    green. Real VLM smoke (loading e.g. SmolVLM-Instruct-4bit) is
+    a manual-QA item — multi-GB download.
+  - Image picker, multimodal HTTP, and conversation persistence
+    land in the v0.4.1 part-3 PR. Plan:
+    `docs/superpowers/plans/2026-05-10-v0.4.1-vlm.md`.
 - **VLM Foundation** (v0.4.1, part 1 of 3). Pure-Swift Core changes
   for vision-language model support. No MLX integration yet, no UI,
   no HTTP changes.
