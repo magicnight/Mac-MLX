@@ -5,11 +5,35 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
     public let id: UUID
     public let role: MessageRole
     public let content: String
+    /// Image attachments. Empty for text-only messages — the common
+    /// case. Backwards compatible: pre-v0.4.1 conversation JSON (which
+    /// has no `images` key) decodes with an empty array, so existing
+    /// user chats survive the upgrade unchanged.
+    public let images: [ImageAttachment]
 
-    public init(id: UUID = UUID(), role: MessageRole, content: String) {
+    public init(
+        id: UUID = UUID(),
+        role: MessageRole,
+        content: String,
+        images: [ImageAttachment] = []
+    ) {
         self.id = id
         self.role = role
         self.content = content
+        self.images = images
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, content, images
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.role = try c.decode(MessageRole.self, forKey: .role)
+        self.content = try c.decode(String.self, forKey: .content)
+        // Default to empty when the key is absent (legacy conversations).
+        self.images = try c.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
     }
 }
 

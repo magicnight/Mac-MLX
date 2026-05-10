@@ -53,10 +53,21 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
 /// Recognised on-disk model formats.
 public enum ModelFormat: String, Codable, Hashable, Sendable, CaseIterable {
     case mlx
+    /// Vision-language model (v0.4.1+). Same on-disk shape as `.mlx`,
+    /// distinguished by `model_type` in `config.json`. The library
+    /// scan first runs `detect(in:)` to filter MLX / GGUF / unknown
+    /// from the file listing, then upgrades `.mlx` → `.mlxVLM` if the
+    /// `model_type` matches a known VLM family.
+    case mlxVLM
     case gguf
     case unknown
 
     /// Heuristic classifier from a directory's file listing.
+    ///
+    /// File-listing inspection only — no I/O on the contents. Returns
+    /// `.mlx` for any directory that looks like an MLX text model;
+    /// `ModelLibraryManager.scan(_:)` is responsible for the further
+    /// `.mlx` → `.mlxVLM` upgrade based on `config.json`.
     public static func detect(in fileNames: [String]) -> ModelFormat {
         let lower = fileNames.map { $0.lowercased() }
         if lower.contains(where: { $0.hasSuffix(".gguf") }) { return .gguf }

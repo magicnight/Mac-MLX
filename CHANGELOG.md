@@ -59,6 +59,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `macmlx serve` and `macmlx run`). Drop into Claude Desktop's
   `claude_desktop_config.json` as
   `{ "mcpServers": { "macmlx": { "command": "macmlx", "args": ["mcp", "serve"] } } }`.
+- **VLM Foundation** (v0.4.1, part 1 of 3). Pure-Swift Core changes
+  for vision-language model support. No MLX integration yet, no UI,
+  no HTTP changes.
+  - `ImageAttachment` value type (`fileURL`, `mimeType`) sits next
+    to `LocalModel` / `HFModel` and round-trips through Codable.
+    MIME-type helper covers jpeg / png / webp / gif / heic / bmp.
+  - `ChatMessage` gains an `images: [ImageAttachment]` field with a
+    custom `init(from:)` that defaults to empty when the key is
+    absent — pre-v0.4.1 conversation JSON loads unchanged, no
+    migration step.
+  - `ModelFormat.mlxVLM` distinguishes vision-language directories.
+    `ModelLibraryManager.scan(_:)` peeks `config.json`'s
+    `model_type` and tags 14 known VLM families: qwen2_vl,
+    qwen2_5_vl, qwen3_vl, qwen3_5_vl, gemma3, smolvlm, smolvlm2,
+    paligemma, pixtral, idefics3, fast_vlm, lfm2_vl, glm_ocr,
+    mistral3. Malformed / missing `model_type` falls back to
+    `.mlx`. 13 new unit tests cover detection edge cases.
+  - Engine integration (MLXSwiftEngine VLM branch via
+    `MLXVLM.VLMModelFactory`) and UI / HTTP work land in follow-up
+    PRs — see
+    `docs/superpowers/plans/2026-05-10-v0.4.1-vlm.md`.
 
 ---
 
