@@ -10,6 +10,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **LoRA Foundation** (v0.5, part 1 of 2). Pure-Swift Core layer
+  for HuggingFace LoRA adapter discovery — no engine integration
+  yet, no UI. `LocalAdapter` value type holds adapter metadata
+  parsed from PEFT's `adapter_config.json` (`base_model_name_or_path`,
+  `r`, `lora_alpha`, `target_modules`, `peft_type`). `AdapterStore`
+  actor scans `~/.mac-mlx/adapters/<name>/` for directories that
+  contain both `adapter_config.json` and `adapter_model.safetensors`
+  — best-effort, malformed configs / missing weights silently drop.
+  10 new unit tests cover decode + scan paths. Engine application
+  of adapter weights via `LoRATrain.convert` + `loadLoRAWeights`
+  and the parameters-inspector picker land in v0.5 part 2.
 - **Prompt cache tiering** (v0.4.0 engine parity, part 1 of 3).
   Successive chat turns on the same model now reuse the KV cache
   when the new prompt extends the previous one — the shared prefix
