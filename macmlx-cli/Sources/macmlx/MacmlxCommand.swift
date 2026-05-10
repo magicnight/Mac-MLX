@@ -14,6 +14,7 @@ struct MacmlxCommand: AsyncParsableCommand {
             ListCommand.self,
             PSCommand.self,
             StopCommand.self,
+            MCPCommand.self,
         ]
     )
 
