@@ -9,13 +9,19 @@ Shares MacMLXCore with the GUI app — identical inference quality.
 ## Installation
 
 ```bash
-# Via Homebrew (v0.2+)
-brew install magicnight/mac-mlx/macmlx
+# Via Homebrew (shipping post-#20)
+brew tap magicnight/mac-mlx
+brew install macmlx
 
 # Bundled with macMLX.app DMG
 # /Applications/macMLX.app/Contents/MacOS/macmlx
 # Symlinked to /usr/local/bin/macmlx during onboarding (optional)
 ```
+
+Pipeline lives in `.claude/distribution.md` (Homebrew Tap section):
+release CI builds an arm64 tarball, renders `Formula/macmlx.rb`,
+and pushes it to `magicnight/homebrew-mac-mlx` when
+`HOMEBREW_TAP_TOKEN` is configured.
 
 ## Command Design
 

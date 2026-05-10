@@ -52,6 +52,25 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: ./scripts/package-dmg.sh
 
+      - name: Package macmlx CLI tarball
+        # Builds the Release-mode `macmlx` binary, strips it, and tars
+        # it as macmlx-${TAG}-arm64.tar.gz for the Homebrew tap (#20).
+        # Exports MACMLX_CLI_TARBALL + MACMLX_CLI_SHA256 to GITHUB_ENV
+        # so the next step can render the formula.
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: ./scripts/package-cli.sh
+
+      - name: Render Homebrew formula
+        # Substitutes version/URL/sha256 into Formula/macmlx.rb and
+        # writes dist/macmlx.rb. Attached to the GitHub Release so the
+        # tap repo (magicnight/homebrew-mac-mlx) can pull it directly,
+        # either by hand or by a follow-up automation step.
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          MACMLX_CLI_SHA256: ${{ env.MACMLX_CLI_SHA256 }}
+        run: ./scripts/render-formula.sh
+
       - name: Sign DMG with Sparkle EdDSA
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -145,6 +164,57 @@ jobs:
           files: |
             dist/*.dmg
             dist/*.sha256
+            dist/macmlx-*.tar.gz
+            dist/macmlx.rb
           draft: false
           prerelease: false
           generate_release_notes: true
+
+      - name: Publish formula to Homebrew tap
+        # Pushes dist/macmlx.rb to magicnight/homebrew-mac-mlx so
+        # `brew tap magicnight/mac-mlx && brew install macmlx` Just Works
+        # (#20). Skipped automatically when the cross-repo PAT isn't
+        # configured — the rendered formula is still attached to the
+        # release above, so a maintainer can copy it manually.
+        if: env.MACMLX_CLI_SHA256 != ''
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN secret not set — skipping tap update."
+            echo "The rendered formula is attached to this release as macmlx.rb."
+            echo "To enable auto-publish: create a fine-grained PAT with"
+            echo "Contents: Read+Write on magicnight/homebrew-mac-mlx and"
+            echo "store it as HOMEBREW_TAP_TOKEN in this repo's secrets."
+            exit 0
+          fi
+          if [ ! -f dist/macmlx.rb ]; then
+            echo "warning: dist/macmlx.rb not found — formula render must have failed."
+            exit 0
+          fi
+          TAP_DIR="$(mktemp -d)"
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/magicnight/homebrew-mac-mlx.git" \
+            "$TAP_DIR"
+          mkdir -p "$TAP_DIR/Formula"
+          cp dist/macmlx.rb "$TAP_DIR/Formula/macmlx.rb"
+          cd "$TAP_DIR"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/macmlx.rb
+          if git diff --staged --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git commit -m "macmlx ${GITHUB_REF_NAME}"
+          for attempt in 1 2 3; do
+            if git push origin HEAD; then
+              echo "Tap updated on attempt ${attempt}."
+              exit 0
+            fi
+            git pull --rebase origin HEAD || true
+            sleep $((attempt * 5))
+          done
+          echo "warning: tap push failed after 3 attempts."
+          exit 1
