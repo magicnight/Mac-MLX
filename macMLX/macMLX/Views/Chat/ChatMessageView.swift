@@ -1,6 +1,7 @@
 // ChatMessageView.swift
 // macMLX
 
+import AppKit
 import SwiftUI
 import MacMLXCore
 
@@ -87,6 +88,10 @@ struct ChatMessageView: View {
     @ViewBuilder
     private var bubble: some View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
+            if !message.images.isEmpty {
+                imageStrip
+            }
+
             renderedContent
                 .textSelection(.enabled)
                 .padding(.horizontal, 12)
@@ -110,6 +115,32 @@ struct ChatMessageView: View {
                 }
             }
         }
+    }
+
+    /// Inline thumbnail strip rendered above the text bubble for any
+    /// message that has VLM image attachments (v0.4.1+). Click a
+    /// thumbnail to open the original in Preview via NSWorkspace.
+    @ViewBuilder
+    private var imageStrip: some View {
+        let columns = [GridItem(.adaptive(minimum: 96, maximum: 120), spacing: 8)]
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+            ForEach(message.images, id: \.fileURL) { att in
+                Button {
+                    NSWorkspace.shared.open(att.fileURL)
+                } label: {
+                    AsyncThumbnailImage(url: att.fileURL)
+                        .frame(width: 96, height: 96)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Open \(att.fileURL.lastPathComponent) in Preview")
+            }
+        }
+        .frame(maxWidth: 320, alignment: message.role == .user ? .trailing : .leading)
     }
 
     private var bubbleBackground: Color {

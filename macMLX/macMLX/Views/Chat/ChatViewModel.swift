@@ -20,6 +20,8 @@ struct UIChatMessage: Identifiable {
     let timestamp: Date
     var tokenCount: Int?
     var isGenerating: Bool
+    /// VLM image attachments tied to this message (v0.4.1+).
+    var images: [ImageAttachment]
 
     init(
         id: UUID = UUID(),
@@ -27,7 +29,8 @@ struct UIChatMessage: Identifiable {
         content: String,
         timestamp: Date = Date(),
         tokenCount: Int? = nil,
-        isGenerating: Bool = false
+        isGenerating: Bool = false,
+        images: [ImageAttachment] = []
     ) {
         self.id = id
         self.role = role
@@ -35,6 +38,7 @@ struct UIChatMessage: Identifiable {
         self.timestamp = timestamp
         self.tokenCount = tokenCount
         self.isGenerating = isGenerating
+        self.images = images
     }
 
     /// Restore from persistence.
@@ -45,6 +49,7 @@ struct UIChatMessage: Identifiable {
         self.timestamp = stored.timestamp
         self.tokenCount = stored.tokenCount
         self.isGenerating = false
+        self.images = stored.images
     }
 
     /// Dehydrate for persistence. Transient `isGenerating` is dropped.
@@ -54,7 +59,8 @@ struct UIChatMessage: Identifiable {
             role: role,
             content: content,
             timestamp: timestamp,
-            tokenCount: tokenCount
+            tokenCount: tokenCount,
+            images: images
         )
     }
 }
@@ -68,6 +74,10 @@ final class ChatViewModel {
     var messages: [UIChatMessage] = []
     var inputText: String = ""
     var isGenerating: Bool = false
+    /// Image attachments staged for the next user message (v0.4.1+).
+    /// `send()` picks these up, attaches them to the new turn, and
+    /// clears the bag. The chat input strip mirrors this array.
+    var attachedImages: [ImageAttachment] = []
 
     /// All saved conversations, newest-first. Refreshed on `reloadConversationList()`
     /// — fires after every `persist()`, `switchTo(_:)`, `deleteConversation(_:)`,
@@ -253,12 +263,45 @@ final class ChatViewModel {
     /// assistant's reply.
     func send() async {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty,
-              coordinator.currentModel != nil else { return }
+        guard coordinator.currentModel != nil else { return }
+        // Allow image-only messages on VLM models — a bare image with no
+        // accompanying prompt is a legitimate ask ("describe this").
+        guard !text.isEmpty || !attachedImages.isEmpty else { return }
 
+        let images = attachedImages
+        attachedImages = []
         inputText = ""
-        messages.append(UIChatMessage(role: .user, content: text))
+        messages.append(UIChatMessage(role: .user, content: text, images: images))
         await generate()
+    }
+
+    // MARK: - Image attachments (v0.4.1)
+
+    /// Whether the currently-loaded model accepts image attachments.
+    /// Drives the chat input's image-picker enabled state.
+    var canAttachImages: Bool {
+        coordinator.currentModel?.format == .mlxVLM
+    }
+
+    /// Attach an image picked from disk, paste, or drop. Determines the
+    /// MIME type from the path extension. Silently rejects URLs whose
+    /// extension we don't recognise.
+    func attachImage(at url: URL) {
+        guard let mime = ImageAttachment.mimeType(forPathExtension: url.pathExtension) else {
+            return
+        }
+        attachedImages.append(ImageAttachment(fileURL: url, mimeType: mime))
+    }
+
+    /// Remove the staged attachment with the given file URL. No-op if
+    /// not present.
+    func removeAttachedImage(at url: URL) {
+        attachedImages.removeAll { $0.fileURL == url }
+    }
+
+    /// Clear every staged attachment (e.g. on "New Chat").
+    func clearAttachedImages() {
+        attachedImages = []
     }
 
     // MARK: - Regenerate / Edit / Delete (#11)
@@ -345,7 +388,7 @@ final class ChatViewModel {
 
         let coreMessages: [ChatMessage] = messages
             .filter { !$0.isGenerating }
-            .map { ChatMessage(role: $0.role, content: $0.content) }
+            .map { ChatMessage(role: $0.role, content: $0.content, images: $0.images) }
 
         let params = parameters.parameters
         let request = GenerateRequest(

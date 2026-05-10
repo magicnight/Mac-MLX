@@ -76,8 +76,10 @@ private struct ChatContent: View {
             // Input area
             ChatInputView(
                 text: $viewModel.inputText,
+                attachedImages: $viewModel.attachedImages,
                 isGenerating: viewModel.isGenerating,
                 isModelLoaded: isModelLoaded,
+                canAttachImages: viewModel.canAttachImages,
                 onSend: {
                     Task { await viewModel.send() }
                 },
