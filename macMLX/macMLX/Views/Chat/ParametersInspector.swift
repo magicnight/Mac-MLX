@@ -90,6 +90,49 @@ struct ParametersInspector: View {
                 .frame(minHeight: 80, idealHeight: 120)
             }
 
+            Section("LoRA Adapter") {
+                HStack {
+                    Picker(
+                        "Adapter",
+                        selection: Binding<String>(
+                            get: { params.parameters.adapterName ?? "" },
+                            set: { newValue in
+                                let trimmed = newValue.isEmpty ? nil : newValue
+                                params.parameters.adapterName = trimmed
+                                params.persist()
+                            }
+                        )
+                    ) {
+                        Text("None").tag("")
+                        ForEach(appState.availableAdapters, id: \.name) { adapter in
+                            Text(adapter.name).tag(adapter.name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .help("Apply a LoRA adapter on top of the loaded base model. Drop PEFT-format adapters into ~/.mac-mlx/adapters/<name>/. The adapter applies on the next model load.")
+
+                    Button {
+                        Task { await appState.refreshAdapters() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Re-scan ~/.mac-mlx/adapters/")
+                }
+                if appState.availableAdapters.isEmpty {
+                    Text("No adapters in ~/.mac-mlx/adapters/. Drop a PEFT or mlx-format LoRA folder there and click Refresh.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let name = params.parameters.adapterName,
+                   !name.isEmpty,
+                   !appState.availableAdapters.contains(where: { $0.name == name }) {
+                    Text("Configured adapter '\(name)' is not present — load will skip the adapter.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
             Section {
                 if let modelID = params.currentModelID {
                     Text("Current model: \(modelID)")

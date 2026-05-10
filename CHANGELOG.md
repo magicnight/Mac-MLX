@@ -10,6 +10,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **LoRA Parameters Inspector picker** (v0.5, part 4 of 4). User-
+  facing surface for selecting and applying LoRA adapters.
+  - `AppState.adapterStore` actor + `availableAdapters: [LocalAdapter]`
+    @Observable property + `adaptersDirectory` (real
+    `~/.mac-mlx/adapters/`). Initial scan runs after `bootstrap()`.
+  - `AppState.refreshAdapters()` re-runs the scan; the parameters
+    inspector exposes a refresh button so users can drop a new
+    adapter and pick it up without restarting the app.
+  - `EngineCoordinator.onModelLoaded` callback now resolves the
+    pinned `ModelParameters.adapterName` against the adapter cache
+    and calls `engine.applyAdapter(_:)` after the base model loads.
+    Missing-adapter / apply-failure paths log to Pulse's `engine`
+    category — the model still loads text-only.
+  - `ParametersInspector` grows a "LoRA Adapter" section with:
+    - menu picker bound to `params.parameters.adapterName` (None /
+      every detected adapter)
+    - refresh button to rescan `~/.mac-mlx/adapters/`
+    - empty-state hint when the directory is empty
+    - orange warning when the configured adapter name no longer
+      exists on disk (load will skip it cleanly)
 - **LoRA Engine integration** (v0.5, part 3 of 4). Engine-side
   glue tying the v0.5 LoRA Foundation (#36) and PEFT → mlx
   Converter (#37) together so a downloaded HuggingFace adapter
