@@ -69,6 +69,32 @@ public struct Settings: Codable, Equatable, Sendable {
     /// for small-memory Macs.
     public var maxResidentMemoryGB: Int
 
+    // MARK: - Speech I/O (v0.6+)
+
+    /// Master toggle for speech features — `false` keeps mic capture
+    /// + TTS playback completely off, mirrors the v0.6 first-run UX.
+    public var audioEnabled: Bool
+
+    /// Identifier of the STT model to load on demand
+    /// (e.g. `whisper-small`, `whisper-medium`, `whisper-large-v3`,
+    /// `fun-asr`). Nil means "user hasn't picked one" — the chat
+    /// input's mic button surfaces a one-shot picker on first use.
+    public var sttModel: String?
+
+    /// Identifier of the TTS model
+    /// (e.g. `marvis`, `chatterbox`, `cosyvoice2`). Nil = no TTS
+    /// model picked.
+    public var ttsModel: String?
+
+    /// Voice id passed to the TTS model. Voice cloning works by
+    /// pointing this at a `~/.mac-mlx/audio/voices/<name>.wav`
+    /// reference clip. Nil = use the model's default voice.
+    public var ttsVoice: String?
+
+    /// Auto-speak completed assistant replies. False (default) keeps
+    /// playback opt-in via the per-bubble speaker button.
+    public var ttsAutoSpeak: Bool
+
     // MARK: Factory
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
@@ -89,7 +115,12 @@ public struct Settings: Codable, Equatable, Sendable {
         hfEndpoint: "https://huggingface.co",
         kvCacheHotMB: 512,
         kvCacheColdGB: 20,
-        maxResidentMemoryGB: max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
+        maxResidentMemoryGB: max(4, Int(MemoryProbe.totalMemoryGB()) / 2),
+        audioEnabled: false,
+        sttModel: nil,
+        ttsModel: nil,
+        ttsVoice: nil,
+        ttsAutoSpeak: false
     )
 
     // MARK: Init
@@ -108,7 +139,12 @@ public struct Settings: Codable, Equatable, Sendable {
         hfEndpoint: String = "https://huggingface.co",
         kvCacheHotMB: Int = 512,
         kvCacheColdGB: Int = 20,
-        maxResidentMemoryGB: Int = max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
+        maxResidentMemoryGB: Int = max(4, Int(MemoryProbe.totalMemoryGB()) / 2),
+        audioEnabled: Bool = false,
+        sttModel: String? = nil,
+        ttsModel: String? = nil,
+        ttsVoice: String? = nil,
+        ttsAutoSpeak: Bool = false
     ) {
         self.modelDirectory = modelDirectory
         self.preferredEngine = preferredEngine
@@ -124,6 +160,11 @@ public struct Settings: Codable, Equatable, Sendable {
         self.kvCacheHotMB = kvCacheHotMB
         self.kvCacheColdGB = kvCacheColdGB
         self.maxResidentMemoryGB = maxResidentMemoryGB
+        self.audioEnabled = audioEnabled
+        self.sttModel = sttModel
+        self.ttsModel = ttsModel
+        self.ttsVoice = ttsVoice
+        self.ttsAutoSpeak = ttsAutoSpeak
     }
 
     // MARK: - Codable (backward-compat decode)
@@ -146,6 +187,11 @@ public struct Settings: Codable, Equatable, Sendable {
         case kvCacheHotMB
         case kvCacheColdGB
         case maxResidentMemoryGB
+        case audioEnabled
+        case sttModel
+        case ttsModel
+        case ttsVoice
+        case ttsAutoSpeak
     }
 
     public init(from decoder: Decoder) throws {
@@ -167,6 +213,14 @@ public struct Settings: Codable, Equatable, Sendable {
         self.maxResidentMemoryGB =
             (try c.decodeIfPresent(Int.self, forKey: .maxResidentMemoryGB))
             ?? max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
+        // v0.6 audio fields — pre-v0.6 settings.json files don't carry
+        // them. Fall back to "audio off" so existing installs upgrade
+        // without surprise mic permission prompts.
+        self.audioEnabled = try c.decodeIfPresent(Bool.self, forKey: .audioEnabled) ?? false
+        self.sttModel = try c.decodeIfPresent(String.self, forKey: .sttModel)
+        self.ttsModel = try c.decodeIfPresent(String.self, forKey: .ttsModel)
+        self.ttsVoice = try c.decodeIfPresent(String.self, forKey: .ttsVoice)
+        self.ttsAutoSpeak = try c.decodeIfPresent(Bool.self, forKey: .ttsAutoSpeak) ?? false
     }
 }
 
