@@ -53,3 +53,6 @@ sparkle_private_key*
 .omc/logs/
 .omc/research/
 .omc/notepad.md
+
+# Project website — static site, deployed separately
+public/
