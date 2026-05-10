@@ -118,7 +118,10 @@ public final class EngineCoordinator {
     /// engines (`.swiftLM`, `.pythonMLX`) fail fast since the pool's
     /// factory always produces `MLXSwiftEngine`.
     @discardableResult
-    public func load(_ model: LocalModel) async -> Result<Void, Error> {
+    public func load(
+        _ model: LocalModel,
+        adapter: LocalAdapter? = nil
+    ) async -> Result<Void, Error> {
         guard engineID == .mlxSwift else {
             let err = EngineError.unsupportedOperation(
                 "Engine \(engineID.rawValue) is detection-only in v0.1"
@@ -129,7 +132,22 @@ public final class EngineCoordinator {
         status = .loading(model: model.id)
         await logs.log("Loading model: \(model.id)", level: .info, category: .engine)
         do {
-            _ = try await pool.load(model)
+            let engine = try await pool.load(model)
+
+            // Layer the LoRA adapter on top of the freshly-loaded
+            // base model (v0.5+). Engines that don't support adapters
+            // (CPU stubs, future Python engines) get the protocol-
+            // extension default no-op; MLXSwiftEngine routes through
+            // LoRAContainer.from(directory:) + auto-PEFT-conversion.
+            if let adapter {
+                try await engine.applyAdapter(adapter)
+                await logs.log(
+                    "LoRA adapter applied: \(adapter.name) (format=\(adapter.format.rawValue))",
+                    level: .info,
+                    category: .engine
+                )
+            }
+
             currentModel = model
             currentModelID = model.id
             status = .ready(model: model.id)

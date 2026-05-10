@@ -7,6 +7,7 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
     case engineNotReady
     case generationInProgress
     case modelLoadFailed(reason: String)
+    case adapterApplyFailed(reason: String)
     case unsupportedOperation(String)
 
     public var errorDescription: String? {
@@ -21,6 +22,8 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
             return "A generation is already in progress on this engine."
         case .modelLoadFailed(let reason):
             return "Model failed to load: \(reason)"
+        case .adapterApplyFailed(let reason):
+            return "LoRA adapter failed to apply: \(reason)"
         case .unsupportedOperation(let op):
             return "Operation not supported by this engine: \(op)."
         }

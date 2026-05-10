@@ -27,17 +27,41 @@ public struct ModelParameters: Codable, Hashable, Sendable {
     public var maxTokens: Int
     /// System prompt prepended to every generation.
     public var systemPrompt: String
+    /// Optional LoRA adapter name (folder under
+    /// `~/.mac-mlx/adapters/<name>/`) to apply on model load (v0.5+).
+    /// Empty string is treated identically to `nil` and means "no
+    /// adapter" — matches how the parameters inspector represents
+    /// the "None" pick.
+    public var adapterName: String?
 
     public init(
         temperature: Double = 0.7,
         topP: Double = 0.95,
         maxTokens: Int = 2048,
-        systemPrompt: String = "You are a helpful assistant."
+        systemPrompt: String = "You are a helpful assistant.",
+        adapterName: String? = nil
     ) {
         self.temperature = temperature
         self.topP = topP
         self.maxTokens = maxTokens
         self.systemPrompt = systemPrompt
+        self.adapterName = adapterName
+    }
+
+    /// Backwards-compatible decoder. Pre-v0.5 JSON has no
+    /// `adapterName` key — default to nil so existing per-model
+    /// override files load unchanged.
+    private enum CodingKeys: String, CodingKey {
+        case temperature, topP, maxTokens, systemPrompt, adapterName
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.temperature = try c.decode(Double.self, forKey: .temperature)
+        self.topP = try c.decode(Double.self, forKey: .topP)
+        self.maxTokens = try c.decode(Int.self, forKey: .maxTokens)
+        self.systemPrompt = try c.decode(String.self, forKey: .systemPrompt)
+        self.adapterName = try c.decodeIfPresent(String.self, forKey: .adapterName)
     }
 
     /// Factory for the factory defaults — handy in "Reset" buttons.

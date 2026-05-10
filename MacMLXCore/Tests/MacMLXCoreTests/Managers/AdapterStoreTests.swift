@@ -72,6 +72,48 @@ struct AdapterStoreTests {
     }
 
     @Test
+    func scanDetectsMLXNativeFormat() async throws {
+        let temp = try TempDir()
+        try writeMLXAdapter(in: temp.url, name: "mlx-cached", rank: 8, scale: 2.0, keys: ["q_proj"])
+        let store = AdapterStore()
+        let found = try await store.scan(temp.url)
+        #expect(found.count == 1)
+        #expect(found[0].format == .mlx)
+        #expect(found[0].rank == 8)
+        #expect(found[0].targetModel == nil)  // mlx-native doesn't carry base id
+        #expect(found[0].targetModules == ["q_proj"])
+    }
+
+    @Test
+    func scanPrefersMLXOverPEFTWhenBothFilesPresent() async throws {
+        // A directory that has both PEFT and mlx-native files (e.g. a
+        // user kept the converter output side-by-side with the source)
+        // should be reported as .mlx — that's the format the engine
+        // can load directly without re-converting.
+        let temp = try TempDir()
+        let dir = temp.url.appendingPathComponent("dual-format")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Both weights files…
+        try Data().write(to: dir.appendingPathComponent("adapter_model.safetensors"))
+        try Data().write(to: dir.appendingPathComponent("adapters.safetensors"))
+        // …but only the mlx config (the readMLXAdapter path is tried
+        // first, so this is what the scan should latch onto).
+        let mlxCfg = """
+        {
+          "num_layers": 1,
+          "fine_tune_type": "lora",
+          "lora_parameters": { "rank": 4, "scale": 2.0, "keys": null }
+        }
+        """
+        try Data(mlxCfg.utf8).write(to: dir.appendingPathComponent("adapter_config.json"))
+
+        let store = AdapterStore()
+        let found = try await store.scan(temp.url)
+        #expect(found.count == 1)
+        #expect(found[0].format == .mlx)
+    }
+
+    @Test
     func scanSortsAdaptersByName() async throws {
         let temp = try TempDir()
         try writeAdapter(in: temp.url, name: "zeta", targetModel: nil, r: 4)
@@ -80,6 +122,23 @@ struct AdapterStoreTests {
         let store = AdapterStore()
         let found = try await store.scan(temp.url)
         #expect(found.map(\.name) == ["alpha", "mu", "zeta"])
+    }
+
+    /// Lay down a directory in mlx-native format (mlx schema config +
+    /// `adapters.safetensors`). Same shape as the converter writes.
+    private func writeMLXAdapter(in root: URL, name: String, rank: Int, scale: Float, keys: [String]) throws {
+        let dir = root.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let keysJSON = "[\(keys.map { "\"\($0)\"" }.joined(separator: ","))]"
+        let cfg = """
+        {
+          "num_layers": 1,
+          "fine_tune_type": "lora",
+          "lora_parameters": { "rank": \(rank), "scale": \(scale), "keys": \(keysJSON) }
+        }
+        """
+        try Data(cfg.utf8).write(to: dir.appendingPathComponent("adapter_config.json"))
+        try Data().write(to: dir.appendingPathComponent("adapters.safetensors"))
     }
 
     private func writeAdapter(in root: URL, name: String, targetModel: String?, r: Int) throws {

@@ -50,6 +50,40 @@ struct LocalAdapterTests {
     }
 
     @Test
+    func defaultsFormatToPEFTWhenMissing() throws {
+        // Pre-v0.5 JSON has no `format` key. The custom decoder
+        // defaults to .peft so on-disk adapter records keep loading.
+        let legacy = """
+        {
+            "name": "old-adapter",
+            "directory": "file:///tmp/old",
+            "targetModel": null,
+            "rank": 4,
+            "targetModules": ["q_proj"]
+        }
+        """
+        let decoded = try JSONDecoder().decode(LocalAdapter.self, from: Data(legacy.utf8))
+        #expect(decoded.format == .peft)
+        #expect(decoded.rank == 4)
+    }
+
+    @Test
+    func mlxFormatRoundTrips() throws {
+        let original = LocalAdapter(
+            name: "qwen3-cached",
+            directory: URL(fileURLWithPath: "/tmp/cached"),
+            format: .mlx,
+            targetModel: nil,
+            rank: 8,
+            targetModules: ["q_proj", "v_proj"]
+        )
+        let data = try JSONEncoder().encode(original)
+        let back = try JSONDecoder().decode(LocalAdapter.self, from: data)
+        #expect(back.format == .mlx)
+        #expect(back == original)
+    }
+
+    @Test
     func idMirrorsName() {
         let a = LocalAdapter(
             name: "x",
