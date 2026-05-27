@@ -20,28 +20,66 @@ public actor ModelLibraryManager {
 
     /// Scan `directory` for subdirectories that look like MLX models.
     ///
-    /// - Each top-level subdirectory is inspected by calling `ModelFormat.detect(in:)`.
-    /// - MLX models are returned as `LocalModel` values sorted by `displayName`.
-    /// - GGUF and unknown directories are silently skipped (with a `print` notice for GGUF).
+    /// Recurses into subdirectories up to `maxDepth` levels so that
+    /// HuggingFace-style nested layouts (`models/<org>/<repo>/...`) are
+    /// discovered as well as flat layouts (`models/<repo>/...`). Any
+    /// directory that itself looks like a model (per
+    /// `ModelFormat.detect(in:)`) is treated as a leaf — the scan does
+    /// not recurse into it.
+    ///
+    /// `LocalModel.id` is the path relative to `directory`, so nested
+    /// repos with identical leaf names (e.g.
+    /// `nightmedia/gemma-...-q8-mlx` vs `mlx-community/gemma-...-q8-mlx`)
+    /// remain distinguishable. `displayName` is just the leaf for UX.
+    ///
+    /// - GGUF directories are silently skipped (with a `print` notice
+    ///   that includes the relative path).
     /// - Hidden directories (names starting with `.`) are always skipped.
     ///
-    /// - Parameter directory: The root directory to scan.
+    /// - Parameters:
+    ///   - directory: The root directory to scan.
+    ///   - maxDepth: Maximum directory depth to traverse. `1` matches
+    ///     pre-v0.5.1 behaviour (top-level only); the default `2`
+    ///     covers HF-style `<root>/<org>/<repo>/` layouts. Increase to
+    ///     `3` if you nest by `<root>/<author>/<org>/<repo>/`.
     /// - Returns: Sorted array of discovered `LocalModel` values.
     @discardableResult
-    public func scan(_ directory: URL) async throws -> [LocalModel] {
+    public func scan(_ directory: URL, maxDepth: Int = 2) async throws -> [LocalModel] {
+        var results: [LocalModel] = []
+        try scanRecursive(at: directory, root: directory, depth: 1, maxDepth: maxDepth, into: &results)
+
+        let sorted = results.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
+        lastScan = sorted
+        return sorted
+    }
+
+    // MARK: - Recursive scanner
+
+    /// Walks `dir` for one level, registering any model it finds and
+    /// recursing into non-model subdirectories until `depth` reaches
+    /// `maxDepth`. Mutates `results` in place — caller sorts.
+    ///
+    /// `root` stays constant across the recursion so each leaf can
+    /// compute its `LocalModel.id` as a path relative to the original
+    /// scan root rather than its immediate parent.
+    private func scanRecursive(
+        at dir: URL,
+        root: URL,
+        depth: Int,
+        maxDepth: Int,
+        into results: inout [LocalModel]
+    ) throws {
         let contents = try fileManager.contentsOfDirectory(
-            at: directory,
+            at: dir,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         )
 
-        var results: [LocalModel] = []
-
         for itemURL in contents {
             guard try isDirectory(itemURL) else { continue }
 
-            let dirName = itemURL.lastPathComponent
-            guard !dirName.hasPrefix(".") else { continue }
+            let leafName = itemURL.lastPathComponent
+            guard !leafName.hasPrefix(".") else { continue }
 
             let fileURLs = (try? fileManager.contentsOfDirectory(
                 at: itemURL,
@@ -51,6 +89,7 @@ public actor ModelLibraryManager {
 
             let fileNames = fileURLs.map { $0.lastPathComponent }
             let format = ModelFormat.detect(in: fileNames)
+            let relativeID = relativePath(of: itemURL, from: root) ?? leafName
 
             switch format {
             case .mlx:
@@ -58,7 +97,8 @@ public actor ModelLibraryManager {
                 // when the directory contains a vision-language model.
                 let upgradedFormat = upgradeFormatIfVLM(directory: itemURL)
                 let model = buildLocalModel(
-                    dirName: dirName,
+                    id: relativeID,
+                    displayName: leafName,
                     dirURL: itemURL,
                     fileURLs: fileURLs,
                     format: upgradedFormat
@@ -71,7 +111,8 @@ public actor ModelLibraryManager {
                 // only via tests that hand-craft a format. Fall through
                 // to the same path as `.mlx`.
                 let model = buildLocalModel(
-                    dirName: dirName,
+                    id: relativeID,
+                    displayName: leafName,
                     dirURL: itemURL,
                     fileURLs: fileURLs,
                     format: .mlxVLM
@@ -79,16 +120,35 @@ public actor ModelLibraryManager {
                 results.append(model)
 
             case .gguf:
-                print("[ModelLibraryManager] Skipping GGUF directory: \(dirName)")
+                print("[ModelLibraryManager] Skipping GGUF directory: \(relativeID)")
 
             case .unknown:
-                break
+                // Not a model — try recursing one level deeper for
+                // nested layouts like `<root>/<org>/<repo>/`. Bail out
+                // at `maxDepth` so a typo'd `modelDirectory` pointing
+                // at `~` doesn't walk the whole home tree.
+                if depth < maxDepth {
+                    try scanRecursive(
+                        at: itemURL,
+                        root: root,
+                        depth: depth + 1,
+                        maxDepth: maxDepth,
+                        into: &results
+                    )
+                }
             }
         }
+    }
 
-        let sorted = results.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
-        lastScan = sorted
-        return sorted
+    /// Path of `url` expressed relative to `root`, with the leading
+    /// separator stripped. Returns `nil` if `url` is not inside `root`
+    /// (shouldn't happen during normal scan; defensive only).
+    private func relativePath(of url: URL, from root: URL) -> String? {
+        let rootPath = root.standardizedFileURL.path
+        let urlPath = url.standardizedFileURL.path
+        guard urlPath.hasPrefix(rootPath) else { return nil }
+        let dropped = String(urlPath.dropFirst(rootPath.count))
+        return dropped.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     // MARK: - Private Helpers
@@ -99,7 +159,8 @@ public actor ModelLibraryManager {
     }
 
     private func buildLocalModel(
-        dirName: String,
+        id: String,
+        displayName: String,
         dirURL: URL,
         fileURLs: [URL],
         format: ModelFormat = .mlx
@@ -114,12 +175,13 @@ public actor ModelLibraryManager {
             }
             .reduce(0, +)
 
-        // Extract quantization suffix, e.g. "Qwen3-8B-4bit" → "4bit"
-        let quantization = extractQuantization(from: dirName)
+        // Extract quantization suffix from the leaf name (parent
+        // directories like "nightmedia/" wouldn't carry a quant tag).
+        let quantization = extractQuantization(from: displayName)
 
         return LocalModel(
-            id: dirName,
-            displayName: dirName,
+            id: id,
+            displayName: displayName,
             directory: dirURL,
             sizeBytes: sizeBytes,
             format: format,

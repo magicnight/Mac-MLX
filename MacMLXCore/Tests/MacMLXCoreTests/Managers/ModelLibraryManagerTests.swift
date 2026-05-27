@@ -99,6 +99,109 @@ private func populateDir(_ url: URL, files: [String]) throws {
     #expect(results.first?.id == cached.first?.id)
 }
 
+@Test func scanFindsModelInNestedSubdirectory() async throws {
+    // HuggingFace-style layout: `<root>/<org>/<repo>/<weights>`. The
+    // <org> dir doesn't itself contain model files, so the old
+    // single-level scan missed it entirely.
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let orgDir = root.appending(path: "nightmedia", directoryHint: .isDirectory)
+    let modelDir = orgDir.appending(path: "my-fine-tune-q8-mlx", directoryHint: .isDirectory)
+    try populateDir(modelDir, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    let manager = ModelLibraryManager()
+    let results = try await manager.scan(root)
+
+    #expect(results.count == 1)
+    #expect(results[0].id == "nightmedia/my-fine-tune-q8-mlx")
+    #expect(results[0].displayName == "my-fine-tune-q8-mlx")
+    #expect(results[0].format == .mlx)
+    // Quantization parser still works against the leaf name only.
+    #expect(results[0].quantization == nil)
+}
+
+@Test func scanFindsBothFlatAndNestedInSameRoot() async throws {
+    // Mixed layout: one model at top level, one nested. Both should
+    // be discovered; their ids should be distinguishable (leaf vs
+    // org/leaf) so downstream lookups don't collide.
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let flat = root.appending(path: "FlatModel", directoryHint: .isDirectory)
+    try populateDir(flat, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    let nested = root.appending(path: "org-x/NestedModel", directoryHint: .isDirectory)
+    try populateDir(nested, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    let manager = ModelLibraryManager()
+    let results = try await manager.scan(root)
+
+    #expect(results.count == 2)
+    let ids = Set(results.map(\.id))
+    #expect(ids == ["FlatModel", "org-x/NestedModel"])
+}
+
+@Test func scanDoesNotRecurseIntoModelDirectories() async throws {
+    // A real model dir often has subdirectories (e.g. checkpoint
+    // shards, tokenizer assets). Once a dir is recognised as a model,
+    // the scan must stop descending so nested fragments aren't
+    // mis-registered as separate models.
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let modelDir = root.appending(path: "OuterModel", directoryHint: .isDirectory)
+    try populateDir(modelDir, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    // A sub-subdir that *would* qualify as a model on its own.
+    let bogusInner = modelDir.appending(path: "tokenizer-files", directoryHint: .isDirectory)
+    try populateDir(bogusInner, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    let manager = ModelLibraryManager()
+    let results = try await manager.scan(root)
+
+    #expect(results.count == 1)
+    #expect(results[0].id == "OuterModel")
+}
+
+@Test func scanRespectsMaxDepthOne() async throws {
+    // maxDepth=1 = pre-v0.5.1 behaviour (top-level only). A model
+    // hidden under an <org>/ subdir should NOT be discovered.
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let nested = root.appending(path: "org/Hidden", directoryHint: .isDirectory)
+    try populateDir(nested, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    let manager = ModelLibraryManager()
+    let results = try await manager.scan(root, maxDepth: 1)
+
+    #expect(results.isEmpty)
+}
+
+@Test func scanHonoursDeeperMaxDepth() async throws {
+    // Caller-controlled depth bound. With maxDepth=3, a model at
+    // `<root>/a/b/<model>/` is discoverable.
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let deep = root.appending(path: "a/b/DeepModel", directoryHint: .isDirectory)
+    try populateDir(deep, files: ["config.json", "tokenizer.json", "model.safetensors"])
+
+    let manager = ModelLibraryManager()
+    let resultsShallow = try await manager.scan(root, maxDepth: 2)
+    #expect(resultsShallow.isEmpty)
+
+    let resultsDeep = try await manager.scan(root, maxDepth: 3)
+    #expect(resultsDeep.count == 1)
+    #expect(resultsDeep[0].id == "a/b/DeepModel")
+}
+
 @Test func scanSumsSafetensorsSize() async throws {
     let root = makeTestRoot()
     defer { try? FileManager.default.removeItem(at: root) }
