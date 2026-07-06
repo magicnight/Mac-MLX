@@ -13,14 +13,6 @@ import MLXLMCommon
 /// enough to catch structural regressions.
 final class DeepseekV32IndexerTests: XCTestCase {
 
-    private func requireMetalOrSkip() throws {
-        let bundle = Bundle(identifier: "mlx-swift_Cmlx.resources")
-            ?? Bundle.allBundles.first(where: { $0.bundlePath.contains("Cmlx") })
-        if bundle?.url(forResource: "default", withExtension: "metallib") == nil {
-            throw XCTSkip("Requires default.metallib (run under xcodebuild)")
-        }
-    }
-
     /// A tiny config where `index_topk` is small enough to exercise both
     /// the short-circuit (s ≤ topk) and the sparse (s > topk) paths.
     private func tinyConfig(indexTopK: Int) throws -> DeepseekV32Configuration {
@@ -41,7 +33,7 @@ final class DeepseekV32IndexerTests: XCTestCase {
     }
 
     func testShortCircuitReturnsNilWhenContextFitsInTopK() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
         let config = try tinyConfig(indexTopK: 8)
         let indexer = DeepseekV32Indexer(config)
 
@@ -54,7 +46,7 @@ final class DeepseekV32IndexerTests: XCTestCase {
     }
 
     func testReturnsTopKIndicesWhenContextExceedsTopK() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
         let config = try tinyConfig(indexTopK: 4)
         let indexer = DeepseekV32Indexer(config)
 
