@@ -133,6 +133,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// the same LLM. VLM generations bypass it.
     private let promptCacheStore: PromptCacheStore
 
+    /// Guards the one-time `ModelOverlay.registerAll()` so macMLX-owned
+    /// architectures are registered into the shared factory registry
+    /// exactly once, before the first model load. `registerAll` is itself
+    /// idempotent; this flag just avoids the redundant actor hop.
+    private var overlayRegistered = false
+
     // MARK: Initialiser
 
     public init() {
@@ -150,6 +156,15 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// - Throws: ``EngineError/modelLoadFailed(reason:)`` if loading fails for any reason.
     public func load(_ model: LocalModel) async throws {
         status = .loading(model: model.id)
+
+        // Teach the stock factory about macMLX-owned architectures before
+        // the first load. No-op until an overlay architecture ships, but
+        // wired now so `LLMModelFactory.shared.loadContainer` can resolve
+        // our `model_type`s the moment one is registered. See ModelOverlay.
+        if !overlayRegistered {
+            await ModelOverlay.registerAll()
+            overlayRegistered = true
+        }
 
         // Preflight: catch Gemma 4 MoE checkpoints before handing off to
         // LLMModelFactory, which surfaces a cryptic "Unhandled keys"
