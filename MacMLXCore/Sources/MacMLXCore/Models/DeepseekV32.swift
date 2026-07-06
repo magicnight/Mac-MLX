@@ -203,10 +203,15 @@ final class DeepseekV32Indexer: Module {
         self._kNorm.wrappedValue = LayerNorm(dimensions: config.indexHeadDim)
         self._weightsProj.wrappedValue = Linear(
             config.hiddenSize, config.indexNHeads, bias: false)
+        // mlx-lm 0.31.3 (paired with our mlx-swift-lm 3.31.x) hardcodes
+        // traditional=true for the indexer rope. A later upstream commit
+        // makes it `indexer_rope_interleave` (default false) — a behavior
+        // flip to resolve against real weights in the end-to-end smoke
+        // (S4). Match 0.31.3 so the numerical-parity fixture is valid.
         self.rope = initializeRope(
             dims: config.qkRopeHeadDim,
             base: config.ropeTheta,
-            traditional: config.indexerRopeInterleave,
+            traditional: true,
             scalingConfig: config.ropeScaling,
             maxPositionEmbeddings: config.maxPositionEmbeddings)
     }
