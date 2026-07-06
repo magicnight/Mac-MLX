@@ -12,11 +12,15 @@ VERSION="${TAG#v}"
 
 echo "==> Archiving $APP_NAME $VERSION"
 
+# -skipPackagePluginValidation: mlx-swift 0.31.x ships a "CudaBuild"
+# SwiftPM build-tool plugin that xcodebuild otherwise fails validating
+# in a non-interactive CI archive. No-op on Apple Silicon / Metal.
 xcodebuild \
     -project "macMLX/${APP_NAME}.xcodeproj" \
     -scheme "$APP_NAME" \
     -configuration Release \
     -archivePath "build/${APP_NAME}.xcarchive" \
+    -skipPackagePluginValidation \
     MARKETING_VERSION="$VERSION" \
     CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER:-1}" \
     CODE_SIGN_IDENTITY="" \
