@@ -156,8 +156,14 @@ final class DeepseekMultiLinear: Module, Quantizable {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        x.matmul(weight.swappedAxes(-1, -2))
+    /// Per-head projection. `transpose == true` (the default) maps
+    /// `inputDims → outputDims` (`x @ weightᵀ`); `transpose == false`
+    /// maps `outputDims → inputDims` (`x @ weight`). The absorbed-MLA
+    /// attention uses both directions: `embed_q` forward (true) and
+    /// the prefill `embed_q`/`unembed_out` reverse (false). Mirrors
+    /// mlx-lm's `mla.MultiLinear.__call__(x, transpose=True)`.
+    func callAsFunction(_ x: MLXArray, transpose: Bool = true) -> MLXArray {
+        transpose ? x.matmul(weight.swappedAxes(-1, -2)) : x.matmul(weight)
     }
 
     func toQuantized(groupSize: Int, bits: Int, mode: QuantizationMode) -> Module {
