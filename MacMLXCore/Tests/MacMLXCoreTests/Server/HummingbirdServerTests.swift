@@ -227,6 +227,114 @@ struct HummingbirdServerTests {
         #expect(content == "stub-response")
     }
 
+    // MARK: - Anthropic Messages API (v0.5.1)
+    //
+    // Port assignments (spaced by 10):
+    //   anthropicMessagesNonStreaming  : 19_400
+    //   anthropicMessagesSystemTopLevel: 19_410
+    //   anthropicMessagesStreaming     : 19_420
+
+    /// Build a stub engine with a model already loaded, matching the
+    /// setup `chatCompletionsNonStreaming` uses.
+    private func loadedStubServer(modelID: String = "stub-model") async throws -> HummingbirdServer {
+        let engine = StubInferenceEngine(engineID: .mlxSwift)
+        let model = LocalModel(
+            id: modelID,
+            displayName: "Stub",
+            directory: URL(filePath: "/tmp"),
+            sizeBytes: 0,
+            format: .mlx,
+            quantization: nil,
+            parameterCount: nil,
+            architecture: nil
+        )
+        try await engine.load(model)
+        return HummingbirdServer(engine: engine)
+    }
+
+    @Test
+    func anthropicMessagesNonStreaming() async throws {
+        let server = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_400)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [["role": "user", "content": "Hello"]],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(json["type"] as? String == "message")
+        let content = try #require(json["content"] as? [[String: Any]])
+        #expect(content.count == 1)
+        // StubInferenceEngine yields "stub-" + "response"
+        #expect(content[0]["text"] as? String == "stub-response")
+        let usage = try #require(json["usage"] as? [String: Any])
+        #expect(usage["input_tokens"] as? Int == 1)
+        #expect(usage["output_tokens"] as? Int == 2)
+        #expect(json["stop_reason"] as? String == "end_turn")
+    }
+
+    @Test
+    func anthropicMessagesSystemTopLevel() async throws {
+        let server = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_410)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "system": "You are terse.",
+            "messages": [["role": "user", "content": "Hello"]],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let content = try #require(json["content"] as? [[String: Any]])
+        #expect(content[0]["text"] as? String == "stub-response")
+    }
+
+    @Test
+    func anthropicMessagesStreaming() async throws {
+        let server = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_420)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "Hello"]],
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+
+        await server.stop()
+
+        #expect(http.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("event: message_start"))
+        #expect(text.contains("event: content_block_delta"))
+        #expect(text.contains("text_delta"))
+        #expect(text.contains("event: message_stop"))
+    }
+
     // MARK: - Cold-swap (v0.3.3)
     //
     // Port assignments for these tests:
