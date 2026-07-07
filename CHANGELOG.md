@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **MCP client pool** (v0.5 MCP track, part 2 of 2). `MCPClientPool`
+  actor spawns each configured `mcpServers` entry as a subprocess,
+  speaks MCP over stdio via swift-sdk's `StdioTransport`, and exposes
+  `connectAll` / `listAllTools` / `callTool` / `disconnectAll` for the
+  chat-side tool router. Partial failures are tolerated (a broken
+  server logs to stderr without taking the pool down). Two dead-server
+  robustness fixes: a process-wide `SIGPIPE` ignore, and a connect
+  timeout + `disconnect()` working around a swift-sdk 0.12.1 busy-loop
+  when a spawned server dies before `initialize`. (PR #45)
+- **API reasoning separation** (issue #30). Reasoning models' `<think>`
+  chain-of-thought now goes in the response's `reasoning_content` field
+  (DeepSeek / mlx-lm / LM Studio convention) instead of leaking into
+  `content`, for both non-streaming and streaming `/v1/chat/completions`.
+  `MessageSegmenter.splitReasoning` (whole-text) + `ReasoningStreamSplitter`
+  (incremental, handles `<think>` tags split across stream chunks) + a
+  new `InferenceEngine.promptOpensThinkBlock` that seeds the streaming
+  splitter from whether the chat template opened a `<think>` block
+  (qwen3's implicit opener). Non-reasoning models are untouched. (PR #46)
+
+### Changed
+- **Release workflow bumped to `softprops/action-gh-release@v3`**
+  (Node.js 24), clearing the Node 20 deprecation warning. (PR #43)
+
 ---
 
 ## [0.5.0] - 2026-05-10

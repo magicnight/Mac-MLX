@@ -56,9 +56,17 @@ Want to see what Gatekeeper thinks of the app?
 spctl --assess --verbose /Applications/macMLX.app
 ```
 
-## Feature highlights (v0.2 → v0.3.7)
+## Feature highlights (v0.2 → v0.5)
 
-Fifteen-ish shipped releases since the v0.1 MVP. Pick the ones that matter:
+Sixteen-plus shipped releases since the v0.1 MVP. The v0.5.0 headline
+first, then the rest by area:
+
+**Engine & models (v0.5.0)** — the biggest minor yet:
+- **Vision-Language Models** — 16 VLM architectures (Qwen2.5/3-VL, Gemma-3, SmolVLM/2, Pixtral, Idefics3, glm_ocr, …). Image picker (drag-drop + paste), OpenAI multimodal `content` arrays, images persisted per conversation.
+- **Tiered KV prompt cache** (hot RAM + cold SSD) — repeat prefixes (coding assistants re-sending history every turn) skip prefill.
+- **Multi-model pool** — resident-memory-capped, LRU auto-evict, pin a model from the Models tab; cold-swap between pinned models skips the weight reload.
+- **LoRA adapter inference** — drop a HuggingFace PEFT adapter into `~/.mac-mlx/adapters/`, pick it in the Parameters Inspector; auto-converts to MLX format at load.
+- **MCP server** — `macmlx mcp serve` exposes `list_models` + `chat` tools over stdio to Claude Desktop / Cursor.
 
 **Downloads**
 - Resumable downloads survive cancels AND app quits (background URLSession + persisted resume data) — #5/#6/#8
@@ -134,7 +142,7 @@ Any OpenAI-compatible client works — point it at
 
 | Engine | Status | Notes |
 |--------|--------|-------|
-| **MLX Swift** (default) | ✅ Shipping | Apple's `mlx-swift-lm`, in-process. Supports models up to ~70B on 64 GB+ Macs. Tiered KV prompt cache + multi-model pool since v0.4.0. |
+| **MLX Swift** (default) | ✅ Shipping | Apple's `mlx-swift-lm`, in-process. Supports models up to ~70B on 64 GB+ Macs (text + 16 VLM architectures). Tiered KV prompt cache + multi-model pool + LoRA adapters since v0.5.0. |
 | **SwiftLM** (100B+ MoE) | 🔓 Reopenable | Subprocess path was blocked by App Sandbox until v0.3.6; with sandbox off, [#12](../../issues/12) / [#13](../../issues/13) are candidates for v0.5/v0.6 — not yet committed. Fills the [mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219) MoE gap. |
 | **Python mlx-lm** | 🔓 Reopenable | Same subprocess path. Max model coverage from mlx-community's Python-only checkpoints in exchange for `uv` on PATH. |
 
@@ -204,38 +212,29 @@ swift test --package-path MacMLXCore   # runs in ~3s
 
 See `CHANGELOG.md` for the per-tag breakdown.
 
-### In progress (v0.4.0 — engine parity with oMLX)
+### On `main` (unreleased — next release)
 
-Pivot from the original VLM-first plan: after comparing macMLX against [oMLX](https://github.com/jundot/omlx) (10.6k★), the higher-leverage investment is closing the inference-engine gap first. VLM moves to v0.4.1. Three independent sub-features, same release:
+- **MCP client pool** — `MCPClientPool` spawns each configured MCP server as a subprocess and aggregates their tools (`connectAll` / `listAllTools` / `callTool`). Library-ready; chat-side tool-call routing is the next step. Ships with two dead-server robustness fixes: a process-wide SIGPIPE ignore, and a connect timeout + `disconnect()` working around a swift-sdk 0.12.1 busy-loop when a spawned server dies before `initialize`.
+- **API reasoning separation** ([#30](../../issues/30)) — reasoning models' `<think>` chain-of-thought now lands in `reasoning_content` (the DeepSeek / mlx-lm / LM Studio convention) instead of leaking into `content`, for both non-streaming and streaming responses.
 
-- **Tiered KV cache (hot RAM + cold SSD)** — shipped to `main` (PR #26). Successive chat turns on the same model reuse the KV cache when the new prompt extends the previous one. Hot tier = last-K snapshots in an LRU dict; cold tier = safetensors at `~/.mac-mlx/kv-cache/` (16-way sharded) round-tripped through mlx-swift-lm's `savePromptCache` / `loadPromptCache`. Settings → "KV Cache" section exposes hot/cold budgets + Clear All. Coding-assistant workflows (Claude Code / Cursor / Zed re-sending history every turn) see reduced TTFT on repeat prefixes.
-- **Multi-model pool with auto-swap** — in PR #27. `ModelPool` actor holds `[String: InferenceEngine]` keyed by model ID, bounded by a user-configurable resident-memory cap (Settings → Model Pool; default 50% of total RAM). Non-pinned models auto-evict LRU when over budget. Pin a model from its row in the Models tab (orange pin icon) to keep it resident. Cold-swap between pinned models no longer re-reads weights.
-- **MCP server MVP** — next. `macmlx mcp serve` CLI subcommand over stdio via [`modelcontextprotocol/swift-sdk`](https://github.com/modelcontextprotocol/swift-sdk) v0.11.x, exposing `list_models` and `chat` tools. Drop into Claude Desktop / Cursor's `mcpServers` config and run local MLX inference through their tool ecosystems.
+### In progress — DeepSeek V3.2 architecture (pure-Swift port)
 
-Full plan: [`docs/roadmap-post-v0.3.6.md`](docs/roadmap-post-v0.3.6.md).
+Proving macMLX can own a frontier model architecture as an **external overlay** — registering a custom `model_type` into mlx-swift-lm's factory with **zero fork of the library**. DeepSeek V3.2's DSA sparse attention (the "lightning indexer") + absorbed Multi-head Latent Attention are being ported to pure Swift and validated numerically against the Python `mlx-lm` reference (per-component parity to 1e-4, under an xcodebuild Metal test job). Foundation for a later DeepSeek V4 port. This is macMLX's differentiation now that Ollama and LM Studio ship MLX backends too.
 
-### Next minor (v0.4.1 — VLM)
+### Later
 
-Original v0.4 scope intact, shifted one dot:
+- **v0.6** — Speech I/O via [`DePasqualeOrg/mlx-swift-audio`](https://github.com/DePasqualeOrg/mlx-swift-audio): MLX-native STT (Whisper, Fun-ASR for Chinese) + TTS (Marvis streaming, Chatterbox voice cloning, CosyVoice 2). Kokoro deliberately excluded to avoid GPL-3 espeak-ng.
+- **v0.7+** — Community Benchmarks service (opt-in `POST /v1/benchmarks` → anonymised leaderboard by chip × model × quant × macOS), and continuous batching once upstream `mlx-swift-lm` ships `BatchGenerator` + `BatchKVCache`.
 
-- [#23](../../issues/23) Vision-Language Model support via `MLXVLM` (already in the dependency tree). 16 architectures: Qwen2.5-VL, Qwen3-VL, Gemma-3, SmolVLM/2, Paligemma, Pixtral, Idefics3, FastVLM, LFM2-VL, glm_ocr, mistral3. Image picker (NSOpenPanel + drag-drop + paste), OpenAI multimodal `content`-array parsing, images persisted to `~/.mac-mlx/conversations/<uuid>/images/`.
+Full roadmap: [`docs/superpowers/plans/2026-05-11-omlx-parity-roadmap.md`](docs/superpowers/plans/2026-05-11-omlx-parity-roadmap.md).
 
-### Later (v0.5+)
+### Reopenable / deferred
 
-- **v0.5** — Continuous batching (blocked on upstream `mlx-swift-lm` shipping `BatchGenerator` + `BatchKVCache` — tracked against Python mlx-lm PRs [#941](https://github.com/ml-explore/mlx-lm/pull/941) / [#1101](https://github.com/ml-explore/mlx-lm/pull/1101)), LoRA adapter loading (drop in existing HF adapters, no training), MCP *client* (configure external MCP servers from inside macMLX so chat models tool-call through them).
-- **v0.6** — Speech I/O via [`DePasqualeOrg/mlx-swift-audio`](https://github.com/DePasqualeOrg/mlx-swift-audio) (replaces the original WhisperKit plan). MLX-native STT (Whisper, Fun-ASR for Chinese) + TTS (Marvis streaming, Chatterbox voice cloning, CosyVoice 2). Kokoro deliberately excluded to avoid GPL-3 espeak-ng.
-- **v0.7** — Community Benchmarks service. Opt-in `POST /v1/benchmarks` endpoint aggregates anonymised `BenchmarkResult` + `HardwareInfo` by chip × model × quant × macOS version into a public leaderboard on this website and inside the app.
+App Sandbox was disabled in v0.3.6, so several previously-closed items are feasible again (none committed yet):
 
-### Reopenable after sandbox removal (v0.3.6)
-
-App Sandbox was disabled in v0.3.6; several previously-closed "not planned" items are feasible again. None are committed yet:
-
-- [#12](../../issues/12) Python `mlx-lm` engine via subprocess — max model coverage at the cost of `uv` on PATH + slower first-token.
-- [#13](../../issues/13) SwiftLM binary engine via subprocess — 100B+ MoE coverage where `mlx-swift-lm` can't handle (Gemma 4 MoE, Llama 4 MoE, DeepSeek-V3).
-- [#20](../../issues/20) Homebrew tap for the CLI — unblocked once the CLI tarball ships as a release asset.
-
-### Still deferred / blocked
-
+- [#12](../../issues/12) Python `mlx-lm` engine via subprocess — max model coverage at the cost of `uv` on PATH.
+- [#13](../../issues/13) SwiftLM binary engine via subprocess — 100B+ MoE coverage (Gemma 4 MoE, Llama 4 MoE) where `mlx-swift-lm` can't.
+- [#20](../../issues/20) Homebrew tap for the CLI — once the CLI tarball ships as a release asset.
 - [#19](../../issues/19) Signed + notarized DMG — needs a paid Apple Developer account.
 
 ## Contributing

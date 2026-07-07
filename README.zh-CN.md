@@ -53,9 +53,16 @@ open /Applications/macMLX.app         # 首次启动
 spctl --assess --verbose /Applications/macMLX.app
 ```
 
-## 功能亮点（v0.2 → v0.3.7）
+## 功能亮点（v0.2 → v0.5）
 
-自 v0.1 MVP 起陆续发了十五个左右版本。挑你关心的看：
+自 v0.1 MVP 起陆续发了十六个以上版本。先看 v0.5.0 的重头戏，再按领域看其余的：
+
+**引擎与模型（v0.5.0）** —— 至今最大的一个 minor：
+- **视觉语言模型（VLM）** —— 16 种 VLM 架构（Qwen2.5/3-VL、Gemma-3、SmolVLM/2、Pixtral、Idefics3、glm_ocr 等）。图像选择器（拖放 + 粘贴）、OpenAI 多模态 `content` 数组、图像按对话持久化。
+- **分层 KV prompt cache**（hot RAM + cold SSD）—— 重复前缀（编程助手每轮重发历史）跳过 prefill。
+- **多模型池** —— 常驻内存上限 + LRU 自动 evict，可在 Models 标签页 pin 某个模型；pin 模型之间冷换不再重读权重。
+- **LoRA adapter 推理** —— 把 HuggingFace PEFT adapter 丢进 `~/.mac-mlx/adapters/`，在参数面板里选中即用，加载时自动转成 MLX 格式。
+- **MCP server** —— `macmlx mcp serve` 通过 stdio 向 Claude Desktop / Cursor 暴露 `list_models` + `chat` 工具。
 
 **下载**
 - 可续传下载，跨取消 + 应用退出都不丢进度（后台 URLSession + resume-data 持久化）—— #5/#6/#8
@@ -131,7 +138,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 | 引擎 | 状态 | 说明 |
 |------|------|------|
-| **MLX Swift**（默认） | ✅ 已发布 | Apple 的 `mlx-swift-lm`，进程内运行。在 64GB+ 的 Mac 上支持到约 70B 的模型。v0.4.0 起支持分层 KV prompt cache + 多模型池。 |
+| **MLX Swift**（默认） | ✅ 已发布 | Apple 的 `mlx-swift-lm`，进程内运行。在 64GB+ 的 Mac 上支持到约 70B 的模型（文本 + 16 种 VLM 架构）。v0.5.0 起支持分层 KV prompt cache + 多模型池 + LoRA adapter。 |
 | **SwiftLM**（100B+ MoE） | 🔓 可重开 | 子进程路径之前被 App Sandbox 拦住，v0.3.6 关掉 sandbox 后 [#12](../../issues/12) / [#13](../../issues/13) 可重新考虑 —— 候选 v0.5/v0.6，尚未提上日程。填补 [mlx-swift-lm#219](https://github.com/ml-explore/mlx-swift-lm/issues/219) 的 MoE 空白。 |
 | **Python mlx-lm** | 🔓 可重开 | 同一套子进程路径。代价是 PATH 里需要 `uv`，换取 mlx-community 的 Python-only checkpoint 最大覆盖度。 |
 
@@ -197,41 +204,33 @@ swift test --package-path MacMLXCore   # 约 3 秒
 - **v0.3.0 → v0.3.5** —— Benchmark 功能、跨切面缺陷修复、UX 小修、聊天历史侧栏、API 冷换模型、Logs 标签页、原生 ANSI CLI 仪表盘。
 - **v0.3.6** —— 13 个用户上报 bug + 一打 post-QA hot patch：可折叠 `<think>` 渲染器、关闭 App Sandbox、CORS + 请求日志 + 路由别名、Ollama API 兼容层 + NDJSON 流式、GUI/CLI 通过 `LoadHook` 统一状态、FIFO 生成信号量、聊天渲染修复、侧栏重建。
 - **v0.3.7** —— 维护 release：CI 升级到 Node.js 24（`actions/checkout@v5` / `actions/cache@v5`）、MLX stdout / stderr 转进 Logs 标签页、通过 `.macmlx-meta.json` 边车文件做 HF 更新检测、GUI 与 CLI 共用 `~/.mac-mlx/macmlx.pid`。
+- **v0.5.0** —— 至今最大的一个 minor。把原先规划为 v0.4.0 / v0.4.1 的内容加上 v0.5 track 一起发了：**对标 oMLX 的引擎升级**（分层 KV prompt cache、带 pin + LRU 自动 evict 的多模型池、暴露 `list_models` / `chat` 的 `macmlx mcp serve` MCP server）、**视觉语言模型**（16 种架构、图像选择器 + OpenAI 多模态 HTTP、图像按对话持久化）、**LoRA adapter 推理**（HuggingFace PEFT 直接丢进去、加载时自动转 MLX）、MCP client 配置、以及 v0.6 的音频设置 schema。
 
 按 tag 的细节见 `CHANGELOG.md`。
 
-### 进行中（v0.4.0 —— 对标 oMLX 的引擎升级）
+### 在 `main` 上（未发布 —— 下个 release）
 
-从原先 "VLM 优先" 的计划转向：对比 [oMLX](https://github.com/jundot/omlx)（10.6k★）之后，更高 leverage 的投入是先补上推理引擎的差距。VLM 推后到 v0.4.1。三个独立子项目，同一个 release：
+- **MCP client pool** —— `MCPClientPool` 把每个配置的 MCP server 作为子进程拉起并聚合它们的工具（`connectAll` / `listAllTools` / `callTool`）。库层已就绪；接进聊天的工具调用路由是下一步。附带两个 dead-server 健壮性修复：进程级忽略 SIGPIPE，以及连接超时 + `disconnect()`——绕开 swift-sdk 0.12.1 在 server 于 `initialize` 前死掉时的 busy-loop。
+- **API reasoning 分离**（[#30](../../issues/30)）—— reasoning 模型的 `<think>` 思维链现在进独立的 `reasoning_content` 字段（DeepSeek / mlx-lm / LM Studio 约定），不再泄漏到 `content` 里；非流式和流式都覆盖。
 
-- **分层 KV cache（hot RAM + cold SSD）** —— 已合并到 `main`（PR #26）。同一个模型后续轮次对话会复用 KV cache：新提示是旧提示的延长时共享前缀就跳过 prefill。热层 = 内存里的 LRU 字典，冷层 = `~/.mac-mlx/kv-cache/` 下 16-way 分片的 safetensors，走 mlx-swift-lm 的 `savePromptCache` / `loadPromptCache` 往返。Settings → "KV Cache" 有热/冷预算 stepper + Clear All 按钮。对"编程助手"式工作流（Claude Code / Cursor / Zed 每轮都重发整段历史）显著降低 TTFT。
-- **多模型池 + 自动换出** —— 在 PR #27 里。`ModelPool` actor 持有 `[String: InferenceEngine]`，按用户可配的常驻内存预算上限（Settings → Model Pool；默认 = 总内存 50%）约束。超预算时非 pin 模型按 LRU 自动 evict。在 Models 标签页里点某行的橙色 pin 图标就可以强制常驻。pin 模型之间冷换不再需要重新读权重。
-- **MCP server MVP** —— 下一步。新 CLI 子命令 `macmlx mcp serve`，通过 stdio 走 [`modelcontextprotocol/swift-sdk`](https://github.com/modelcontextprotocol/swift-sdk) v0.11.x，暴露 `list_models` 和 `chat` 两个工具。在 Claude Desktop / Cursor 的 `mcpServers` 配置里加一行就能让本地 MLX 推理通过它们的工具生态被调用。
+### 进行中 —— DeepSeek V3.2 架构（纯 Swift 移植）
 
-完整计划：[`docs/roadmap-post-v0.3.6.md`](docs/roadmap-post-v0.3.6.md)。
+证明 macMLX 能以**外部 overlay** 的方式携带前沿模型架构 —— 把自定义 `model_type` 注册进 mlx-swift-lm 的工厂，**零 fork 该库**。DeepSeek V3.2 的 DSA 稀疏注意力（"lightning indexer"）+ absorbed 多头潜在注意力正在被移植到纯 Swift，并对 Python `mlx-lm` 参考做逐组件数值验证（每个组件 parity 到 1e-4，在 xcodebuild Metal 测试 job 下跑）。这是后续 DeepSeek V4 移植的地基。在 Ollama 和 LM Studio 也上了 MLX 后端的当下，这是 macMLX 的差异化所在。
 
-### 下个 minor 版本（v0.4.1 —— VLM）
+### 更远
 
-原先 v0.4 的 scope 保持不变，只是平移一位：
+- **v0.6** —— 语音 I/O，通过 [`DePasqualeOrg/mlx-swift-audio`](https://github.com/DePasqualeOrg/mlx-swift-audio)：MLX 原生 STT（Whisper、中文强的 Fun-ASR）+ TTS（流式 Marvis、可复刻声音的 Chatterbox、CosyVoice 2）。故意不纳入 Kokoro —— 它间接依赖 GPL-3 的 espeak-ng。
+- **v0.7+** —— Community Benchmarks 服务（可选的 `POST /v1/benchmarks` → 按芯片 × 模型 × 量化 × macOS 聚合的匿名排行榜），以及等上游 `mlx-swift-lm` 出了 `BatchGenerator` + `BatchKVCache` 之后的连续批处理。
 
-- [#23](../../issues/23) VLM（视觉语言模型）支持，通过 `MLXVLM`（已经在依赖里）。16 种架构：Qwen2.5-VL / Qwen3-VL / Gemma-3 / SmolVLM/2 / Paligemma / Pixtral / Idefics3 / FastVLM / LFM2-VL / glm_ocr / mistral3。图像选择器（NSOpenPanel + 拖放 + 粘贴）、`HummingbirdServer` 解析 OpenAI 多模态 `content` 数组、图像写入 `~/.mac-mlx/conversations/<uuid>/images/`。
+完整路线图：[`docs/superpowers/plans/2026-05-11-omlx-parity-roadmap.md`](docs/superpowers/plans/2026-05-11-omlx-parity-roadmap.md)。
 
-### 更远（v0.5 起）
+### 可重开 / 已 defer
 
-- **v0.5** —— 连续批处理（阻塞在上游 `mlx-swift-lm` 什么时候把 `BatchGenerator` + `BatchKVCache` 从 Python 移植过来，参考 Python mlx-lm PR [#941](https://github.com/ml-explore/mlx-lm/pull/941) / [#1101](https://github.com/ml-explore/mlx-lm/pull/1101)）、LoRA adapter 加载（HF 现成 adapter 直接用，不含训练 UI）、MCP *client*（在 macMLX 里配置外部 MCP server，让聊天模型通过它们做工具调用）。
-- **v0.6** —— 语音 I/O，通过 [`DePasqualeOrg/mlx-swift-audio`](https://github.com/DePasqualeOrg/mlx-swift-audio)（替换原先 WhisperKit 方案）。MLX 原生 STT（Whisper、中文强的 Fun-ASR）+ TTS（流式 Marvis、可复刻声音的 Chatterbox、CosyVoice 2）。故意不纳入 Kokoro —— 它间接依赖 GPL-3 的 espeak-ng。
-- **v0.7** —— Community Benchmarks 服务。可选的 `POST /v1/benchmarks` 端点接收匿名化的 `BenchmarkResult` + `HardwareInfo`，按芯片 × 模型 × 量化 × macOS 版本聚合到网站和 App 内的公开排行榜。
+v0.3.6 关掉 App Sandbox 后，之前标 "not planned" 的几项重新可行（目前都没提上日程）：
 
-### 关闭 sandbox 后可以重开（v0.3.6）
-
-v0.3.6 关掉了 App Sandbox，之前标 "not planned" 的项目重新变得可行。目前没一项提上日程：
-
-- [#12](../../issues/12) Python `mlx-lm` 引擎走子进程 —— 最大覆盖度，代价是需要 PATH 里有 `uv`，first-token 略慢。
-- [#13](../../issues/13) SwiftLM 二进制引擎走子进程 —— 填上 `mlx-swift-lm` 搞不定的 100B+ MoE（Gemma 4 MoE / Llama 4 MoE / DeepSeek-V3）。
+- [#12](../../issues/12) Python `mlx-lm` 引擎走子进程 —— 最大覆盖度，代价是 PATH 里要有 `uv`。
+- [#13](../../issues/13) SwiftLM 二进制引擎走子进程 —— 填上 `mlx-swift-lm` 搞不定的 100B+ MoE（Gemma 4 MoE / Llama 4 MoE）。
 - [#20](../../issues/20) CLI 的 Homebrew tap —— 等 CLI tarball 作为 release asset 一起打后就能推。
-
-### 还在 defer / 被阻塞
-
 - [#19](../../issues/19) 签名 + 公证 DMG —— 需要付费 Apple Developer 账号。
 
 ## 参与贡献
