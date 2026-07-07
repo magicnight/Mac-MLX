@@ -99,4 +99,42 @@ final class ModelPoolTests: XCTestCase {
         let e = await pool.engine(for: "A")
         XCTAssertNil(e)
     }
+
+    // MARK: - Idle TTL (v0.5.1)
+
+    func testSweepIdleUnloadsExpiredEntry() async throws {
+        let pool = ModelPool(maxBytes: 4_000_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A"), ttlSeconds: 1)
+        // A far-future `now` → A has been idle far longer than its 1s TTL.
+        await pool.sweepIdle(now: Date().addingTimeInterval(10_000))
+        let residents = await pool.residentModelIDs()
+        XCTAssertFalse(residents.contains("A"))
+    }
+
+    func testSweepIdleSkipsPinnedEntry() async throws {
+        let pool = ModelPool(maxBytes: 4_000_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A"), ttlSeconds: 1)
+        await pool.setPinned("A", true)
+        // Even far past the TTL, a pinned entry is exempt from the sweep.
+        await pool.sweepIdle(now: Date().addingTimeInterval(10_000))
+        let residents = await pool.residentModelIDs()
+        XCTAssertTrue(residents.contains("A"))
+    }
+
+    func testSweepIdleSkipsWithinTTLEntry() async throws {
+        let pool = ModelPool(maxBytes: 4_000_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A"), ttlSeconds: 3600)
+        // `now` ≈ load time → idle well under the 1h TTL, so A survives.
+        await pool.sweepIdle(now: Date())
+        let residents = await pool.residentModelIDs()
+        XCTAssertTrue(residents.contains("A"))
+    }
+
+    func testSweepIdleNeverSweepsNilTTLEntry() async throws {
+        let pool = ModelPool(maxBytes: 4_000_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A"))  // no TTL configured
+        await pool.sweepIdle(now: Date().addingTimeInterval(10_000))
+        let residents = await pool.residentModelIDs()
+        XCTAssertTrue(residents.contains("A"))
+    }
 }

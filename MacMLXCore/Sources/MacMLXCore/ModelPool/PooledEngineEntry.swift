@@ -14,17 +14,24 @@ public struct PooledEngineEntry: Sendable, Equatable {
     public var lastAccess: Date
     /// Pinned entries are never evicted by the LRU sweeper.
     public var isPinned: Bool
+    /// Optional idle time-to-live in seconds (v0.5.1). When set,
+    /// `ModelPool.sweepIdle(now:)` unloads this entry once it has been
+    /// idle longer than `ttlSeconds` — even within the byte budget.
+    /// `nil` means "never idle-unload"; pinned entries are exempt.
+    public var ttlSeconds: Int?
 
     public init(
         modelID: String,
         estimatedBytes: Int64,
         lastAccess: Date = Date(),
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        ttlSeconds: Int? = nil
     ) {
         self.modelID = modelID
         self.estimatedBytes = estimatedBytes
         self.lastAccess = lastAccess
         self.isPinned = isPinned
+        self.ttlSeconds = ttlSeconds
     }
 }
 

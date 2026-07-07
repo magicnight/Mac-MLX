@@ -169,6 +169,162 @@ private struct OllamaGenerateRequest: Decodable, Sendable {
     let options: Options?
 }
 
+// MARK: - Anthropic-compatible request/response types
+
+/// Anthropic Messages API request body (`POST /v1/messages`).
+///
+/// Mirrors the subset of the Anthropic wire format macMLX supports:
+/// a top-level `system` prompt (string or `[{type:"text", text}]`),
+/// a `messages` array whose `content` is either a bare string or an
+/// array of typed blocks (`text` / `image`), and the usual sampling
+/// knobs. Unlike OpenAI, `max_tokens` is required by Anthropic's spec.
+private struct AnthropicMessagesRequest: Decodable, Sendable {
+    let model: String
+    let max_tokens: Int
+    let messages: [AnthropicMessage]
+    let system: AnthropicSystem?
+    let temperature: Double?
+    let top_p: Double?
+    let stream: Bool?
+}
+
+/// Anthropic top-level `system` field. Either a plain string or an
+/// array of `{type:"text", text}` blocks (the SDK's structured form).
+/// `text` flattens both into the single system-prompt string macMLX's
+/// engine expects.
+private enum AnthropicSystem: Decodable, Sendable {
+    case string(String)
+    case blocks([AnthropicBlock])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .string(s)
+            return
+        }
+        self = .blocks(try container.decode([AnthropicBlock].self))
+    }
+
+    /// Concatenated text of the system blocks (or the bare string).
+    var text: String {
+        switch self {
+        case .string(let s):
+            return s
+        case .blocks(let blocks):
+            return blocks.compactMap { $0.type == "text" ? $0.text : nil }
+                .joined(separator: "\n")
+        }
+    }
+}
+
+/// One Anthropic message turn. `role` is "user" or "assistant";
+/// `content` is a string or an array of typed content blocks.
+private struct AnthropicMessage: Decodable, Sendable {
+    let role: String
+    let content: AnthropicContent
+}
+
+/// Anthropic message `content`. Either a bare string (text-only turn)
+/// or an array of typed blocks (`text` and `image`). The decoder tries
+/// the string form first, falling through to `[AnthropicBlock]`.
+private enum AnthropicContent: Decodable, Sendable {
+    case string(String)
+    case blocks([AnthropicBlock])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .string(s)
+            return
+        }
+        self = .blocks(try container.decode([AnthropicBlock].self))
+    }
+
+    /// Concatenated text view — what the model sees as the prompt
+    /// content for this turn. Image blocks are ignored (their bytes
+    /// flow into the engine separately via `extractImages()`).
+    var text: String {
+        switch self {
+        case .string(let s):
+            return s
+        case .blocks(let blocks):
+            return blocks.compactMap { $0.type == "text" ? $0.text : nil }
+                .joined(separator: "\n")
+        }
+    }
+
+    /// Decode any base64 image blocks into `ImageAttachment` values
+    /// backed by tmpfile copies. Caps mirror the OpenAI path:
+    /// - 4 images per call (further blocks silently dropped)
+    /// - 10 MB per image (oversized blocks silently dropped)
+    ///
+    /// Unlike OpenAI's data-URL form, Anthropic supplies `media_type` +
+    /// raw base64 `data` directly, so we decode the bytes straight from
+    /// `source.data` without any data-URL parsing.
+    func extractImages() -> [ImageAttachment] {
+        guard case .blocks(let blocks) = self else { return [] }
+        var out: [ImageAttachment] = []
+        for block in blocks {
+            guard block.type == "image",
+                  let source = block.source,
+                  let attachment = AnthropicContent.decodeImageSource(source)
+            else { continue }
+            out.append(attachment)
+            if out.count >= 4 { break }
+        }
+        return out
+    }
+
+    /// Best-effort base64 image block → on-disk image. Returns nil on
+    /// malformed input or unsupported media type so callers can simply
+    /// drop the block.
+    private static func decodeImageSource(_ source: AnthropicImageSource) -> ImageAttachment? {
+        let mime = source.media_type
+        let ext: String
+        switch mime.lowercased() {
+        case "image/jpeg", "image/jpg": ext = "jpg"
+        case "image/png":               ext = "png"
+        case "image/webp":              ext = "webp"
+        case "image/gif":               ext = "gif"
+        case "image/heic":              ext = "heic"
+        case "image/bmp":               ext = "bmp"
+        default:                        return nil
+        }
+
+        guard let bytes = Data(base64Encoded: source.data, options: .ignoreUnknownCharacters) else {
+            return nil
+        }
+        // 10 MB per image cap.
+        if bytes.count > 10 * 1024 * 1024 { return nil }
+
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macmlx-http-img-\(UUID().uuidString).\(ext)")
+        do {
+            try bytes.write(to: tmp)
+            return ImageAttachment(fileURL: tmp, mimeType: mime)
+        } catch {
+            return nil
+        }
+    }
+}
+
+/// One Anthropic content block. `text` is set for `type:"text"`;
+/// `source` is set for `type:"image"`.
+private struct AnthropicBlock: Decodable, Sendable {
+    let type: String            // "text" or "image"
+    let text: String?
+    let source: AnthropicImageSource?
+}
+
+/// Anthropic image block `source`. Only the base64 form is decoded
+/// (`type:"base64"`); `media_type` is the IANA MIME and `data` is the
+/// raw base64 payload (no data-URL prefix).
+private struct AnthropicImageSource: Decodable, Sendable {
+    let type: String            // "base64"
+    let media_type: String
+    let data: String
+}
+
 // MARK: - HummingbirdServer
 
 /// OpenAI-compatible HTTP server backed by an `InferenceEngine`.
@@ -524,6 +680,15 @@ public actor HummingbirdServer {
             return try await server.handleChatCompletions(request: request, context: context)
         }
 
+        // POST /v1/messages — Anthropic Messages API compatibility.
+        // Claude Code, the Anthropic SDKs, and other Anthropic-speaking
+        // clients POST here. We translate to and from the same
+        // GenerateRequest the OpenAI path uses so one engine serves both.
+        router.post("/v1/messages") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleAnthropicMessages(request: request, context: context)
+        }
+
         // POST /x/models/load
         router.post("/x/models/load") { request, context -> Response in
             await server.incrementRequest()
@@ -639,7 +804,17 @@ public actor HummingbirdServer {
         let loaded = await engine.loadedModel
         var data: [[String: String]] = []
         if let model = loaded {
-            data = [["id": model.id, "object": "model", "owned_by": "local"]]
+            // Report the user-facing alias (v0.5.1) when one is set for
+            // this model; otherwise fall back to its directory id. Empty
+            // alias is treated as "no alias".
+            let params = await ModelParametersStore().load(for: model.id)
+            let reportedID: String
+            if let alias = params.alias, !alias.isEmpty {
+                reportedID = alias
+            } else {
+                reportedID = model.id
+            }
+            data = [["id": reportedID, "object": "model", "owned_by": "local"]]
         }
         let body: [String: Any] = ["object": "list", "data": data]
         return try jsonResponseAny(body)
@@ -722,7 +897,8 @@ public actor HummingbirdServer {
             model: chatReq.model,
             messages: messages,
             systemPrompt: systemPrompt,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: chatReq.model)
         )
 
         // Cold-swap (v0.3.3). If the request names a different model than
@@ -852,7 +1028,8 @@ public actor HummingbirdServer {
             model: req.model,
             messages: messages,
             systemPrompt: systemPrompt,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: req.model)
         )
 
         do {
@@ -1000,7 +1177,8 @@ public actor HummingbirdServer {
             model: req.model,
             messages: [ChatMessage(role: .user, content: req.prompt)],
             systemPrompt: req.system,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: req.model)
         )
 
         do {
@@ -1129,8 +1307,25 @@ public actor HummingbirdServer {
             return
         }
 
-        guard let target = await modelResolver(requestedID) else {
+        // Resolve `requestedID`. First try the direct resolver (id or
+        // displayName). If that misses, treat `requestedID` as a
+        // user-facing alias (v0.5.1): scan the per-model params files
+        // for a matching alias, then resolve the backing directory id.
+        let target: LocalModel
+        if let resolved = await modelResolver(requestedID) {
+            target = resolved
+        } else if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID),
+                  let aliasTarget = await modelResolver(aliasID) {
+            target = aliasTarget
+        } else {
             throw ModelSwapError.modelNotFound(id: requestedID)
+        }
+
+        // An alias may point at the model that is already loaded; skip
+        // the swap in that case (the id-equality early return above only
+        // catches a request naming the directory id directly).
+        if await engine.loadedModel?.id == target.id {
+            return
         }
 
         // Kick off the swap as a Task we can store for concurrent
@@ -1158,6 +1353,18 @@ public actor HummingbirdServer {
                 reason: error.localizedDescription
             )
         }
+    }
+
+    /// Per-model chat-template kwargs (v0.5.1) configured for `modelID`,
+    /// or nil when none are set. Populates `GenerateRequest.templateKwargs`
+    /// on every generation path so the Jinja template receives them as
+    /// `additionalContext`. Loaded by the request's model id — a request
+    /// that names a model by its *alias* won't pick up kwargs stored under
+    /// the directory id (a minor known gap).
+    private func templateKwargs(for modelID: String) async -> [String: JSONValue]? {
+        let params = await ModelParametersStore().load(for: modelID)
+        guard let kwargs = params.templateKwargs, !kwargs.isEmpty else { return nil }
+        return kwargs
     }
 
     private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
@@ -1316,6 +1523,295 @@ public actor HummingbirdServer {
         )
     }
 
+    // MARK: - Anthropic Messages API compatibility
+
+    /// Anthropic `POST /v1/messages`. Decodes the Anthropic wire format,
+    /// maps it onto the same `GenerateRequest` the OpenAI path uses, runs
+    /// the shared cold-swap, and dispatches to the Anthropic streaming or
+    /// non-streaming responder. `system` is top-level (not a message turn)
+    /// and `max_tokens` is required by Anthropic's spec.
+    private func handleAnthropicMessages(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Empty request body",
+                code: "invalid_request_error"
+            )
+        }
+
+        let req: AnthropicMessagesRequest
+        do {
+            req = try JSONDecoder().decode(AnthropicMessagesRequest.self, from: data)
+        } catch {
+            return errorResponse(
+                status: .badRequest,
+                message: "Invalid JSON: \(error.localizedDescription)",
+                code: "invalid_request_error"
+            )
+        }
+
+        // Anthropic carries the system prompt at the top level (not as a
+        // message turn), so there's nothing to strip out of `messages` —
+        // GenerateRequest.allMessages re-prepends this systemPrompt.
+        let systemPrompt = req.system?.text
+
+        // Map turns. Anthropic roles are only user / assistant; unknown
+        // roles are dropped. Text blocks → `content`, image blocks →
+        // `images` via `extractImages()`. See AnthropicContent.
+        let messages: [ChatMessage] = req.messages.compactMap { msg in
+            guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
+            return ChatMessage(
+                role: role,
+                content: msg.content.text,
+                images: msg.content.extractImages()
+            )
+        }
+
+        let params = GenerationParameters(
+            temperature: req.temperature ?? 0.7,
+            topP: req.top_p ?? 0.95,
+            maxTokens: req.max_tokens,
+            stream: req.stream ?? false
+        )
+
+        let genRequest = GenerateRequest(
+            model: req.model,
+            messages: messages,
+            systemPrompt: systemPrompt,
+            parameters: params,
+            templateKwargs: await templateKwargs(for: req.model)
+        )
+
+        // Cold-swap (v0.3.3) — same resolve/load + error mapping as the
+        // OpenAI path. Missing model → 404, load failure → 500.
+        do {
+            try await ensureModelLoaded(req.model)
+        } catch let err as ModelSwapError {
+            switch err {
+            case .modelNotFound(let id):
+                return errorResponse(
+                    status: .notFound,
+                    message: "Model not found: \(id). Download it via `macmlx pull \(id)` or check `macmlx list`.",
+                    code: "model_not_found"
+                )
+            case .loadFailed(let id, let reason):
+                return errorResponse(
+                    status: .internalServerError,
+                    message: "Failed to load \(id): \(reason)",
+                    code: "load_failed"
+                )
+            }
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: error.localizedDescription,
+                code: "load_failed"
+            )
+        }
+
+        let wantsStream = req.stream ?? false
+        if wantsStream {
+            return try await anthropicStreamingResponse(genRequest: genRequest)
+        } else {
+            return try await anthropicNonStreamingResponse(genRequest: genRequest)
+        }
+    }
+
+    /// Non-streaming Anthropic `/v1/messages` response. Accumulates the
+    /// full generation, splits off reasoning (dropped in this MVP — only
+    /// the answer is surfaced in `content[0]`), and emits Anthropic's
+    /// message envelope.
+    private func anthropicNonStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
+        // Serialise: MLX engine state isn't safe across overlapping
+        // generations. Release on ALL exit paths (success, catch, throw).
+        await acquireGenerationLock()
+        defer { Task { [weak self] in await self?.releaseGenerationLock() } }
+
+        let stream = await engine.generate(genRequest)
+        var fullText = ""
+        var finishReason: FinishReason?
+        var promptTokens = 0
+        var completionTokens = 0
+
+        do {
+            for try await chunk in stream {
+                fullText += chunk.text
+                if let usage = chunk.usage {
+                    promptTokens = usage.promptTokens
+                    completionTokens = usage.completionTokens
+                }
+                if let reason = chunk.finishReason {
+                    finishReason = reason
+                }
+            }
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: error.localizedDescription,
+                code: "engine_error"
+            )
+        }
+
+        incrementTokens(completionTokens)
+
+        // Reasoning is not surfaced as a separate block in this MVP — only
+        // the answer text goes into content[0]. `splitReasoning` strips any
+        // `<think>…</think>`; non-reasoning models keep their full text.
+        let (_, answer) = MessageSegmenter.splitReasoning(fullText)
+
+        let body: [String: Any] = [
+            "id": "msg_\(UUID().uuidString)",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                ["type": "text", "text": answer] as [String: Any]
+            ],
+            "model": genRequest.model,
+            "stop_reason": anthropicStopReason(finishReason),
+            "stop_sequence": NSNull(),
+            "usage": [
+                "input_tokens": promptTokens,
+                "output_tokens": completionTokens,
+            ] as [String: Any],
+        ]
+        return try jsonResponseAny(body)
+    }
+
+    /// Streaming Anthropic `/v1/messages` — SSE with *named* events
+    /// (`event: <name>\ndata: <json>\n\n`) in Anthropic's fixed order:
+    /// message_start → content_block_start → content_block_delta* →
+    /// content_block_stop → message_delta → message_stop. Only the answer
+    /// portion is streamed as `text_delta`; reasoning is dropped for this
+    /// MVP (matching the non-streaming path). The generation lock is held
+    /// for the whole body and released in `defer`.
+    private func anthropicStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
+        await acquireGenerationLock()
+
+        // Seed the reasoning splitter — does the rendered prompt open a
+        // <think> block the model continues (qwen3)? Reasoning is dropped
+        // for the Anthropic MVP, so this only affects which text counts as
+        // the answer, never a separate surfaced block.
+        let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+        let stream = await engine.generate(genRequest)
+        let messageID = "msg_\(UUID().uuidString)"
+        let model = genRequest.model
+        let server = self
+
+        let responseBody = ResponseBody { writer in
+            defer { Task { await server.releaseGenerationLock() } }
+
+            var chunkCount = 0
+            var completionTokens = 0
+            var promptTokens = 0
+            var finishReason: FinishReason?
+            var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
+
+            do {
+                // 1. message_start
+                try await writeAnthropicSSE(&writer, event: "message_start", payload: [
+                    "type": "message_start",
+                    "message": [
+                        "id": messageID,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model,
+                        "stop_reason": NSNull(),
+                        "stop_sequence": NSNull(),
+                        "usage": [
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                        ] as [String: Any],
+                    ] as [String: Any],
+                ])
+
+                // 2. content_block_start (single text block at index 0)
+                try await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": [
+                        "type": "text",
+                        "text": "",
+                    ] as [String: Any],
+                ])
+
+                // 3. content_block_delta per answer delta.
+                for try await chunk in stream {
+                    chunkCount += 1
+                    if let usage = chunk.usage {
+                        completionTokens = usage.completionTokens
+                        promptTokens = usage.promptTokens
+                    }
+                    let (_, answer) = splitter.push(chunk.text)
+                    var text = answer
+                    if let reason = chunk.finishReason {
+                        finishReason = reason
+                        // Flush any buffered tail into this terminal chunk.
+                        let (_, aTail) = splitter.finish()
+                        text += aTail
+                    }
+                    guard !text.isEmpty else { continue }
+                    try await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": [
+                            "type": "text_delta",
+                            "text": text,
+                        ] as [String: Any],
+                    ])
+                }
+            } catch {
+                let msg = error.localizedDescription
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"\(msg)\"}}\n\n")
+                try? await writer.write(buf)
+            }
+
+            // 4. content_block_stop
+            try? await writeAnthropicSSE(&writer, event: "content_block_stop", payload: [
+                "type": "content_block_stop",
+                "index": 0,
+            ])
+
+            // 5. message_delta — final stop reason + output token count.
+            try? await writeAnthropicSSE(&writer, event: "message_delta", payload: [
+                "type": "message_delta",
+                "delta": [
+                    "stop_reason": anthropicStopReason(finishReason),
+                    "stop_sequence": NSNull(),
+                ] as [String: Any],
+                "usage": [
+                    "input_tokens": promptTokens,
+                    "output_tokens": completionTokens,
+                ] as [String: Any],
+            ])
+
+            // 6. message_stop
+            try? await writeAnthropicSSE(&writer, event: "message_stop", payload: [
+                "type": "message_stop",
+            ])
+            try await writer.finish(nil)
+
+            await server.incrementTokens(chunkCount)
+        }
+
+        var headers = HTTPFields()
+        headers[.contentType] = "text/event-stream"
+        headers[.cacheControl] = "no-cache"
+        headers[.connection] = "keep-alive"
+
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: responseBody
+        )
+    }
+
     private func handleLoadModel(
         request: Request,
         context: BasicRequestContext
@@ -1432,6 +1928,34 @@ public actor HummingbirdServer {
             headers: headers,
             body: .init(byteBuffer: ByteBuffer(bytes: data))
         )
+    }
+}
+
+// MARK: - Anthropic SSE helpers
+
+/// Serialise one Anthropic SSE frame: `event: <name>\ndata: <json>\n\n`.
+/// Free function (not an actor method) so it can run inside the
+/// `ResponseBody` writer closure, which executes outside actor isolation.
+private func writeAnthropicSSE(
+    _ writer: inout any ResponseBodyWriter,
+    event: String,
+    payload: [String: Any]
+) async throws {
+    let jsonData = try JSONSerialization.data(withJSONObject: payload)
+    let jsonStr = String(decoding: jsonData, as: UTF8.self)
+    var buf = ByteBuffer()
+    buf.writeString("event: \(event)\ndata: \(jsonStr)\n\n")
+    try await writer.write(buf)
+}
+
+/// Map macMLX's `FinishReason` onto Anthropic's `stop_reason` vocabulary.
+/// Only an explicit length cap maps to `max_tokens`; everything else
+/// (normal stop, engine error, or absent) reads as `end_turn`, since the
+/// Anthropic message envelope has no dedicated error stop reason.
+private func anthropicStopReason(_ reason: FinishReason?) -> String {
+    switch reason {
+    case .length: return "max_tokens"
+    case .stop, .error, .none: return "end_turn"
     }
 }
 
