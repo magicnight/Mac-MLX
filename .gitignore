@@ -56,3 +56,6 @@ sparkle_private_key*
 
 # Project website — static site, deployed separately
 public/
+
+# Process/dev docs — implementation plans kept local, not synced to git
+docs/superpowers/plans/

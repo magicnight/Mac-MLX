@@ -259,8 +259,7 @@ is in place; STT / TTS runtime lands in v0.6.
     green. Real VLM smoke (loading e.g. SmolVLM-Instruct-4bit) is
     a manual-QA item — multi-GB download.
   - Image picker, multimodal HTTP, and conversation persistence
-    land in the v0.4.1 part-3 PR. Plan:
-    `docs/superpowers/plans/2026-05-10-v0.4.1-vlm.md`.
+    land in the v0.4.1 part-3 PR.
 - **VLM Foundation** (v0.4.1, part 1 of 3). Pure-Swift Core changes
   for vision-language model support. No MLX integration yet, no UI,
   no HTTP changes.
@@ -280,8 +279,7 @@ is in place; STT / TTS runtime lands in v0.6.
     `.mlx`. 13 new unit tests cover detection edge cases.
   - Engine integration (MLXSwiftEngine VLM branch via
     `MLXVLM.VLMModelFactory`) and UI / HTTP work land in follow-up
-    PRs — see
-    `docs/superpowers/plans/2026-05-10-v0.4.1-vlm.md`.
+    PRs.
 
 ---
 
