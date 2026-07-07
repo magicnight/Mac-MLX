@@ -1178,6 +1178,18 @@ public actor HummingbirdServer {
 
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
+
+        // Split reasoning into its own field (DeepSeek / mlx-lm / LM Studio
+        // convention) so external agents can filter the chain-of-thought
+        // instead of receiving bare `<think>…</think>` inside `content`
+        // (issue #30). Non-reasoning models are untouched: `reasoning` is
+        // nil and `content` is the full text.
+        let (reasoning, answer) = MessageSegmenter.splitReasoning(fullText)
+        var message: [String: Any] = ["role": "assistant", "content": answer]
+        if let reasoning {
+            message["reasoning_content"] = reasoning
+        }
+
         let body: [String: Any] = [
             "id": completionID,
             "object": "chat.completion",
@@ -1186,10 +1198,7 @@ public actor HummingbirdServer {
             "choices": [
                 [
                     "index": 0,
-                    "message": [
-                        "role": "assistant",
-                        "content": fullText,
-                    ] as [String: Any],
+                    "message": message,
                     "finish_reason": finishReason,
                 ] as [String: Any]
             ],

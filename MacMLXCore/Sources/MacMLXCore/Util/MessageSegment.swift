@@ -85,4 +85,30 @@ public enum MessageSegmenter {
 
         return segments
     }
+
+    /// Split complete assistant output into reasoning + answer for the
+    /// `reasoning_content` API convention (DeepSeek / mlx-lm / LM Studio).
+    ///
+    /// Reasoning models emit `<think>…</think>` blocks; qwen3 only emits
+    /// the closing tag because its chat template injects the opener into
+    /// the prompt (handled by `parse`). Returns the joined reasoning text
+    /// (`nil` when there was none, so non-reasoning models are untouched)
+    /// and the answer with every think block removed.
+    ///
+    /// - Note: Operates on the *complete* text — streaming callers need an
+    ///   incremental splitter that tracks the `<think>`/`</think>` boundary
+    ///   across chunks (tags can be split mid-token).
+    public static func splitReasoning(
+        _ content: String
+    ) -> (reasoning: String?, answer: String) {
+        var reasoning = ""
+        var answer = ""
+        for segment in parse(content) {
+            switch segment {
+            case .think(let text, _): reasoning += text
+            case .text(let text): answer += text
+            }
+        }
+        return (reasoning.isEmpty ? nil : reasoning, answer)
+    }
 }
