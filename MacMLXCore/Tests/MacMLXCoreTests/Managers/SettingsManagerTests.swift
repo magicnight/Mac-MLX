@@ -54,6 +54,20 @@ struct SettingsManagerTests {
         #expect(current.serverPort == 9999)
     }
 
+    @Test("serverAPIKey persists and reloads across instances")
+    func serverAPIKeyRoundTrips() async throws {
+        let url = makeTempSettingsURL()
+
+        let managerA = SettingsManager(fileURL: url)
+        await managerA.load()
+        try await managerA.update { $0.serverAPIKey = "sk-test-123" }
+
+        let managerB = SettingsManager(fileURL: url)
+        await managerB.load()
+        let current = await managerB.current
+        #expect(current.serverAPIKey == "sk-test-123")
+    }
+
     // MARK: Corrupt file
 
     @Test("corrupt file falls back to defaults without overwriting it")

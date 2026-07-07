@@ -219,6 +219,12 @@ public actor HummingbirdServer {
     /// `currentModel`, `status`, and `onModelLoaded` stay in sync.
     private let loadHook: LoadHook?
 
+    /// Bearer token gate for the HTTP surface. `nil` (default) leaves the
+    /// localhost server open — the dev default. When set, every `/v1/*`
+    /// and `/api/*` request must carry `Authorization: Bearer <key>`;
+    /// only the `/health` + `/v1/health` probes stay open.
+    private let apiKey: String?
+
     /// In-flight cold-swap Task, if any. Guards against thrashing when
     /// two requests for different models arrive at once: the second one
     /// awaits the first's completion before checking whether it can
@@ -285,10 +291,11 @@ public actor HummingbirdServer {
     /// Create a server without cold-swap support — a chat completion
     /// request whose `model` field doesn't match the engine's loaded
     /// model will fail at the engine layer.
-    public init(engine: any InferenceEngine) {
+    public init(engine: any InferenceEngine, apiKey: String? = nil) {
         self.engine = engine
         self.modelResolver = { _ in nil }
         self.loadHook = nil
+        self.apiKey = apiKey
     }
 
     /// Create a server with cold-swap support — chat completion
@@ -296,11 +303,13 @@ public actor HummingbirdServer {
     /// trigger an unload + load before the request proceeds.
     public init(
         engine: any InferenceEngine,
-        modelResolver: @escaping ModelResolver
+        modelResolver: @escaping ModelResolver,
+        apiKey: String? = nil
     ) {
         self.engine = engine
         self.modelResolver = modelResolver
         self.loadHook = nil
+        self.apiKey = apiKey
     }
 
     /// Create a server with cold-swap + a custom load hook. GUI uses
@@ -312,11 +321,13 @@ public actor HummingbirdServer {
     public init(
         engine: any InferenceEngine,
         modelResolver: @escaping ModelResolver,
-        loadHook: @escaping LoadHook
+        loadHook: @escaping LoadHook,
+        apiKey: String? = nil
     ) {
         self.engine = engine
         self.modelResolver = modelResolver
         self.loadHook = loadHook
+        self.apiKey = apiKey
     }
 
     // MARK: Lifecycle
@@ -456,6 +467,13 @@ public actor HummingbirdServer {
         // (including ones that will 404 at route-matching time) is
         // observed.
         router.add(middleware: RequestLoggingMiddleware())
+
+        // Bearer-token auth — when the server is configured with an API
+        // key, gate every route except the health probes. Added after
+        // logging so rejected requests still show up in the Logs tab.
+        if let apiKey {
+            router.add(middleware: BearerAuthMiddleware(apiKey: apiKey))
+        }
 
         // Capture self for use in route closures.
         // The actor reference is Sendable, so this is safe under Swift 6.
@@ -1411,6 +1429,52 @@ public actor HummingbirdServer {
         headers[.contentType] = "application/json; charset=utf-8"
         return Response(
             status: status,
+            headers: headers,
+            body: .init(byteBuffer: ByteBuffer(bytes: data))
+        )
+    }
+}
+
+// MARK: - Bearer auth middleware
+
+/// Gates the HTTP surface behind a bearer token when the server is
+/// configured with an API key (OpenAI convention:
+/// `Authorization: Bearer <key>`). The `/health` and `/v1/health`
+/// liveness probes stay open so orchestrators can check readiness
+/// without the key; everything else gets 401 + a JSON error body
+/// shaped like the server's other errors.
+private struct BearerAuthMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+    let apiKey: String
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        let path = request.uri.path
+        if path == "/health" || path == "/v1/health" {
+            return try await next(request, context)
+        }
+        guard request.headers[.authorization] == "Bearer \(apiKey)" else {
+            return Self.unauthorized()
+        }
+        return try await next(request, context)
+    }
+
+    private static func unauthorized() -> Response {
+        let body: [String: Any] = [
+            "error": [
+                "message": "Missing or invalid API key.",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+            ] as [String: Any]
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json; charset=utf-8"
+        return Response(
+            status: .unauthorized,
             headers: headers,
             body: .init(byteBuffer: ByteBuffer(bytes: data))
         )
