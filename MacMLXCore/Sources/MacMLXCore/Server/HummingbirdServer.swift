@@ -1358,11 +1358,13 @@ public actor HummingbirdServer {
     /// Per-model chat-template kwargs (v0.5.1) configured for `modelID`,
     /// or nil when none are set. Populates `GenerateRequest.templateKwargs`
     /// on every generation path so the Jinja template receives them as
-    /// `additionalContext`. Loaded by the request's model id — a request
-    /// that names a model by its *alias* won't pick up kwargs stored under
-    /// the directory id (a minor known gap).
+    /// `additionalContext`. Alias-aware (A5): a request that names the model
+    /// by its user-facing alias resolves to the backing directory id before
+    /// the per-model params are loaded, mirroring the swap resolver above.
     private func templateKwargs(for modelID: String) async -> [String: JSONValue]? {
-        let params = await ModelParametersStore().load(for: modelID)
+        let store = ModelParametersStore()
+        let resolvedID = await store.modelID(forAlias: modelID) ?? modelID
+        let params = await store.load(for: resolvedID)
         guard let kwargs = params.templateKwargs, !kwargs.isEmpty else { return nil }
         return kwargs
     }

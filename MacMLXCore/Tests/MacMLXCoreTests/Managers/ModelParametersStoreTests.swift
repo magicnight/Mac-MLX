@@ -171,4 +171,29 @@ func modelIDForAliasIgnoresEmptyQuery() async throws {
     #expect(resolved == nil)
 }
 
+@Test
+func aliasResolvesToModelWithTemplateKwargs() async throws {
+    // Exercises the exact two-step chain HummingbirdServer.templateKwargs(for:)
+    // now runs after the v0.5.1 A5 alias fix: a request naming the model by
+    // its alias resolves to the backing directory id, then the per-model
+    // kwargs load from that id. The server helper itself uses the real home
+    // dir, so this store-level alias→id + load chain is the clean seam.
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let modelID = "mlx-community/Qwen3-8B-4bit"   // "X"
+    var params = ModelParameters.default
+    params.alias = "qwen"                          // "Y"
+    params.templateKwargs = ["enable_thinking": .bool(true)]
+    try await store.save(params, for: modelID)
+
+    // Step 1: alias "Y" → backing directory id "X".
+    let resolved = await store.modelID(forAlias: "qwen")
+    #expect(resolved == modelID)
+
+    // Step 2: kwargs load from the resolved id (what the server now does).
+    let loaded = await store.load(for: resolved ?? "qwen")
+    #expect(loaded.templateKwargs == ["enable_thinking": .bool(true)])
+}
+
 } // end @Suite ModelParametersStoreTests

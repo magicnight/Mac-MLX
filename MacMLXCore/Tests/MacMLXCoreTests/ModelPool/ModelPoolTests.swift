@@ -137,4 +137,22 @@ final class ModelPoolTests: XCTestCase {
         let residents = await pool.residentModelIDs()
         XCTAssertTrue(residents.contains("A"))
     }
+
+    func testSweepIdleSkipsInFlightGeneratingEntry() async throws {
+        let pool = ModelPool(maxBytes: 4_000_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A"), ttlSeconds: 1)
+        // Mark A as actively generating — even far past its 1s TTL it must
+        // NOT be swept out from under an in-flight stream (A4 hazard fix).
+        await pool.setGenerating("A", true)
+        await pool.sweepIdle(now: Date().addingTimeInterval(10_000))
+        var residents = await pool.residentModelIDs()
+        XCTAssertTrue(residents.contains("A"), "generating entry must survive the sweep")
+
+        // Once the generation finishes, the same expired entry is reclaimed —
+        // proving the in-flight marker (not something else) is what spared it.
+        await pool.setGenerating("A", false)
+        await pool.sweepIdle(now: Date().addingTimeInterval(10_000))
+        residents = await pool.residentModelIDs()
+        XCTAssertFalse(residents.contains("A"), "cleared entry past TTL must sweep")
+    }
 }

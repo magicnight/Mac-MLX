@@ -69,10 +69,16 @@ struct RunCommand: AsyncParsableCommand {
             )
         } else if TTYDetect.isInteractive {
             // Interactive TUI/REPL mode — plain stdin REPL (see #18).
-            // NOTE: ChatTUI builds its own default GenerationParameters and
-            // doesn't thread per-model overrides, so template kwargs
-            // (v0.5.1) are not applied in interactive mode — a follow-up.
-            try await ChatTUI.run(engine: engine, model: local, system: resolvedSystem)
+            // Per-model template kwargs (v0.5.1) are threaded through so e.g.
+            // Qwen3's `enable_thinking` applies in interactive chat. (ChatTUI
+            // still builds its own default GenerationParameters — temperature
+            // / max-tokens overrides remain a follow-up.)
+            try await ChatTUI.run(
+                engine: engine,
+                model: local,
+                system: resolvedSystem,
+                templateKwargs: templateKwargs
+            )
         } else {
             // Non-interactive stdin mode: read lines until EOF
             try await runStdinLoop(
