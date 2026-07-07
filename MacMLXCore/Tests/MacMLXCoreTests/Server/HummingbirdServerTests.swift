@@ -70,6 +70,71 @@ struct HummingbirdServerTests {
         #expect(json["status"] == "ok")
     }
 
+    // MARK: API-key auth (v0.5.1)
+    //   protectedRouteRejectsMissingKey : 19_300
+    //   protectedRouteRejectsWrongKey   : 19_310
+    //   protectedRouteAcceptsCorrectKey : 19_320
+    //   openServerNeedsNoKey            : 19_330
+    //   healthProbeStaysOpenWithKey     : 19_340
+
+    private func keyedServer(_ key: String) -> HummingbirdServer {
+        HummingbirdServer(engine: StubInferenceEngine(engineID: .mlxSwift), apiKey: key)
+    }
+
+    @Test
+    func protectedRouteRejectsMissingKey() async throws {
+        let server = keyedServer("s3cret")
+        let port = try await server.start(preferredPort: 19_300)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/models")!
+        let (_, response) = try await get(url)
+        await server.stop()
+        #expect(response.statusCode == 401)
+    }
+
+    @Test
+    func protectedRouteRejectsWrongKey() async throws {
+        let server = keyedServer("s3cret")
+        let port = try await server.start(preferredPort: 19_310)
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/models")!)
+        req.setValue("Bearer wrong", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: req)
+        await server.stop()
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 401)
+    }
+
+    @Test
+    func protectedRouteAcceptsCorrectKey() async throws {
+        let server = keyedServer("s3cret")
+        let port = try await server.start(preferredPort: 19_320)
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/models")!)
+        req.setValue("Bearer s3cret", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: req)
+        await server.stop()
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 200)
+    }
+
+    @Test
+    func openServerNeedsNoKey() async throws {
+        let server = makeServer()  // no apiKey → open
+        let port = try await server.start(preferredPort: 19_330)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/models")!
+        let (_, response) = try await get(url)
+        await server.stop()
+        #expect(response.statusCode == 200)
+    }
+
+    @Test
+    func healthProbeStaysOpenWithKey() async throws {
+        let server = keyedServer("s3cret")
+        let port = try await server.start(preferredPort: 19_340)
+        let url = URL(string: "http://127.0.0.1:\(port)/health")!
+        let (_, response) = try await get(url)
+        await server.stop()
+        #expect(response.statusCode == 200)
+    }
+
     @Test
     func modelsEndpointEmptyWhenNoModelLoaded() async throws {
         let server = makeServer()

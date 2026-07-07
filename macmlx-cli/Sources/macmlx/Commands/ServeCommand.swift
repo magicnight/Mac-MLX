@@ -12,6 +12,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Model ID or display name to load at startup.")
     var model: String?
 
+    @Option(help: "Require this bearer token on all API routes (overrides the persisted serverAPIKey setting).")
+    var apiKey: String?
+
     @Option(help: "Port to listen on (default: 8000).")
     var port: Int = 8000
 
@@ -57,7 +60,11 @@ struct ServeCommand: AsyncParsableCommand {
                 """)
         }
 
-        let server = HummingbirdServer(engine: engine, modelResolver: resolver)
+        let server = HummingbirdServer(
+            engine: engine,
+            modelResolver: resolver,
+            apiKey: apiKey ?? ctx.settings.serverAPIKey
+        )
         let actualPort = try await server.start(preferredPort: port)
 
         let startedAt = Date()

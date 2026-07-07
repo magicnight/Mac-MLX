@@ -35,6 +35,11 @@ public struct Settings: Codable, Equatable, Sendable {
     /// Path to the SwiftLM binary for 100B+ MoE inference.
     public var swiftLMPath: String?
 
+    /// Bearer token required on the HTTP server's `/v1/*` and `/api/*`
+    /// routes. `nil` (default) leaves the localhost server open — the dev
+    /// default. When set, requests must send `Authorization: Bearer <key>`.
+    public var serverAPIKey: String?
+
     /// Sparkle update channel — "release" or "beta".
     public var sparkleUpdateChannel: String
 
@@ -110,6 +115,7 @@ public struct Settings: Codable, Equatable, Sendable {
         onboardingComplete: false,
         pythonPath: nil,
         swiftLMPath: nil,
+        serverAPIKey: nil,
         sparkleUpdateChannel: "release",
         logRetentionDays: 7,
         hfEndpoint: "https://huggingface.co",
@@ -134,6 +140,7 @@ public struct Settings: Codable, Equatable, Sendable {
         onboardingComplete: Bool,
         pythonPath: String?,
         swiftLMPath: String?,
+        serverAPIKey: String? = nil,
         sparkleUpdateChannel: String,
         logRetentionDays: Int,
         hfEndpoint: String = "https://huggingface.co",
@@ -154,6 +161,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.onboardingComplete = onboardingComplete
         self.pythonPath = pythonPath
         self.swiftLMPath = swiftLMPath
+        self.serverAPIKey = serverAPIKey
         self.sparkleUpdateChannel = sparkleUpdateChannel
         self.logRetentionDays = logRetentionDays
         self.hfEndpoint = hfEndpoint
@@ -181,6 +189,7 @@ public struct Settings: Codable, Equatable, Sendable {
         case onboardingComplete
         case pythonPath
         case swiftLMPath
+        case serverAPIKey
         case sparkleUpdateChannel
         case logRetentionDays
         case hfEndpoint
@@ -204,6 +213,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.onboardingComplete = try c.decode(Bool.self, forKey: .onboardingComplete)
         self.pythonPath = try c.decodeIfPresent(String.self, forKey: .pythonPath)
         self.swiftLMPath = try c.decodeIfPresent(String.self, forKey: .swiftLMPath)
+        self.serverAPIKey = try c.decodeIfPresent(String.self, forKey: .serverAPIKey)
         self.sparkleUpdateChannel = try c.decode(String.self, forKey: .sparkleUpdateChannel)
         self.logRetentionDays = try c.decode(Int.self, forKey: .logRetentionDays)
         self.hfEndpoint = try c.decodeIfPresent(String.self, forKey: .hfEndpoint)
