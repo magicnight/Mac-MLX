@@ -42,21 +42,24 @@ final class DeepseekV32AttentionParityTests: XCTestCase {
         return try JSONDecoder().decode(DeepseekV32Configuration.self, from: Data(json.utf8))
     }
 
-    func testPrefillMatchesPythonReference() throws {
+    /// Load a captured attention fixture, run the Swift attention with the
+    /// identical weights + inputs, and assert the output matches the Python
+    /// reference. Shared by the prefill (S2.1) and sparse-prefill (S2.2)
+    /// cases — they differ only in the fixture (s ≤ vs > index_topk).
+    private func assertAttentionParity(fixture: String, _ label: String) throws {
         try requireMLXRuntimeOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(
-                forResource: "attn_prefill_fixture", withExtension: "safetensors",
-                subdirectory: "Fixtures"),
-            "attention prefill fixture not found in test bundle")
+                forResource: fixture, withExtension: "safetensors", subdirectory: "Fixtures"),
+            "\(fixture) not found in test bundle")
         let arrays = try MLX.loadArrays(url: url)
 
         let config = try fixtureConfig()
         let attn = DeepseekV32Attention(config)
 
-        // Load the captured weights (nested keys unflatten onto the
-        // submodules: indexer.wq_b.weight → indexer.wqB.weight, etc.).
+        // Nested keys unflatten onto submodules (indexer.wq_b.weight →
+        // indexer.wqB.weight, etc.).
         let weightKeys = [
             "q_a_proj.weight", "q_a_layernorm.weight", "q_b_proj.weight",
             "kv_a_proj_with_mqa.weight", "kv_a_layernorm.weight",
@@ -79,10 +82,20 @@ final class DeepseekV32AttentionParityTests: XCTestCase {
         let out = attn(x, mask: mask, cache: nil)
         out.eval()
 
-        XCTAssertEqual(out.shape, expected.shape, "output shape mismatch")
+        XCTAssertEqual(out.shape, expected.shape, "\(label): output shape mismatch")
         let close = allClose(out, expected, rtol: 1e-4, atol: 1e-4)
-        XCTAssertTrue(
-            close.item(Bool.self),
-            "attention prefill output diverges from the Python reference")
+        XCTAssertTrue(close.item(Bool.self), "\(label) diverges from the Python reference")
+    }
+
+    /// S2.1: prefill, `s <= index_topk` → indexer short-circuits, dense.
+    func testPrefillMatchesPythonReference() throws {
+        try assertAttentionParity(fixture: "attn_prefill_fixture", "attention prefill")
+    }
+
+    /// S2.2: prefill, `s > index_topk` → indexer returns top-k, driving the
+    /// sparse-mask scatter branch (`put_along_axis` + AND with the causal
+    /// mask). Exercises the path S2.1 short-circuited past.
+    func testSparsePrefillMatchesPythonReference() throws {
+        try assertAttentionParity(fixture: "attn_sparse_fixture", "attention sparse prefill")
     }
 }
