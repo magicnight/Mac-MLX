@@ -1706,6 +1706,7 @@ public actor HummingbirdServer {
 
             var chunkCount = 0
             var completionTokens = 0
+            var promptTokens = 0
             var finishReason: FinishReason?
             var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
 
@@ -1743,6 +1744,7 @@ public actor HummingbirdServer {
                     chunkCount += 1
                     if let usage = chunk.usage {
                         completionTokens = usage.completionTokens
+                        promptTokens = usage.promptTokens
                     }
                     let (_, answer) = splitter.push(chunk.text)
                     var text = answer
@@ -1784,6 +1786,7 @@ public actor HummingbirdServer {
                     "stop_sequence": NSNull(),
                 ] as [String: Any],
                 "usage": [
+                    "input_tokens": promptTokens,
                     "output_tokens": completionTokens,
                 ] as [String: Any],
             ])

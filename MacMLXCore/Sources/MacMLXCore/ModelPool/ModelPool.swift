@@ -172,6 +172,13 @@ public actor ModelPool {
     /// inside the byte budget (v0.5.1). Pinned and nil-TTL entries are
     /// never swept. Called at the top of `load(_:)`; `now` is injectable
     /// for tests.
+    ///
+    /// TODO(A4 GUI wiring): `lastAccess` is refreshed on `engine(for:)` /
+    /// `load()` but NOT during a long-running generation. Before a real
+    /// `ttlSeconds` is fed from the GUI/EngineCoordinator, bump `lastAccess`
+    /// at generation start (or exclude models with an in-flight generation)
+    /// so a concurrent load's sweep can't unload a model that is actively
+    /// streaming. Safe today only because `ttlSeconds` defaults to nil.
     public func sweepIdle(now: Date = Date()) {
         let expired = entries.values.filter { entry in
             guard !entry.isPinned, let ttl = entry.ttlSeconds else { return false }

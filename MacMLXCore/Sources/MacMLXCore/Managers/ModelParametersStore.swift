@@ -164,7 +164,7 @@ public actor ModelParametersStore {
             return nil
         }
         let decoder = JSONDecoder()
-        for url in files where url.pathExtension == "json" {
+        for url in files.sorted(by: { $0.path < $1.path }) where url.pathExtension == "json" {
             guard let data = try? Data(contentsOf: url),
                   let params = try? decoder.decode(ModelParameters.self, from: data),
                   params.alias == alias else {
