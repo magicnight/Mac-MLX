@@ -5,19 +5,6 @@ import MLX
 
 final class PromptCacheStoreTests: XCTestCase {
 
-    /// mlx-swift's SwiftPM build does not always bundle `default.metallib`
-    /// alongside the test binary — in that case any `MLXArray` op aborts
-    /// the test process with a fatalError from the C++ side. Detect the
-    /// bundle up front and skip MLX-dependent tests so we still exercise
-    /// the pure LRU / miss paths in the store.
-    private func requireMetalOrSkip() throws {
-        let bundle = Bundle(identifier: "mlx-swift_Cmlx.resources")
-            ?? Bundle.allBundles.first(where: { $0.bundlePath.contains("Cmlx") })
-        let metallib = bundle?.url(forResource: "default", withExtension: "metallib")
-        if metallib == nil {
-            throw XCTSkip("Requires default.metallib (SPM test binaries often lack it — run under xcodebuild)")
-        }
-    }
 
     /// Build a minimal single-layer [KVCache] from known keys/values.
     /// Sufficient for roundtrip — shape is [1, n_heads, seq, head_dim].
@@ -37,7 +24,7 @@ final class PromptCacheStoreTests: XCTestCase {
     }
 
     func testPutThenGetHitsHotTier() async throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
         let store = PromptCacheStore(root: tmpRoot(), hotCapacity: 4)
         let key = PromptCacheKey(modelID: "M", tokens: [1, 2, 3])
 
@@ -48,7 +35,7 @@ final class PromptCacheStoreTests: XCTestCase {
     }
 
     func testHotEvictionWritesToCold() async throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
         let root = tmpRoot()
         let store = PromptCacheStore(root: root, hotCapacity: 1)
 
@@ -64,7 +51,7 @@ final class PromptCacheStoreTests: XCTestCase {
     }
 
     func testColdLookupRestores() async throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
         let root = tmpRoot()
         let store = PromptCacheStore(root: root, hotCapacity: 1)
 
