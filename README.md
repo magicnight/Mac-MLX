@@ -13,14 +13,24 @@ API for everything else.
 
 ## Why macMLX?
 
+MLX inference and a CLI used to be the whole pitch — but as of 2026 both
+[LM Studio](https://github.com/lmstudio-ai/mlx-engine) and
+[Ollama](https://ollama.com/blog/mlx) ship MLX engines on Apple Silicon, and
+LM Studio has the `lms` CLI. So the honest comparison is the *combination*: a
+genuinely native macOS GUI, an always-on API, and zero Python in one ~50 MB app.
+
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| Native macOS GUI | ✅ SwiftUI | ❌ Electron | ❌ | ❌ Web UI |
-| MLX-native inference | ✅ | ❌ GGUF | ❌ GGUF | ✅ |
-| CLI | ✅ | ❌ | ✅ | ✅ |
+| Native macOS GUI | ✅ SwiftUI | Electron | menu-bar only | Web UI |
+| MLX inference | ✅ | ✅ | ✅ (preview) | ✅ |
+| CLI | ✅ | ✅ `lms` | ✅ | ✅ |
 | Resumable downloads + mirrors | ✅ | ⚠ partial | ⚠ partial | ❌ |
 | OpenAI-compatible API | ✅ always-on | ✅ | ✅ | ✅ |
 | Zero Python required | ✅ | ✅ | ✅ | ❌ |
+
+Where macMLX stands alone: a first-class SwiftUI app **and** a proper CLI/TUI
+over one shared Swift core — plus owning frontier model architectures in pure
+Swift (the DeepSeek V3.2 port) instead of waiting for upstream.
 
 ## Requirements
 
@@ -39,9 +49,11 @@ open /Applications/macMLX.app
 
 (Or right-click the app → **Open** → **Open**.)
 
-## Feature highlights
+## Feature highlights (v0.2 → v0.5)
 
-Sixteen-plus releases since the v0.1 MVP, by area:
+Sixteen-plus releases since the v0.1 MVP, by area. **This section tracks the
+latest shipped state — new features land here first, then get a one-line
+roadmap entry below.**
 
 - **Engine & models** — in-process MLX Swift engine (text + 16 VLM architectures, models to ~70B); tiered KV prompt cache (RAM + SSD), multi-model pool with LRU eviction, LoRA adapter inference, MCP server (`macmlx mcp serve`).
 - **Downloads** — resumable across cancels and app quits, live speed/ETA, HuggingFace mirror support, Hub-commit update detection.
@@ -119,6 +131,9 @@ swift test  --package-path MacMLXCore    # tests (~3s)
 ```
 
 ## Roadmap
+
+> Kept current per release: when a `0.x` ships, it moves from a future section
+> up to **Shipped**, and the feature highlights above get updated to match.
 
 - **Shipped (v0.1 → v0.5)** — native GUI + menu bar + CLI + OpenAI API (v0.1); download & chat polish (v0.2); Benchmark, Logs, chat history, API cold-swap, Ollama compat, sandbox-off (v0.3); and the v0.5 engine leap — VLMs, tiered KV cache, model pool, LoRA, MCP server. Per-tag detail in [CHANGELOG.md](CHANGELOG.md).
 - **Next release (on `main`)** — MCP client pool (chat-side tool routing next) and `reasoning_content` API separation ([#30](../../issues/30)).

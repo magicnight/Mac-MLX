@@ -12,14 +12,24 @@ Electron。给新手一个精致的 SwiftUI 应用，给开发者一把趁手的
 
 ## 为什么选 macMLX？
 
+MLX 推理和 CLI 曾经就是全部卖点——但截至 2026，
+[LM Studio](https://github.com/lmstudio-ai/mlx-engine) 和
+[Ollama](https://ollama.com/blog/mlx) 在 Apple Silicon 上都上了 MLX 引擎，
+LM Studio 也有 `lms` CLI。所以诚实的对比是关于**组合**：真正原生的 macOS
+GUI、常驻 API、零 Python，全在一个约 50 MB 的 app 里。
+
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| 原生 macOS GUI | ✅ SwiftUI | ❌ Electron | ❌ | ❌ Web UI |
-| 原生 MLX 推理 | ✅ | ❌ GGUF | ❌ GGUF | ✅ |
-| 命令行 (CLI) | ✅ | ❌ | ✅ | ✅ |
+| 原生 macOS GUI | ✅ SwiftUI | Electron | 仅菜单栏 | Web UI |
+| MLX 推理 | ✅ | ✅ | ✅（预览） | ✅ |
+| 命令行 (CLI) | ✅ | ✅ `lms` | ✅ | ✅ |
 | 断点续传 + 镜像源 | ✅ | ⚠ 部分 | ⚠ 部分 | ❌ |
 | OpenAI 兼容 API | ✅ 常驻 | ✅ | ✅ | ✅ |
 | 无需 Python | ✅ | ✅ | ✅ | ❌ |
+
+macMLX 真正独有的：一流的 SwiftUI app **加上**共享同一 Swift 核心的完整
+CLI/TUI——以及用纯 Swift 拥有前沿模型架构（DeepSeek V3.2 移植），而不是干
+等上游支持。
 
 ## 系统要求
 
@@ -38,9 +48,10 @@ open /Applications/macMLX.app
 
 （或右键点 app → **打开** → 再 **打开**。）
 
-## 功能亮点
+## 功能亮点 (v0.2 → v0.5)
 
-自 v0.1 MVP 起发了十六个以上版本，按领域：
+自 v0.1 MVP 起发了十六个以上版本，按领域。**这一节记录最新的已发布状态——
+新功能先落到这里，再到下面路线图加一行。**
 
 - **引擎与模型** —— 进程内 MLX Swift 引擎（文本 + 16 种 VLM 架构，模型到约 70B）；分层 KV prompt cache（RAM + SSD）、带 LRU 淘汰的多模型池、LoRA adapter 推理、MCP server（`macmlx mcp serve`）。
 - **下载** —— 跨取消和退出的断点续传、实时速度/ETA、HuggingFace 镜像源、Hub commit 更新检测。
@@ -115,6 +126,9 @@ swift test  --package-path MacMLXCore    # 测试（约 3 秒）
 ```
 
 ## 路线图
+
+> 每个 release 保持更新：某个 `0.x` 发布后，把它从未来章节移到**已发布**，
+> 并同步更新上面的功能亮点。
 
 - **已发布（v0.1 → v0.5）** —— 原生 GUI + 菜单栏 + CLI + OpenAI API（v0.1）；下载与聊天打磨（v0.2）；Benchmark、Logs、聊天历史、API 冷换、Ollama 兼容、关闭 sandbox（v0.3）；以及 v0.5 的引擎大跃进——VLM、分层 KV cache、多模型池、LoRA、MCP server。按 tag 细节见 [CHANGELOG.md](CHANGELOG.md)。
 - **下个 release（在 `main` 上）** —— MCP client pool（接进聊天的工具路由为下一步）、`reasoning_content` API 分离（[#30](../../issues/30)）。
