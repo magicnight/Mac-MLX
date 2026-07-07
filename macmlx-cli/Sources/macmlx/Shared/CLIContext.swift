@@ -64,7 +64,7 @@ public struct CLIContext: Sendable {
         explicitMaxTokens: Int?,
         explicitSystem: String?,
         stream: Bool
-    ) async -> (GenerationParameters, String?) {
+    ) async -> (GenerationParameters, String?, [String: JSONValue]?) {
         let persisted = await paramStore.load(for: modelID)
         let params = GenerationParameters(
             temperature: explicitTemperature ?? persisted.temperature,
@@ -81,7 +81,7 @@ public struct CLIContext: Sendable {
         } else {
             system = persisted.systemPrompt
         }
-        return (params, system)
+        return (params, system, persisted.templateKwargs)
     }
 }
 

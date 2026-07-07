@@ -86,4 +86,89 @@ func corruptFileFallsBackToDefault() async throws {
     #expect(loaded == .default)
 }
 
+// MARK: - v0.5.1 fields (alias / ttlSeconds / templateKwargs)
+
+@Test
+func newOptionalFieldsRoundTrip() async throws {
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let params = ModelParameters(
+        temperature: 0.5,
+        topP: 0.9,
+        maxTokens: 512,
+        systemPrompt: "s",
+        alias: "qwen",
+        ttlSeconds: 900,
+        templateKwargs: ["enable_thinking": .bool(true)]
+    )
+    try await store.save(params, for: "mlx-community/Qwen3-8B-4bit")
+    let loaded = await store.load(for: "mlx-community/Qwen3-8B-4bit")
+    #expect(loaded.alias == "qwen")
+    #expect(loaded.ttlSeconds == 900)
+    #expect(loaded.templateKwargs == ["enable_thinking": .bool(true)])
+}
+
+@Test
+func newOptionalFieldsDefaultToNil() async throws {
+    // A pre-v0.5.1 file (only the four original keys) must still load,
+    // with the new fields defaulting to nil.
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appending(path: "legacy.json", directoryHint: .notDirectory)
+    let legacy = """
+    {"temperature":0.7,"topP":0.95,"maxTokens":2048,"systemPrompt":"hi"}
+    """
+    try Data(legacy.utf8).write(to: url)
+
+    let loaded = await store.load(for: "legacy")
+    #expect(loaded.alias == nil)
+    #expect(loaded.ttlSeconds == nil)
+    #expect(loaded.templateKwargs == nil)
+}
+
+@Test
+func modelIDForAliasFindsMatch() async throws {
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let slashID = "mlx-community/Qwen3-8B-4bit"
+    var params = ModelParameters.default
+    params.alias = "qwen"
+    try await store.save(params, for: slashID)
+
+    let resolved = await store.modelID(forAlias: "qwen")
+    // The decoded filename must recover the original slashed id.
+    #expect(resolved == slashID)
+}
+
+@Test
+func modelIDForAliasReturnsNilForUnknownAlias() async throws {
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    var params = ModelParameters.default
+    params.alias = "qwen"
+    try await store.save(params, for: "some-model")
+
+    let resolved = await store.modelID(forAlias: "not-a-known-alias")
+    #expect(resolved == nil)
+}
+
+@Test
+func modelIDForAliasIgnoresEmptyQuery() async throws {
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    // A stored empty alias must not be resolvable by an empty query.
+    var params = ModelParameters.default
+    params.alias = ""
+    try await store.save(params, for: "some-model")
+
+    let resolved = await store.modelID(forAlias: "")
+    #expect(resolved == nil)
+}
+
 } // end @Suite ModelParametersStoreTests

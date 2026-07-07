@@ -804,7 +804,17 @@ public actor HummingbirdServer {
         let loaded = await engine.loadedModel
         var data: [[String: String]] = []
         if let model = loaded {
-            data = [["id": model.id, "object": "model", "owned_by": "local"]]
+            // Report the user-facing alias (v0.5.1) when one is set for
+            // this model; otherwise fall back to its directory id. Empty
+            // alias is treated as "no alias".
+            let params = await ModelParametersStore().load(for: model.id)
+            let reportedID: String
+            if let alias = params.alias, !alias.isEmpty {
+                reportedID = alias
+            } else {
+                reportedID = model.id
+            }
+            data = [["id": reportedID, "object": "model", "owned_by": "local"]]
         }
         let body: [String: Any] = ["object": "list", "data": data]
         return try jsonResponseAny(body)
@@ -887,7 +897,8 @@ public actor HummingbirdServer {
             model: chatReq.model,
             messages: messages,
             systemPrompt: systemPrompt,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: chatReq.model)
         )
 
         // Cold-swap (v0.3.3). If the request names a different model than
@@ -1017,7 +1028,8 @@ public actor HummingbirdServer {
             model: req.model,
             messages: messages,
             systemPrompt: systemPrompt,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: req.model)
         )
 
         do {
@@ -1165,7 +1177,8 @@ public actor HummingbirdServer {
             model: req.model,
             messages: [ChatMessage(role: .user, content: req.prompt)],
             systemPrompt: req.system,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: req.model)
         )
 
         do {
@@ -1294,8 +1307,25 @@ public actor HummingbirdServer {
             return
         }
 
-        guard let target = await modelResolver(requestedID) else {
+        // Resolve `requestedID`. First try the direct resolver (id or
+        // displayName). If that misses, treat `requestedID` as a
+        // user-facing alias (v0.5.1): scan the per-model params files
+        // for a matching alias, then resolve the backing directory id.
+        let target: LocalModel
+        if let resolved = await modelResolver(requestedID) {
+            target = resolved
+        } else if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID),
+                  let aliasTarget = await modelResolver(aliasID) {
+            target = aliasTarget
+        } else {
             throw ModelSwapError.modelNotFound(id: requestedID)
+        }
+
+        // An alias may point at the model that is already loaded; skip
+        // the swap in that case (the id-equality early return above only
+        // catches a request naming the directory id directly).
+        if await engine.loadedModel?.id == target.id {
+            return
         }
 
         // Kick off the swap as a Task we can store for concurrent
@@ -1323,6 +1353,18 @@ public actor HummingbirdServer {
                 reason: error.localizedDescription
             )
         }
+    }
+
+    /// Per-model chat-template kwargs (v0.5.1) configured for `modelID`,
+    /// or nil when none are set. Populates `GenerateRequest.templateKwargs`
+    /// on every generation path so the Jinja template receives them as
+    /// `additionalContext`. Loaded by the request's model id — a request
+    /// that names a model by its *alias* won't pick up kwargs stored under
+    /// the directory id (a minor known gap).
+    private func templateKwargs(for modelID: String) async -> [String: JSONValue]? {
+        let params = await ModelParametersStore().load(for: modelID)
+        guard let kwargs = params.templateKwargs, !kwargs.isEmpty else { return nil }
+        return kwargs
     }
 
     private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
@@ -1540,7 +1582,8 @@ public actor HummingbirdServer {
             model: req.model,
             messages: messages,
             systemPrompt: systemPrompt,
-            parameters: params
+            parameters: params,
+            templateKwargs: await templateKwargs(for: req.model)
         )
 
         // Cold-swap (v0.3.3) — same resolve/load + error mapping as the

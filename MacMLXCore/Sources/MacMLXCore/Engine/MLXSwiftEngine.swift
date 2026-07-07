@@ -382,7 +382,10 @@ public actor MLXSwiftEngine: InferenceEngine {
             return Chat.Message(role: role, content: msg.content)
         }
         do {
-            let lmInput = try await container.prepare(input: UserInput(chat: chatMessages))
+            let lmInput = try await container.prepare(input: UserInput(
+                chat: chatMessages,
+                additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
+            ))
             let ids = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             let text = await container.decode(tokens: ids)
             return MessageSegmenter.promptOpensThink(text)
@@ -469,7 +472,14 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
         }
 
-        let userInput = UserInput(chat: chatMessages)
+        // Forward per-model chat-template kwargs (v0.5.1) as
+        // `additionalContext` — the tokenizer hands them to the Jinja
+        // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
+        // to the plain Sendable shape the upstream API expects.
+        let userInput = UserInput(
+            chat: chatMessages,
+            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
+        )
 
         status = .generating
 
