@@ -19,6 +19,12 @@ public struct PooledEngineEntry: Sendable, Equatable {
     /// idle longer than `ttlSeconds` — even within the byte budget.
     /// `nil` means "never idle-unload"; pinned entries are exempt.
     public var ttlSeconds: Int?
+    /// In-flight marker (v0.5.1 A4). `true` while a generation is actively
+    /// streaming against this entry's engine. `ModelPool.sweepIdle(now:)`
+    /// never unloads an entry with `isGenerating == true`, so a concurrent
+    /// `load(_:)`'s idle sweep can't evict a model mid-stream. Toggled by
+    /// `ModelPool.setGenerating(_:_:)` around the generation.
+    public var isGenerating: Bool = false
 
     public init(
         modelID: String,

@@ -132,7 +132,11 @@ public final class EngineCoordinator {
         status = .loading(model: model.id)
         await logs.log("Loading model: \(model.id)", level: .info, category: .engine)
         do {
-            let engine = try await pool.load(model)
+            // Feed the model's configured idle TTL (v0.5.1) into the pool so
+            // `sweepIdle` can reclaim it once idle past `ttlSeconds`. Fresh
+            // store mirrors how HummingbirdServer loads per-model params.
+            let params = await ModelParametersStore().load(for: model.id)
+            let engine = try await pool.load(model, ttlSeconds: params.ttlSeconds)
 
             // Layer the LoRA adapter on top of the freshly-loaded
             // base model (v0.5+). Engines that don't support adapters
@@ -212,6 +216,13 @@ public final class EngineCoordinator {
                     return
                 }
                 self.status = .generating
+                // Mark the entry in-flight so a concurrent `load(_:)`'s idle
+                // sweep can't unload this model mid-stream (A4). Clear the
+                // mark on EVERY exit path — success, throw, or cancellation —
+                // via a defer that spawns the async clear (mirrors the
+                // release-lock idiom in HummingbirdServer).
+                await pool.setGenerating(id, true)
+                defer { Task { await pool.setGenerating(id, false) } }
                 do {
                     for try await chunk in engine.generate(request) {
                         if let usage = chunk.usage {

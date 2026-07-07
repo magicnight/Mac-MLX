@@ -80,10 +80,21 @@ public actor MCPBridge {
 
     private let library: ModelSource
     private let engineFactory: EngineFactory
+    /// Per-model parameter overrides — source of the chat-template kwargs
+    /// (v0.5.1) forwarded on each `chat`. Defaults to the real
+    /// `~/.mac-mlx/model-params/` store; `MCPCommand` passes the
+    /// bootstrapped `CLIContext.paramStore` so the CLI and MCP surfaces
+    /// share one store.
+    private let paramStore: ModelParametersStore
     private var engine: (any InferenceEngine)?
 
-    public init(library: ModelSource, engineFactory: @escaping EngineFactory) {
+    public init(
+        library: ModelSource,
+        paramStore: ModelParametersStore = ModelParametersStore(),
+        engineFactory: @escaping EngineFactory
+    ) {
         self.library = library
+        self.paramStore = paramStore
         self.engineFactory = engineFactory
     }
 
@@ -144,11 +155,17 @@ public actor MCPBridge {
         if let maxTokens { params.maxTokens = maxTokens }
         params.stream = false
 
+        // Per-model chat-template kwargs (v0.5.1) — e.g. Qwen3's
+        // `enable_thinking` — mirror the RunCommand path so MCP callers get
+        // the same template behaviour as `macmlx run`.
+        let templateKwargs = await paramStore.load(for: model).templateKwargs
+
         let request = GenerateRequest(
             model: model,
             messages: chatMessages,
             systemPrompt: systemPrompt,
-            parameters: params
+            parameters: params,
+            templateKwargs: templateKwargs
         )
 
         var buffer = ""

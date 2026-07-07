@@ -70,6 +70,19 @@ public actor ModelPool {
         entries[modelID]?.isPinned ?? false
     }
 
+    /// Mark `id` as having an in-flight generation (or clear the mark).
+    /// While `isGenerating` is true the entry is exempt from `sweepIdle`,
+    /// so a concurrent `load(_:)`'s idle sweep can't unload a model that
+    /// is actively streaming (v0.5.1 A4). Setting `active == true` also
+    /// refreshes `lastAccess`, so a just-started generation counts as
+    /// fresh for LRU/TTL purposes. No-op when `id` isn't resident.
+    public func setGenerating(_ id: String, _ active: Bool) {
+        guard var entry = entries[id] else { return }
+        entry.isGenerating = active
+        if active { entry.lastAccess = Date() }
+        entries[id] = entry
+    }
+
     public func unload(_ modelID: String) async {
         if let e = engines.removeValue(forKey: modelID) {
             try? await e.unload()
@@ -167,21 +180,21 @@ public actor ModelPool {
         }
     }
 
-    /// Unload every non-pinned resident model whose `ttlSeconds` is set
-    /// and whose idle time (`now - lastAccess`) exceeds it — even while
-    /// inside the byte budget (v0.5.1). Pinned and nil-TTL entries are
-    /// never swept. Called at the top of `load(_:)`; `now` is injectable
-    /// for tests.
+    /// Unload every non-pinned, non-generating resident model whose
+    /// `ttlSeconds` is set and whose idle time (`now - lastAccess`)
+    /// exceeds it — even while inside the byte budget (v0.5.1). Pinned,
+    /// in-flight (`isGenerating`), and nil-TTL entries are never swept.
+    /// Called at the top of `load(_:)`; `now` is injectable for tests.
     ///
-    /// TODO(A4 GUI wiring): `lastAccess` is refreshed on `engine(for:)` /
-    /// `load()` but NOT during a long-running generation. Before a real
-    /// `ttlSeconds` is fed from the GUI/EngineCoordinator, bump `lastAccess`
-    /// at generation start (or exclude models with an in-flight generation)
-    /// so a concurrent load's sweep can't unload a model that is actively
-    /// streaming. Safe today only because `ttlSeconds` defaults to nil.
+    /// Mid-use hazard (A4) — now handled: `lastAccess` is refreshed on
+    /// `engine(for:)` / `load()` but NOT during a long-running generation,
+    /// so a concurrent `load(_:)`'s sweep could otherwise unload a model
+    /// that is actively streaming. `EngineCoordinator.generate` marks the
+    /// entry via `setGenerating(_:_:)` around the stream, and the filter
+    /// below skips any entry with `isGenerating == true`.
     public func sweepIdle(now: Date = Date()) {
         let expired = entries.values.filter { entry in
-            guard !entry.isPinned, let ttl = entry.ttlSeconds else { return false }
+            guard !entry.isPinned, !entry.isGenerating, let ttl = entry.ttlSeconds else { return false }
             return now.timeIntervalSince(entry.lastAccess) > Double(ttl)
         }
         for victim in expired {
