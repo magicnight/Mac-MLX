@@ -364,6 +364,33 @@ public actor MLXSwiftEngine: InferenceEngine {
         true
     }
 
+    /// Whether the rendered prompt for `request` ends inside an open
+    /// `<think>` block. Applies the chat template exactly as `generate`
+    /// does (same `Chat.Message` mapping + `container.prepare`), decodes
+    /// the resulting tokens, and inspects the tail via
+    /// `MessageSegmenter.promptOpensThink`. Returns false if no model is
+    /// loaded or the template can't be applied.
+    public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
+        guard let container = loadedSupport.container else { return false }
+        let chatMessages: [Chat.Message] = request.allMessages.map { msg in
+            let role: Chat.Message.Role
+            switch msg.role {
+            case .user: role = .user
+            case .assistant: role = .assistant
+            case .system: role = .system
+            }
+            return Chat.Message(role: role, content: msg.content)
+        }
+        do {
+            let lmInput = try await container.prepare(input: UserInput(chat: chatMessages))
+            let ids = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            let text = await container.decode(tokens: ids)
+            return MessageSegmenter.promptOpensThink(text)
+        } catch {
+            return false
+        }
+    }
+
     // MARK: Prompt cache management
 
     /// Drop both tiers of the prompt cache. Wired up to the Settings
