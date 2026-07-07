@@ -267,3 +267,171 @@ final class DeepseekV32Indexer: Module {
         return part[.ellipsis, (part.dim(-1) - indexTopK)...]
     }
 }
+
+// MARK: - Attention (absorbed MLA + DSA sparse mask)
+
+/// DeepSeek V3.2 Multi-head Latent Attention with the indexer's sparse
+/// mask folded in.
+///
+/// "Absorbed" form: instead of materializing full K/V via `kv_b_proj`
+/// (as stock DeepSeek-V3 does), it keeps K/V in the `kv_lora_rank`
+/// latent space and uses the per-head `embed_q` / `unembed_out`
+/// projections, computing the RoPE contribution (`peScores`) separately
+/// and feeding it to SDPA as an additive mask — so the full attention
+/// score is `scale·(qNope·kᵀ) + peScores` in one softmax.
+///
+/// Two forward branches:
+/// - **prefill** (`L > 1`): `k = embed_q(kvLatent, transpose:false)`,
+///   `v = unembed_out(kvLatent)`; when the context exceeds `index_topk`
+///   the indexer scatters a sparse boolean mask.
+/// - **decode** (`L == 1`): `qNope = embed_q(qNope)`, `k = v = kvLatent`;
+///   the indexer gathers the top-k latent rows and the SDPA output is
+///   projected back through `unembed_out`.
+///
+/// Translated from the Python `DeepseekV32Attention`. Parity is proven
+/// per-branch: `DeepseekV32AttentionParityTests` covers prefill (S2.1);
+/// sparse-prefill (S2.2) and decode+cache (S2.3) follow.
+final class DeepseekV32Attention: Module {
+    let numHeads: Int
+    let qkNopeHeadDim: Int
+    let qkRopeHeadDim: Int
+    let qHeadDim: Int
+    let kvLoraRank: Int
+    let vHeadDim: Int
+    let scale: Float
+
+    @ModuleInfo(key: "q_a_proj") var qAProj: Linear
+    @ModuleInfo(key: "q_a_layernorm") var qALayerNorm: RMSNorm
+    @ModuleInfo(key: "q_b_proj") var qBProj: Linear
+    @ModuleInfo(key: "kv_a_proj_with_mqa") var kvAProjWithMqa: Linear
+    @ModuleInfo(key: "kv_a_layernorm") var kvALayerNorm: RMSNorm
+    @ModuleInfo(key: "embed_q") var embedQ: DeepseekMultiLinear
+    @ModuleInfo(key: "unembed_out") var unembedOut: DeepseekMultiLinear
+    @ModuleInfo(key: "o_proj") var oProj: Linear
+    @ModuleInfo(key: "indexer") var indexer: DeepseekV32Indexer
+    let rope: RoPELayer
+
+    init(_ config: DeepseekV32Configuration) {
+        self.numHeads = config.numAttentionHeads
+        self.qkNopeHeadDim = config.qkNopeHeadDim
+        self.qkRopeHeadDim = config.qkRopeHeadDim
+        self.qHeadDim = config.qkNopeHeadDim + config.qkRopeHeadDim
+        self.kvLoraRank = config.kvLoraRank
+        self.vHeadDim = config.vHeadDim
+
+        var scale = pow(Float(config.qkNopeHeadDim + config.qkRopeHeadDim), -0.5)
+        // Optional YaRN mscale — matches the Python `mscale_all_dim` branch.
+        if let ropeScaling = config.ropeScaling,
+            let mscaleAllDim = ropeScaling["mscale_all_dim"]?.asFloat(), mscaleAllDim != 0,
+            let factor = ropeScaling["factor"]?.asFloat(), factor > 1
+        {
+            let s = 0.1 * mscaleAllDim * log(factor) + 1.0
+            scale = scale * s * s
+        }
+        self.scale = scale
+
+        self._qAProj.wrappedValue = Linear(
+            config.hiddenSize, config.qLoraRank, bias: config.attentionBias)
+        self._qALayerNorm.wrappedValue = RMSNorm(dimensions: config.qLoraRank, eps: 1e-6)
+        self._qBProj.wrappedValue = Linear(
+            config.qLoraRank, config.numAttentionHeads * qHeadDim, bias: false)
+        self._kvAProjWithMqa.wrappedValue = Linear(
+            config.hiddenSize, config.kvLoraRank + config.qkRopeHeadDim,
+            bias: config.attentionBias)
+        self._kvALayerNorm.wrappedValue = RMSNorm(dimensions: config.kvLoraRank, eps: 1e-6)
+        self._embedQ.wrappedValue = DeepseekMultiLinear(
+            inputDims: config.qkNopeHeadDim, outputDims: config.kvLoraRank,
+            numHeads: config.numAttentionHeads)
+        self._unembedOut.wrappedValue = DeepseekMultiLinear(
+            inputDims: config.kvLoraRank, outputDims: config.vHeadDim,
+            numHeads: config.numAttentionHeads)
+        self._oProj.wrappedValue = Linear(
+            config.numAttentionHeads * config.vHeadDim, config.hiddenSize,
+            bias: config.attentionBias)
+        self._indexer.wrappedValue = DeepseekV32Indexer(config)
+        // Main-attention RoPE stays traditional (interleaved) — upstream
+        // keeps traditional=true here. This is DISTINCT from the indexer's
+        // rope, which follows `indexer_rope_interleave` (default false).
+        self.rope = initializeRope(
+            dims: config.qkRopeHeadDim, base: config.ropeTheta, traditional: true,
+            scalingConfig: config.ropeScaling,
+            maxPositionEmbeddings: config.maxPositionEmbeddings)
+    }
+
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXArray?, cache: CacheList?
+    ) -> MLXArray {
+        let b = x.dim(0)
+        let l = x.dim(1)
+
+        let qr = qALayerNorm(qAProj(x))
+        var q = qBProj(qr)
+        q = q.reshaped(b, l, numHeads, qHeadDim).swappedAxes(1, 2)  // [b,H,l,qHeadDim]
+        let splitQ = split(q, indices: [qkNopeHeadDim], axis: -1)
+        var qNope = splitQ[0]  // [b,H,l,qkNope]
+        var qPe = splitQ[1]  // [b,H,l,qkRope]
+
+        let compressed = kvAProjWithMqa(x)
+        let splitKv = split(compressed, indices: [kvLoraRank], axis: -1)
+        var kvLatent = kvALayerNorm(splitKv[0])  // [b,l,kvLora]
+        var kPe = splitKv[1].reshaped(b, l, 1, qkRopeHeadDim).swappedAxes(1, 2)  // [b,1,l,qkRope]
+
+        let offset = cache?[0].ropeOffset
+        qPe = applyRotaryPosition(rope, to: qPe, offset: offset)
+        kPe = applyRotaryPosition(rope, to: kPe, offset: offset)
+
+        kvLatent = kvLatent.expandedDimensions(axis: 1)  // [b,1,l,kvLora]
+        if let cache {
+            (kvLatent, kPe) = cache[0].update(keys: kvLatent, values: kPe)
+        }
+
+        // Indexer top-k selection. Returns nil when s <= index_topk, in
+        // which case attention stays dense. (Decode threads cache[1] in
+        // S2.3; prefill needs no indexer cache.)
+        let topk = indexer(x, qr, mask)
+        var effMask = mask
+        if let topk {
+            if l == 1 {
+                // Decode: gather the top-k latent rows along the key axis.
+                let idx = topk[0..., 0..., 0, 0...].expandedDimensions(axis: -1)  // [b,1,topk,1]
+                let kvIdx = broadcast(idx, to: Array(idx.shape.dropLast()) + [kvLatent.dim(-1)])
+                kvLatent = takeAlong(kvLatent, kvIdx, axis: 2)
+                let peIdx = broadcast(idx, to: Array(idx.shape.dropLast()) + [kPe.dim(-1)])
+                kPe = takeAlong(kPe, peIdx, axis: 2)
+                if let m = effMask { effMask = takeAlong(m, topk, axis: -1) }
+            } else {
+                // Prefill: scatter a sparse boolean mask over the key axis.
+                var shape = topk.shape
+                shape[shape.count - 1] = kvLatent.dim(2)
+                var sparse = zeros(shape, type: Bool.self)
+                sparse = putAlong(sparse, topk, values: MLXArray(true), axis: -1)
+                if let m = effMask { sparse = sparse .&& m }
+                effMask = sparse
+            }
+        }
+
+        var peScores = matmul(qPe * scale, kPe.swappedAxes(-1, -2))  // [b,H,l,s]
+        if let m = effMask {
+            peScores = MLX.where(m, peScores, MLXArray(-Float.greatestFiniteMagnitude))
+        }
+
+        let k: MLXArray
+        let v: MLXArray
+        if l == 1 {
+            qNope = embedQ(qNope)  // [b,H,l,kvLora]
+            k = kvLatent
+            v = kvLatent
+        } else {
+            k = embedQ(kvLatent, transpose: false)  // [b,H,s,qkNope]
+            v = unembedOut(kvLatent)  // [b,H,s,vHead]
+        }
+
+        var output = scaledDotProductAttention(
+            queries: qNope, keys: k, values: v, scale: scale, mask: peScores)
+        if l == 1 {
+            output = unembedOut(output)  // [b,H,l,vHead]
+        }
+        output = output.swappedAxes(1, 2).reshaped(b, l, -1)  // [b,l,H*vHead]
+        return oProj(output)
+    }
+}
