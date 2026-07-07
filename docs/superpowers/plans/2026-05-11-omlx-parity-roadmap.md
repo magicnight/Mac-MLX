@@ -130,9 +130,9 @@ came from `bge-m3` + rerank users. `mlx-swift-lm` already ships an
 
 ## v0.5.3 — Tool calling parsers + MCP client wire-up
 
-**Theme:** close the tool-calling loop. `feat/v0.5-mcp-client-pool`
-(currently stashed) provides the subprocess pool. This minor connects
-it to chat completions.
+**Theme:** close the tool-calling loop. `MCPClientPool` (merged to
+main via PR #45, 2026-07-06) provides the subprocess pool. This minor
+connects it to chat completions.
 
 ### Track C1 — Per-family tool-call parsers
 - New `ToolCallParser` protocol with concrete parsers for:
@@ -149,10 +149,18 @@ it to chat completions.
 - Emits `[ToolCall(name: String, arguments: [String: Value])]`.
 - Tests: fixture output from each family → structured tool calls.
 
-### Track C2 — MCP subprocess pool (unstash + finish)
-- Resume the `feat/v0.5-mcp-client-pool` work (already ~200 LOC:
-  spawn via `Process`, hand pipes to `StdioTransport`, connect).
-- Add integration test using `npx -y @modelcontextprotocol/server-everything`.
+### ~~Track C2 — MCP subprocess pool (unstash + finish)~~ ✅ DONE
+- ~~Resume the `feat/v0.5-mcp-client-pool` work~~ **Shipped in PR #45
+  (2026-07-06):** `MCPClientPool` actor — spawn via `Process`, pipes to
+  `StdioTransport`, connectAll / listAllTools / callTool /
+  disconnectAll, partial-failure tolerance. Includes two dead-server
+  robustness fixes (SIGPIPE ignore; connect timeout + `disconnect()`
+  against swift-sdk 0.12.1's pre-init-EOF busy-loop, upstream PR #221
+  still open).
+- Still open (rolls into C3 or a hardening PR): integration test using
+  `npx -y @modelcontextprotocol/server-everything`; zombie reaping /
+  `waitUntilExit` on teardown; `forwardStderr` off the cooperative
+  pool; `connectAll` signature honesty (review findings 2026-07-07).
 
 ### Track C3 — Chat completion tool_calls emit + MCP round-trip
 - Chat completions extract `tools` from request (OpenAI schema).
