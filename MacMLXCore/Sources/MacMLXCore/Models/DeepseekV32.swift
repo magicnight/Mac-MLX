@@ -235,7 +235,7 @@ final class DeepseekV32Indexer: Module {
     ///     main attention's `q_a_layernorm(q_a_proj(x))`)
     ///   - mask: optional additive/boolean attention mask `[b, 1, s, s]`
     func callAsFunction(
-        _ x: MLXArray, _ qr: MLXArray, _ mask: MLXArray?
+        _ x: MLXArray, _ qr: MLXArray, _ mask: MLXArray?, cache: KVCache? = nil
     ) -> MLXArray? {
         let b = x.dim(0)
         let s = x.dim(1)
@@ -246,11 +246,20 @@ final class DeepseekV32Indexer: Module {
         k = kNorm(k)
         k = k.reshaped(b, 1, s, headDim)  // [b, 1, s, headDim]
 
-        q = applyRotaryPosition(rope, to: q, offset: nil)
-        k = applyRotaryPosition(rope, to: k, offset: nil)
+        let offset = cache?.ropeOffset
+        q = applyRotaryPosition(rope, to: q, offset: offset)
+        k = applyRotaryPosition(rope, to: k, offset: offset)
 
-        // Short-circuit: nothing to prune when every key fits in top-k.
-        if s <= indexTopK { return nil }
+        // Accumulate keys across decode steps. The indexer only needs
+        // keys, so values are an empty (head_dim 0) placeholder — mirrors
+        // the Python `cache.update_and_fetch(k, zeros([b,1,s,0]))`.
+        if let cache {
+            (k, _) = cache.update(keys: k, values: zeros([b, 1, s, 0]))
+        }
+
+        // Short-circuit: nothing to prune when every key (including any
+        // cached from prior decode steps) already fits in top-k.
+        if k.dim(2) <= indexTopK { return nil }
 
         var scores = matmul(q, k.swappedAxes(-1, -2))  // [b, nHeads, s, s]
         scores = maximum(scores, 0)
@@ -385,10 +394,10 @@ final class DeepseekV32Attention: Module {
             (kvLatent, kPe) = cache[0].update(keys: kvLatent, values: kPe)
         }
 
-        // Indexer top-k selection. Returns nil when s <= index_topk, in
-        // which case attention stays dense. (Decode threads cache[1] in
-        // S2.3; prefill needs no indexer cache.)
-        let topk = indexer(x, qr, mask)
+        // Indexer top-k selection (threads cache[1] so the indexer's keys
+        // accumulate across decode steps). Returns nil when the total key
+        // count <= index_topk → dense attention.
+        let topk = indexer(x, qr, mask, cache: cache?[1])
         var effMask = mask
         if let topk {
             if l == 1 {

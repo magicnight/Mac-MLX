@@ -124,8 +124,21 @@ per-component, not the full forward.
   xcodebuild) + **Indexer numerical parity** vs Python (逐位一致).
 - **S2 groundwork:** ✅ **DONE** — `DeepseekMultiLinear` gains the
   `transpose` param (absorbed-MLA needs both directions).
-- **S2:** ← **NEXT** — `DeepseekV32Attention` (both branches) + parity.
-  The hard one. See kickoff recipe below.
+- **S2.1:** ✅ **DONE** (2026-07-07) — `DeepseekV32Attention` absorbed-MLA
+  **dense prefill** (`s <= index_topk`, indexer short-circuits). Parity
+  vs Python 1e-4 under xcodebuild (`attn_prefill_fixture`).
+- **S2.2:** ✅ **DONE** (2026-07-07) — **sparse prefill** (`s > index_topk`,
+  indexer top-k → `put_along_axis` scatter mask AND causal). Parity 1e-4
+  (`attn_sparse_fixture`).
+- **S2.3:** ← **IN PROGRESS** — **decode + cache**. Done: indexer cache
+  support (offset from cache, key accumulation via `cache.update`,
+  short-circuit on *total* length) + attention threads `cache[1]` to the
+  indexer. **⚠️ uncommitted in the working tree as of this checkpoint.**
+  **Remaining:** primed-cache decode fixture (Python prefill-then-decode
+  through `CacheList`) + a Swift two-stage `CacheList(KVCache, KVCache)`
+  test exercising the `L==1` `take_along_axis` gather branch.
+- **S2.4:** assemble the decoder block's attention + `makeCache()` →
+  `[CacheList(KVCache, KVCache)]` per layer + `kvHeads`.
 - **S3:** MoE stack (MLP, gate, MoE) + parity.
 - **S4:** assemble model + sanitize + register + real-model smoke.
 - **S5+:** DeepSeek V4 as the increment (hash routing, compressed KV,
