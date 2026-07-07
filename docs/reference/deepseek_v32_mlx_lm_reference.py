@@ -1,4 +1,18 @@
 # Copyright © 2025 Apple Inc.
+#
+# ── macMLX provenance note ──────────────────────────────────────────
+# This is a snapshot of mlx_lm/models/deepseek_v32.py from mlx-lm MAIN
+# (July 2026, post-PR-#1431) — NOT the PyPI 0.31.3 release. The one
+# behavioral difference that matters: stock 0.31.3 hardcodes
+# `traditional=True` in the Indexer rope; PR #1431 (merged 2026-06-24,
+# unreleased) reverted that regression to
+# `traditional=args.indexer_rope_interleave` (default False), which is
+# what this snapshot — and our Swift port — implement. Parity fixtures
+# are captured from an offline uv venv running 0.31.3 + that one-line
+# patch (see capture_indexer.py beside this file), so fixture, snapshot
+# and Swift all agree. If you diff this file against an installed
+# 0.31.3, expect that line to differ.
+# ────────────────────────────────────────────────────────────────────
 
 import math
 from dataclasses import dataclass

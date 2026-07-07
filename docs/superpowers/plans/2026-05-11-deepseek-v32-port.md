@@ -60,9 +60,13 @@ parity test before the thing that uses it):
   (`59b2f6f`) — `DeepseekV32IndexerParityTests` selects the *same*
   sorted top-k as Python mlx-lm 0.31.3 (fixture
   `Fixtures/indexer_parity_fixture.safetensors`, captured offline via
-  `scratchpad/capture_indexer.py`). Rope uses `traditional: true` to
-  match the pinned reference. Both structural tests + the short-circuit
-  path (`s <= index_topk → nil`) covered.
+  `scratchpad/capture_indexer.py`). Both structural tests + the
+  short-circuit path (`s <= index_topk → nil`) covered. **Rope
+  corrected 2026-07-07:** now `traditional: config.indexerRopeInterleave`
+  (default false) per upstream mlx-lm PR #1431 — stock 0.31.3's
+  hardcoded `True` was a regression that silently degrades long-sequence
+  quality. Fixture regenerated against the patched venv; parity re-green
+  under xcodebuild.
 - [ ] **4. `DeepseekV32Attention`** — MLA (q_a/q_b, kv_a_proj_with_mqa,
   kv_a_layernorm, embed_q / unembed_out `DeepseekMultiLinear`, o_proj)
   + indexer sparse-mask integration. The two branches (L==1 decode vs
@@ -184,9 +188,11 @@ indexer sub-module keys under `indexer.*`.
 **Gotchas already learned:**
 - `DeepseekMultiLinear.callAsFunction(_:transpose:)` is ready — decode
   uses `transpose:true`, prefill `transpose:false`.
-- Indexer rope is `traditional: true` (pinned mlx-lm 0.31.3). Confirm the
-  main-attention rope's `traditional` against the reference before
-  capturing — mismatch here silently breaks parity.
+- Indexer rope follows `indexer_rope_interleave` (default **false**) —
+  corrected per upstream PR #1431; do not reintroduce `traditional: true`.
+  The **main attention's** rope is different: upstream keeps
+  `traditional=True` there (reference line ~173) — confirm against the
+  reference before capturing S2 fixtures; mismatch silently breaks parity.
 - Sort-before-compare only applies to the indexer's index sets; the
   attention output is a dense tensor → compare with `allClose`, not sort.
 

@@ -209,15 +209,18 @@ final class DeepseekV32Indexer: Module {
         self._kNorm.wrappedValue = LayerNorm(dimensions: config.indexHeadDim)
         self._weightsProj.wrappedValue = Linear(
             config.hiddenSize, config.indexNHeads, bias: false)
-        // mlx-lm 0.31.3 (paired with our mlx-swift-lm 3.31.x) hardcodes
-        // traditional=true for the indexer rope. A later upstream commit
-        // makes it `indexer_rope_interleave` (default false) — a behavior
-        // flip to resolve against real weights in the end-to-end smoke
-        // (S4). Match 0.31.3 so the numerical-parity fixture is valid.
+        // RoPE interleave follows `indexer_rope_interleave` (default false
+        // — non-interleaved). Stock mlx-lm 0.31.3 hardcoded traditional=true
+        // here (a GLM5-era regression); upstream PR #1431 (2026-06-24)
+        // restored the config-driven value because the hardcoded mode
+        // silently degrades long-sequence quality. Our parity fixture is
+        // captured against 0.31.3 + that one-line patch — see
+        // docs/reference/capture_indexer.py. The main attention's rope
+        // (S2) is unaffected: upstream keeps traditional=true there.
         self.rope = initializeRope(
             dims: config.qkRopeHeadDim,
             base: config.ropeTheta,
-            traditional: true,
+            traditional: config.indexerRopeInterleave,
             scalingConfig: config.ropeScaling,
             maxPositionEmbeddings: config.maxPositionEmbeddings)
     }

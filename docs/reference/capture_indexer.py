@@ -4,6 +4,14 @@ Runs the mlx-lm reference Indexer with fixed weights + input, saves
 {weights, inputs, expected top-k indices} to a safetensors fixture that
 the Swift DeepseekV32IndexerParityTests loads. No Python enters macMLX —
 this is an offline, throwaway capture.
+
+Environment: uv venv with mlx-lm 0.31.3 + transformers<5.13, PLUS the
+one-line patch from mlx-lm PR #1431 (merged upstream 2026-06-24,
+unreleased as of capture): the Indexer rope is
+`traditional=args.indexer_rope_interleave` (default False), NOT the
+hardcoded `traditional=True` that stock 0.31.3 ships — upstream deemed
+the hardcoded mode a regression that silently degrades long-sequence
+quality. The Swift port follows the corrected behavior.
 """
 import mlx.core as mx
 from mlx_lm.models.deepseek_v32 import Indexer, ModelArgs
@@ -33,6 +41,8 @@ args = ModelArgs(
     qk_rope_head_dim=QK_ROPE_HEAD_DIM,
     max_position_embeddings=MAXPOS,
     rope_theta=ROPE_THETA,
+    # Explicit: non-interleaved rope (the corrected default per PR #1431).
+    indexer_rope_interleave=False,
 )
 
 indexer = Indexer(args)
