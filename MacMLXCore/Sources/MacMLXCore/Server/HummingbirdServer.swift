@@ -1217,6 +1217,12 @@ public actor HummingbirdServer {
         // last chunk is written.
         await acquireGenerationLock()
 
+        // Seed the streaming reasoning splitter: does the rendered prompt
+        // open a <think> block the model will continue (qwen3's template
+        // does)? This decides whether the first streamed token is
+        // reasoning even though the opening tag never appears in the
+        // stream (issue #30).
+        let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
         let stream = await engine.generate(genRequest)
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
@@ -1226,10 +1232,25 @@ public actor HummingbirdServer {
         let responseBody = ResponseBody { writer in
             defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
+            var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
             do {
                 for try await chunk in stream {
                     chunkCount += 1
-                    let delta: [String: Any] = ["content": chunk.text]
+                    let (reasoning, answer) = splitter.push(chunk.text)
+                    var delta: [String: Any] = [:]
+                    if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
+                    if !answer.isEmpty { delta["content"] = answer }
+                    if chunk.finishReason != nil {
+                        // Flush any buffered tail into this terminal chunk.
+                        let (rTail, aTail) = splitter.finish()
+                        let r = (delta["reasoning_content"] as? String ?? "") + rTail
+                        let a = (delta["content"] as? String ?? "") + aTail
+                        if !r.isEmpty { delta["reasoning_content"] = r }
+                        if !a.isEmpty { delta["content"] = a }
+                    } else if delta.isEmpty {
+                        // Chunk fully buffered as a partial tag — nothing to emit yet.
+                        continue
+                    }
                     var choice: [String: Any] = ["index": 0, "delta": delta]
                     if let reason = chunk.finishReason {
                         choice["finish_reason"] = reason.rawValue

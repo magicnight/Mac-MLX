@@ -114,4 +114,93 @@ final class MessageSegmentTests: XCTestCase {
         XCTAssertEqual(reasoning, "ab")
         XCTAssertEqual(answer, "XY")
     }
+
+    // MARK: - ReasoningStreamSplitter (streaming, incremental)
+
+    func testStreamSplitterImplicitReasoningWholeChunk() {
+        var s = ReasoningStreamSplitter(startInReasoning: true)
+        let (r, a) = s.push("reasoning here</think>the answer")
+        XCTAssertEqual(r, "reasoning here")
+        XCTAssertEqual(a, "the answer")
+    }
+
+    func testStreamSplitterImplicitReasoningAcrossChunks() {
+        // qwen3 case: prompt opened <think>, model streams reasoning then
+        // </think> then the answer, chunked arbitrarily.
+        var s = ReasoningStreamSplitter(startInReasoning: true)
+        var reasoning = "", answer = ""
+        for chunk in ["rea", "soning", "</think>", "ans", "wer"] {
+            let (r, a) = s.push(chunk)
+            reasoning += r
+            answer += a
+        }
+        let (r, a) = s.finish()
+        reasoning += r
+        answer += a
+        XCTAssertEqual(reasoning, "reasoning")
+        XCTAssertEqual(answer, "answer")
+    }
+
+    func testStreamSplitterTagSplitAcrossChunks() {
+        // </think> arrives split as "</thi" + "nk>" — must not leak.
+        var s = ReasoningStreamSplitter(startInReasoning: true)
+        var reasoning = "", answer = ""
+        for chunk in ["think</thi", "nk>done"] {
+            let (r, a) = s.push(chunk)
+            reasoning += r
+            answer += a
+        }
+        XCTAssertEqual(reasoning, "think")
+        XCTAssertEqual(answer, "done")
+    }
+
+    func testStreamSplitterNonReasoningModel() {
+        // startInReasoning=false, no tags → everything is answer.
+        var s = ReasoningStreamSplitter(startInReasoning: false)
+        var answer = ""
+        for chunk in ["plain ", "answer ", "no tags"] {
+            let (r, a) = s.push(chunk)
+            XCTAssertEqual(r, "")
+            answer += a
+        }
+        XCTAssertEqual(answer, "plain answer no tags")
+    }
+
+    func testStreamSplitterExplicitThinkTag() {
+        var s = ReasoningStreamSplitter(startInReasoning: false)
+        let (r, a) = s.push("<think>reason</think>answer")
+        XCTAssertEqual(r, "reason")
+        XCTAssertEqual(a, "answer")
+    }
+
+    func testStreamSplitterFlushesFalseTagPrefixOnFinish() {
+        // A trailing "<" that never becomes a tag must flush at finish.
+        var s = ReasoningStreamSplitter(startInReasoning: false)
+        let (r1, a1) = s.push("answer<")
+        XCTAssertEqual(r1, "")
+        XCTAssertEqual(a1, "answer")  // "<" held back as a possible tag
+        let (r2, a2) = s.finish()
+        XCTAssertEqual(r2, "")
+        XCTAssertEqual(a2, "<")
+    }
+
+    // MARK: - promptOpensThink (streaming seed signal)
+
+    func testPromptOpensThinkTrailingOpen() {
+        // qwen3: prompt ends with the injected opener → open.
+        XCTAssertTrue(MessageSegmenter.promptOpensThink("system\nuser: hi\nassistant\n<think>\n"))
+    }
+
+    func testPromptOpensThinkClosedBlock() {
+        // A balanced block from a prior turn → not open.
+        XCTAssertFalse(MessageSegmenter.promptOpensThink("<think>x</think>ok, ready"))
+    }
+
+    func testPromptOpensThinkNoTags() {
+        XCTAssertFalse(MessageSegmenter.promptOpensThink("plain prompt, no tags"))
+    }
+
+    func testPromptOpensThinkReopenedAfterClose() {
+        XCTAssertTrue(MessageSegmenter.promptOpensThink("<think>a</think>b<think>c"))
+    }
 }

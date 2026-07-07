@@ -46,6 +46,14 @@ public protocol InferenceEngine: Actor {
 
     /// Synchronously confirm the engine is responsive.
     func healthCheck() async -> Bool
+
+    /// Whether applying the chat template to this request opens a
+    /// `<think>` reasoning block the model will continue — qwen3's
+    /// template injects `<think>` into the prompt, so the first generated
+    /// token is reasoning with no opening tag in the output stream.
+    /// Streaming callers seed `ReasoningStreamSplitter` with this to
+    /// classify that first token correctly. Default false.
+    func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool
 }
 
 extension InferenceEngine {
@@ -54,5 +62,12 @@ extension InferenceEngine {
     /// silently leaves the model unchanged.
     public func applyAdapter(_ adapter: LocalAdapter) async throws {
         // intentional no-op
+    }
+
+    /// Default for engines that can't inspect the rendered prompt (test
+    /// stubs, future CPU/Python engines): assume no open think block. The
+    /// MLX engine overrides this by applying the chat template.
+    public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
+        false
     }
 }
