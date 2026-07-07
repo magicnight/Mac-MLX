@@ -98,4 +98,60 @@ final class DeepseekV32AttentionParityTests: XCTestCase {
     func testSparsePrefillMatchesPythonReference() throws {
         try assertAttentionParity(fixture: "attn_sparse_fixture", "attention sparse prefill")
     }
+
+    /// S2.3: decode step with a primed `CacheList`. Prefill 6 tokens to fill
+    /// both sub-caches (main MLA KV + indexer), then decode 1 token — total
+    /// 7 > index_topk 4, so the indexer returns a real top-k and the `L == 1`
+    /// `take_along_axis` gather branch runs (the path S2.1/S2.2 never hit).
+    /// Reproduces the exact two-stage cache state, then compares the decode
+    /// output. Fixture `attn_decode_fixture.safetensors` — see
+    /// `docs/reference/capture_attention_decode.py`.
+    func testDecodeStepMatchesPythonReference() throws {
+        try requireMLXRuntimeOrSkip()
+
+        let url = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "attn_decode_fixture", withExtension: "safetensors",
+                subdirectory: "Fixtures"),
+            "attn_decode_fixture not found in test bundle")
+        let arrays = try MLX.loadArrays(url: url)
+
+        let config = try fixtureConfig()
+        let attn = DeepseekV32Attention(config)
+
+        let weightKeys = [
+            "q_a_proj.weight", "q_a_layernorm.weight", "q_b_proj.weight",
+            "kv_a_proj_with_mqa.weight", "kv_a_layernorm.weight",
+            "embed_q.weight", "unembed_out.weight", "o_proj.weight",
+            "indexer.wq_b.weight", "indexer.wk.weight",
+            "indexer.k_norm.weight", "indexer.k_norm.bias",
+            "indexer.weights_proj.weight",
+        ]
+        var params: [String: MLXArray] = [:]
+        for key in weightKeys {
+            params[key] = try XCTUnwrap(arrays[key], "missing weight \(key) in fixture")
+        }
+        try attn.update(
+            parameters: ModuleParameters.unflattened(params), verify: [.noUnusedKeys])
+
+        // One CacheList holds the layer's two sub-caches (main KV + indexer).
+        let cache = CacheList(KVCacheSimple(), KVCacheSimple())
+
+        // Stage 1: prefill — primes both sub-caches with 6 tokens.
+        let xPrefill = try XCTUnwrap(arrays["x_prefill"])
+        let maskPrefill = try XCTUnwrap(arrays["mask_prefill"]).asType(.bool)
+        _ = attn(xPrefill, mask: maskPrefill, cache: cache)
+
+        // Stage 2: decode one token (mask nil — attend the cached top-k).
+        let xDecode = try XCTUnwrap(arrays["x_decode"])
+        let out = attn(xDecode, mask: nil, cache: cache)
+        out.eval()
+
+        let expected = try XCTUnwrap(arrays["expected_decode"])
+        XCTAssertEqual(out.shape, expected.shape, "decode output shape mismatch")
+        let close = allClose(out, expected, rtol: 1e-4, atol: 1e-4)
+        XCTAssertTrue(
+            close.item(Bool.self),
+            "attention decode-step output diverges from the Python reference")
+    }
 }
