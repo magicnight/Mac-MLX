@@ -55,6 +55,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   return 404 before headers again on all four streaming paths. 7 regression
   tests cover the exact escape mechanisms. Embeddings/rerank handlers
   adapted to the throwing generation lock (PR #53).
+- **P2 hardening** (PR #56): the GUI-launched server now honors
+  `serverAPIKey` (was CLI-only; empty string counts as no-auth); bearer
+  tokens compared constant-time; concurrent loads of different models can
+  no longer combine past the pool's byte budget (in-flight reservation);
+  evicted engines free *before* the replacement allocates; `/x/models/load`
+  + `/x/models/unload` run under the generation lock; the in-flight marker
+  is a refcount, so overlapping GUI + server generations on one model keep
+  their eviction protection.
+- **P3 cleanup** (PR #57): legacy `{"prompt"}` bodies accepted on
+  `/v1/completions`; Ollama `/api/tags` reports aliases; streaming
+  telemetry counts real completion tokens instead of frames; `unload`
+  during an in-flight `load` no longer resurrects the model; a residency
+  miss reconciles the GUI status instead of leaving a stale `.ready`; the
+  engine always emits a terminal chunk on non-cancel stream ends (reasoning
+  splitters flush held-back partial tags); `/v1/embeddings` + `/v1/rerank`
+  return 400 `model_not_embedder` for non-embedder targets.
+- **CI** (PR #55): MLX-touching tests are properly gated — bare `swift
+  test` (no metallib) skips instead of fatally aborting, and strict 1e-4
+  parity suites skip on GitHub's paravirtualized-Metal runners
+  (`MACMLX_UNTRUSTED_METAL`) while remaining enforced on real hardware.
 
 ### Changed
 - **Release workflow bumped to `softprops/action-gh-release@v3`**
