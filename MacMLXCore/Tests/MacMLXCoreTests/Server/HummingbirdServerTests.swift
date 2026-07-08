@@ -260,6 +260,100 @@ struct HummingbirdServerTests {
         #expect(content == "stub-response")
     }
 
+    /// Stub engine that records the `GenerateRequest` it was asked to
+    /// generate, so a test can inspect exactly which messages/roles survived
+    /// server-side decoding. Unlike `StubInferenceEngine` (fixed response, no
+    /// capture) or `EchoingStubEngine` (echoes the model id, not the request).
+    private actor CapturingStubEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        private(set) var status: EngineStatus = .idle
+        private(set) var loadedModel: LocalModel?
+        let version = "capturing-1"
+
+        private(set) var capturedRequest: GenerateRequest?
+
+        func load(_ model: LocalModel) async throws {
+            status = .loading(model: model.id)
+            loadedModel = model
+            status = .ready(model: model.id)
+        }
+
+        func unload() async throws {
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { continuation in
+                Task { [weak self] in
+                    guard let self else { continuation.finish(); return }
+                    await self.capture(request)
+                    continuation.yield(GenerateChunk(
+                        text: "stub-response",
+                        finishReason: .stop,
+                        usage: TokenUsage(promptTokens: 1, completionTokens: 2)
+                    ))
+                    continuation.finish()
+                }
+            }
+        }
+
+        private func capture(_ request: GenerateRequest) {
+            capturedRequest = request
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
+    /// Wave-1 regression guard (v0.5 review fix): before wave 1 added
+    /// `MessageRole.tool`, `MessageRole(rawValue: "tool")` was `nil` and the
+    /// OpenAI decode guard's `compactMap` silently dropped tool-role turns.
+    /// Wave 1 made that role resolve, which (absent this exclusion) would
+    /// admit it half-formed — `toolCallID` always nil at this decode site,
+    /// and the preceding assistant `tool_calls` aren't decoded either — which
+    /// can trip a chat-template pairing assertion downstream. This proves the
+    /// pre-wave-1 drop behaviour is preserved until wave 2 wires proper
+    /// tool-turn decode.
+    @Test
+    func chatCompletionsDropsToolRoleMessageUntilWave2() async throws {
+        let engine = CapturingStubEngine()
+        let model = LocalModel(
+            id: "stub-model",
+            displayName: "Stub",
+            directory: URL(filePath: "/tmp"),
+            sizeBytes: 0,
+            format: .mlx,
+            quantization: nil,
+            parameterCount: nil,
+            architecture: nil
+        )
+        try await engine.load(model)
+
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_040)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                ["role": "user", "content": "What's the weather?"],
+                ["role": "assistant", "content": "Let me check."],
+                ["role": "tool", "content": "22C, sunny"],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let captured = await engine.capturedRequest
+        let messages = try #require(captured?.messages)
+        #expect(messages.count == 2)
+        #expect(messages.map(\.role) == [.user, .assistant])
+        #expect(messages.contains { $0.role == .tool } == false)
+    }
+
     // MARK: - Anthropic Messages API (v0.5.1)
     //
     // Port assignments (spaced by 10):

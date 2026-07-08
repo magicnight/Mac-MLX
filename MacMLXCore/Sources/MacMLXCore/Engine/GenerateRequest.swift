@@ -10,21 +10,33 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
     /// has no `images` key) decodes with an empty array, so existing
     /// user chats survive the upgrade unchanged.
     public let images: [ImageAttachment]
+    /// For a `.tool` message: the id of the assistant tool call this result
+    /// answers. Nil for every non-tool turn. `decodeIfPresent` + default nil so
+    /// pre-v0.5 conversation JSON (no such key) still decodes.
+    public let toolCallID: String?
+    /// For an `.assistant` message that itself issued tool calls: the calls it
+    /// made, so a re-render reproduces the assistant's tool-call block. Nil
+    /// otherwise. Back-compatible for the same reason as `toolCallID`.
+    public let toolCalls: [ToolCallRequest]?
 
     public init(
         id: UUID = UUID(),
         role: MessageRole,
         content: String,
-        images: [ImageAttachment] = []
+        images: [ImageAttachment] = [],
+        toolCallID: String? = nil,
+        toolCalls: [ToolCallRequest]? = nil
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.images = images
+        self.toolCallID = toolCallID
+        self.toolCalls = toolCalls
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, images
+        case id, role, content, images, toolCallID, toolCalls
     }
 
     public init(from decoder: Decoder) throws {
@@ -32,8 +44,10 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
         self.id = try c.decode(UUID.self, forKey: .id)
         self.role = try c.decode(MessageRole.self, forKey: .role)
         self.content = try c.decode(String.self, forKey: .content)
-        // Default to empty when the key is absent (legacy conversations).
+        // Default to empty/nil when the key is absent (legacy conversations).
         self.images = try c.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
+        self.toolCallID = try c.decodeIfPresent(String.self, forKey: .toolCallID)
+        self.toolCalls = try c.decodeIfPresent([ToolCallRequest].self, forKey: .toolCalls)
     }
 }
 
@@ -42,6 +56,10 @@ public enum MessageRole: String, Codable, Hashable, Sendable, CaseIterable {
     case system
     case user
     case assistant
+    /// A tool result turn (chat-side MCP routing, v0.5). Raw value matches the
+    /// OpenAI `tool` role. Additive: legacy conversation JSON never carries it,
+    /// so existing on-disk data keeps decoding.
+    case tool
 }
 
 /// Sampling and length parameters.
@@ -77,19 +95,31 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// synthesised `Codable` / `Hashable`; the engine unwraps to the
     /// tokenizer's `Sendable` shape at the `UserInput` boundary.
     public var templateKwargs: [String: JSONValue]?
+    /// Optional tool specifications (v0.5) forwarded to the chat template as
+    /// `UserInput.tools`. Each element is one OpenAI function spec
+    /// (`{"type":"function","function":{name,description,parameters}}`), built
+    /// from an MCP tool via `ToolValueBridge.openAIToolSpec(from:)`. Stored as
+    /// `[JSONValue]` — not `[ToolSpec]` — so `GenerateRequest` keeps its
+    /// synthesised `Codable` / `Hashable`; the engine unwraps to the
+    /// tokenizer's `Sendable` shape at the `UserInput` boundary. Default nil
+    /// and (being optional) decoded via the synthesised `decodeIfPresent`, so
+    /// existing serialized requests keep decoding.
+    public var tools: [JSONValue]?
 
     public init(
         model: String,
         messages: [ChatMessage],
         systemPrompt: String? = nil,
         parameters: GenerationParameters = .init(),
-        templateKwargs: [String: JSONValue]? = nil
+        templateKwargs: [String: JSONValue]? = nil,
+        tools: [JSONValue]? = nil
     ) {
         self.model = model
         self.messages = messages
         self.systemPrompt = systemPrompt
         self.parameters = parameters
         self.templateKwargs = templateKwargs
+        self.tools = tools
     }
 
     /// Messages with the system prompt (if any) prepended.

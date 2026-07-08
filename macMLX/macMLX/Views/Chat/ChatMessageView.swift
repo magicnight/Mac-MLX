@@ -148,6 +148,10 @@ struct ChatMessageView: View {
         case .user:      return .accentColor
         case .assistant: return Color(.secondarySystemFill)
         case .system:    return Color(.tertiarySystemFill)
+        // Placeholder so the app keeps compiling now that `MessageRole` has a
+        // `.tool` case (v0.5 MCP routing). Dedicated tool-result bubble
+        // rendering is wired in wave 2 (GUI).
+        case .tool:      return Color(.tertiarySystemFill)
         }
     }
 

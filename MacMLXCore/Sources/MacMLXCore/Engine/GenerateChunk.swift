@@ -3,11 +3,23 @@ public struct GenerateChunk: Codable, Hashable, Sendable {
     public let text: String
     public let finishReason: FinishReason?
     public let usage: TokenUsage?
+    /// Tool calls the model emitted this turn. Non-nil only on the terminal
+    /// chunk of a generation that ended in tool calls (paired with
+    /// `finishReason == .toolCalls`); nil for ordinary text chunks. Default
+    /// nil keeps existing call sites and the synthesised `Codable` (which
+    /// omits the key when absent) wire-compatible.
+    public let toolCalls: [ToolCallRequest]?
 
-    public init(text: String, finishReason: FinishReason? = nil, usage: TokenUsage? = nil) {
+    public init(
+        text: String,
+        finishReason: FinishReason? = nil,
+        usage: TokenUsage? = nil,
+        toolCalls: [ToolCallRequest]? = nil
+    ) {
         self.text = text
         self.finishReason = finishReason
         self.usage = usage
+        self.toolCalls = toolCalls
     }
 }
 
@@ -16,6 +28,9 @@ public enum FinishReason: String, Codable, Hashable, Sendable, CaseIterable {
     case stop
     case length
     case error
+    /// The model stopped to call one or more tools. Raw value matches the
+    /// OpenAI `finish_reason` string.
+    case toolCalls = "tool_calls"
 }
 
 /// Token usage accounting at the end of a generation.
