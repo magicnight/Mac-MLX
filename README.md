@@ -21,16 +21,19 @@ genuinely native macOS GUI, an always-on API, and zero Python in one ~50 MB app.
 
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| Native macOS GUI | ✅ SwiftUI | Electron | menu-bar only | Web UI |
+| Native macOS GUI | ✅ SwiftUI | Electron | menu-bar only | ✅ SwiftUI (v0.4+) |
+| **Swift-native in-process engine** | ✅ | ❌ | ❌ | ❌ (Python core) |
 | MLX inference | ✅ | ✅ | ✅ (preview) | ✅ |
-| CLI | ✅ | ✅ `lms` | ✅ | ✅ |
+| CLI | ✅ | ✅ `lms` | ✅ | launcher only |
 | Resumable downloads + mirrors | ✅ | ⚠ partial | ⚠ partial | ❌ |
 | OpenAI-compatible API | ✅ always-on | ✅ | ✅ | ✅ |
 | Zero Python required | ✅ | ✅ | ✅ | ❌ |
 
-Where macMLX stands alone: a first-class SwiftUI app **and** a proper CLI/TUI
-over one shared Swift core — plus owning frontier model architectures in pure
-Swift (the DeepSeek V3.2 port) instead of waiting for upstream.
+Where macMLX stands alone: the **inference engine itself is Swift, running
+in-process** — oMLX's native app (v0.4+) fronts a Python core, ours has no
+Python anywhere in one ~50 MB DMG. On top of that: a proper CLI/TUI sharing
+the same Swift core, and owning frontier model architectures in pure Swift
+(the DeepSeek V3.2 port) instead of waiting for upstream.
 
 ## Requirements
 
