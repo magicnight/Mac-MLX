@@ -354,6 +354,294 @@ struct HummingbirdServerTests {
         #expect(messages.contains { $0.role == .tool } == false)
     }
 
+    // MARK: - Tool pass-through (v0.5, OpenAI /v1/chat/completions)
+    //
+    // The server is the SERVER half of tool-calling: it (1) forwards the
+    // request's `tools` into `GenerateRequest.tools` (which the chat template
+    // consumes) and (2) serialises detected `tool_calls` back in OpenAI shape.
+    // It runs NO agent loop — external clients do. These tests use stub engines
+    // so no model is needed.
+    //
+    // Port assignments (spaced by 10):
+    //   chatCompletionsToolsPopulateGenerateRequestTools : 19_800
+    //   chatCompletionsNonStreamingEmitsToolCalls        : 19_810
+    //   chatCompletionsStreamingEmitsToolCallDelta       : 19_820
+    //   chatCompletionsToolChoiceNoneOmitsTools          : 19_830
+    //   chatCompletionsWithoutToolsFieldDecodesUnchanged : 19_840
+
+    /// Stub engine that ends a generation in a tool call with no accompanying
+    /// text — the shape `MLXSwiftEngine` produces on the terminal chunk when
+    /// `ToolCallProcessor` drains a call. Lets the server's OpenAI tool_calls
+    /// serialization be exercised without a real model.
+    private actor ToolCallStubEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        private(set) var status: EngineStatus = .idle
+        private(set) var loadedModel: LocalModel?
+        let version = "toolcall-1"
+
+        func load(_ model: LocalModel) async throws {
+            status = .loading(model: model.id)
+            loadedModel = model
+            status = .ready(model: model.id)
+        }
+
+        func unload() async throws {
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { continuation in
+                let call = ToolCallRequest(
+                    id: "call_abc123",
+                    name: "get_weather",
+                    arguments: ["city": .string("Paris")]
+                )
+                continuation.yield(GenerateChunk(
+                    text: "",
+                    finishReason: .toolCalls,
+                    usage: TokenUsage(promptTokens: 3, completionTokens: 4),
+                    toolCalls: [call]
+                ))
+                continuation.finish()
+            }
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
+    /// A single OpenAI `tools` entry `{"type":"function","function":{...}}`,
+    /// as a JSON-object body clients send.
+    private var weatherToolSpec: [String: Any] {
+        [
+            "type": "function",
+            "function": [
+                "name": "get_weather",
+                "description": "Get the weather for a city",
+                "parameters": [
+                    "type": "object",
+                    "properties": ["city": ["type": "string"]],
+                    "required": ["city"],
+                ],
+            ],
+        ]
+    }
+
+    /// A request carrying `tools` populates `GenerateRequest.tools` verbatim,
+    /// so the chat template can offer them to the model.
+    @Test
+    func chatCompletionsToolsPopulateGenerateRequestTools() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_800)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": false,
+            "tools": [weatherToolSpec],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let tools = try #require(await engine.capturedRequest?.tools)
+        #expect(tools.count == 1)
+        // Forwarded verbatim: the element is the OpenAI function spec object.
+        guard case .object(let spec) = tools[0] else {
+            Issue.record("tool spec did not decode as a JSON object")
+            return
+        }
+        #expect(spec["type"] == .string("function"))
+        guard case .object(let fn)? = spec["function"] else {
+            Issue.record("function payload missing")
+            return
+        }
+        #expect(fn["name"] == .string("get_weather"))
+    }
+
+    /// A terminal chunk carrying `toolCalls` is serialised into the OpenAI
+    /// non-streaming `message.tool_calls` shape: id / type / function.name and
+    /// `arguments` as a JSON-ENCODED STRING, with `finish_reason:"tool_calls"`
+    /// and `content` null (only tool calls, no text).
+    @Test
+    func chatCompletionsNonStreamingEmitsToolCalls() async throws {
+        let engine = ToolCallStubEngine()
+        try await engine.load(fixtureModel(id: "tool-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_810)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "tool-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": false,
+            "tools": [weatherToolSpec],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let choices = try #require(json["choices"] as? [[String: Any]])
+        #expect(choices.count == 1)
+        #expect(choices[0]["finish_reason"] as? String == "tool_calls")
+
+        let message = try #require(choices[0]["message"] as? [String: Any])
+        // content is JSON null when the assistant only called tools.
+        let content = try #require(message["content"])
+        #expect(content is NSNull)
+
+        let toolCalls = try #require(message["tool_calls"] as? [[String: Any]])
+        #expect(toolCalls.count == 1)
+        #expect(toolCalls[0]["id"] as? String == "call_abc123")
+        #expect(toolCalls[0]["type"] as? String == "function")
+        let fn = try #require(toolCalls[0]["function"] as? [String: Any])
+        #expect(fn["name"] as? String == "get_weather")
+        // arguments is a JSON-encoded STRING, not a nested object.
+        let argsString = try #require(fn["arguments"] as? String)
+        let argsObj = try #require(
+            try JSONSerialization.jsonObject(with: Data(argsString.utf8)) as? [String: Any]
+        )
+        #expect(argsObj["city"] as? String == "Paris")
+    }
+
+    /// Streaming: a `delta` frame carries the tool_call (with `index`), and a
+    /// later frame carries `finish_reason:"tool_calls"`.
+    @Test
+    func chatCompletionsStreamingEmitsToolCallDelta() async throws {
+        let engine = ToolCallStubEngine()
+        try await engine.load(fixtureModel(id: "tool-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_820)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "tool-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": true,
+            "tools": [weatherToolSpec],
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+
+        await server.stop()
+
+        #expect(http.statusCode == 200)
+        let frames = sseFrames(data)
+
+        var sawToolCallDelta = false
+        var sawToolCallsFinish = false
+        var toolCallID: String?
+        var toolCallName: String?
+        var toolCallArgs: String?
+        for frame in frames {
+            guard let choices = frame["choices"] as? [[String: Any]],
+                  let choice = choices.first
+            else { continue }
+            if let delta = choice["delta"] as? [String: Any],
+               let calls = delta["tool_calls"] as? [[String: Any]],
+               let call = calls.first {
+                sawToolCallDelta = true
+                #expect(call["index"] as? Int == 0)
+                #expect(call["type"] as? String == "function")
+                toolCallID = call["id"] as? String
+                if let fn = call["function"] as? [String: Any] {
+                    toolCallName = fn["name"] as? String
+                    toolCallArgs = fn["arguments"] as? String
+                }
+            }
+            if choice["finish_reason"] as? String == "tool_calls" {
+                sawToolCallsFinish = true
+            }
+        }
+        #expect(sawToolCallDelta)
+        #expect(sawToolCallsFinish)
+        #expect(toolCallID == "call_abc123")
+        #expect(toolCallName == "get_weather")
+        let argsString = try #require(toolCallArgs)
+        let argsObj = try #require(
+            try JSONSerialization.jsonObject(with: Data(argsString.utf8)) as? [String: Any]
+        )
+        #expect(argsObj["city"] as? String == "Paris")
+    }
+
+    /// `tool_choice:"none"` suppresses tools — `GenerateRequest.tools` stays nil
+    /// even though `tools` was supplied.
+    @Test
+    func chatCompletionsToolChoiceNoneOmitsTools() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_830)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": false,
+            "tools": [weatherToolSpec],
+            "tool_choice": "none",
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(await engine.capturedRequest?.tools == nil)
+    }
+
+    /// Back-compat: a request with NO `tools` field decodes fine and behaves
+    /// exactly as before — `GenerateRequest.tools` is nil and the response is a
+    /// plain assistant message.
+    @Test
+    func chatCompletionsWithoutToolsFieldDecodesUnchanged() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_840)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Hello"]],
+            "stream": false,
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(await engine.capturedRequest?.tools == nil)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let choices = try #require(json["choices"] as? [[String: Any]])
+        let message = try #require(choices[0]["message"] as? [String: Any])
+        #expect(message["content"] as? String == "stub-response")
+        #expect(message["tool_calls"] == nil)
+    }
+
+    /// Split an SSE response body into decoded `data:` JSON frames, dropping the
+    /// terminal `[DONE]` sentinel. Used by the streaming tool-call test.
+    private func sseFrames(_ data: Data) -> [[String: Any]] {
+        let text = String(decoding: data, as: UTF8.self)
+        return text.components(separatedBy: "\n\n").compactMap { block in
+            guard let range = block.range(of: "data: ") else { return nil }
+            let payload = String(block[range.upperBound...])
+            guard payload != "[DONE]",
+                  let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
+            else { return nil }
+            return obj
+        }
+    }
+
     // MARK: - Anthropic Messages API (v0.5.1)
     //
     // Port assignments (spaced by 10):

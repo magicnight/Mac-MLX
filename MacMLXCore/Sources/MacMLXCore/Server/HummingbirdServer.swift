@@ -25,6 +25,20 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     let temperature: Double?
     let top_p: Double?
     let max_tokens: Int?
+    /// OpenAI `tools` — an array of `{"type":"function","function":{name,
+    /// description,parameters}}` specs. Forwarded VERBATIM into
+    /// `GenerateRequest.tools` (the chat template consumes exactly this shape,
+    /// so no conversion happens here). Optional + synthesised `decodeIfPresent`
+    /// ⇒ absent key decodes as nil, so every pre-tools client is unchanged.
+    let tools: [JSONValue]?
+    /// OpenAI `tool_choice`. Only the string `"none"` is honored here — it
+    /// suppresses the tools so the model can't call any. Every other value
+    /// (the strings `"auto"`/`"required"`, or a `{"type":"function",...}`
+    /// object naming a specific function) currently means "offer the tools and
+    /// let the model decide"; fine-grained forcing is a documented follow-up.
+    /// Decoded as a free-form `JSONValue` so both the string and object forms
+    /// round-trip without a bespoke enum.
+    let tool_choice: JSONValue?
 }
 
 /// Legacy OpenAI text-completions body (`/v1/completions`, and the
@@ -1122,7 +1136,10 @@ public actor HummingbirdServer {
                 stream: legacy.stream,
                 temperature: legacy.temperature,
                 top_p: legacy.top_p,
-                max_tokens: legacy.max_tokens
+                max_tokens: legacy.max_tokens,
+                // Legacy text-completions bodies carry no tools.
+                tools: nil,
+                tool_choice: nil
             )
         }
 
@@ -1162,12 +1179,29 @@ public actor HummingbirdServer {
             stream: chatReq.stream ?? false
         )
 
+        // Tool pass-through (v0.5, OpenAI `/v1/chat/completions` only): forward
+        // the request's `tools` into the chat template unless `tool_choice` is
+        // the string "none", which suppresses tool use entirely. Passing an
+        // empty `tools` array through is harmless — the engine gates its
+        // tool-call detector on `tools?.isEmpty == false`, so `[]` behaves like
+        // "no tools". Fine-grained forcing (a `tool_choice` object naming one
+        // function) is a documented follow-up; any non-"none" value here means
+        // "offer the tools".
+        let toolChoiceIsNone: Bool
+        if case .string("none") = chatReq.tool_choice {
+            toolChoiceIsNone = true
+        } else {
+            toolChoiceIsNone = false
+        }
+        let toolsToSend = toolChoiceIsNone ? nil : chatReq.tools
+
         let genRequest = GenerateRequest(
             model: chatReq.model,
             messages: messages,
             systemPrompt: systemPrompt,
             parameters: params,
-            templateKwargs: await templateKwargs(for: chatReq.model)
+            templateKwargs: await templateKwargs(for: chatReq.model),
+            tools: toolsToSend
         )
 
         // Cold-swap (v0.3.3) is no longer resolved here. SRV-2: the swap
@@ -1808,6 +1842,9 @@ public actor HummingbirdServer {
         var finishReason = "stop"
         var promptTokens = 0
         var completionTokens = 0
+        // Tool calls the model requested this turn (v0.5). Populated from the
+        // terminal chunk when generation ends in `.toolCalls`; empty otherwise.
+        var capturedToolCalls: [ToolCallRequest] = []
 
         do {
             loop: while true {
@@ -1830,6 +1867,9 @@ public actor HummingbirdServer {
                     }
                     if let reason = chunk.finishReason {
                         finishReason = reason.rawValue
+                    }
+                    if let calls = chunk.toolCalls, !calls.isEmpty {
+                        capturedToolCalls = calls
                     }
                 }
             }
@@ -1855,6 +1895,17 @@ public actor HummingbirdServer {
         var message: [String: Any] = ["role": "assistant", "content": answer]
         if let reasoning {
             message["reasoning_content"] = reasoning
+        }
+        // OpenAI tool-call turn: attach the detected calls as `message.tool_calls`
+        // (each with `arguments` as a JSON-encoded string). `finishReason` is
+        // already "tool_calls" (carried on the terminal chunk). Per the OpenAI
+        // shape, `content` is null when the assistant only called tools and
+        // produced no text; any text the model did emit is preserved.
+        if !capturedToolCalls.isEmpty {
+            message["tool_calls"] = capturedToolCalls.map { openAIToolCallObject($0) }
+            if answer.isEmpty {
+                message["content"] = NSNull()
+            }
         }
 
         let body: [String: Any] = [
@@ -1966,6 +2017,47 @@ public actor HummingbirdServer {
                             if !a.isEmpty { delta["content"] = a }
                         } else if delta.isEmpty {
                             // Chunk fully buffered as a partial tag — nothing to emit yet.
+                            continue
+                        }
+                        // OpenAI tool-call streaming: when the terminal chunk carries
+                        // detected calls, split them across their own SSE frames —
+                        // mirroring the reasoning/answer split above (distinct concerns,
+                        // distinct frames). Order: [optional buffered text/reasoning
+                        // delta] → a `delta.tool_calls` frame → a final frame whose delta
+                        // is empty and which carries `finish_reason:"tool_calls"`. Each
+                        // call is emitted complete in one delta (see openAIToolCallDelta),
+                        // not per-fragment argument streaming.
+                        if chunk.finishReason == .toolCalls, let calls = chunk.toolCalls, !calls.isEmpty {
+                            var toolFrames: [[String: Any]] = []
+                            if !delta.isEmpty {
+                                toolFrames.append(["index": 0, "delta": delta])
+                            }
+                            let toolCallDeltas = calls.enumerated().map {
+                                openAIToolCallDelta(index: $0.offset, call: $0.element)
+                            }
+                            toolFrames.append([
+                                "index": 0,
+                                "delta": ["tool_calls": toolCallDeltas] as [String: Any],
+                            ])
+                            toolFrames.append([
+                                "index": 0,
+                                "delta": [String: Any](),
+                                "finish_reason": FinishReason.toolCalls.rawValue,
+                            ])
+                            for frameChoice in toolFrames {
+                                let payload: [String: Any] = [
+                                    "id": completionID,
+                                    "object": "chat.completion.chunk",
+                                    "created": timestamp,
+                                    "model": model,
+                                    "choices": [frameChoice],
+                                ]
+                                let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                                let jsonStr = String(decoding: jsonData, as: UTF8.self)
+                                var buf = ByteBuffer()
+                                buf.writeString("data: \(jsonStr)\n\n")
+                                try await writer.write(buf)
+                            }
                             continue
                         }
                         var choice: [String: Any] = ["index": 0, "delta": delta]
@@ -2864,6 +2956,47 @@ private func nextGenerationStep(
         group.cancelAll()
         return first
     }
+}
+
+// MARK: - OpenAI tool-call serialization helpers
+
+/// Serialise a detected tool call's arguments object into the JSON-ENCODED
+/// STRING OpenAI puts in `function.arguments` (e.g. `"{\"city\":\"SF\"}"`),
+/// NOT a nested JSON object. `toSendable()` unwraps each `JSONValue` to the
+/// Foundation types `JSONSerialization` accepts. An arguments map that somehow
+/// fails to serialise degrades to `"{}"` rather than failing the whole
+/// response. Free function (not actor-isolated) so it runs inside the
+/// `ResponseBody` streaming closure — mirrors `writeAnthropicSSE`.
+private func openAIToolArgumentsJSON(_ arguments: [String: JSONValue]) -> String {
+    let sendable = arguments.mapValues { $0.toSendable() }
+    guard let data = try? JSONSerialization.data(withJSONObject: sendable) else {
+        return "{}"
+    }
+    return String(decoding: data, as: UTF8.self)
+}
+
+/// One OpenAI `tool_calls[]` object for a non-streaming `message`:
+/// `{"id","type":"function","function":{"name","arguments":<JSON string>}}`.
+private func openAIToolCallObject(_ call: ToolCallRequest) -> [String: Any] {
+    [
+        "id": call.id,
+        "type": "function",
+        "function": [
+            "name": call.name,
+            "arguments": openAIToolArgumentsJSON(call.arguments),
+        ] as [String: Any],
+    ]
+}
+
+/// One OpenAI streaming `delta.tool_calls[]` object — the non-streaming object
+/// plus the required `index`. We emit each call complete in a single delta
+/// (name + full arguments at once), not OpenAI's per-fragment argument
+/// streaming; a documented simplification that external agent loops, which
+/// reassemble tool calls by `index`, handle transparently.
+private func openAIToolCallDelta(index: Int, call: ToolCallRequest) -> [String: Any] {
+    var object = openAIToolCallObject(call)
+    object["index"] = index
+    return object
 }
 
 // MARK: - Anthropic SSE helpers
