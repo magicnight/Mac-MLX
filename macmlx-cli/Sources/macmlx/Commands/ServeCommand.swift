@@ -60,10 +60,16 @@ struct ServeCommand: AsyncParsableCommand {
                 """)
         }
 
+        // SRV-1: the CLI has exactly one engine instance (mutated in place
+        // by cold-swap), so a fixed provider is semantically equivalent to
+        // the old captured reference — but using the provider-based
+        // primary init (rather than the `engine:` back-compat convenience)
+        // lets us also plumb the configured stall-watchdog timeout (SRV-4).
         let server = HummingbirdServer(
-            engine: engine,
+            engineProvider: { engine },
             modelResolver: resolver,
-            apiKey: apiKey ?? ctx.settings.serverAPIKey
+            apiKey: apiKey ?? ctx.settings.serverAPIKey,
+            stallTimeoutSeconds: TimeInterval(ctx.settings.generationStallTimeoutSeconds)
         )
         let actualPort = try await server.start(preferredPort: port)
 

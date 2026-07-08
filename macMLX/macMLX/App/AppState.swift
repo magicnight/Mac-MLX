@@ -242,7 +242,11 @@ public final class AppState {
     /// to `LogManager`.
     public func startServer() async {
         guard server == nil, !isServerToggling else { return }
-        guard let engine = await coordinator.activeEngine else {
+        // Precondition unchanged from pre-SRV-1 behaviour: the server still
+        // won't start with nothing loaded. What changes is HOW the engine
+        // is handed to `HummingbirdServer` below — as a re-resolving
+        // provider (SRV-1), not this one-time snapshot.
+        guard await coordinator.activeEngine != nil else {
             await logs.log(
                 "Cannot start server: no engine loaded",
                 level: .warning,
@@ -277,10 +281,27 @@ public final class AppState {
                 throw err
             }
         }
+        // SRV-1 (CRITICAL): re-resolve the active engine on every request
+        // instead of capturing it once. The GUI's cold-swap routes through
+        // `ModelPool`, which mints a NEW `MLXSwiftEngine` per model — a
+        // frozen reference would keep answering from the model that was
+        // active when the server started (or from nothing, if that model
+        // was since evicted), regardless of what's actually loaded now.
+        let engineProvider: @Sendable () async -> (any InferenceEngine)? = {
+            await coord.activeEngine
+        }
+        // POOL-3: let the server mark the active model in-flight in the
+        // pool, so a concurrent GUI load can't LRU-evict a model the
+        // server is mid-stream against.
+        let inFlightHook: HummingbirdServer.InFlightHook = { modelID, active in
+            await coord.setGenerating(modelID, active)
+        }
         let instance = HummingbirdServer(
-            engine: engine,
+            engineProvider: engineProvider,
             modelResolver: resolver,
-            loadHook: loadHook
+            loadHook: loadHook,
+            inFlightHook: inFlightHook,
+            stallTimeoutSeconds: TimeInterval(currentSettings.generationStallTimeoutSeconds)
         )
         do {
             let actualPort = try await instance.start(

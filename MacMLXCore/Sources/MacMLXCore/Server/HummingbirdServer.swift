@@ -405,7 +405,13 @@ public actor HummingbirdServer {
 
     // MARK: State
 
-    private let engine: any InferenceEngine
+    /// Re-resolved per request (SRV-1). MacMLXCore never imports app-target
+    /// types, so the *current* engine is fetched through this closure rather
+    /// than captured once: the CLI passes `{ engine }` (a single engine it
+    /// mutates in place), while the GUI passes `{ await coordinator.activeEngine }`
+    /// — its `ModelPool` mints a NEW `MLXSwiftEngine` per model, so a captured
+    /// reference would answer from a stale (or evicted) model after a cold-swap.
+    private let engineProvider: @Sendable () async -> (any InferenceEngine)?
 
     /// Caller-supplied resolver for cold-swap. Defaults to returning nil
     /// (i.e. cold-swap disabled — server behaves as pre-v0.3.3: only
@@ -423,6 +429,22 @@ public actor HummingbirdServer {
     /// and `/api/*` request must carry `Authorization: Bearer <key>`;
     /// only the `/health` + `/v1/health` probes stay open.
     private let apiKey: String?
+
+    /// Optional hook the server calls around each generation to mark the
+    /// active model in-flight one layer up (the GUI's `ModelPool`), so a
+    /// concurrent load can't LRU-evict a model mid-stream (POOL-3). Injected
+    /// as a closure — like `loadHook` — so MacMLXCore stays free of app types.
+    /// CLI leaves it nil (it has no pool).
+    public typealias InFlightHook = @Sendable (_ modelID: String, _ active: Bool) async -> Void
+    private let inFlightHook: InFlightHook?
+
+    /// Inter-chunk stall timeout in seconds (SRV-4 / issue #29). If a live
+    /// generation emits no new chunk for this long, the watchdog cancels it,
+    /// releases the generation lock, and fails loudly (HTTP 504 for
+    /// non-streaming; an in-band error frame then close for streaming).
+    /// `<= 0` disables the watchdog. Stall-based, NOT total-duration: a long
+    /// generation that keeps producing tokens is never killed.
+    private let stallTimeoutSeconds: TimeInterval
 
     /// In-flight cold-swap Task, if any. Guards against thrashing when
     /// two requests for different models arrive at once: the second one
@@ -447,31 +469,134 @@ public actor HummingbirdServer {
     /// FIFO semaphore across response-body iteration, so at most one
     /// generation streams at a time.
     private var generationLocked: Bool = false
-    private var generationWaiters: [CheckedContinuation<Void, Never>] = []
 
-    /// Await the generation lock. Callers MUST pair this with
-    /// `releaseGenerationLock()` once their response-body iteration
-    /// finishes (success or error).
-    func acquireGenerationLock() async {
+    /// A parked acquirer. Keyed by `id` so a cancelled waiter can be removed
+    /// from the queue before a release ever hands it ownership — the old
+    /// non-cancellation-aware `withCheckedContinuation` let a dead waiter
+    /// receive the lock and never release it (SRV-3b permanent deadlock).
+    private struct GenerationWaiter {
+        let id: UInt64
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    private var generationWaiters: [GenerationWaiter] = []
+    private var nextGenerationWaiterID: UInt64 = 0
+
+    // MARK: Generation lock + lifecycle
+    //
+    // Lock-scope invariant (SRV-2 + SRV-3): the generation lock is acquired
+    // and released within the SAME lexical scope that runs the generation —
+    // the actor method for non-streaming, the `ResponseBody` writer closure
+    // for streaming. It is NEVER acquired before entering that scope, so a
+    // scope Hummingbird never runs never acquires (no leak), and a scope that
+    // runs always releases via `defer`. The cold-swap (`ensureModelLoaded`)
+    // runs AFTER the acquire, under the lock, so a swap can never race an
+    // in-flight generation (SRV-2). `ensureModelLoaded` never waits on this
+    // lock, so holding it across the load cannot deadlock.
+
+    /// Await the generation lock. Cancellation-aware: a parked acquirer whose
+    /// task is cancelled is removed from the queue and throws `CancellationError`
+    /// instead of silently receiving ownership later (SRV-3b). Callers MUST
+    /// pair a successful (non-throwing) return with `releaseGenerationLock()`.
+    func acquireGenerationLock() async throws {
         if !generationLocked {
             generationLocked = true
             return
         }
-        await withCheckedContinuation { cont in
-            generationWaiters.append(cont)
+        let id = nextGenerationWaiterID
+        nextGenerationWaiterID &+= 1
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                generationWaiters.append(GenerationWaiter(id: id, continuation: cont))
+            }
+        } onCancel: {
+            Task { await self.cancelGenerationWaiter(id) }
         }
-        // FIFO wake-up already sets us as the new owner.
+        // A non-throwing return means a release handed us ownership.
     }
 
-    /// Release the generation lock and hand off to the next waiter
-    /// (if any).
+    /// Remove a still-parked waiter and fail its acquire. No-op if it was
+    /// already handed ownership by a release (that owner still releases).
+    private func cancelGenerationWaiter(_ id: UInt64) {
+        guard let idx = generationWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = generationWaiters.remove(at: idx)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    /// Release the generation lock and hand off to the next live waiter.
     func releaseGenerationLock() {
         if !generationWaiters.isEmpty {
             let next = generationWaiters.removeFirst()
-            next.resume()
+            next.continuation.resume(returning: ())
+            // Ownership passes to `next`; `generationLocked` stays true.
             return
         }
         generationLocked = false
+    }
+
+    /// Acquire the lock, cold-swap to `requestedID` under it (SRV-2), and
+    /// return the freshly-resolved active engine (SRV-1). The lock is HELD on
+    /// a non-throwing return — the caller MUST `releaseGenerationLock()` on
+    /// every exit path (via `defer`). Any thrown error releases the lock first,
+    /// so a failure never leaks it.
+    private func beginGeneration(_ requestedID: String) async throws -> any InferenceEngine {
+        try await acquireGenerationLock()
+        // Race guard: if a release handed us ownership but our task was
+        // concurrently cancelled, drop the lock instead of generating under a
+        // cancelled task.
+        if Task.isCancelled {
+            releaseGenerationLock()
+            throw CancellationError()
+        }
+        do {
+            try await ensureModelLoaded(requestedID)  // SRV-2: swap under the lock
+        } catch {
+            releaseGenerationLock()
+            throw error
+        }
+        guard let engine = await engineProvider() else {  // SRV-1: re-resolve
+            releaseGenerationLock()
+            throw ModelSwapError.loadFailed(id: requestedID, reason: "No active engine after load")
+        }
+        return engine
+    }
+
+    /// Mark/unmark the active model in-flight one layer up (POOL-3). Best
+    /// effort — a nil hook (CLI/tests) is a no-op.
+    private func markInFlight(_ modelID: String, _ active: Bool) async {
+        await inFlightHook?(modelID, active)
+    }
+
+    /// Map a cold-swap failure onto an OpenAI/Anthropic-style error
+    /// `Response` (`model_not_found` / `load_failed`). Shared by every
+    /// OpenAI + Anthropic response path — each now calls `beginGeneration`
+    /// directly (SRV-2 moved the swap under the generation lock).
+    private func openAIStyleSwapErrorResponse(_ err: ModelSwapError) -> Response {
+        switch err {
+        case .modelNotFound(let id):
+            return errorResponse(
+                status: .notFound,
+                message: "Model not found: \(id). Download it via `macmlx pull \(id)` or check `macmlx list`.",
+                code: "model_not_found"
+            )
+        case .loadFailed(let id, let reason):
+            return errorResponse(
+                status: .internalServerError,
+                message: "Failed to load \(id): \(reason)",
+                code: "load_failed"
+            )
+        }
+    }
+
+    /// Ollama-style variant — same shape, different wording/codes
+    /// (`model_load_failed` vs `load_failed`) matching the pre-existing
+    /// Ollama error responses.
+    private func ollamaStyleSwapErrorResponse(_ err: ModelSwapError) -> Response {
+        switch err {
+        case .modelNotFound(let id):
+            return errorResponse(status: .notFound, message: "Model not found: \(id)", code: "model_not_found")
+        case .loadFailed(let id, let reason):
+            return errorResponse(status: .internalServerError, message: "Failed to load \(id): \(reason)", code: "model_load_failed")
+        }
     }
 
     /// The running ServiceGroup — held so `stop()` can trigger graceful shutdown.
@@ -494,46 +619,82 @@ public actor HummingbirdServer {
 
     // MARK: Init
 
+    /// Default stall-watchdog timeout (SRV-4) when a caller doesn't
+    /// specify one — mirrors `SettingsManager`'s persisted default.
+    public static let defaultStallTimeoutSeconds: TimeInterval = 120
+
     /// Create a server without cold-swap support — a chat completion
     /// request whose `model` field doesn't match the engine's loaded
-    /// model will fail at the engine layer.
+    /// model will fail at the engine layer. Back-compat convenience:
+    /// wraps `engine` in a fixed provider (SRV-1's re-resolution is a
+    /// no-op when there's only ever one engine instance, as with the CLI).
     public init(engine: any InferenceEngine, apiKey: String? = nil) {
-        self.engine = engine
+        self.engineProvider = { engine }
         self.modelResolver = { _ in nil }
         self.loadHook = nil
+        self.inFlightHook = nil
         self.apiKey = apiKey
+        self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
     }
 
     /// Create a server with cold-swap support — chat completion
     /// requests naming a different model than currently loaded will
-    /// trigger an unload + load before the request proceeds.
+    /// trigger an unload + load before the request proceeds. Back-compat
+    /// convenience — fixed provider, see `init(engine:apiKey:)`.
     public init(
         engine: any InferenceEngine,
         modelResolver: @escaping ModelResolver,
         apiKey: String? = nil
     ) {
-        self.engine = engine
+        self.engineProvider = { engine }
         self.modelResolver = modelResolver
         self.loadHook = nil
+        self.inFlightHook = nil
         self.apiKey = apiKey
+        self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
     }
 
-    /// Create a server with cold-swap + a custom load hook. GUI uses
-    /// this to route the load through `EngineCoordinator` so menu
-    /// bar / toolbar state reflects the newly-loaded model. Hook
-    /// receives the resolved `LocalModel`; caller's implementation
-    /// is responsible for unloading the current model first if its
-    /// lifecycle model requires that.
+    /// Create a server with cold-swap + a custom load hook. Back-compat
+    /// convenience — fixed provider, see `init(engine:apiKey:)`. Prefer
+    /// `init(engineProvider:modelResolver:loadHook:inFlightHook:apiKey:stallTimeoutSeconds:)`
+    /// for callers (like the GUI) whose active engine can change out from
+    /// under a fixed reference.
     public init(
         engine: any InferenceEngine,
         modelResolver: @escaping ModelResolver,
         loadHook: @escaping LoadHook,
         apiKey: String? = nil
     ) {
-        self.engine = engine
+        self.engineProvider = { engine }
         self.modelResolver = modelResolver
         self.loadHook = loadHook
+        self.inFlightHook = nil
         self.apiKey = apiKey
+        self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
+    }
+
+    /// Primary initialiser (SRV-1). `engineProvider` is invoked fresh on
+    /// every request after `ensureModelLoaded` succeeds, so a caller whose
+    /// active engine can change out from under it (the GUI's `ModelPool`
+    /// mints a new `MLXSwiftEngine` per model) always generates against the
+    /// model that's actually loaded. `inFlightHook` (POOL-3) lets the caller
+    /// mark the active model busy in a pool one layer up; `stallTimeoutSeconds`
+    /// (SRV-4) bounds inter-chunk silence during generation — `<= 0` disables
+    /// the watchdog.
+    public init(
+        engineProvider: @escaping @Sendable () async -> (any InferenceEngine)?,
+        modelResolver: @escaping ModelResolver = { _ in nil },
+        loadHook: LoadHook? = nil,
+        inFlightHook: InFlightHook? = nil,
+        apiKey: String? = nil,
+        stallTimeoutSeconds: TimeInterval = HummingbirdServer.defaultStallTimeoutSeconds
+    ) {
+        self.engineProvider = engineProvider
+        self.modelResolver = modelResolver
+        self.loadHook = loadHook
+        self.inFlightHook = inFlightHook
+        self.apiKey = apiKey
+        self.stallTimeoutSeconds = stallTimeoutSeconds
     }
 
     // MARK: Lifecycle
@@ -865,7 +1026,7 @@ public actor HummingbirdServer {
         // point-lookup. We keep listing the loaded model (compatibility)
         // and document that external clients wanting a full list should
         // use `macmlx list` or the GUI Models tab.
-        let loaded = await engine.loadedModel
+        let loaded = await engineProvider()?.loadedModel
         var data: [[String: String]] = []
         if let model = loaded {
             // Report the user-facing alias (v0.5.1) when one is set for
@@ -885,7 +1046,7 @@ public actor HummingbirdServer {
     }
 
     private func handleStatus() async throws -> Response {
-        let loaded = await engine.loadedModel
+        let loaded = await engineProvider()?.loadedModel
         let uptime = startedAt.map { Date().timeIntervalSince($0) } ?? 0
         let totalMemory = MemoryProbe.totalMemoryGB()
 
@@ -965,35 +1126,11 @@ public actor HummingbirdServer {
             templateKwargs: await templateKwargs(for: chatReq.model)
         )
 
-        // Cold-swap (v0.3.3). If the request names a different model than
-        // is currently loaded, try to resolve + load it on the fly. A
-        // missing model → 404, a load failure → 500. Concurrent requests
-        // for different models serialise on `loadInFlight`.
-        do {
-            try await ensureModelLoaded(chatReq.model)
-        } catch let err as ModelSwapError {
-            switch err {
-            case .modelNotFound(let id):
-                return errorResponse(
-                    status: .notFound,
-                    message: "Model not found: \(id). Download it via `macmlx pull \(id)` or check `macmlx list`.",
-                    code: "model_not_found"
-                )
-            case .loadFailed(let id, let reason):
-                return errorResponse(
-                    status: .internalServerError,
-                    message: "Failed to load \(id): \(reason)",
-                    code: "load_failed"
-                )
-            }
-        } catch {
-            return errorResponse(
-                status: .internalServerError,
-                message: error.localizedDescription,
-                code: "load_failed"
-            )
-        }
-
+        // Cold-swap (v0.3.3) is no longer resolved here. SRV-2: the swap
+        // must happen atomically with the generation lock, so each
+        // responder below calls `beginGeneration(genRequest.model)` itself
+        // (acquire → swap → re-resolve engine, all under the lock) instead
+        // of us doing it here, unlocked, ahead of time.
         let wantsStream = chatReq.stream ?? false
         if wantsStream {
             return try await streamingChatResponse(genRequest: genRequest)
@@ -1020,7 +1157,7 @@ public actor HummingbirdServer {
         // Reuse the same "what's loaded + what the resolver can see"
         // logic as handleModels. For Ollama the list should be of
         // locally-available models regardless of load state.
-        let currentID = await engine.loadedModel?.id
+        let currentID = await engineProvider()?.loadedModel?.id
         var entries: [[String: Any]] = []
         if let currentID {
             entries.append([
@@ -1096,17 +1233,9 @@ public actor HummingbirdServer {
             templateKwargs: await templateKwargs(for: req.model)
         )
 
-        do {
-            try await ensureModelLoaded(req.model)
-        } catch let err as ModelSwapError {
-            switch err {
-            case .modelNotFound(let id):
-                return errorResponse(status: .notFound, message: "Model not found: \(id)", code: "model_not_found")
-            case .loadFailed(let id, let reason):
-                return errorResponse(status: .internalServerError, message: "Failed to load \(id): \(reason)", code: "model_load_failed")
-            }
-        }
-
+        // Cold-swap (SRV-2): resolved inside each responder, atomically with
+        // the generation lock — see `beginGeneration`.
+        //
         // Ollama defaults stream=true when omitted (opposite of OpenAI).
         // Zed, Immersive Translate, and most Ollama CLIs expect NDJSON
         // streaming unless they explicitly opt out.
@@ -1120,13 +1249,34 @@ public actor HummingbirdServer {
     /// Non-streaming Ollama /api/chat response. Shape:
     /// `{"model":"…","created_at":"…","message":{"role":"assistant","content":"…"},"done":true}`.
     private func nonStreamingOllamaChatResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
-        await acquireGenerationLock()
+        let engine: any InferenceEngine
+        do {
+            engine = try await beginGeneration(genRequest.model)
+        } catch let err as ModelSwapError {
+            return ollamaStyleSwapErrorResponse(err)
+        }
         defer { Task { [weak self] in await self?.releaseGenerationLock() } }
 
+        let modelID = await engine.loadedModel?.id ?? genRequest.model
+        await markInFlight(modelID, true)
+        defer { Task { [weak self] in await self?.markInFlight(modelID, false) } }
+
         let stream = await engine.generate(genRequest)
+        let box = ChunkIteratorBox(stream)
         var fullText = ""
-        for try await chunk in stream {
-            fullText += chunk.text
+        loop: while true {
+            switch try await nextGenerationStep(box, stallTimeout: stallTimeoutSeconds) {
+            case .finished:
+                break loop
+            case .stalled:
+                return errorResponse(
+                    status: .gatewayTimeout,
+                    message: "Generation stalled: no output for over \(Int(stallTimeoutSeconds))s.",
+                    code: "generation_stalled"
+                )
+            case .chunk(let chunk):
+                fullText += chunk.text
+            }
         }
         return try jsonResponseAny([
             "model": model,
@@ -1146,32 +1296,73 @@ public actor HummingbirdServer {
     /// so covers Zed, Immersive Translate, Ollama CLI, and most other
     /// Ollama-speaking tools.
     private func streamingOllamaChatResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
-        await acquireGenerationLock()
+        // A1: cheap pre-flight resolve check (no load, no lock) — reject
+        // an unknown model with a real 404 before any streaming headers
+        // are sent. The real (locked) resolve+load still happens inside
+        // the ResponseBody closure below; SRV-2 atomicity is unchanged.
+        let modelIsResolvable = await canResolveModel(model)
+        if !modelIsResolvable {
+            return ollamaStyleSwapErrorResponse(.modelNotFound(id: model))
+        }
 
-        let stream = await engine.generate(genRequest)
+        // Lock-scope invariant (SRV-2/SRV-3): acquire, cold-swap, and
+        // generate ALL happen inside the writer closure — see the
+        // invariant comment above `acquireGenerationLock()`.
         let startedAt = Date()
         let server = self
 
         let responseBody = ResponseBody { writer in
-            defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
+
+            let engine: any InferenceEngine
             do {
-                for try await chunk in stream {
-                    chunkCount += 1
-                    let payload: [String: Any] = [
-                        "model": model,
-                        "created_at": ISO8601DateFormatter().string(from: Date()),
-                        "message": [
-                            "role": "assistant",
-                            "content": chunk.text
-                        ] as [String: Any],
-                        "done": false
-                    ]
-                    let jsonData = try JSONSerialization.data(withJSONObject: payload)
-                    var buf = ByteBuffer()
-                    buf.writeBytes(jsonData)
-                    buf.writeString("\n")
-                    try await writer.write(buf)
+                engine = try await server.beginGeneration(genRequest.model)
+            } catch {
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("{\"error\":\"\(msg)\",\"done\":true}\n")
+                try? await writer.write(buf)
+                try? await writer.finish(nil)
+                return
+            }
+            defer { Task { await server.releaseGenerationLock() } }
+
+            let modelID = await engine.loadedModel?.id ?? model
+            await server.markInFlight(modelID, true)
+            defer { Task { await server.markInFlight(modelID, false) } }
+
+            let stream = await engine.generate(genRequest)
+            let stallTimeout = await server.stallTimeoutSeconds
+            let box = ChunkIteratorBox(stream)
+            do {
+                loop: while true {
+                    switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
+                    case .finished:
+                        break loop
+                    case .stalled:
+                        var buf = ByteBuffer()
+                        buf.writeString("{\"error\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\",\"done\":true}\n")
+                        try? await writer.write(buf)
+                        try? await writer.finish(nil)
+                        await server.incrementTokens(chunkCount)
+                        return
+                    case .chunk(let chunk):
+                        chunkCount += 1
+                        let payload: [String: Any] = [
+                            "model": model,
+                            "created_at": ISO8601DateFormatter().string(from: Date()),
+                            "message": [
+                                "role": "assistant",
+                                "content": chunk.text
+                            ] as [String: Any],
+                            "done": false
+                        ]
+                        let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                        var buf = ByteBuffer()
+                        buf.writeBytes(jsonData)
+                        buf.writeString("\n")
+                        try await writer.write(buf)
+                    }
                 }
             } catch {
                 let msg = error.localizedDescription
@@ -1245,29 +1436,41 @@ public actor HummingbirdServer {
             templateKwargs: await templateKwargs(for: req.model)
         )
 
-        do {
-            try await ensureModelLoaded(req.model)
-        } catch let err as ModelSwapError {
-            switch err {
-            case .modelNotFound(let id):
-                return errorResponse(status: .notFound, message: "Model not found: \(id)", code: "model_not_found")
-            case .loadFailed(let id, let reason):
-                return errorResponse(status: .internalServerError, message: "Failed to load \(id): \(reason)", code: "model_load_failed")
-            }
-        }
-
+        // Cold-swap (SRV-2): resolved inside each responder, atomically with
+        // the generation lock — see `beginGeneration`.
         let wantsStream = req.stream ?? true
         if wantsStream {
             return try await streamingOllamaGenerateResponse(model: req.model, genRequest: genRequest)
         }
 
-        await acquireGenerationLock()
+        let engine: any InferenceEngine
+        do {
+            engine = try await beginGeneration(genRequest.model)
+        } catch let err as ModelSwapError {
+            return ollamaStyleSwapErrorResponse(err)
+        }
         defer { Task { [weak self] in await self?.releaseGenerationLock() } }
 
+        let modelID = await engine.loadedModel?.id ?? genRequest.model
+        await markInFlight(modelID, true)
+        defer { Task { [weak self] in await self?.markInFlight(modelID, false) } }
+
         let stream = await engine.generate(genRequest)
+        let box = ChunkIteratorBox(stream)
         var fullText = ""
-        for try await chunk in stream {
-            fullText += chunk.text
+        loop: while true {
+            switch try await nextGenerationStep(box, stallTimeout: stallTimeoutSeconds) {
+            case .finished:
+                break loop
+            case .stalled:
+                return errorResponse(
+                    status: .gatewayTimeout,
+                    message: "Generation stalled: no output for over \(Int(stallTimeoutSeconds))s.",
+                    code: "generation_stalled"
+                )
+            case .chunk(let chunk):
+                fullText += chunk.text
+            }
         }
         return try jsonResponseAny([
             "model": req.model,
@@ -1280,29 +1483,71 @@ public actor HummingbirdServer {
     /// Streaming Ollama /api/generate — NDJSON, each line
     /// `{"model":...,"response":"partial","done":false}`.
     private func streamingOllamaGenerateResponse(model: String, genRequest: GenerateRequest) async throws -> Response {
-        await acquireGenerationLock()
+        // A1: cheap pre-flight resolve check (no load, no lock) — reject
+        // an unknown model with a real 404 before any streaming headers
+        // are sent. The real (locked) resolve+load still happens inside
+        // the ResponseBody closure below; SRV-2 atomicity is unchanged.
+        // (Same gap as the /api/chat streaming path — /api/generate hits
+        // the identical `beginGeneration`-inside-the-closure shape.)
+        let modelIsResolvable = await canResolveModel(model)
+        if !modelIsResolvable {
+            return ollamaStyleSwapErrorResponse(.modelNotFound(id: model))
+        }
 
-        let stream = await engine.generate(genRequest)
+        // Lock-scope invariant (SRV-2/SRV-3): acquire, cold-swap, and
+        // generate ALL happen inside the writer closure.
         let startedAt = Date()
         let server = self
 
         let responseBody = ResponseBody { writer in
-            defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
+
+            let engine: any InferenceEngine
             do {
-                for try await chunk in stream {
-                    chunkCount += 1
-                    let payload: [String: Any] = [
-                        "model": model,
-                        "created_at": ISO8601DateFormatter().string(from: Date()),
-                        "response": chunk.text,
-                        "done": false
-                    ]
-                    let jsonData = try JSONSerialization.data(withJSONObject: payload)
-                    var buf = ByteBuffer()
-                    buf.writeBytes(jsonData)
-                    buf.writeString("\n")
-                    try await writer.write(buf)
+                engine = try await server.beginGeneration(genRequest.model)
+            } catch {
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("{\"error\":\"\(msg)\",\"done\":true}\n")
+                try? await writer.write(buf)
+                try? await writer.finish(nil)
+                return
+            }
+            defer { Task { await server.releaseGenerationLock() } }
+
+            let modelID = await engine.loadedModel?.id ?? model
+            await server.markInFlight(modelID, true)
+            defer { Task { await server.markInFlight(modelID, false) } }
+
+            let stream = await engine.generate(genRequest)
+            let stallTimeout = await server.stallTimeoutSeconds
+            let box = ChunkIteratorBox(stream)
+            do {
+                loop: while true {
+                    switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
+                    case .finished:
+                        break loop
+                    case .stalled:
+                        var buf = ByteBuffer()
+                        buf.writeString("{\"error\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\",\"done\":true}\n")
+                        try? await writer.write(buf)
+                        try? await writer.finish(nil)
+                        await server.incrementTokens(chunkCount)
+                        return
+                    case .chunk(let chunk):
+                        chunkCount += 1
+                        let payload: [String: Any] = [
+                            "model": model,
+                            "created_at": ISO8601DateFormatter().string(from: Date()),
+                            "response": chunk.text,
+                            "done": false
+                        ]
+                        let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                        var buf = ByteBuffer()
+                        buf.writeBytes(jsonData)
+                        buf.writeString("\n")
+                        try await writer.write(buf)
+                    }
                 }
             } catch {
                 let msg = error.localizedDescription
@@ -1348,6 +1593,34 @@ public actor HummingbirdServer {
         case loadFailed(id: String, reason: String)
     }
 
+    /// Cheap, side-effect-free check (A1): can `requestedID` be resolved
+    /// to a model — either because it's already loaded, or the resolver
+    /// (directly or via alias) knows about it on disk? No load, no lock —
+    /// mirrors only the RESOLUTION half of `ensureModelLoaded` below.
+    ///
+    /// Used by the streaming responders to reject an unknown model with a
+    /// real 404 BEFORE any response headers are sent, matching the
+    /// non-streaming path (pre-fix, streaming requests for a nonexistent
+    /// model got a 200 with an in-band SSE/NDJSON error frame instead — a
+    /// regression introduced when SRV-2/SRV-3 moved the real swap inside
+    /// the `ResponseBody` closure). This is a pre-flight, not a guarantee:
+    /// a race where the model becomes unresolvable/evicted between this
+    /// check and the real (locked) resolve+load inside the closure still
+    /// surfaces as an in-band error frame — expected, and harmless, since
+    /// SRV-2's atomicity is unchanged.
+    private func canResolveModel(_ requestedID: String) async -> Bool {
+        if await engineProvider()?.loadedModel?.id == requestedID {
+            return true
+        }
+        if await modelResolver(requestedID) != nil {
+            return true
+        }
+        if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID) {
+            return await modelResolver(aliasID) != nil
+        }
+        return false
+    }
+
     /// Make sure the engine has `requestedID` loaded. No-op if it's
     /// already current. If another model is current, unload + load;
     /// if nothing is loaded, just load. If `requestedID` isn't on disk,
@@ -1367,7 +1640,7 @@ public actor HummingbirdServer {
             loadInFlight = nil
         }
 
-        if await engine.loadedModel?.id == requestedID {
+        if await engineProvider()?.loadedModel?.id == requestedID {
             return
         }
 
@@ -1388,7 +1661,7 @@ public actor HummingbirdServer {
         // An alias may point at the model that is already loaded; skip
         // the swap in that case (the id-equality early return above only
         // catches a request naming the directory id directly).
-        if await engine.loadedModel?.id == target.id {
+        if await engineProvider()?.loadedModel?.id == target.id {
             return
         }
 
@@ -1396,14 +1669,19 @@ public actor HummingbirdServer {
         // callers to await. Errors propagate via the Task's value.
         // When a loadHook is installed (GUI path), route through it
         // so observable state (currentModel, status, callbacks) stays
-        // in sync. Otherwise fall back to raw engine calls (CLI path).
+        // in sync. Otherwise fall back to raw engine calls against
+        // whatever `engineProvider` currently resolves to (CLI path,
+        // where the provider is a fixed single engine — SRV-1).
         let hook = loadHook
-        let swapTask = Task { [engine] in
+        let provider = engineProvider
+        let swapTask = Task {
             if let hook {
                 try await hook(target)
-            } else {
+            } else if let engine = await provider() {
                 try? await engine.unload()
                 try await engine.load(target)
+            } else {
+                throw EngineError.modelNotLoaded
             }
         }
         loadInFlight = swapTask
@@ -1434,27 +1712,55 @@ public actor HummingbirdServer {
     }
 
     private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
-        // Serialise: MLX engine state isn't safe across overlapping
-        // generations. Release on ALL exit paths (success, catch, throw).
-        await acquireGenerationLock()
+        // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
+        // under it, and re-resolve the active engine (SRV-1). Release on
+        // ALL exit paths (success, catch, throw).
+        let engine: any InferenceEngine
+        do {
+            engine = try await beginGeneration(genRequest.model)
+        } catch let err as ModelSwapError {
+            return openAIStyleSwapErrorResponse(err)
+        } catch {
+            return errorResponse(status: .internalServerError, message: error.localizedDescription, code: "load_failed")
+        }
         defer { Task { [weak self] in await self?.releaseGenerationLock() } }
+
+        // POOL-3: mark the active model in-flight so a concurrent load
+        // can't LRU-evict it mid-generation.
+        let modelID = await engine.loadedModel?.id ?? genRequest.model
+        await markInFlight(modelID, true)
+        defer { Task { [weak self] in await self?.markInFlight(modelID, false) } }
 
         // Hop into the engine actor to call generate, then iterate the returned stream.
         let stream = await engine.generate(genRequest)
+        let box = ChunkIteratorBox(stream)
         var fullText = ""
         var finishReason = "stop"
         var promptTokens = 0
         var completionTokens = 0
 
         do {
-            for try await chunk in stream {
-                fullText += chunk.text
-                if let usage = chunk.usage {
-                    promptTokens = usage.promptTokens
-                    completionTokens = usage.completionTokens
-                }
-                if let reason = chunk.finishReason {
-                    finishReason = reason.rawValue
+            loop: while true {
+                switch try await nextGenerationStep(box, stallTimeout: stallTimeoutSeconds) {
+                case .finished:
+                    break loop
+                case .stalled:
+                    // SRV-4: no chunk for `stallTimeoutSeconds` — fail loudly
+                    // instead of hanging the client forever (issue #29).
+                    return errorResponse(
+                        status: .gatewayTimeout,
+                        message: "Generation stalled: no output for over \(Int(stallTimeoutSeconds))s.",
+                        code: "generation_stalled"
+                    )
+                case .chunk(let chunk):
+                    fullText += chunk.text
+                    if let usage = chunk.usage {
+                        promptTokens = usage.promptTokens
+                        completionTokens = usage.completionTokens
+                    }
+                    if let reason = chunk.finishReason {
+                        finishReason = reason.rawValue
+                    }
                 }
             }
         } catch {
@@ -1503,62 +1809,110 @@ public actor HummingbirdServer {
     }
 
     private func streamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
-        // Serialise streaming too — body closure runs outside the actor,
-        // so we acquire here and release inside the closure after the
-        // last chunk is written.
-        await acquireGenerationLock()
+        // A1: cheap pre-flight resolve check (no load, no lock) — reject
+        // an unknown model with a real 404 before any streaming headers
+        // are sent. The real (locked) resolve+load still happens inside
+        // the ResponseBody closure below; SRV-2 atomicity is unchanged.
+        let modelIsResolvable = await canResolveModel(genRequest.model)
+        if !modelIsResolvable {
+            return openAIStyleSwapErrorResponse(.modelNotFound(id: genRequest.model))
+        }
 
-        // Seed the streaming reasoning splitter: does the rendered prompt
-        // open a <think> block the model will continue (qwen3's template
-        // does)? This decides whether the first streamed token is
-        // reasoning even though the opening tag never appears in the
-        // stream (issue #30).
-        let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
-        let stream = await engine.generate(genRequest)
+        // Lock-scope invariant (SRV-2/SRV-3): acquire, cold-swap, and
+        // generate ALL happen inside the writer closure below, in the same
+        // scope as the `defer`-guaranteed release — see the invariant
+        // comment above `acquireGenerationLock()`. Headers are sent
+        // immediately (below); a cold-swap failure discovered inside the
+        // closure is reported as an in-band SSE error frame since the HTTP
+        // status can no longer change by that point.
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
         let model = genRequest.model
         let server = self
 
         let responseBody = ResponseBody { writer in
-            defer { Task { await server.releaseGenerationLock() } }
             var chunkCount = 0
-            var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
+
+            let engine: any InferenceEngine
             do {
-                for try await chunk in stream {
-                    chunkCount += 1
-                    let (reasoning, answer) = splitter.push(chunk.text)
-                    var delta: [String: Any] = [:]
-                    if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
-                    if !answer.isEmpty { delta["content"] = answer }
-                    if chunk.finishReason != nil {
-                        // Flush any buffered tail into this terminal chunk.
-                        let (rTail, aTail) = splitter.finish()
-                        let r = (delta["reasoning_content"] as? String ?? "") + rTail
-                        let a = (delta["content"] as? String ?? "") + aTail
-                        if !r.isEmpty { delta["reasoning_content"] = r }
-                        if !a.isEmpty { delta["content"] = a }
-                    } else if delta.isEmpty {
-                        // Chunk fully buffered as a partial tag — nothing to emit yet.
-                        continue
+                engine = try await server.beginGeneration(model)
+            } catch {
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("data: {\"error\":{\"message\":\"\(msg)\"}}\n\n")
+                try? await writer.write(buf)
+                var doneBuf = ByteBuffer()
+                doneBuf.writeString("data: [DONE]\n\n")
+                try? await writer.write(doneBuf)
+                try? await writer.finish(nil)
+                return
+            }
+            defer { Task { await server.releaseGenerationLock() } }
+
+            // POOL-3: mark the active model in-flight so a concurrent load
+            // can't LRU-evict it mid-generation.
+            let modelID = await engine.loadedModel?.id ?? model
+            await server.markInFlight(modelID, true)
+            defer { Task { await server.markInFlight(modelID, false) } }
+
+            // Seed the streaming reasoning splitter: does the rendered prompt
+            // open a <think> block the model will continue (qwen3's template
+            // does)? This decides whether the first streamed token is
+            // reasoning even though the opening tag never appears in the
+            // stream (issue #30).
+            let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            let stream = await engine.generate(genRequest)
+            let stallTimeout = await server.stallTimeoutSeconds
+            var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
+            let box = ChunkIteratorBox(stream)
+            do {
+                loop: while true {
+                    switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
+                    case .finished:
+                        break loop
+                    case .stalled:
+                        // SRV-4: no chunk for `stallTimeoutSeconds` — emit an
+                        // in-band SSE error then close (issue #29).
+                        let errPayload = "data: {\"error\":{\"message\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\",\"code\":\"generation_stalled\"}}\n\n"
+                        var buf = ByteBuffer()
+                        buf.writeString(errPayload)
+                        try? await writer.write(buf)
+                        break loop
+                    case .chunk(let chunk):
+                        chunkCount += 1
+                        let (reasoning, answer) = splitter.push(chunk.text)
+                        var delta: [String: Any] = [:]
+                        if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
+                        if !answer.isEmpty { delta["content"] = answer }
+                        if chunk.finishReason != nil {
+                            // Flush any buffered tail into this terminal chunk.
+                            let (rTail, aTail) = splitter.finish()
+                            let r = (delta["reasoning_content"] as? String ?? "") + rTail
+                            let a = (delta["content"] as? String ?? "") + aTail
+                            if !r.isEmpty { delta["reasoning_content"] = r }
+                            if !a.isEmpty { delta["content"] = a }
+                        } else if delta.isEmpty {
+                            // Chunk fully buffered as a partial tag — nothing to emit yet.
+                            continue
+                        }
+                        var choice: [String: Any] = ["index": 0, "delta": delta]
+                        if let reason = chunk.finishReason {
+                            choice["finish_reason"] = reason.rawValue
+                        }
+                        let payload: [String: Any] = [
+                            "id": completionID,
+                            "object": "chat.completion.chunk",
+                            "created": timestamp,
+                            "model": model,
+                            "choices": [choice],
+                        ]
+                        let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                        let jsonStr = String(decoding: jsonData, as: UTF8.self)
+                        let sseChunk = "data: \(jsonStr)\n\n"
+                        var buf = ByteBuffer()
+                        buf.writeString(sseChunk)
+                        try await writer.write(buf)
                     }
-                    var choice: [String: Any] = ["index": 0, "delta": delta]
-                    if let reason = chunk.finishReason {
-                        choice["finish_reason"] = reason.rawValue
-                    }
-                    let payload: [String: Any] = [
-                        "id": completionID,
-                        "object": "chat.completion.chunk",
-                        "created": timestamp,
-                        "model": model,
-                        "choices": [choice],
-                    ]
-                    let jsonData = try JSONSerialization.data(withJSONObject: payload)
-                    let jsonStr = String(decoding: jsonData, as: UTF8.self)
-                    let sseChunk = "data: \(jsonStr)\n\n"
-                    var buf = ByteBuffer()
-                    buf.writeString(sseChunk)
-                    try await writer.write(buf)
                 }
             } catch {
                 let msg = error.localizedDescription
@@ -1652,33 +2006,9 @@ public actor HummingbirdServer {
             templateKwargs: await templateKwargs(for: req.model)
         )
 
-        // Cold-swap (v0.3.3) — same resolve/load + error mapping as the
-        // OpenAI path. Missing model → 404, load failure → 500.
-        do {
-            try await ensureModelLoaded(req.model)
-        } catch let err as ModelSwapError {
-            switch err {
-            case .modelNotFound(let id):
-                return errorResponse(
-                    status: .notFound,
-                    message: "Model not found: \(id). Download it via `macmlx pull \(id)` or check `macmlx list`.",
-                    code: "model_not_found"
-                )
-            case .loadFailed(let id, let reason):
-                return errorResponse(
-                    status: .internalServerError,
-                    message: "Failed to load \(id): \(reason)",
-                    code: "load_failed"
-                )
-            }
-        } catch {
-            return errorResponse(
-                status: .internalServerError,
-                message: error.localizedDescription,
-                code: "load_failed"
-            )
-        }
-
+        // Cold-swap (SRV-2): resolved inside each responder, atomically with
+        // the generation lock — see `beginGeneration`. Missing model → 404,
+        // load failure → 500, both mapped by the responder itself.
         let wantsStream = req.stream ?? false
         if wantsStream {
             return try await anthropicStreamingResponse(genRequest: genRequest)
@@ -1692,26 +2022,50 @@ public actor HummingbirdServer {
     /// the answer is surfaced in `content[0]`), and emits Anthropic's
     /// message envelope.
     private func anthropicNonStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
-        // Serialise: MLX engine state isn't safe across overlapping
-        // generations. Release on ALL exit paths (success, catch, throw).
-        await acquireGenerationLock()
+        // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
+        // under it, and re-resolve the active engine (SRV-1). Release on
+        // ALL exit paths (success, catch, throw).
+        let engine: any InferenceEngine
+        do {
+            engine = try await beginGeneration(genRequest.model)
+        } catch let err as ModelSwapError {
+            return openAIStyleSwapErrorResponse(err)
+        } catch {
+            return errorResponse(status: .internalServerError, message: error.localizedDescription, code: "load_failed")
+        }
         defer { Task { [weak self] in await self?.releaseGenerationLock() } }
 
+        let modelID = await engine.loadedModel?.id ?? genRequest.model
+        await markInFlight(modelID, true)
+        defer { Task { [weak self] in await self?.markInFlight(modelID, false) } }
+
         let stream = await engine.generate(genRequest)
+        let box = ChunkIteratorBox(stream)
         var fullText = ""
         var finishReason: FinishReason?
         var promptTokens = 0
         var completionTokens = 0
 
         do {
-            for try await chunk in stream {
-                fullText += chunk.text
-                if let usage = chunk.usage {
-                    promptTokens = usage.promptTokens
-                    completionTokens = usage.completionTokens
-                }
-                if let reason = chunk.finishReason {
-                    finishReason = reason
+            loop: while true {
+                switch try await nextGenerationStep(box, stallTimeout: stallTimeoutSeconds) {
+                case .finished:
+                    break loop
+                case .stalled:
+                    return errorResponse(
+                        status: .gatewayTimeout,
+                        message: "Generation stalled: no output for over \(Int(stallTimeoutSeconds))s.",
+                        code: "generation_stalled"
+                    )
+                case .chunk(let chunk):
+                    fullText += chunk.text
+                    if let usage = chunk.usage {
+                        promptTokens = usage.promptTokens
+                        completionTokens = usage.completionTokens
+                    }
+                    if let reason = chunk.finishReason {
+                        finishReason = reason
+                    }
                 }
             }
         } catch {
@@ -1755,26 +2109,53 @@ public actor HummingbirdServer {
     /// MVP (matching the non-streaming path). The generation lock is held
     /// for the whole body and released in `defer`.
     private func anthropicStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
-        await acquireGenerationLock()
+        // A1: cheap pre-flight resolve check (no load, no lock) — reject
+        // an unknown model with a real 404 before any streaming headers
+        // are sent. The real (locked) resolve+load still happens inside
+        // the ResponseBody closure below; SRV-2 atomicity is unchanged.
+        let modelIsResolvable = await canResolveModel(genRequest.model)
+        if !modelIsResolvable {
+            return openAIStyleSwapErrorResponse(.modelNotFound(id: genRequest.model))
+        }
 
-        // Seed the reasoning splitter — does the rendered prompt open a
-        // <think> block the model continues (qwen3)? Reasoning is dropped
-        // for the Anthropic MVP, so this only affects which text counts as
-        // the answer, never a separate surfaced block.
-        let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
-        let stream = await engine.generate(genRequest)
+        // Lock-scope invariant (SRV-2/SRV-3): acquire, cold-swap, and
+        // generate ALL happen inside the writer closure below.
         let messageID = "msg_\(UUID().uuidString)"
         let model = genRequest.model
         let server = self
 
         let responseBody = ResponseBody { writer in
-            defer { Task { await server.releaseGenerationLock() } }
-
             var chunkCount = 0
             var completionTokens = 0
             var promptTokens = 0
             var finishReason: FinishReason?
+
+            let engine: any InferenceEngine
+            do {
+                engine = try await server.beginGeneration(model)
+            } catch {
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "\\\"")
+                var buf = ByteBuffer()
+                buf.writeString("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"\(msg)\"}}\n\n")
+                try? await writer.write(buf)
+                try? await writer.finish(nil)
+                return
+            }
+            defer { Task { await server.releaseGenerationLock() } }
+
+            let modelID = await engine.loadedModel?.id ?? model
+            await server.markInFlight(modelID, true)
+            defer { Task { await server.markInFlight(modelID, false) } }
+
+            // Seed the reasoning splitter — does the rendered prompt open a
+            // <think> block the model continues (qwen3)? Reasoning is dropped
+            // for the Anthropic MVP, so this only affects which text counts as
+            // the answer, never a separate surfaced block.
+            let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            let stream = await engine.generate(genRequest)
+            let stallTimeout = await server.stallTimeoutSeconds
             var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
+            let box = ChunkIteratorBox(stream)
 
             do {
                 // 1. message_start
@@ -1806,29 +2187,41 @@ public actor HummingbirdServer {
                 ])
 
                 // 3. content_block_delta per answer delta.
-                for try await chunk in stream {
-                    chunkCount += 1
-                    if let usage = chunk.usage {
-                        completionTokens = usage.completionTokens
-                        promptTokens = usage.promptTokens
+                stallLoop: while true {
+                    switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
+                    case .finished:
+                        break stallLoop
+                    case .stalled:
+                        // SRV-4: no chunk for `stallTimeoutSeconds` — emit an
+                        // in-band error event then close (issue #29).
+                        var buf = ByteBuffer()
+                        buf.writeString("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\"}}\n\n")
+                        try? await writer.write(buf)
+                        break stallLoop
+                    case .chunk(let chunk):
+                        chunkCount += 1
+                        if let usage = chunk.usage {
+                            completionTokens = usage.completionTokens
+                            promptTokens = usage.promptTokens
+                        }
+                        let (_, answer) = splitter.push(chunk.text)
+                        var text = answer
+                        if let reason = chunk.finishReason {
+                            finishReason = reason
+                            // Flush any buffered tail into this terminal chunk.
+                            let (_, aTail) = splitter.finish()
+                            text += aTail
+                        }
+                        guard !text.isEmpty else { continue }
+                        try await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": [
+                                "type": "text_delta",
+                                "text": text,
+                            ] as [String: Any],
+                        ])
                     }
-                    let (_, answer) = splitter.push(chunk.text)
-                    var text = answer
-                    if let reason = chunk.finishReason {
-                        finishReason = reason
-                        // Flush any buffered tail into this terminal chunk.
-                        let (_, aTail) = splitter.finish()
-                        text += aTail
-                    }
-                    guard !text.isEmpty else { continue }
-                    try await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": [
-                            "type": "text_delta",
-                            "text": text,
-                        ] as [String: Any],
-                    ])
                 }
             } catch {
                 let msg = error.localizedDescription
@@ -1915,6 +2308,13 @@ public actor HummingbirdServer {
             architecture: nil
         )
 
+        guard let engine = await engineProvider() else {
+            return errorResponse(
+                status: .internalServerError,
+                message: "No active engine to load into",
+                code: "load_failed"
+            )
+        }
         let start = Date()
         do {
             try await engine.load(model)
@@ -1938,6 +2338,9 @@ public actor HummingbirdServer {
         request: Request,
         context: BasicRequestContext
     ) async throws -> Response {
+        guard let engine = await engineProvider() else {
+            return try jsonResponse(["status": "unloaded"])
+        }
         do {
             try await engine.unload()
         } catch {
@@ -2213,6 +2616,78 @@ public actor HummingbirdServer {
             headers: headers,
             body: .init(byteBuffer: ByteBuffer(bytes: data))
         )
+    }
+}
+
+// MARK: - Stall watchdog (SRV-4)
+
+/// Outcome of racing a generation stream's `next()` against the stall
+/// deadline. `.stalled` means `stallTimeout` elapsed with no new chunk —
+/// an inter-chunk GAP, not total duration, so a long generation that keeps
+/// producing tokens is never killed.
+private enum GenerationStep {
+    case chunk(GenerateChunk)
+    case finished
+    case stalled
+}
+
+/// Reference-type wrapper around a generation stream's iterator so it can
+/// be driven from inside a `TaskGroup` child task — an `inout` local
+/// iterator can't cross that boundary, and `AsyncThrowingStream.AsyncIterator`
+/// is a struct. `@unchecked Sendable`: by construction only one `next()`
+/// call is ever in flight on a given box at a time (`nextGenerationStep`
+/// awaits it to completion — including via cancellation — before another
+/// caller could invoke `next()` again).
+private final class ChunkIteratorBox: @unchecked Sendable {
+    private var iterator: AsyncThrowingStream<GenerateChunk, Error>.AsyncIterator
+    init(_ stream: AsyncThrowingStream<GenerateChunk, Error>) {
+        self.iterator = stream.makeAsyncIterator()
+    }
+    func next() async throws -> GenerateChunk? {
+        try await iterator.next()
+    }
+}
+
+/// Advance `box` by one chunk, racing it against `stallTimeout` seconds of
+/// silence (SRV-4 / issue #29). Free function (not an actor method) so it
+/// can run inside the `ResponseBody` writer closure, which executes outside
+/// actor isolation — mirrors `writeAnthropicSSE` below. `stallTimeout <= 0`
+/// disables the watchdog (waits with no timeout — pre-SRV-4 behaviour).
+///
+/// On `.stalled`, the still-pending `box.next()` child task is cancelled
+/// via `group.cancelAll()`. Cancelling the task that's awaiting an
+/// `AsyncThrowingStream`'s `next()` causes that stream to treat the
+/// iteration as terminated and invoke its `onTermination` handler — which
+/// is how `MLXSwiftEngine.generate` (POOL-2) learns to stop the underlying
+/// generation instead of burning GPU on an abandoned request.
+private func nextGenerationStep(
+    _ box: ChunkIteratorBox,
+    stallTimeout: TimeInterval
+) async throws -> GenerationStep {
+    // A4: clamp before the nanosecond conversion. `stallTimeout` traces
+    // back to `SettingsManager.generationStallTimeoutSeconds` (a
+    // user/settings-configurable `Int`) — an absurd or corrupted value
+    // would make `stallTimeout * 1_000_000_000` exceed `UInt64.max`, and
+    // `UInt64(_:)` on an out-of-range `Double` traps instead of clamping.
+    // Floor at 0 (still "disabled" via the guard below); cap at 24h — a
+    // generous ceiling no legitimate stall timeout should ever need.
+    let clampedTimeout = min(max(stallTimeout, 0), 86_400)
+    guard clampedTimeout > 0 else {
+        if let chunk = try await box.next() { return .chunk(chunk) }
+        return .finished
+    }
+    return try await withThrowingTaskGroup(of: GenerationStep.self) { group in
+        group.addTask {
+            if let chunk = try await box.next() { return .chunk(chunk) }
+            return .finished
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(clampedTimeout * 1_000_000_000))
+            return .stalled
+        }
+        guard let first = try await group.next() else { return .finished }
+        group.cancelAll()
+        return first
     }
 }
 

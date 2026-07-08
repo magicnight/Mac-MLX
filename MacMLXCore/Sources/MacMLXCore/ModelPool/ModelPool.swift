@@ -162,14 +162,21 @@ public actor ModelPool {
         entries.removeValue(forKey: modelID)
     }
 
-    /// Evict LRU non-pinned entries until (currentBytes + incoming) fits.
+    /// Evict LRU non-pinned, non-generating entries until (currentBytes +
+    /// incoming) fits. Skipping `isGenerating` mirrors the guard
+    /// `sweepIdle` already applies (POOL-3) — without it, a concurrent
+    /// `load(_:)` (GUI cold-swap, or another server request) could evict a
+    /// model out from under an in-flight generation: bytes not actually
+    /// freed (ARC keeps weights alive via the generation's captured
+    /// container) so the budget is silently violated, and the entry
+    /// disappearing feeds POOL-1 stale-ready / SRV-1 bricking.
     private func evict(toFit incoming: Int64) {
         var target = maxBytes - incoming
         if target < 0 { target = 0 }
 
-        // Candidates: non-pinned, oldest first.
+        // Candidates: non-pinned, non-generating, oldest first.
         let candidates = entries.values
-            .filter { !$0.isPinned }
+            .filter { !$0.isPinned && !$0.isGenerating }
             .sorted { $0.lastAccess < $1.lastAccess }
 
         var current = currentResidentBytes()
