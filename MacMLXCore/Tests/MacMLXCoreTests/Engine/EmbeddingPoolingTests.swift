@@ -4,32 +4,8 @@ import Testing
 
 @testable import MLXEmbedders
 
-/// Anchor for locating the host (`.xctest`) bundle via `Bundle(for:)`.
-private final class BundleToken {}
-
-/// True when mlx-swift's Metal library (`default.metallib`) is reachable, so
-/// real `MLXArray` evaluation can run without aborting the process.
-///
-/// mlx-swift ships its Metal kernels in a nested `mlx-swift_Cmlx.bundle`
-/// resource bundle. `xcodebuild` embeds it under the `.xctest` bundle's
-/// `Resources`; bare `swift test` binaries frequently omit it. Gate
-/// MLX-touching tests on this so they run under `xcodebuild` and skip cleanly
-/// under `swift test`. (The `Bundle(identifier:)`/`allBundles` fallbacks mirror
-/// the other MLX-gated suites, but those miss a resource-only bundle that has
-/// not been code-loaded — hence the primary nested-bundle lookup.)
-private let metallibIsAvailable: Bool = {
-    func hasMetallib(_ bundle: Bundle?) -> Bool {
-        bundle?.url(forResource: "default", withExtension: "metallib") != nil
-    }
-    let host = Bundle(for: BundleToken.self)
-    if let nested = host.url(forResource: "mlx-swift_Cmlx", withExtension: "bundle"),
-        hasMetallib(Bundle(url: nested))
-    {
-        return true
-    }
-    if hasMetallib(Bundle(identifier: "mlx-swift_Cmlx.resources")) { return true }
-    return Bundle.allBundles.contains { $0.bundlePath.contains("Cmlx") && hasMetallib($0) }
-}()
+// Metallib availability gating lives in Helpers/MLXTestSupport.swift
+// (`mlxMetallibIsAvailable`) — shared with the other MLX-gated suites.
 
 /// Regression coverage for `EmbeddingEngine.embed`'s pooling call.
 ///
@@ -49,7 +25,7 @@ struct EmbeddingPoolingTests {
 
     @Test(
         "Padding is excluded only when the mask is passed to pooling",
-        .enabled(if: metallibIsAvailable, "Requires default.metallib (run under xcodebuild)"),
+        .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"),
         arguments: [Pooling.Strategy.mean, Pooling.Strategy.last]
     )
     func poolingExcludesPaddingOnlyWithMask(strategy: Pooling.Strategy) {

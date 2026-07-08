@@ -68,7 +68,7 @@ final class DeepseekV32DecoderLayerParityTests: XCTestCase {
     /// matches the Python reference within 1e-4. Exercises attention +
     /// residuals + both layer norms + the dense MLP end-to-end.
     func testDenseDecoderLayerMatchesPythonReference() throws {
-        try requireMLXRuntimeOrSkip()
+        try requireTrustworthyMetalOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(
