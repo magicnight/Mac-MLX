@@ -38,7 +38,7 @@ final class DeepseekV32IndexerParityTests: XCTestCase {
     }
 
     func testMatchesPythonReferenceTopKSelection() throws {
-        try requireMLXRuntimeOrSkip()
+        try requireTrustworthyMetalOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(

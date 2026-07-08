@@ -39,8 +39,12 @@ struct DeepseekV32RegistrationTests {
         #expect(await LLMTypeRegistry.shared.contains(Self.modelType) == true)
     }
 
-    @Test
+    @Test(.enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
     func factoryInstantiatesDeepseekV32FromConfig() async throws {
+        // Instantiating DeepseekV32Model creates real MLXArrays (Linear /
+        // Embedding inits) — fatal under bare `swift test` without the
+        // metallib, hence the trait gate. The two registry-only tests above
+        // never invoke the creator, so they stay ungated.
         await ModelOverlay.registerAll()
 
         // A minimal `config.json` slice; `createModel` is exactly what

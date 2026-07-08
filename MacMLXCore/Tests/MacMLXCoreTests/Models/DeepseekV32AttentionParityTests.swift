@@ -47,7 +47,7 @@ final class DeepseekV32AttentionParityTests: XCTestCase {
     /// reference. Shared by the prefill (S2.1) and sparse-prefill (S2.2)
     /// cases — they differ only in the fixture (s ≤ vs > index_topk).
     private func assertAttentionParity(fixture: String, _ label: String) throws {
-        try requireMLXRuntimeOrSkip()
+        try requireTrustworthyMetalOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(
@@ -107,7 +107,7 @@ final class DeepseekV32AttentionParityTests: XCTestCase {
     /// output. Fixture `attn_decode_fixture.safetensors` — see
     /// `docs/reference/capture_attention_decode.py`.
     func testDecodeStepMatchesPythonReference() throws {
-        try requireMLXRuntimeOrSkip()
+        try requireTrustworthyMetalOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(
