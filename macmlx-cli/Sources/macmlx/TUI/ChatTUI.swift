@@ -17,7 +17,8 @@ enum ChatTUI {
     static func run(
         engine: any InferenceEngine,
         model: LocalModel,
-        system: String?
+        system: String?,
+        templateKwargs: [String: JSONValue]? = nil
     ) async throws {
         let width = 54
         print(CLITerm.boxHeader("macmlx run — \(model.displayName)", width: width))
@@ -40,7 +41,8 @@ enum ChatTUI {
                 model: model.id,
                 messages: conversationMessages,
                 systemPrompt: system,
-                parameters: GenerationParameters()
+                parameters: GenerationParameters(),
+                templateKwargs: templateKwargs
             )
 
             var responseText = ""

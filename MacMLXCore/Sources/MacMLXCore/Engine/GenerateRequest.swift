@@ -70,17 +70,26 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     public let messages: [ChatMessage]
     public let systemPrompt: String?
     public var parameters: GenerationParameters
+    /// Optional per-model chat-template kwargs (v0.5.1) forwarded to the
+    /// Jinja chat template as `additionalContext` — e.g.
+    /// `{"enable_thinking": true}` for Qwen3. Stored as `JSONValue` (not
+    /// `[String: any Sendable]`) so `GenerateRequest` keeps its
+    /// synthesised `Codable` / `Hashable`; the engine unwraps to the
+    /// tokenizer's `Sendable` shape at the `UserInput` boundary.
+    public var templateKwargs: [String: JSONValue]?
 
     public init(
         model: String,
         messages: [ChatMessage],
         systemPrompt: String? = nil,
-        parameters: GenerationParameters = .init()
+        parameters: GenerationParameters = .init(),
+        templateKwargs: [String: JSONValue]? = nil
     ) {
         self.model = model
         self.messages = messages
         self.systemPrompt = systemPrompt
         self.parameters = parameters
+        self.templateKwargs = templateKwargs
     }
 
     /// Messages with the system prompt (if any) prepended.

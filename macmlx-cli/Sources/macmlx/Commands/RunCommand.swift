@@ -49,7 +49,7 @@ struct RunCommand: AsyncParsableCommand {
         // who configured the model's temperature/top_p/system prompt in
         // the GUI sees those same defaults here unless they override
         // with explicit `--` flags.
-        let (params, resolvedSystem) = await ctx.resolveParameters(
+        let (params, resolvedSystem, templateKwargs) = await ctx.resolveParameters(
             for: local.id,
             explicitTemperature: temperature,
             explicitMaxTokens: maxTokens,
@@ -64,18 +64,29 @@ struct RunCommand: AsyncParsableCommand {
                 engine: engine,
                 model: local,
                 params: params,
-                system: resolvedSystem
+                system: resolvedSystem,
+                templateKwargs: templateKwargs
             )
         } else if TTYDetect.isInteractive {
-            // Interactive TUI/REPL mode — plain stdin REPL (see #18)
-            try await ChatTUI.run(engine: engine, model: local, system: resolvedSystem)
+            // Interactive TUI/REPL mode — plain stdin REPL (see #18).
+            // Per-model template kwargs (v0.5.1) are threaded through so e.g.
+            // Qwen3's `enable_thinking` applies in interactive chat. (ChatTUI
+            // still builds its own default GenerationParameters — temperature
+            // / max-tokens overrides remain a follow-up.)
+            try await ChatTUI.run(
+                engine: engine,
+                model: local,
+                system: resolvedSystem,
+                templateKwargs: templateKwargs
+            )
         } else {
             // Non-interactive stdin mode: read lines until EOF
             try await runStdinLoop(
                 engine: engine,
                 model: local,
                 params: params,
-                system: resolvedSystem
+                system: resolvedSystem,
+                templateKwargs: templateKwargs
             )
         }
     }
@@ -87,14 +98,16 @@ struct RunCommand: AsyncParsableCommand {
         engine: any InferenceEngine,
         model: LocalModel,
         params: GenerationParameters,
-        system: String?
+        system: String?,
+        templateKwargs: [String: JSONValue]?
     ) async throws {
         let messages = [ChatMessage(role: .user, content: prompt)]
         let request = GenerateRequest(
             model: model.id,
             messages: messages,
             systemPrompt: system,
-            parameters: params
+            parameters: params,
+            templateKwargs: templateKwargs
         )
 
         var fullResponse = ""
@@ -139,7 +152,8 @@ struct RunCommand: AsyncParsableCommand {
         engine: any InferenceEngine,
         model: LocalModel,
         params: GenerationParameters,
-        system: String?
+        system: String?,
+        templateKwargs: [String: JSONValue]?
     ) async throws {
         while let line = readLine(strippingNewline: true) {
             guard !line.isEmpty else { continue }
@@ -149,7 +163,8 @@ struct RunCommand: AsyncParsableCommand {
                 model: model.id,
                 messages: messages,
                 systemPrompt: system,
-                parameters: params
+                parameters: params,
+                templateKwargs: templateKwargs
             )
 
             var fullResponse = ""

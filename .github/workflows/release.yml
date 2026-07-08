@@ -162,7 +162,7 @@ jobs:
         # Always run (unless a prior required step hard-failed) so the
         # DMG gets published even if the appcast push raced with main.
         if: always()
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.dmg

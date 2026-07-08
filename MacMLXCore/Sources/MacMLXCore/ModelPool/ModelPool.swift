@@ -70,6 +70,19 @@ public actor ModelPool {
         entries[modelID]?.isPinned ?? false
     }
 
+    /// Mark `id` as having an in-flight generation (or clear the mark).
+    /// While `isGenerating` is true the entry is exempt from `sweepIdle`,
+    /// so a concurrent `load(_:)`'s idle sweep can't unload a model that
+    /// is actively streaming (v0.5.1 A4). Setting `active == true` also
+    /// refreshes `lastAccess`, so a just-started generation counts as
+    /// fresh for LRU/TTL purposes. No-op when `id` isn't resident.
+    public func setGenerating(_ id: String, _ active: Bool) {
+        guard var entry = entries[id] else { return }
+        entry.isGenerating = active
+        if active { entry.lastAccess = Date() }
+        entries[id] = entry
+    }
+
     public func unload(_ modelID: String) async {
         if let e = engines.removeValue(forKey: modelID) {
             try? await e.unload()
@@ -81,7 +94,10 @@ public actor ModelPool {
     /// entry when possible. Evicts LRU entries as needed to stay
     /// within `maxBytes`. Concurrent loads of the same ID share.
     @discardableResult
-    public func load(_ model: LocalModel) async throws -> any InferenceEngine {
+    public func load(
+        _ model: LocalModel,
+        ttlSeconds: Int? = nil
+    ) async throws -> any InferenceEngine {
         // Already loaded? Touch and return.
         if let e = engines[model.id] {
             if var entry = entries[model.id] {
@@ -94,6 +110,13 @@ public actor ModelPool {
         if let pending = loadTasks[model.id] {
             return try await pending.value
         }
+
+        // Reclaim idle models past their TTL before we take the byte
+        // budget into account (v0.5.1). Safe here: `model.id` is not
+        // resident (guarded above), so this can never sweep the model
+        // we're about to load. Sweep-on-load is the MVP — a background
+        // timer is a deliberate follow-up.
+        sweepIdle()
 
         // Evict to fit before starting the load, using the model's
         // sizeBytes (or our estimate) as the cost.
@@ -113,7 +136,8 @@ public actor ModelPool {
             engines[model.id] = engine
             entries[model.id] = PooledEngineEntry(
                 modelID: model.id,
-                estimatedBytes: cost
+                estimatedBytes: cost,
+                ttlSeconds: ttlSeconds
             )
             return engine
         } catch {
@@ -128,24 +152,60 @@ public actor ModelPool {
         entries.values.map(\.estimatedBytes).reduce(0, +)
     }
 
-    /// Evict LRU non-pinned entries until (currentBytes + incoming) fits.
+    /// Drop `modelID` from the resident set and fire-and-forget its
+    /// async unload. Shared by `evict(toFit:)` and `sweepIdle(now:)`,
+    /// both of which are synchronous and can't await per victim.
+    private func removeAndUnload(_ modelID: String) {
+        if let e = engines.removeValue(forKey: modelID) {
+            Task { try? await e.unload() }
+        }
+        entries.removeValue(forKey: modelID)
+    }
+
+    /// Evict LRU non-pinned, non-generating entries until (currentBytes +
+    /// incoming) fits. Skipping `isGenerating` mirrors the guard
+    /// `sweepIdle` already applies (POOL-3) — without it, a concurrent
+    /// `load(_:)` (GUI cold-swap, or another server request) could evict a
+    /// model out from under an in-flight generation: bytes not actually
+    /// freed (ARC keeps weights alive via the generation's captured
+    /// container) so the budget is silently violated, and the entry
+    /// disappearing feeds POOL-1 stale-ready / SRV-1 bricking.
     private func evict(toFit incoming: Int64) {
         var target = maxBytes - incoming
         if target < 0 { target = 0 }
 
-        // Candidates: non-pinned, oldest first.
+        // Candidates: non-pinned, non-generating, oldest first.
         let candidates = entries.values
-            .filter { !$0.isPinned }
+            .filter { !$0.isPinned && !$0.isGenerating }
             .sorted { $0.lastAccess < $1.lastAccess }
 
         var current = currentResidentBytes()
         var iterator = candidates.makeIterator()
         while current > target, let victim = iterator.next() {
-            if let e = engines.removeValue(forKey: victim.modelID) {
-                Task { try? await e.unload() }
-            }
-            entries.removeValue(forKey: victim.modelID)
+            removeAndUnload(victim.modelID)
             current -= victim.estimatedBytes
+        }
+    }
+
+    /// Unload every non-pinned, non-generating resident model whose
+    /// `ttlSeconds` is set and whose idle time (`now - lastAccess`)
+    /// exceeds it — even while inside the byte budget (v0.5.1). Pinned,
+    /// in-flight (`isGenerating`), and nil-TTL entries are never swept.
+    /// Called at the top of `load(_:)`; `now` is injectable for tests.
+    ///
+    /// Mid-use hazard (A4) — now handled: `lastAccess` is refreshed on
+    /// `engine(for:)` / `load()` but NOT during a long-running generation,
+    /// so a concurrent `load(_:)`'s sweep could otherwise unload a model
+    /// that is actively streaming. `EngineCoordinator.generate` marks the
+    /// entry via `setGenerating(_:_:)` around the stream, and the filter
+    /// below skips any entry with `isGenerating == true`.
+    public func sweepIdle(now: Date = Date()) {
+        let expired = entries.values.filter { entry in
+            guard !entry.isPinned, !entry.isGenerating, let ttl = entry.ttlSeconds else { return false }
+            return now.timeIntervalSince(entry.lastAccess) > Double(ttl)
+        }
+        for victim in expired {
+            removeAndUnload(victim.modelID)
         }
     }
 }

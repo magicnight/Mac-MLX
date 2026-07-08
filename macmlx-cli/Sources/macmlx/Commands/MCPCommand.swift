@@ -45,6 +45,7 @@ struct MCPServeCommand: AsyncParsableCommand {
         // engine; the bridge swaps the loaded model lazily.
         let bridge = MCPBridge(
             library: library,
+            paramStore: ctx.paramStore,
             engineFactory: { try ctx.makeEngine() }
         )
 

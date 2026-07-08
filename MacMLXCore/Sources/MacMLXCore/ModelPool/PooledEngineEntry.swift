@@ -14,17 +14,30 @@ public struct PooledEngineEntry: Sendable, Equatable {
     public var lastAccess: Date
     /// Pinned entries are never evicted by the LRU sweeper.
     public var isPinned: Bool
+    /// Optional idle time-to-live in seconds (v0.5.1). When set,
+    /// `ModelPool.sweepIdle(now:)` unloads this entry once it has been
+    /// idle longer than `ttlSeconds` — even within the byte budget.
+    /// `nil` means "never idle-unload"; pinned entries are exempt.
+    public var ttlSeconds: Int?
+    /// In-flight marker (v0.5.1 A4). `true` while a generation is actively
+    /// streaming against this entry's engine. `ModelPool.sweepIdle(now:)`
+    /// never unloads an entry with `isGenerating == true`, so a concurrent
+    /// `load(_:)`'s idle sweep can't evict a model mid-stream. Toggled by
+    /// `ModelPool.setGenerating(_:_:)` around the generation.
+    public var isGenerating: Bool = false
 
     public init(
         modelID: String,
         estimatedBytes: Int64,
         lastAccess: Date = Date(),
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        ttlSeconds: Int? = nil
     ) {
         self.modelID = modelID
         self.estimatedBytes = estimatedBytes
         self.lastAccess = lastAccess
         self.isPinned = isPinned
+        self.ttlSeconds = ttlSeconds
     }
 }
 

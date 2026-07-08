@@ -33,26 +33,50 @@ public struct ModelParameters: Codable, Hashable, Sendable {
     /// adapter" — matches how the parameters inspector represents
     /// the "None" pick.
     public var adapterName: String?
+    /// Optional user-facing alias for this model (v0.5.1). When set,
+    /// `GET /v1/models` reports the alias as the model `id`, and
+    /// chat / messages / completions requests may name the model by
+    /// this alias in addition to its on-disk directory id. Empty
+    /// string is treated identically to `nil` ("no alias").
+    public var alias: String?
+    /// Optional idle time-to-live in seconds (v0.5.1). When set, the
+    /// model pool unloads this model once it has been idle longer than
+    /// `ttlSeconds`, even while inside the byte budget (pinned models
+    /// are exempt). `nil` means "never idle-unload".
+    public var ttlSeconds: Int?
+    /// Optional free-form chat-template kwargs (v0.5.1) forwarded to the
+    /// Jinja chat template as `additionalContext` — e.g.
+    /// `{"enable_thinking": true}` for Qwen3. `nil` means "no extra
+    /// context".
+    public var templateKwargs: [String: JSONValue]?
 
     public init(
         temperature: Double = 0.7,
         topP: Double = 0.95,
         maxTokens: Int = 2048,
         systemPrompt: String = "You are a helpful assistant.",
-        adapterName: String? = nil
+        adapterName: String? = nil,
+        alias: String? = nil,
+        ttlSeconds: Int? = nil,
+        templateKwargs: [String: JSONValue]? = nil
     ) {
         self.temperature = temperature
         self.topP = topP
         self.maxTokens = maxTokens
         self.systemPrompt = systemPrompt
         self.adapterName = adapterName
+        self.alias = alias
+        self.ttlSeconds = ttlSeconds
+        self.templateKwargs = templateKwargs
     }
 
     /// Backwards-compatible decoder. Pre-v0.5 JSON has no
-    /// `adapterName` key — default to nil so existing per-model
-    /// override files load unchanged.
+    /// `adapterName` key, and pre-v0.5.1 JSON has no `alias` /
+    /// `ttlSeconds` / `templateKwargs` keys — default to nil so
+    /// existing per-model override files load unchanged.
     private enum CodingKeys: String, CodingKey {
         case temperature, topP, maxTokens, systemPrompt, adapterName
+        case alias, ttlSeconds, templateKwargs
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,6 +86,9 @@ public struct ModelParameters: Codable, Hashable, Sendable {
         self.maxTokens = try c.decode(Int.self, forKey: .maxTokens)
         self.systemPrompt = try c.decode(String.self, forKey: .systemPrompt)
         self.adapterName = try c.decodeIfPresent(String.self, forKey: .adapterName)
+        self.alias = try c.decodeIfPresent(String.self, forKey: .alias)
+        self.ttlSeconds = try c.decodeIfPresent(Int.self, forKey: .ttlSeconds)
+        self.templateKwargs = try c.decodeIfPresent([String: JSONValue].self, forKey: .templateKwargs)
     }
 
     /// Factory for the factory defaults — handy in "Reset" buttons.
@@ -120,6 +147,34 @@ public actor ModelParametersStore {
     /// Remove stored overrides for `modelID`. Idempotent.
     public func reset(for modelID: String) async {
         try? fileManager.removeItem(at: fileURL(for: modelID))
+    }
+
+    /// Scan the params directory for an override whose `alias` equals
+    /// `alias`, returning that override's model ID (the decoded
+    /// filename). Returns `nil` when no override declares this alias.
+    /// Lets the server resolve a chat / messages / completions request
+    /// that names a model by its user-facing alias (v0.5.1). An empty
+    /// `alias` never matches — empty is "no alias".
+    public func modelID(forAlias alias: String) async -> String? {
+        guard !alias.isEmpty else { return nil }
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        for url in files.sorted(by: { $0.path < $1.path }) where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let params = try? decoder.decode(ModelParameters.self, from: data),
+                  params.alias == alias else {
+                continue
+            }
+            // Recover the model ID from the percent-encoded filename.
+            let encoded = url.deletingPathExtension().lastPathComponent
+            return encoded.removingPercentEncoding ?? encoded
+        }
+        return nil
     }
 
     // MARK: - Private

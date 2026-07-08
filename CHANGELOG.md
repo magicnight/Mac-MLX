@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **MCP client pool** (v0.5 MCP track, part 2 of 2). `MCPClientPool`
+  actor spawns each configured `mcpServers` entry as a subprocess,
+  speaks MCP over stdio via swift-sdk's `StdioTransport`, and exposes
+  `connectAll` / `listAllTools` / `callTool` / `disconnectAll` for the
+  chat-side tool router. Partial failures are tolerated (a broken
+  server logs to stderr without taking the pool down). Two dead-server
+  robustness fixes: a process-wide `SIGPIPE` ignore, and a connect
+  timeout + `disconnect()` working around a swift-sdk 0.12.1 busy-loop
+  when a spawned server dies before `initialize`. (PR #45)
+- **API reasoning separation** (issue #30). Reasoning models' `<think>`
+  chain-of-thought now goes in the response's `reasoning_content` field
+  (DeepSeek / mlx-lm / LM Studio convention) instead of leaking into
+  `content`, for both non-streaming and streaming `/v1/chat/completions`.
+  `MessageSegmenter.splitReasoning` (whole-text) + `ReasoningStreamSplitter`
+  (incremental, handles `<think>` tags split across stream chunks) + a
+  new `InferenceEngine.promptOpensThinkBlock` that seeds the streaming
+  splitter from whether the chat template opened a `<think>` block
+  (qwen3's implicit opener). Non-reasoning models are untouched. (PR #46)
+
+### Changed
+- **Release workflow bumped to `softprops/action-gh-release@v3`**
+  (Node.js 24), clearing the Node 20 deprecation warning. (PR #43)
+
 ---
 
 ## [0.5.0] - 2026-05-10
@@ -235,8 +259,7 @@ is in place; STT / TTS runtime lands in v0.6.
     green. Real VLM smoke (loading e.g. SmolVLM-Instruct-4bit) is
     a manual-QA item — multi-GB download.
   - Image picker, multimodal HTTP, and conversation persistence
-    land in the v0.4.1 part-3 PR. Plan:
-    `docs/superpowers/plans/2026-05-10-v0.4.1-vlm.md`.
+    land in the v0.4.1 part-3 PR.
 - **VLM Foundation** (v0.4.1, part 1 of 3). Pure-Swift Core changes
   for vision-language model support. No MLX integration yet, no UI,
   no HTTP changes.
@@ -256,8 +279,7 @@ is in place; STT / TTS runtime lands in v0.6.
     `.mlx`. 13 new unit tests cover detection edge cases.
   - Engine integration (MLXSwiftEngine VLM branch via
     `MLXVLM.VLMModelFactory`) and UI / HTTP work land in follow-up
-    PRs — see
-    `docs/superpowers/plans/2026-05-10-v0.4.1-vlm.md`.
+    PRs.
 
 ---
 

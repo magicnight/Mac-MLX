@@ -343,7 +343,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         _ request: GenerateRequest
     ) -> AsyncThrowingStream<GenerateChunk, Error> {
         AsyncThrowingStream { continuation in
-            Task { [weak self] in
+            let task = Task { [weak self] in
                 guard let self else {
                     continuation.finish()
                     return
@@ -354,6 +354,16 @@ public actor MLXSwiftEngine: InferenceEngine {
                     continuation.finish(throwing: error)
                 }
             }
+            // POOL-2: propagate abandonment/cancellation of this stream's
+            // iteration down into the generation Task. `onTermination`
+            // fires when the consumer stops iterating (including when the
+            // consuming task itself is cancelled) — without this, walking
+            // away from the stream never stops the underlying token loop,
+            // so GPU work burns to completion even after a Stop button or
+            // a server-side stall watchdog (SRV-4) gives up on the response.
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+            }
         }
     }
 
@@ -362,6 +372,36 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Returns `true` always — a model need not be loaded for the engine to be healthy.
     public func healthCheck() async -> Bool {
         true
+    }
+
+    /// Whether the rendered prompt for `request` ends inside an open
+    /// `<think>` block. Applies the chat template exactly as `generate`
+    /// does (same `Chat.Message` mapping + `container.prepare`), decodes
+    /// the resulting tokens, and inspects the tail via
+    /// `MessageSegmenter.promptOpensThink`. Returns false if no model is
+    /// loaded or the template can't be applied.
+    public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
+        guard let container = loadedSupport.container else { return false }
+        let chatMessages: [Chat.Message] = request.allMessages.map { msg in
+            let role: Chat.Message.Role
+            switch msg.role {
+            case .user: role = .user
+            case .assistant: role = .assistant
+            case .system: role = .system
+            }
+            return Chat.Message(role: role, content: msg.content)
+        }
+        do {
+            let lmInput = try await container.prepare(input: UserInput(
+                chat: chatMessages,
+                additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
+            ))
+            let ids = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            let text = await container.decode(tokens: ids)
+            return MessageSegmenter.promptOpensThink(text)
+        } catch {
+            return false
+        }
     }
 
     // MARK: Prompt cache management
@@ -442,7 +482,14 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
         }
 
-        let userInput = UserInput(chat: chatMessages)
+        // Forward per-model chat-template kwargs (v0.5.1) as
+        // `additionalContext` — the tokenizer hands them to the Jinja
+        // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
+        // to the plain Sendable shape the upstream API expects.
+        let userInput = UserInput(
+            chat: chatMessages,
+            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
+        )
 
         status = .generating
 
@@ -553,6 +600,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         var completionInfo: GenerateCompletionInfo?
 
         for await event in stream {
+            // POOL-2: stop promptly once the consumer has abandoned/
+            // cancelled this stream (see `generate`'s `onTermination`
+            // hook) instead of running to maxTokens/EOS regardless.
+            if Task.isCancelled {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
             switch event {
             case .token(let token):
                 generatedTokenIDs.append(token)
@@ -609,6 +663,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         var completionInfo: GenerateCompletionInfo?
 
         for await event in stream {
+            // POOL-2: stop promptly once the consumer has abandoned/
+            // cancelled this stream (see `generate`'s `onTermination`
+            // hook) instead of running to maxTokens/EOS regardless.
+            if Task.isCancelled {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
             switch event {
             case .token(let token):
                 detokenizer.append(token: token)

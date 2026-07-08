@@ -129,10 +129,17 @@ public final class EngineCoordinator {
             status = .error(err.localizedDescription)
             return .failure(err)
         }
+        // POOL-1: remember who was current before this swap so we can
+        // unpin them once the new model is successfully pinned.
+        let previousModelID = currentModelID
         status = .loading(model: model.id)
         await logs.log("Loading model: \(model.id)", level: .info, category: .engine)
         do {
-            let engine = try await pool.load(model)
+            // Feed the model's configured idle TTL (v0.5.1) into the pool so
+            // `sweepIdle` can reclaim it once idle past `ttlSeconds`. Fresh
+            // store mirrors how HummingbirdServer loads per-model params.
+            let params = await ModelParametersStore().load(for: model.id)
+            let engine = try await pool.load(model, ttlSeconds: params.ttlSeconds)
 
             // Layer the LoRA adapter on top of the freshly-loaded
             // base model (v0.5+). Engines that don't support adapters
@@ -157,6 +164,17 @@ public final class EngineCoordinator {
             // state (e.g. Parameters Inspector overrides) even if the
             // user never opens the Inspector view.
             await onModelLoaded?(model)
+
+            // POOL-1: pin the newly-active model so the pool's LRU/budget
+            // eviction never reclaims the model the GUI currently treats
+            // as current, then unpin whichever model was previously
+            // current (if different) — only the single active model is
+            // GUI-pinned at a time; other resident models stay eligible
+            // for eviction under pressure.
+            await pool.setPinned(model.id, true)
+            if let previousModelID, previousModelID != model.id {
+                await pool.setPinned(previousModelID, false)
+            }
             return .success(())
         } catch {
             status = .error(error.localizedDescription)
@@ -165,6 +183,22 @@ public final class EngineCoordinator {
                 level: .error,
                 category: .engine
             )
+            // POOL-1: a failed load(B) may have evicted A (the previously
+            // current model) to make room before B's own load threw. If A
+            // is no longer resident, `currentModel`/`currentModelID` would
+            // otherwise keep pointing at a dangling entry — a subsequent
+            // `generate()` call would throw `.modelNotLoaded` while other
+            // UI surfaces still saw a (stale) non-nil `currentModel`.
+            // Reconcile: clear the pointer when residency confirms the
+            // old model is actually gone.
+            if let id = currentModelID {
+                let stillResident = await pool.residentModelIDs().contains(id)
+                if !stillResident {
+                    currentModel = nil
+                    currentModelID = nil
+                    engineVersion = ""
+                }
+            }
             return .failure(error)
         }
     }
@@ -205,19 +239,33 @@ public final class EngineCoordinator {
         let pool = self.pool
         let currentID = self.currentModelID
         return AsyncThrowingStream { continuation in
-            Task { @MainActor in
+            let task = Task { @MainActor in
                 guard let id = currentID,
                       let engine = await pool.engine(for: id) else {
                     continuation.finish(throwing: EngineError.modelNotLoaded)
                     return
                 }
                 self.status = .generating
+                // Mark the entry in-flight so a concurrent `load(_:)`'s idle
+                // sweep can't unload this model mid-stream (A4). Clear the
+                // mark on EVERY exit path — success, throw, or cancellation —
+                // via a defer that spawns the async clear (mirrors the
+                // release-lock idiom in HummingbirdServer).
+                await pool.setGenerating(id, true)
+                defer { Task { await pool.setGenerating(id, false) } }
                 do {
                     for try await chunk in engine.generate(request) {
                         if let usage = chunk.usage {
                             self.tokensGeneratedTotal += usage.completionTokens
                         }
-                        continuation.yield(chunk)
+                        // POOL-2 (H7): honor the yield result instead of
+                        // discarding it. `.terminated` means the consumer
+                        // stopped listening (e.g. Stop cancelled its
+                        // iteration) — stop pulling from the engine instead
+                        // of draining it to completion regardless.
+                        if case .terminated = continuation.yield(chunk) {
+                            break
+                        }
                     }
                     continuation.finish()
                     if let model = self.currentModel {
@@ -230,6 +278,15 @@ public final class EngineCoordinator {
                     self.status = .error(error.localizedDescription)
                 }
             }
+            // POOL-2 (H7): propagate this stream's termination — including
+            // the consumer's task being cancelled (GUI Stop button) — down
+            // into the Task driving generation. Without this, cancelling
+            // only the CONSUMER left this Task (and the engine's own
+            // generation loop) running to maxTokens/EOS, burning GPU and
+            // still writing the prompt cache after Stop was pressed.
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+            }
         }
     }
 
@@ -240,6 +297,15 @@ public final class EngineCoordinator {
     /// aren't currently resident.
     public func setPinned(_ modelID: String, _ pinned: Bool) async {
         await pool.setPinned(modelID, pinned)
+    }
+
+    /// Mark/unmark `modelID` as actively generating in the pool (POOL-3).
+    /// Used as the HTTP server's in-flight hook (`HummingbirdServer.InFlightHook`)
+    /// so a concurrent GUI `load(_:)` can't evict a model the server is
+    /// mid-stream against — mirrors the guard `generate(_:)` above already
+    /// applies for the GUI chat path.
+    public func setGenerating(_ modelID: String, _ active: Bool) async {
+        await pool.setGenerating(modelID, active)
     }
 
     /// IDs of every currently-resident model in the pool (sorted).
