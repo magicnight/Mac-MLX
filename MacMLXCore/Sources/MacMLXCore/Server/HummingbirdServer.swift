@@ -137,6 +137,49 @@ private struct LoadModelRequest: Decodable, Sendable {
     let model_path: String
 }
 
+// MARK: - Embeddings / rerank request types (v0.5.2)
+
+/// OpenAI `/v1/embeddings` `input` field. Either a single string or an
+/// array of strings. The decoder tries string first, then falls through
+/// to `[String]` — mirroring `MultimodalContent`'s string-or-array shape.
+private enum EmbeddingsInput: Decodable, Sendable {
+    case string(String)
+    case array([String])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .string(s)
+            return
+        }
+        self = .array(try container.decode([String].self))
+    }
+
+    /// Flattened list of texts to embed, in request order.
+    var values: [String] {
+        switch self {
+        case .string(let s): return [s]
+        case .array(let a): return a
+        }
+    }
+}
+
+/// OpenAI-compatible `/v1/embeddings` request body.
+private struct EmbeddingsRequest: Decodable, Sendable {
+    let model: String
+    let input: EmbeddingsInput
+    let encoding_format: String?
+}
+
+/// `/v1/rerank` request body (Cohere/Jina-style shape). Scored with a
+/// bi-encoder approximation — see `handleRerank`.
+private struct RerankRequest: Decodable, Sendable {
+    let model: String
+    let query: String
+    let documents: [String]
+    let top_n: Int?
+}
+
 /// Ollama-compatible chat request body. Simpler than OpenAI's —
 /// no `stream_options`, system message expressed the same way.
 private struct OllamaChatRequest: Decodable, Sendable {
@@ -386,6 +429,13 @@ public actor HummingbirdServer {
     /// awaits the first's completion before checking whether it can
     /// reuse the newly-loaded model or needs its own swap.
     private var loadInFlight: Task<Void, Error>?
+
+    /// Lazily-created embedding engine for `/v1/embeddings` + `/v1/rerank`
+    /// (v0.5.2). A sibling to `engine` — embedders don't conform to
+    /// `InferenceEngine`. Cold-swapped by `ensureEmbedderLoaded` when a
+    /// request names a different embedder than is currently resident. MVP:
+    /// a single engine, no pool (see `EmbeddingEngine`).
+    private var embeddingEngine: EmbeddingEngine?
 
     /// Binary generation lock. MLX model state (tokenizer, KV cache,
     /// MLX allocator) is not safe to share across concurrent
@@ -687,6 +737,20 @@ public actor HummingbirdServer {
         router.post("/v1/messages") { request, context -> Response in
             await server.incrementRequest()
             return try await server.handleAnthropicMessages(request: request, context: context)
+        }
+
+        // POST /v1/embeddings — OpenAI-compatible text embeddings (v0.5.2).
+        // Served by the dedicated `EmbeddingEngine`, cold-swapped per model.
+        router.post("/v1/embeddings") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleEmbeddings(request: request, context: context)
+        }
+
+        // POST /v1/rerank — bi-encoder rerank MVP (v0.5.2). Embeds the query
+        // and documents with the same embedder and ranks by cosine similarity.
+        router.post("/v1/rerank") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleRerank(request: request, context: context)
         }
 
         // POST /x/models/load
@@ -1884,6 +1948,225 @@ public actor HummingbirdServer {
             )
         }
         return try jsonResponse(["status": "unloaded"])
+    }
+
+    // MARK: - Embeddings / rerank (v0.5.2)
+
+    /// Make sure `embeddingEngine` has `requestedID` resident. Resolves the
+    /// model the same way `ensureModelLoaded` does (direct id/displayName,
+    /// then user-facing alias), creating + loading a fresh `EmbeddingEngine`
+    /// on a cold miss and swapping when a different embedder is requested.
+    /// Throws `.modelNotFound` when the id isn't on disk, `.loadFailed` when
+    /// the load itself fails.
+    private func ensureEmbedderLoaded(_ requestedID: String) async throws {
+        // Same resolution order as the generation cold-swap.
+        let target: LocalModel
+        if let resolved = await modelResolver(requestedID) {
+            target = resolved
+        } else if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID),
+                  let aliasTarget = await modelResolver(aliasID) {
+            target = aliasTarget
+        } else {
+            throw ModelSwapError.modelNotFound(id: requestedID)
+        }
+
+        if let current = embeddingEngine, await current.loadedModel?.id == target.id {
+            return
+        }
+
+        let newEngine = EmbeddingEngine()
+        do {
+            try await newEngine.load(target)
+        } catch {
+            throw ModelSwapError.loadFailed(id: requestedID, reason: error.localizedDescription)
+        }
+        embeddingEngine = newEngine
+    }
+
+    /// `POST /v1/embeddings` — OpenAI-compatible text embeddings. Cold-swaps
+    /// the embedder to `req.model`, embeds the `input` (string or array), and
+    /// returns `{ object:"list", data:[{object:"embedding", embedding, index}],
+    /// model, usage }`.
+    private func handleEmbeddings(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Empty body",
+                code: "invalid_request_error"
+            )
+        }
+
+        let req: EmbeddingsRequest
+        do {
+            req = try JSONDecoder().decode(EmbeddingsRequest.self, from: data)
+        } catch {
+            return errorResponse(
+                status: .badRequest,
+                message: "Invalid JSON: \(error.localizedDescription)",
+                code: "invalid_request_error"
+            )
+        }
+
+        if let failure = await ensureEmbedderOr404(req.model) {
+            return failure
+        }
+        guard let embedder = embeddingEngine else {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Embedder not loaded",
+                code: "load_failed"
+            )
+        }
+
+        // Serialise MLX compute with generation — both touch global MLX
+        // allocator state that isn't safe to share concurrently.
+        await acquireGenerationLock()
+        let vectors: [[Float]]
+        do {
+            vectors = try await embedder.embed(req.input.values)
+            releaseGenerationLock()
+        } catch {
+            releaseGenerationLock()
+            return errorResponse(
+                status: .internalServerError,
+                message: "Embedding failed: \(error.localizedDescription)",
+                code: "embedding_failed"
+            )
+        }
+
+        let dataArray: [[String: Any]] = vectors.enumerated().map { index, vector in
+            [
+                "object": "embedding",
+                "embedding": vector.map { Double($0) },
+                "index": index,
+            ]
+        }
+        // Token usage isn't tracked for embeddings in this MVP (a precise
+        // count would need to be threaded out of `EmbeddingEngine.embed`).
+        return try jsonResponseAny([
+            "object": "list",
+            "data": dataArray,
+            "model": req.model,
+            "usage": [
+                "prompt_tokens": 0,
+                "total_tokens": 0,
+            ] as [String: Any],
+        ])
+    }
+
+    /// `POST /v1/rerank` — bi-encoder rerank MVP. Embeds `[query] + documents`
+    /// with the same embedder and ranks documents by cosine similarity to the
+    /// query. This is an approximation; a true cross-encoder reranker is a
+    /// from-scratch follow-up (see `rerankByCosine`). Returns
+    /// `{ results:[{index, relevance_score}], model }`.
+    private func handleRerank(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Empty body",
+                code: "invalid_request_error"
+            )
+        }
+
+        let req: RerankRequest
+        do {
+            req = try JSONDecoder().decode(RerankRequest.self, from: data)
+        } catch {
+            return errorResponse(
+                status: .badRequest,
+                message: "Invalid JSON: \(error.localizedDescription)",
+                code: "invalid_request_error"
+            )
+        }
+
+        if let failure = await ensureEmbedderOr404(req.model) {
+            return failure
+        }
+        guard let embedder = embeddingEngine else {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Embedder not loaded",
+                code: "load_failed"
+            )
+        }
+
+        await acquireGenerationLock()
+        let embeddings: [[Float]]
+        do {
+            embeddings = try await embedder.embed([req.query] + req.documents)
+            releaseGenerationLock()
+        } catch {
+            releaseGenerationLock()
+            return errorResponse(
+                status: .internalServerError,
+                message: "Embedding failed: \(error.localizedDescription)",
+                code: "embedding_failed"
+            )
+        }
+
+        guard let queryVector = embeddings.first else {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Embedder returned no vectors",
+                code: "embedding_failed"
+            )
+        }
+        let documentVectors = Array(embeddings.dropFirst())
+        let ranked = rerankByCosine(
+            query: queryVector,
+            documents: documentVectors,
+            topN: req.top_n
+        )
+
+        let results: [[String: Any]] = ranked.map { entry in
+            [
+                "index": entry.index,
+                "relevance_score": Double(entry.score),
+            ]
+        }
+        return try jsonResponseAny([
+            "results": results,
+            "model": req.model,
+        ])
+    }
+
+    /// Shared cold-swap-or-error for the embeddings/rerank handlers. Returns
+    /// a ready-made error `Response` (404 for an unknown model, 500 for a
+    /// load failure) on failure, or `nil` once the embedder is resident.
+    private func ensureEmbedderOr404(_ modelID: String) async -> Response? {
+        do {
+            try await ensureEmbedderLoaded(modelID)
+            return nil
+        } catch let err as ModelSwapError {
+            switch err {
+            case .modelNotFound(let id):
+                return errorResponse(
+                    status: .notFound,
+                    message: "Model not found: \(id). Download an embedder (e.g. `bge-small-en-v1.5`) and check `macmlx list`.",
+                    code: "model_not_found"
+                )
+            case .loadFailed(let id, let reason):
+                return errorResponse(
+                    status: .internalServerError,
+                    message: "Failed to load \(id): \(reason)",
+                    code: "load_failed"
+                )
+            }
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: error.localizedDescription,
+                code: "load_failed"
+            )
+        }
     }
 
     // MARK: JSON helpers

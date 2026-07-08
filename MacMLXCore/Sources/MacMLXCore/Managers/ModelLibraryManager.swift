@@ -54,9 +54,10 @@ public actor ModelLibraryManager {
 
             switch format {
             case .mlx:
-                // Peek `config.json` `model_type` — upgrade to .mlxVLM
-                // when the directory contains a vision-language model.
-                let upgradedFormat = upgradeFormatIfVLM(directory: itemURL)
+                // Peek `config.json` `model_type` — upgrade `.mlx` to
+                // `.mlxVLM` (vision-language) or `.embedder` (text
+                // embedding) when the directory's model_type says so.
+                let upgradedFormat = upgradeFormat(directory: itemURL)
                 let model = buildLocalModel(
                     dirName: dirName,
                     dirURL: itemURL,
@@ -65,16 +66,16 @@ public actor ModelLibraryManager {
                 )
                 results.append(model)
 
-            case .mlxVLM:
-                // `ModelFormat.detect(in:)` never returns this directly
-                // — it's set by `upgradeFormatIfVLM` above. Reachable
-                // only via tests that hand-craft a format. Fall through
-                // to the same path as `.mlx`.
+            case .mlxVLM, .embedder:
+                // `ModelFormat.detect(in:)` never returns these directly
+                // — they're set by `upgradeFormat` above. Reachable only
+                // via tests that hand-craft a format. Fall through to the
+                // same path as `.mlx`.
                 let model = buildLocalModel(
                     dirName: dirName,
                     dirURL: itemURL,
                     fileURLs: fileURLs,
-                    format: .mlxVLM
+                    format: format
                 )
                 results.append(model)
 
@@ -152,22 +153,51 @@ public actor ModelLibraryManager {
         "mistral3",
     ]
 
-    /// Peek `config.json`'s `model_type`. Returns `.mlxVLM` if the
-    /// type matches a known VLM family; otherwise `.mlx`.
+    /// `model_type` values that map to MLXEmbedders' encoder registry and
+    /// are unambiguously text-embedding models.
+    ///
+    /// Source of truth: `Libraries/MLXEmbedders/ModelFactory.swift`
+    /// `EmbedderTypeRegistry`. Deliberately ONLY the encoder-only families:
+    /// the registry also maps decoder families (`qwen3`, `lfm2`, `gemma3`,
+    /// `gemma3_text`, `gemma3n`) to embedder variants, but those share their
+    /// `model_type` with generative LLM/VLM checkpoints — `model_type` alone
+    /// can't tell a Qwen3 *embedder* from a Qwen3 *chat* model — so listing
+    /// them here would mis-tag ordinary chat models as embedders and break
+    /// generation. They stay `.mlx` / `.mlxVLM`; precise decoder-embedder
+    /// detection (e.g. inspecting `1_Pooling/`) is a follow-up. Stored
+    /// lowercased — comparisons are case-insensitive against config.json.
+    private static let knownEmbedderTypes: Set<String> = [
+        "bert",
+        "roberta",
+        "xlm-roberta",
+        "distilbert",
+        "nomic_bert",
+    ]
+
+    /// Peek `config.json`'s `model_type` and upgrade `.mlx` to a more
+    /// specific format: `.mlxVLM` for a known vision-language family, or
+    /// `.embedder` for a known text-embedding family. Vision-language wins
+    /// when a `model_type` appears in both registries (e.g. `gemma3`).
+    /// Returns `.mlx` when the type matches neither.
     ///
     /// Best-effort: any read or parse failure (missing file, malformed
     /// JSON, missing `model_type` key) falls back to `.mlx` — the scan
     /// must not blow up because of one unparseable config.
-    private func upgradeFormatIfVLM(directory: URL) -> ModelFormat {
+    private func upgradeFormat(directory: URL) -> ModelFormat {
         let configURL = directory.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let modelType = json["model_type"] as? String,
-              Self.knownVLMTypes.contains(modelType.lowercased())
+              let modelType = (json["model_type"] as? String)?.lowercased()
         else {
             return .mlx
         }
-        return .mlxVLM
+        if Self.knownVLMTypes.contains(modelType) {
+            return .mlxVLM
+        }
+        if Self.knownEmbedderTypes.contains(modelType) {
+            return .embedder
+        }
+        return .mlx
     }
 
     /// Extracts a quantization string from a directory name.
