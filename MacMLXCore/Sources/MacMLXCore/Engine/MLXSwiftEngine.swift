@@ -637,22 +637,40 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Shared "final chunk" emit (usage + finish reason). Both LLM and
     /// VLM paths funnel through this so the wire-format chunk shape
     /// stays identical.
+    ///
+    /// Always yields exactly one terminal chunk, even when the underlying
+    /// mlx-swift-lm token stream ended WITHOUT its closing `.info` event
+    /// (`completionInfo == nil`). This is reached only on a NATURAL stream
+    /// end: cancellation and consumer-abandonment (`.terminated`) both
+    /// `return` early from the generation loop above and never call this, so
+    /// a `nil` info here means an abnormal-but-non-cancel end (e.g. the
+    /// stream closed without emitting a final info record). Previously that
+    /// case yielded nothing, so the server-side reasoning splitter never
+    /// received a `finishReason` to `finish()` on — dropping any held-back
+    /// partial `</think>` tail — and usage stayed 0. Emit a synthetic `.stop`
+    /// terminal chunk with zero usage so every natural end still delivers one
+    /// finish-bearing chunk.
     private func emitFinalChunk(
         completionInfo: GenerateCompletionInfo?,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) {
-        guard let info = completionInfo else { return }
         let finishReason: FinishReason
-        switch info.stopReason {
-        case .length:
-            finishReason = .length
-        case .stop, .cancelled:
+        let usage: TokenUsage
+        if let info = completionInfo {
+            switch info.stopReason {
+            case .length:
+                finishReason = .length
+            case .stop, .cancelled:
+                finishReason = .stop
+            }
+            usage = TokenUsage(
+                promptTokens: info.promptTokenCount,
+                completionTokens: info.generationTokenCount
+            )
+        } else {
             finishReason = .stop
+            usage = TokenUsage(promptTokens: 0, completionTokens: 0)
         }
-        let usage = TokenUsage(
-            promptTokens: info.promptTokenCount,
-            completionTokens: info.generationTokenCount
-        )
         let finalChunk = GenerateChunk(text: "", finishReason: finishReason, usage: usage)
         continuation.yield(finalChunk)
     }

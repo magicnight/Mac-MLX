@@ -240,9 +240,31 @@ public final class EngineCoordinator {
         let currentID = self.currentModelID
         return AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
-                guard let id = currentID,
-                      let engine = await pool.engine(for: id) else {
+                guard let id = currentID else {
+                    // Nothing was ever current — no model to generate against.
                     continuation.finish(throwing: EngineError.modelNotLoaded)
+                    return
+                }
+                guard let engine = await pool.engine(for: id) else {
+                    // Residency miss (P3-6): `id` was our current model but the
+                    // pool no longer has it resident — evicted under budget
+                    // pressure, or unloaded concurrently. Finish the stream as
+                    // not-loaded AND reconcile the observable state; otherwise
+                    // `status` stays a stale `.ready` and the toolbar / menu bar
+                    // keep showing a phantom current model that can't answer.
+                    // Mirrors the failed-load reconcile in `load(_:)`.
+                    continuation.finish(throwing: EngineError.modelNotLoaded)
+                    // Reconcile ONLY when the missing model is still the
+                    // current one. In the stale-id race (this generation
+                    // captured id A, the user has since loaded healthy B)
+                    // touching `status` here would clobber B's `.ready` with
+                    // a phantom error.
+                    if self.currentModelID == id {
+                        self.currentModel = nil
+                        self.currentModelID = nil
+                        self.engineVersion = ""
+                        self.status = .error(EngineError.modelNotLoaded.localizedDescription)
+                    }
                     return
                 }
                 self.status = .generating

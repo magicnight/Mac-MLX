@@ -27,6 +27,22 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     let max_tokens: Int?
 }
 
+/// Legacy OpenAI text-completions body (`/v1/completions`, and the
+/// `POST /` / `POST /v1` aliases): `{"model","prompt",...}` with a bare
+/// `prompt` string and NO `messages` array. Decoded as a fallback when a
+/// body fails to parse as `ChatCompletionRequest`, then wrapped into a
+/// single user turn so these routes serve the same chat-format response
+/// (the full text-completions response shape is out of scope). Honors
+/// `max_tokens` / `temperature` / `top_p` / `stream` when present.
+private struct LegacyCompletionRequest: Decodable, Sendable {
+    let model: String
+    let prompt: String
+    let stream: Bool?
+    let temperature: Double?
+    let top_p: Double?
+    let max_tokens: Int?
+}
+
 /// OpenAI multimodal content payload. Either a plain string (text-only
 /// — backwards compat with every existing client) or an array of typed
 /// parts (`text` and `image_url`). The decoder tries the string form
@@ -1087,10 +1103,26 @@ public actor HummingbirdServer {
         do {
             chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: data)
         } catch {
-            return errorResponse(
-                status: .badRequest,
-                message: "Invalid JSON: \(error.localizedDescription)",
-                code: "invalid_request_error"
+            // Legacy text-completions fallback (P3-1): `/v1/completions` (and
+            // the `POST /` / `POST /v1` aliases) historically carry a bare
+            // `prompt` with NO `messages`, so the chat decode above fails. Wrap
+            // `prompt` into a single user turn and continue — these routes serve
+            // the same chat-format response the route comment promises. A body
+            // that is neither shape falls through to the original 400.
+            guard let legacy = try? JSONDecoder().decode(LegacyCompletionRequest.self, from: data) else {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "Invalid JSON: \(error.localizedDescription)",
+                    code: "invalid_request_error"
+                )
+            }
+            chatReq = ChatCompletionRequest(
+                model: legacy.model,
+                messages: [ChatCompletionRequest.Message(role: "user", content: .string(legacy.prompt))],
+                stream: legacy.stream,
+                temperature: legacy.temperature,
+                top_p: legacy.top_p,
+                max_tokens: legacy.max_tokens
             )
         }
 
@@ -1164,9 +1196,21 @@ public actor HummingbirdServer {
         let currentID = await engineProvider()?.loadedModel?.id
         var entries: [[String: Any]] = []
         if let currentID {
+            // Report the user-facing alias (v0.5.1) when one is set for this
+            // model, mirroring `handleModels` / `GET /v1/models` (P3-2). Without
+            // this, Ollama-compat clients saw the raw directory id while the
+            // OpenAI list showed the alias (A3 inconsistency). Empty alias is
+            // treated as "no alias".
+            let params = await ModelParametersStore().load(for: currentID)
+            let reportedID: String
+            if let alias = params.alias, !alias.isEmpty {
+                reportedID = alias
+            } else {
+                reportedID = currentID
+            }
             entries.append([
-                "name": currentID,
-                "model": currentID,
+                "name": reportedID,
+                "model": reportedID,
                 "modified_at": ISO8601DateFormatter().string(from: Date()),
                 "size": 0,
                 "digest": "",
@@ -1316,7 +1360,7 @@ public actor HummingbirdServer {
         let server = self
 
         let responseBody = ResponseBody { writer in
-            var chunkCount = 0
+            var completionTokens = 0
 
             let engine: any InferenceEngine
             do {
@@ -1348,10 +1392,13 @@ public actor HummingbirdServer {
                         buf.writeString("{\"error\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\",\"done\":true}\n")
                         try? await writer.write(buf)
                         try? await writer.finish(nil)
-                        await server.incrementTokens(chunkCount)
+                        await server.incrementTokens(completionTokens)
                         return
                     case .chunk(let chunk):
-                        chunkCount += 1
+                        // P3-4: accumulate the engine's real completion-token
+                        // count (delivered on the terminal chunk's usage), not
+                        // the number of SSE/NDJSON frames.
+                        if let usage = chunk.usage { completionTokens = usage.completionTokens }
                         let payload: [String: Any] = [
                             "model": model,
                             "created_at": ISO8601DateFormatter().string(from: Date()),
@@ -1375,7 +1422,7 @@ public actor HummingbirdServer {
                 buf.writeString("{\"error\":\"\(msg)\",\"done\":true}\n")
                 try? await writer.write(buf)
                 try? await writer.finish(nil)
-                await server.incrementTokens(chunkCount)
+                await server.incrementTokens(completionTokens)
                 return
             }
 
@@ -1398,7 +1445,7 @@ public actor HummingbirdServer {
             doneBuf.writeString("\n")
             try await writer.write(doneBuf)
             try await writer.finish(nil)
-            await server.incrementTokens(chunkCount)
+            await server.incrementTokens(completionTokens)
         }
 
         var headers = HTTPFields()
@@ -1504,7 +1551,7 @@ public actor HummingbirdServer {
         let server = self
 
         let responseBody = ResponseBody { writer in
-            var chunkCount = 0
+            var completionTokens = 0
 
             let engine: any InferenceEngine
             do {
@@ -1536,10 +1583,13 @@ public actor HummingbirdServer {
                         buf.writeString("{\"error\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\",\"done\":true}\n")
                         try? await writer.write(buf)
                         try? await writer.finish(nil)
-                        await server.incrementTokens(chunkCount)
+                        await server.incrementTokens(completionTokens)
                         return
                     case .chunk(let chunk):
-                        chunkCount += 1
+                        // P3-4: accumulate the engine's real completion-token
+                        // count (delivered on the terminal chunk's usage), not
+                        // the number of SSE/NDJSON frames.
+                        if let usage = chunk.usage { completionTokens = usage.completionTokens }
                         let payload: [String: Any] = [
                             "model": model,
                             "created_at": ISO8601DateFormatter().string(from: Date()),
@@ -1560,7 +1610,7 @@ public actor HummingbirdServer {
                 buf.writeString("{\"error\":\"\(msg)\",\"done\":true}\n")
                 try? await writer.write(buf)
                 try? await writer.finish(nil)
-                await server.incrementTokens(chunkCount)
+                await server.incrementTokens(completionTokens)
                 return
             }
             let totalNanos = Int(Date().timeIntervalSince(startedAt) * 1_000_000_000)
@@ -1578,7 +1628,7 @@ public actor HummingbirdServer {
             doneBuf.writeString("\n")
             try await writer.write(doneBuf)
             try await writer.finish(nil)
-            await server.incrementTokens(chunkCount)
+            await server.incrementTokens(completionTokens)
         }
 
         var headers = HTTPFields()
@@ -1835,7 +1885,7 @@ public actor HummingbirdServer {
         let server = self
 
         let responseBody = ResponseBody { writer in
-            var chunkCount = 0
+            var completionTokens = 0
 
             let engine: any InferenceEngine
             do {
@@ -1883,7 +1933,10 @@ public actor HummingbirdServer {
                         try? await writer.write(buf)
                         break loop
                     case .chunk(let chunk):
-                        chunkCount += 1
+                        // P3-4: accumulate the engine's real completion-token
+                        // count (delivered on the terminal chunk's usage), not
+                        // the number of SSE/NDJSON frames.
+                        if let usage = chunk.usage { completionTokens = usage.completionTokens }
                         let (reasoning, answer) = splitter.push(chunk.text)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
@@ -1932,7 +1985,7 @@ public actor HummingbirdServer {
             try await writer.write(doneBuf)
             try await writer.finish(nil)
 
-            await server.incrementTokens(chunkCount)
+            await server.incrementTokens(completionTokens)
         }
 
         var headers = HTTPFields()
@@ -2129,7 +2182,6 @@ public actor HummingbirdServer {
         let server = self
 
         let responseBody = ResponseBody { writer in
-            var chunkCount = 0
             var completionTokens = 0
             var promptTokens = 0
             var finishReason: FinishReason?
@@ -2163,6 +2215,16 @@ public actor HummingbirdServer {
 
             do {
                 // 1. message_start
+                // Wire-format limitation (P3-3): real Anthropic reports the true
+                // prompt token count in `message_start.usage.input_tokens`
+                // because it tokenises the prompt up front. Our MLX engine only
+                // surfaces prompt/completion counts on the TERMINAL generation
+                // chunk (`GenerateChunk.usage`), which arrives after this event
+                // must already be on the wire — Anthropic's fixed event order
+                // requires `message_start` first, before any token flows.
+                // Deferring `message_start` wouldn't help (the count is still
+                // unknown at the first token), so we send 0 here and deliver the
+                // real counts in the closing `message_delta.usage` below.
                 try await writeAnthropicSSE(&writer, event: "message_start", payload: [
                     "type": "message_start",
                     "message": [
@@ -2203,7 +2265,6 @@ public actor HummingbirdServer {
                         try? await writer.write(buf)
                         break stallLoop
                     case .chunk(let chunk):
-                        chunkCount += 1
                         if let usage = chunk.usage {
                             completionTokens = usage.completionTokens
                             promptTokens = usage.promptTokens
@@ -2260,7 +2321,7 @@ public actor HummingbirdServer {
             ])
             try await writer.finish(nil)
 
-            await server.incrementTokens(chunkCount)
+            await server.incrementTokens(completionTokens)
         }
 
         var headers = HTTPFields()
@@ -2394,12 +2455,22 @@ public actor HummingbirdServer {
 
     // MARK: - Embeddings / rerank (v0.5.2)
 
+    /// Thrown by `ensureEmbedderLoaded` when a request resolves to a real
+    /// model that isn't an embedder (v0.5.2 follow-up). Kept distinct from
+    /// `ModelSwapError` so the generation cold-swap's error mapping stays
+    /// untouched; `ensureEmbedderOr404` maps it to a 400 `model_not_embedder`.
+    private enum EmbedderKindError: Error {
+        case notAnEmbedder(id: String, format: String)
+    }
+
     /// Make sure `embeddingEngine` has `requestedID` resident. Resolves the
     /// model the same way `ensureModelLoaded` does (direct id/displayName,
     /// then user-facing alias), creating + loading a fresh `EmbeddingEngine`
     /// on a cold miss and swapping when a different embedder is requested.
     /// Throws `.modelNotFound` when the id isn't on disk, `.loadFailed` when
-    /// the load itself fails.
+    /// the load itself fails, and `EmbedderKindError.notAnEmbedder` when the
+    /// resolved model isn't an embedder (so /v1/embeddings + /v1/rerank can't
+    /// be pointed at a chat model and return meaningless vectors).
     private func ensureEmbedderLoaded(_ requestedID: String) async throws {
         // Same resolution order as the generation cold-swap.
         let target: LocalModel
@@ -2410,6 +2481,15 @@ public actor HummingbirdServer {
             target = aliasTarget
         } else {
             throw ModelSwapError.modelNotFound(id: requestedID)
+        }
+
+        // P3-8: gate on model kind. A chat/VLM model resolves fine but the
+        // embedder would produce meaningless vectors — reject it up front with
+        // a clear 400 (mapped in `ensureEmbedderOr404`) rather than embedding
+        // against the wrong model. `.embedder` is set by
+        // `ModelLibraryManager.upgradeFormat` after the file-listing scan.
+        guard target.format == .embedder else {
+            throw EmbedderKindError.notAnEmbedder(id: requestedID, format: target.format.rawValue)
         }
 
         if let current = embeddingEngine, await current.loadedModel?.id == target.id {
@@ -2600,12 +2680,25 @@ public actor HummingbirdServer {
     }
 
     /// Shared cold-swap-or-error for the embeddings/rerank handlers. Returns
-    /// a ready-made error `Response` (404 for an unknown model, 500 for a
-    /// load failure) on failure, or `nil` once the embedder is resident.
+    /// a ready-made error `Response` (404 for an unknown model, 400 when the
+    /// model isn't an embedder, 500 for a load failure) on failure, or `nil`
+    /// once the embedder is resident.
     private func ensureEmbedderOr404(_ modelID: String) async -> Response? {
         do {
             try await ensureEmbedderLoaded(modelID)
             return nil
+        } catch let err as EmbedderKindError {
+            switch err {
+            case .notAnEmbedder(let id, let format):
+                // P3-8: resolved to a real model, but not an embedder — 400 so
+                // callers don't get meaningless vectors from a chat/VLM model.
+                return errorResponse(
+                    status: .badRequest,
+                    message: "Model \(id) is not an embedding model (kind: \(format)). "
+                        + "Use an embedder (e.g. `bge-small-en-v1.5`) for /v1/embeddings and /v1/rerank.",
+                    code: "model_not_embedder"
+                )
+            }
         } catch let err as ModelSwapError {
             switch err {
             case .modelNotFound(let id):
@@ -2850,8 +2943,8 @@ private struct BearerAuthMiddleware: RouterMiddleware {
 
 /// Logs every incoming HTTP request at .debug level. 404 responses
 /// are re-logged at .warning with the path, so a client hitting
-/// an unmapped route (e.g. `/v1/completions` which we don't support)
-/// produces a visible Logs-tab entry for debugging.
+/// an unmapped route (e.g. a mistyped `/v2/chat` the server doesn't
+/// expose) produces a visible Logs-tab entry for debugging.
 private struct RequestLoggingMiddleware: RouterMiddleware {
     typealias Context = BasicRequestContext
     func handle(

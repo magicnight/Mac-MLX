@@ -32,6 +32,16 @@ public actor ModelPool {
     /// residency exceed `maxBytes` (OOM risk). Converted into a real entry
     /// on success; rolled back on failure.
     private var pendingBytes: [String: Int64] = [:]
+    /// Tombstones for models whose `unload(_:)` raced an in-flight `load(_:)`
+    /// (P3-5). While a load is in flight its engine isn't in `engines`/`entries`
+    /// yet — it's inserted only after the load task completes — so an `unload`
+    /// arriving mid-load would otherwise find nothing, no-op, and let the
+    /// completing load resurrect the very entry the caller asked to remove.
+    /// `unload` drops a tombstone here; the completing load checks it (before
+    /// inserting) and instead unloads its fresh engine + releases the byte
+    /// reservation, so the model ends up NOT resident. Cleared by the load that
+    /// observes it (or on load failure).
+    private var unloadTombstones: Set<String> = []
 
     private let engineFactory: EngineFactory
 
@@ -108,6 +118,17 @@ public actor ModelPool {
     }
 
     public func unload(_ modelID: String) async {
+        // P3-5: if a load for this id is in flight, its engine isn't resident
+        // yet (inserted only when the load task completes). Drop a tombstone so
+        // the completing load discards its fresh engine and releases its byte
+        // reservation instead of resurrecting the entry we're unloading. Setting
+        // it here — synchronously, while the load is still suspended on
+        // `await task.value` — is what makes the fix deterministic: the load's
+        // post-await insertion block runs without an intervening `await`, so it
+        // always observes a tombstone set before it resumes.
+        if loadTasks[modelID] != nil {
+            unloadTombstones.insert(modelID)
+        }
         if let e = engines.removeValue(forKey: modelID) {
             try? await e.unload()
         }
@@ -182,6 +203,17 @@ public actor ModelPool {
             let engine = try await task.value
             loadTasks.removeValue(forKey: model.id)
             pendingBytes.removeValue(forKey: model.id)  // reservation → real entry
+            // P3-5: an `unload(_:)` that raced this in-flight load dropped a
+            // tombstone. Honor it — discard the freshly-loaded engine instead of
+            // resurrecting the entry the caller asked to unload. The byte
+            // reservation was already released just above, so there is no leak.
+            // These statements run with NO `await` between the resume above and
+            // the insertion below, so `unload` can only have set the tombstone
+            // during the load's suspension — never mid-insert.
+            if unloadTombstones.remove(model.id) != nil {
+                try? await engine.unload()
+                return engine
+            }
             engines[model.id] = engine
             entries[model.id] = PooledEngineEntry(
                 modelID: model.id,
@@ -192,6 +224,7 @@ public actor ModelPool {
         } catch {
             loadTasks.removeValue(forKey: model.id)
             pendingBytes.removeValue(forKey: model.id)  // roll back on failure
+            unloadTombstones.remove(model.id)  // no stale tombstone survives a failed load
             throw error
         }
     }
