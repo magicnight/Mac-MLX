@@ -2315,10 +2315,30 @@ public actor HummingbirdServer {
                 code: "load_failed"
             )
         }
+
+        // A2: take the generation lock around the mutating load — the same
+        // swap-vs-generate hazard SRV-2 fixed for the generation endpoints,
+        // reached here through a different door (`/x/models/load`). A throw
+        // from acquire means the task was cancelled while parked → the lock
+        // is NOT held, so we must not release on that path (mirrors the
+        // embeddings/rerank handlers). Intended consequence: a manual load
+        // now waits for an in-flight generation to finish.
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled"
+            )
+        }
+        // Measure the load itself, not the time spent waiting for the lock.
         let start = Date()
         do {
             try await engine.load(model)
+            releaseGenerationLock()
         } catch {
+            releaseGenerationLock()
             return errorResponse(
                 status: .internalServerError,
                 message: error.localizedDescription,
@@ -2341,9 +2361,24 @@ public actor HummingbirdServer {
         guard let engine = await engineProvider() else {
             return try jsonResponse(["status": "unloaded"])
         }
+
+        // A2: same lock discipline as handleLoadModel — an unload mutates
+        // shared engine/MLX state and must not race an in-flight generation.
+        // Throw from acquire = lock NOT held = do not release (embeddings pattern).
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled"
+            )
+        }
         do {
             try await engine.unload()
+            releaseGenerationLock()
         } catch {
+            releaseGenerationLock()
             return errorResponse(
                 status: .internalServerError,
                 message: error.localizedDescription,
@@ -2740,6 +2775,26 @@ private func anthropicStopReason(_ reason: FinishReason?) -> String {
 
 // MARK: - Bearer auth middleware
 
+/// Constant-time equality over two strings' UTF-8 bytes (SRV-6). Unlike
+/// `String.==`, which returns the moment it hits a differing byte — leaking,
+/// via response timing, how many leading bytes of a guessed token matched the
+/// real key — this compares EVERY byte of equal-length inputs by
+/// OR-accumulating their XOR, so the running time depends only on the length,
+/// never on WHERE the first difference is. A length mismatch is allowed to
+/// short-circuit: leaking the expected key's length is acceptable; leaking a
+/// matched-prefix position is the content side channel being closed. Left at
+/// the default `internal` access so it's unit-testable via `@testable import`.
+func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+    let lhs = Array(a.utf8)
+    let rhs = Array(b.utf8)
+    guard lhs.count == rhs.count else { return false }
+    var diff: UInt8 = 0
+    for i in 0..<lhs.count {
+        diff |= lhs[i] ^ rhs[i]
+    }
+    return diff == 0
+}
+
 /// Gates the HTTP surface behind a bearer token when the server is
 /// configured with an API key (OpenAI convention:
 /// `Authorization: Bearer <key>`). The `/health` and `/v1/health`
@@ -2759,7 +2814,10 @@ private struct BearerAuthMiddleware: RouterMiddleware {
         if path == "/health" || path == "/v1/health" {
             return try await next(request, context)
         }
-        guard request.headers[.authorization] == "Bearer \(apiKey)" else {
+        // SRV-6: constant-time compare so we don't leak, via response timing,
+        // how many leading bytes of a guessed token matched the real key.
+        guard let provided = request.headers[.authorization],
+              constantTimeEquals(provided, "Bearer \(apiKey)") else {
             return Self.unauthorized()
         }
         return try await next(request, context)

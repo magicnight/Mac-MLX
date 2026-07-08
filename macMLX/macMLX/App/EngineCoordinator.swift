@@ -246,13 +246,15 @@ public final class EngineCoordinator {
                     return
                 }
                 self.status = .generating
-                // Mark the entry in-flight so a concurrent `load(_:)`'s idle
-                // sweep can't unload this model mid-stream (A4). Clear the
-                // mark on EVERY exit path — success, throw, or cancellation —
-                // via a defer that spawns the async clear (mirrors the
-                // release-lock idiom in HummingbirdServer).
-                await pool.setGenerating(id, true)
-                defer { Task { await pool.setGenerating(id, false) } }
+                // Register this generation in the pool's in-flight refcount
+                // so a concurrent `load(_:)`'s idle sweep / budget evict can't
+                // reclaim this model mid-stream (A4/A3). Balance it on EVERY
+                // exit path — success, throw, or cancellation — via a defer
+                // that spawns the async end (mirrors the release-lock idiom in
+                // HummingbirdServer). Refcounted (not a bool) so an overlapping
+                // server generation on the same model can't clear it early.
+                await pool.beginGenerating(id)
+                defer { Task { await pool.endGenerating(id) } }
                 do {
                     for try await chunk in engine.generate(request) {
                         if let usage = chunk.usage {
@@ -303,9 +305,16 @@ public final class EngineCoordinator {
     /// Used as the HTTP server's in-flight hook (`HummingbirdServer.InFlightHook`)
     /// so a concurrent GUI `load(_:)` can't evict a model the server is
     /// mid-stream against — mirrors the guard `generate(_:)` above already
-    /// applies for the GUI chat path.
+    /// applies for the GUI chat path. Translates the hook's bool `active`
+    /// shape onto the pool's refcount (A3): `true` begins a generation,
+    /// `false` ends one, so overlapping GUI-chat + server generations on the
+    /// same model each keep the entry protected until BOTH have finished.
     public func setGenerating(_ modelID: String, _ active: Bool) async {
-        await pool.setGenerating(modelID, active)
+        if active {
+            await pool.beginGenerating(modelID)
+        } else {
+            await pool.endGenerating(modelID)
+        }
     }
 
     /// IDs of every currently-resident model in the pool (sorted).

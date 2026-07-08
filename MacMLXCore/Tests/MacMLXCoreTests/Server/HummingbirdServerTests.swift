@@ -144,6 +144,30 @@ struct HummingbirdServerTests {
         #expect(response.statusCode == 200)
     }
 
+    /// SRV-6: the bearer-token check must be a constant-time byte comparison,
+    /// not a short-circuiting `String.==` (a timing side channel that leaks
+    /// how many leading bytes of a guess matched). Exercises the extracted
+    /// `constantTimeEquals` helper directly (internal, visible via
+    /// `@testable import`): equal → true; a difference at the FIRST byte, at
+    /// the LAST byte, and a length mismatch → all false.
+    @Test
+    func srv6ConstantTimeEqualsRejectsAnyDifference() {
+        // Byte-identical → equal.
+        #expect(constantTimeEquals("Bearer s3cret", "Bearer s3cret"))
+        #expect(constantTimeEquals("", ""))
+        // Differ at the very first byte → not equal (must not early-out true).
+        #expect(!constantTimeEquals("Xearer s3cret", "Bearer s3cret"))
+        // Differ only at the very last byte → not equal (the whole length is
+        // still compared).
+        #expect(!constantTimeEquals("Bearer s3creT", "Bearer s3cret"))
+        // Different lengths → not equal (allowed to short-circuit on length).
+        #expect(!constantTimeEquals("Bearer s3cret", "Bearer s3cret2"))
+        #expect(!constantTimeEquals("", "x"))
+        // Multibyte (UTF-8) content is compared by bytes, not scalars.
+        #expect(constantTimeEquals("Bearer kéy", "Bearer kéy"))
+        #expect(!constantTimeEquals("Bearer kéy", "Bearer key"))
+    }
+
     @Test
     func modelsEndpointEmptyWhenNoModelLoaded() async throws {
         let server = makeServer()
