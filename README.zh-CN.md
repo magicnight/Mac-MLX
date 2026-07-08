@@ -20,16 +20,18 @@ GUI、常驻 API、零 Python，全在一个约 50 MB 的 app 里。
 
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| 原生 macOS GUI | ✅ SwiftUI | Electron | 仅菜单栏 | Web UI |
+| 原生 macOS GUI | ✅ SwiftUI | Electron | 仅菜单栏 | ✅ SwiftUI（v0.4+） |
+| **Swift 原生进程内引擎** | ✅ | ❌ | ❌ | ❌（Python 内核） |
 | MLX 推理 | ✅ | ✅ | ✅（预览） | ✅ |
-| 命令行 (CLI) | ✅ | ✅ `lms` | ✅ | ✅ |
+| 命令行 (CLI) | ✅ | ✅ `lms` | ✅ | 仅启动器 |
 | 断点续传 + 镜像源 | ✅ | ⚠ 部分 | ⚠ 部分 | ❌ |
 | OpenAI 兼容 API | ✅ 常驻 | ✅ | ✅ | ✅ |
 | 无需 Python | ✅ | ✅ | ✅ | ❌ |
 
-macMLX 真正独有的：一流的 SwiftUI app **加上**共享同一 Swift 核心的完整
-CLI/TUI——以及用纯 Swift 拥有前沿模型架构（DeepSeek V3.2 移植），而不是干
-等上游支持。
+macMLX 真正独有的：**推理引擎本身就是 Swift、跑在进程内**——oMLX 的原生
+app（v0.4+）壳下仍是 Python 内核，我们整个 ~50 MB DMG 里没有一行 Python。
+在此之上：共享同一 Swift 核心的完整 CLI/TUI，以及用纯 Swift 拥有前沿模型
+架构（DeepSeek V3.2 移植），而不是干等上游支持。
 
 ## 系统要求
 
