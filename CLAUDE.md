@@ -7,8 +7,11 @@ Native macOS LLM inference desktop app for Apple Silicon.
 Inspired by Swama's Swift-native approach, oMLX's feature depth,
 and LM Studio's product experience — wrapped in a first-class SwiftUI GUI.
 
-**Core differentiator: the only MLX inference tool with a truly native macOS GUI
-AND an elegant CLI + TUI for developers.**
+**Core differentiator: the only MLX tool whose inference engine itself is
+native Swift running in-process — native GUI + elegant CLI/TUI over one shared
+Swift core, zero Python runtime anywhere.** (Since oMLX v0.4.0 ships a native
+SwiftUI shell too, but over a Python core; "only native GUI" is no longer true
+and must not be claimed.)
 
 ## Target Users
 

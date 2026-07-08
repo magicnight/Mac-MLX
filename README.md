@@ -21,16 +21,19 @@ genuinely native macOS GUI, an always-on API, and zero Python in one ~50 MB app.
 
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| Native macOS GUI | ✅ SwiftUI | Electron | menu-bar only | Web UI |
+| Native macOS GUI | ✅ SwiftUI | Electron | menu-bar only | ✅ SwiftUI (v0.4+) |
+| **Swift-native in-process engine** | ✅ | ❌ | ❌ | ❌ (Python core) |
 | MLX inference | ✅ | ✅ | ✅ (preview) | ✅ |
-| CLI | ✅ | ✅ `lms` | ✅ | ✅ |
+| CLI | ✅ | ✅ `lms` | ✅ | launcher only |
 | Resumable downloads + mirrors | ✅ | ⚠ partial | ⚠ partial | ❌ |
 | OpenAI-compatible API | ✅ always-on | ✅ | ✅ | ✅ |
 | Zero Python required | ✅ | ✅ | ✅ | ❌ |
 
-Where macMLX stands alone: a first-class SwiftUI app **and** a proper CLI/TUI
-over one shared Swift core — plus owning frontier model architectures in pure
-Swift (the DeepSeek V3.2 port) instead of waiting for upstream.
+Where macMLX stands alone: the **inference engine itself is Swift, running
+in-process** — oMLX's native app (v0.4+) fronts a Python core, ours has no
+Python anywhere in one ~50 MB DMG. On top of that: a proper CLI/TUI sharing
+the same Swift core, and owning frontier model architectures in pure Swift
+(the DeepSeek V3.2 port) instead of waiting for upstream.
 
 ## Requirements
 
@@ -138,7 +141,8 @@ swift test  --package-path MacMLXCore    # tests (~3s)
 - **Shipped (v0.1 → v0.5)** — native GUI + menu bar + CLI + OpenAI API (v0.1); download & chat polish (v0.2); Benchmark, Logs, chat history, API cold-swap, Ollama compat, sandbox-off (v0.3); and the v0.5 engine leap — VLMs, tiered KV cache, model pool, LoRA, MCP server. Per-tag detail in [CHANGELOG.md](CHANGELOG.md).
 - **Next release (on `main`)** — server hardening: api-key auth, Anthropic `/v1/messages`, aliases + idle TTL, template kwargs (v0.5.1); embeddings + rerank endpoints (v0.5.2); the server/pool stability wave — atomic swap+generate, leak-proof generation lock, stall watchdog, pool pinning + true cancellation (v0.5.3); MCP client pool; `reasoning_content` separation ([#30](../../issues/30)); and the **DeepSeek V3.2 pure-Swift port** — DSA sparse attention + absorbed MLA + MoE as a zero-fork overlay into mlx-swift-lm's factory, every component parity-verified at `1e-4` against the Python reference. macMLX's differentiation now that Ollama and LM Studio also ship MLX backends.
 - **In progress** — chat-side MCP tool routing; DeepSeek follow-ups (real-checkpoint smoke, then the V4 increment); true cross-encoder reranker. (The server/pool hardening backlog from the debug round is fully landed — PRs #55-#57.)
-- **Later** — v0.6 speech I/O (MLX-native STT/TTS); v0.7+ community benchmarks service and continuous batching once upstream ships it.
+- **Next (v0.6) — agent backend** — continuous batching (self-built orchestrator over upstream's batch cache primitives), longest-common-prefix prompt-cache reuse across agent turns, structured output (JSON-schema-constrained decoding), speculative decoding wired up (draft models + MTP), an API-compat pack (`logit_bias` / `logprobs` / per-request adapters / server `tools` pass-through), GUI upgrades (existing-HF-cache discovery, coding-agent Integrations screen, model-card polish), and a rolling pipeline of pure-Swift model ports (Llama 4, Command R7B, Kimi, MiniCPM3, …).
+- **Later (v0.7+)** — speech I/O (MLX-native STT/TTS); community benchmarks service; custom Metal kernels for our DeepSeek DSA path if profiling demands it.
 - **Reopenable** (feasible since sandbox-off) — Python / SwiftLM subprocess engines ([#12](../../issues/12) / [#13](../../issues/13)), Homebrew tap ([#20](../../issues/20)), signed + notarized DMG ([#19](../../issues/19)).
 
 ## Contributing · License

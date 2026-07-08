@@ -20,16 +20,18 @@ GUI、常驻 API、零 Python，全在一个约 50 MB 的 app 里。
 
 | | macMLX | LM Studio | Ollama | oMLX |
 |--|--------|-----------|--------|------|
-| 原生 macOS GUI | ✅ SwiftUI | Electron | 仅菜单栏 | Web UI |
+| 原生 macOS GUI | ✅ SwiftUI | Electron | 仅菜单栏 | ✅ SwiftUI（v0.4+） |
+| **Swift 原生进程内引擎** | ✅ | ❌ | ❌ | ❌（Python 内核） |
 | MLX 推理 | ✅ | ✅ | ✅（预览） | ✅ |
-| 命令行 (CLI) | ✅ | ✅ `lms` | ✅ | ✅ |
+| 命令行 (CLI) | ✅ | ✅ `lms` | ✅ | 仅启动器 |
 | 断点续传 + 镜像源 | ✅ | ⚠ 部分 | ⚠ 部分 | ❌ |
 | OpenAI 兼容 API | ✅ 常驻 | ✅ | ✅ | ✅ |
 | 无需 Python | ✅ | ✅ | ✅ | ❌ |
 
-macMLX 真正独有的：一流的 SwiftUI app **加上**共享同一 Swift 核心的完整
-CLI/TUI——以及用纯 Swift 拥有前沿模型架构（DeepSeek V3.2 移植），而不是干
-等上游支持。
+macMLX 真正独有的：**推理引擎本身就是 Swift、跑在进程内**——oMLX 的原生
+app（v0.4+）壳下仍是 Python 内核，我们整个 ~50 MB DMG 里没有一行 Python。
+在此之上：共享同一 Swift 核心的完整 CLI/TUI，以及用纯 Swift 拥有前沿模型
+架构（DeepSeek V3.2 移植），而不是干等上游支持。
 
 ## 系统要求
 
@@ -133,7 +135,8 @@ swift test  --package-path MacMLXCore    # 测试（约 3 秒）
 - **已发布（v0.1 → v0.5）** —— 原生 GUI + 菜单栏 + CLI + OpenAI API（v0.1）；下载与聊天打磨（v0.2）；Benchmark、Logs、聊天历史、API 冷换、Ollama 兼容、关闭 sandbox（v0.3）；以及 v0.5 的引擎大跃进——VLM、分层 KV cache、多模型池、LoRA、MCP server。按 tag 细节见 [CHANGELOG.md](CHANGELOG.md)。
 - **下个 release（在 `main` 上）** —— 服务端加固：api-key 鉴权、Anthropic `/v1/messages`、别名 + 闲置 TTL、模板 kwargs（v0.5.1）；embeddings + rerank 端点（v0.5.2）；server/pool 稳定性波——换模与生成原子化、不泄漏的生成锁、停滞看门狗、模型池 pin + 真取消（v0.5.3）；MCP client pool；`reasoning_content` 分离（[#30](../../issues/30)）；以及 **DeepSeek V3.2 纯 Swift 移植**——DSA 稀疏注意力 + absorbed MLA + MoE 以零 fork overlay 注册进 mlx-swift-lm 工厂，逐组件对 Python 参考 `1e-4` 数值对齐。在 Ollama 和 LM Studio 也上了 MLX 后端的当下，这是 macMLX 的差异化。
 - **进行中** —— 接进聊天的 MCP 工具路由；DeepSeek 后续（真权重 smoke，然后 V4 增量）；真 cross-encoder 重排。（debug 轮的 server/pool 加固 backlog 已全部落地——PRs #55-#57。）
-- **更远** —— v0.6 语音 I/O（MLX 原生 STT/TTS）；v0.7+ 社区 benchmark 服务 + 等上游支持后的连续批处理。
+- **下一版（v0.6）—— agent 后端** —— 连续批处理（基于上游批缓存原语自研编排器）、跨轮最长公共前缀 prompt-cache 复用、结构化输出（JSON Schema 约束解码）、投机解码接线（draft 模型 + MTP）、API 兼容包（`logit_bias` / `logprobs` / 每请求 adapter / server `tools` 透传）、GUI 升级（已有 HF 缓存发现、coding-agent Integrations 屏、模型卡打磨），以及纯 Swift 模型移植流水线（Llama 4、Command R7B、Kimi、MiniCPM3……）。
+- **更远（v0.7+）** —— 语音 I/O（MLX 原生 STT/TTS）；社区 benchmark 服务；若性能剖析需要，为我们的 DeepSeek DSA 路径做自定义 Metal kernel。
 - **可重开**（sandbox 关闭后可行）—— Python / SwiftLM 子进程引擎（[#12](../../issues/12) / [#13](../../issues/13)）、Homebrew tap（[#20](../../issues/20)）、签名 + 公证 DMG（[#19](../../issues/19)）。
 
 ## 参与贡献 · 许可证
