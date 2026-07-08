@@ -4,5 +4,5 @@
 /// (`Engine/`, `Models/`, `Managers/`, `Server/`) added in later stages.
 public enum MacMLXCore {
     public static let name = "MacMLXCore"
-    public static let version = "0.1.0"
+    public static let version = "0.5.3"
 }

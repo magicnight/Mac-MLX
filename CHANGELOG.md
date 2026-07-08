@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-08
+
 ### Added
 - **DeepSeek V3.2 pure-Swift port** — the full architecture (DSA sparse
   attention with the lightning indexer, absorbed MLA, noaux_tc MoE routing)
