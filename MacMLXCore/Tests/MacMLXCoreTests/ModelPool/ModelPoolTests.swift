@@ -343,6 +343,51 @@ final class ModelPoolTests: XCTestCase {
         let residents = await pool.residentModelIDs()
         XCTAssertTrue(residents.contains("A"), "one begin after an unbalanced end must re-protect A (clamp prevented underflow)")
     }
+
+    // MARK: - v0.5.3 P3 cleanup wave (P3-5)
+
+    /// P3-5: an `unload(id)` that races an in-flight `load(id)` must NOT be
+    /// lost. While the load is parked in `engine.load()` the entry isn't
+    /// resident yet, so a naive unload no-ops and the completing load
+    /// resurrects it. The fix drops a tombstone the completing load honors —
+    /// discarding its fresh engine AND releasing the byte reservation. Verified
+    /// two ways: the model is not resident afterwards, and a later pair of
+    /// loads that fit the budget ONLY if the reservation was released both
+    /// survive (a leaked reservation would have forced one out).
+    func testUnloadDuringInFlightLoadDoesNotResurrectOrLeakReservation() async throws {
+        let gate = LoadGate()
+        // Budget 20 bytes; each model costs 10. "A" parks in engine.load so we
+        // can unload it mid-flight; everything else loads immediately.
+        let pool = ModelPool(maxBytes: 20, engineFactory: { model in
+            model.id == "A" ? GatedStubEngine(gate: gate) : GatedStubEngine(gate: nil)
+        })
+
+        let modelA = mkModel("A", size: 10)
+        let loadA = Task { try await pool.load(modelA) }
+        try await waitUntilParked(gate)
+
+        // Unload A while its load is still parked — the entry isn't resident yet,
+        // so this must leave a tombstone rather than silently no-op.
+        await pool.unload("A")
+
+        // Release the gate → A's load completes and must honor the tombstone.
+        await gate.open()
+        _ = try? await loadA.value
+
+        var residents = await pool.residentModelIDs()
+        XCTAssertFalse(residents.contains("A"), "unload during in-flight load must not resurrect the model")
+
+        // Reservation-leak probe: B(10) + C(10) = 20 fits the budget EXACTLY,
+        // but only if A's 10-byte in-flight reservation was released. A leaked
+        // reservation would make loading C see B(10) + pendingA(10) = 20 >
+        // target(10) and evict B.
+        _ = try await pool.load(mkModel("B", size: 10))
+        _ = try await pool.load(mkModel("C", size: 10))
+        residents = await pool.residentModelIDs()
+        XCTAssertTrue(residents.contains("B"), "B must survive — a leaked A reservation would have forced its eviction")
+        XCTAssertTrue(residents.contains("C"))
+        XCTAssertFalse(residents.contains("A"))
+    }
 }
 
 // MARK: - Test doubles for the concurrency tests

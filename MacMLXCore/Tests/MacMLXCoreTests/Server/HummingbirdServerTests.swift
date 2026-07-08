@@ -766,6 +766,208 @@ struct HummingbirdServerTests {
         let content = try chatContent(okData)
         #expect(content == "echo:ok-model")
     }
+
+    // MARK: - v0.5.3 P3 cleanup wave
+    //
+    // Port assignments (spaced by 10):
+    //   legacyCompletionsPromptOnlyReturns200                    : 19_050
+    //   legacyCompletionsPromptOnlyStreamingReturns200           : 19_060
+    //   streamingTokenCounterReflectsCompletionTokensNotFrames   : 19_070
+    //   ollamaTagsReportsConfiguredAlias                         : 19_080
+
+    /// Stub that streams a fixed number of text chunks then a terminal usage
+    /// chunk, so a streaming test can prove the telemetry counter reflects the
+    /// engine's reported `completionTokens` (K) rather than the SSE frame count
+    /// (P3-4). `textChunks` and `reportedCompletionTokens` are deliberately
+    /// distinct so the two are observable. Mirrors `EchoingStubEngine`'s
+    /// synchronous-`let` access pattern from the nonisolated `generate`.
+    private actor CountingStubEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        private(set) var status: EngineStatus = .idle
+        private(set) var loadedModel: LocalModel?
+        let version = "counting-1"
+
+        private let textChunks: Int
+        private let reportedCompletionTokens: Int
+
+        init(textChunks: Int, reportedCompletionTokens: Int) {
+            self.textChunks = textChunks
+            self.reportedCompletionTokens = reportedCompletionTokens
+        }
+
+        func load(_ model: LocalModel) async throws {
+            status = .loading(model: model.id)
+            loadedModel = model
+            status = .ready(model: model.id)
+        }
+
+        func unload() async throws {
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { continuation in
+                Task { [weak self] in
+                    guard let self else { continuation.finish(); return }
+                    for i in 0..<self.textChunks {
+                        continuation.yield(GenerateChunk(text: "tok\(i) "))
+                    }
+                    continuation.yield(GenerateChunk(
+                        text: "",
+                        finishReason: .stop,
+                        usage: TokenUsage(promptTokens: 3, completionTokens: self.reportedCompletionTokens)
+                    ))
+                    continuation.finish()
+                }
+            }
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
+    /// P3-1: a legacy text-completions body (`{"model","prompt",...}` with NO
+    /// `messages`) POSTed to `/v1/completions` must be accepted and answered
+    /// with the same chat-format response — not rejected with a 400 for the
+    /// missing `messages` field.
+    @Test
+    func legacyCompletionsPromptOnlyReturns200() async throws {
+        let server = try await loadedStubServer(modelID: "stub-model")
+        let port = try await server.start(preferredPort: 19_050)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "prompt": "Hello",
+            "max_tokens": 16,
+            "stream": false,
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["object"] as? String == "chat.completion")
+        let choices = try #require(json["choices"] as? [[String: Any]])
+        #expect(!choices.isEmpty)
+        // The `prompt` was wrapped into a single user turn, so the stub answers
+        // exactly as it does for a normal chat request.
+        let message = try #require(choices.first?["message"] as? [String: String])
+        #expect(message["content"] == "stub-response")
+    }
+
+    /// P3-1: the same legacy prompt-only body with `stream:true` must stream a
+    /// normal chat-completion SSE sequence (not 400).
+    @Test
+    func legacyCompletionsPromptOnlyStreamingReturns200() async throws {
+        let server = try await loadedStubServer(modelID: "stub-model")
+        let port = try await server.start(preferredPort: 19_060)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "prompt": "Hello",
+            "stream": true,
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+        await server.stop()
+
+        #expect(http.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("chat.completion.chunk"))
+        #expect(text.contains("[DONE]"))
+    }
+
+    /// P3-4: on a STREAMING request the token telemetry counter must grow by
+    /// the engine's reported `completionTokens` (K), not by the number of SSE
+    /// frames (N = text chunks + terminal chunk). The stub emits N frames whose
+    /// K differs from N, so the pre-fix `incrementTokens(chunkCount)` (frames)
+    /// and the fix are observably different.
+    @Test
+    func streamingTokenCounterReflectsCompletionTokensNotFrames() async throws {
+        let textChunks = 3
+        let reportedK = 7  // != frame count (textChunks + 1 = 4)
+        let engine = CountingStubEngine(textChunks: textChunks, reportedCompletionTokens: reportedK)
+        try await engine.load(fixtureModel(id: "count-model"))
+        let server = HummingbirdServer(engineProvider: { engine })
+        let port = try await server.start(preferredPort: 19_070)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "count-model",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": true,
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 200)
+
+        // The counter is bumped on the server AFTER the body closure finishes
+        // writing, which can land just after the client receives [DONE]. Poll
+        // /x/status until it settles (non-zero), then assert the exact value.
+        let statusURL = URL(string: "http://127.0.0.1:\(port)/x/status")!
+        var counted = 0
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let (data, _) = try await get(statusURL)
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let c = json["tokens_generated_total"] as? Int, c > 0 {
+                counted = c
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        await server.stop()
+
+        #expect(
+            counted == reportedK,
+            "telemetry must count completion tokens (K=\(reportedK)), not SSE frames (N=\(textChunks + 1)); got \(counted)"
+        )
+    }
+
+    /// P3-2: `/api/tags` must report the user-facing alias (when configured),
+    /// matching `/v1/models` — not the raw directory id.
+    @Test
+    func ollamaTagsReportsConfiguredAlias() async throws {
+        // Unique id + alias so this never collides with a real user override in
+        // the shared ~/.mac-mlx/model-params dir the server reads; removed below.
+        let modelID = "macmlx-test-\(UUID().uuidString)"
+        let alias = "friendly-\(UUID().uuidString)"
+        let store = ModelParametersStore()  // default dir — the same store the server reads
+        try await store.save(ModelParameters(alias: alias), for: modelID)
+
+        let engine = StubInferenceEngine(engineID: .mlxSwift)
+        let model = LocalModel(
+            id: modelID, displayName: modelID,
+            directory: URL(filePath: "/tmp"), sizeBytes: 0, format: .mlx,
+            quantization: nil, parameterCount: nil, architecture: nil
+        )
+        try await engine.load(model)
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_080)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/api/tags")!
+        let (data, response) = try await get(url)
+
+        await server.stop()
+        await store.reset(for: modelID)  // clean up the override file regardless of assertions
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let models = try #require(json["models"] as? [[String: Any]])
+        #expect(models.count == 1)
+        #expect(models.first?["name"] as? String == alias, "/api/tags must report the configured alias, not the raw dir id")
+        #expect(models.first?["model"] as? String == alias)
+    }
 }
 
 /// Actor box holding a mutable "active engine" reference — used by the
