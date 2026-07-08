@@ -317,10 +317,10 @@ private struct ChatContent: View {
                         ChatMessageView(
                             message: message,
                             onCopy: { viewModel.copyToPasteboard(messageCopy.content) },
-                            onEdit: message.role == .user
+                            onEdit: (message.role == .user && message.toolActivity == nil)
                                 ? { viewModel.startEdit(messageCopy) }
                                 : nil,
-                            onRegenerate: message.role == .assistant
+                            onRegenerate: (message.role == .assistant && message.toolActivity == nil)
                                 ? {
                                     _ = Task { @MainActor in
                                         await viewModel.regenerate(from: messageCopy.id)
