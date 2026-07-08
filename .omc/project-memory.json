@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1776351494565,
+  "lastScanned": 1783505526360,
   "projectRoot": "/Users/kevin/Projects/macmlx",
   "techStack": {
     "languages": [],
@@ -24,252 +24,114 @@
   "structure": {
     "isMonorepo": false,
     "workspaces": [],
-    "mainDirectories": [],
-    "gitBranches": null
+    "mainDirectories": [
+      "docs",
+      "public",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
   },
   "customNotes": [],
-  "directoryMap": {},
-  "hotPaths": [
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Server/HummingbirdServer.swift",
-      "accessCount": 18,
-      "lastAccessed": 1783447401316,
-      "type": "file"
+  "directoryMap": {
+    "Formula": {
+      "path": "Formula",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1783505526351,
+      "keyFiles": [
+        "macmlx.rb"
+      ]
     },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Engine/MLXSwiftEngine.swift",
-      "accessCount": 6,
-      "lastAccessed": 1783447729773,
-      "type": "file"
+    "MacMLXCore": {
+      "path": "MacMLXCore",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1783505526352,
+      "keyFiles": [
+        "Package.resolved",
+        "Package.swift"
+      ]
     },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Managers/ModelLibraryManager.swift",
-      "accessCount": 5,
-      "lastAccessed": 1783446709455,
-      "type": "file"
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 2,
+      "lastAccessed": 1783505526352,
+      "keyFiles": [
+        "deepseek-v32-swift-port.md",
+        "roadmap-post-v0.3.6.md"
+      ]
     },
-    {
-      "path": "MacMLXCore/Package.swift",
-      "accessCount": 4,
-      "lastAccessed": 1783446494376,
-      "type": "file"
+    "macMLX": {
+      "path": "macMLX",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1783505526352,
+      "keyFiles": [
+        "Info.plist"
+      ]
     },
-    {
-      "path": "macMLX/macMLX/Views/ModelLibrary/LocalModelRow.swift",
-      "accessCount": 4,
-      "lastAccessed": 1783446723764,
-      "type": "file"
+    "macmlx-cli": {
+      "path": "macmlx-cli",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1783505526352,
+      "keyFiles": [
+        "Package.resolved",
+        "Package.swift"
+      ]
     },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Engine/EmbeddingEngine.swift",
-      "accessCount": 4,
-      "lastAccessed": 1783448118510,
-      "type": "file"
+    "public": {
+      "path": "public",
+      "purpose": "Public files",
+      "fileCount": 5,
+      "lastAccessed": 1783505526353,
+      "keyFiles": [
+        "index.html",
+        "llms.txt",
+        "og-image.svg",
+        "robots.txt",
+        "sitemap.xml"
+      ]
     },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Models/LocalModel.swift",
-      "accessCount": 3,
-      "lastAccessed": 1783446682399,
-      "type": "file"
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 7,
+      "lastAccessed": 1783505526353,
+      "keyFiles": [
+        "ExportOptions.plist",
+        "build.sh",
+        "generate_sparkle_keys.sh",
+        "package-cli.sh",
+        "package-dmg.sh"
+      ]
     },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Engine/RerankScoringTests.swift",
-      "accessCount": 3,
-      "lastAccessed": 1783448135199,
-      "type": "file"
+    "MacMLXCore/Tests": {
+      "path": "MacMLXCore/Tests",
+      "purpose": "Test files",
+      "fileCount": 0,
+      "lastAccessed": 1783505526353,
+      "keyFiles": []
     },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Engine/EmbeddingPoolingTests.swift",
-      "accessCount": 3,
-      "lastAccessed": 1783448834755,
-      "type": "file"
+    "macmlx-cli/Tests": {
+      "path": "macmlx-cli/Tests",
+      "purpose": "Test files",
+      "fileCount": 0,
+      "lastAccessed": 1783505526353,
+      "keyFiles": []
     },
-    {
-      "path": "README.md",
-      "accessCount": 2,
-      "lastAccessed": 1776354551353,
-      "type": "file"
-    },
-    {
-      "path": "macMLX/macMLX/ContentView.swift",
-      "accessCount": 2,
-      "lastAccessed": 1776356958122,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Engine/InferenceEngine.swift",
-      "accessCount": 2,
-      "lastAccessed": 1783446012427,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Engine/RerankScoring.swift",
-      "accessCount": 2,
-      "lastAccessed": 1783447371858,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/Engine/HuggingFaceTokenizerLoader.swift",
-      "accessCount": 2,
-      "lastAccessed": 1783447372469,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Server/HummingbirdServerEmbeddingsTests.swift",
-      "accessCount": 2,
-      "lastAccessed": 1783447385281,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Managers/ModelLibraryManagerEmbedderTests.swift",
-      "accessCount": 2,
-      "lastAccessed": 1783447386596,
-      "type": "file"
-    },
-    {
-      "path": "CHANGELOG.md",
-      "accessCount": 2,
-      "lastAccessed": 1783449031877,
-      "type": "file"
-    },
-    {
-      "path": "",
-      "accessCount": 1,
-      "lastAccessed": 1776353681542,
-      "type": "directory"
-    },
-    {
-      "path": "Brewfile",
-      "accessCount": 1,
-      "lastAccessed": 1776353771208,
-      "type": "file"
-    },
-    {
-      "path": ".claude/architecture.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353778328,
-      "type": "file"
-    },
-    {
-      "path": ".claude/swift-conventions.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353778697,
-      "type": "file"
-    },
-    {
-      "path": ".claude/ui-guidelines.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353779102,
-      "type": "file"
-    },
-    {
-      "path": ".claude/api-contracts.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353779935,
-      "type": "file"
-    },
-    {
-      "path": ".claude/features/inference-engines.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353787400,
-      "type": "file"
-    },
-    {
-      "path": ".claude/features/chat-ui.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353787806,
-      "type": "file"
-    },
-    {
-      "path": ".claude/features/menubar.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353788214,
-      "type": "file"
-    },
-    {
-      "path": ".claude/features/cli-tui.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353788465,
-      "type": "file"
-    },
-    {
-      "path": ".claude/features/onboarding.md",
-      "accessCount": 1,
-      "lastAccessed": 1776353789468,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/VersionTests.swift",
-      "accessCount": 1,
-      "lastAccessed": 1776355203006,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/MacMLXCore.swift",
-      "accessCount": 1,
-      "lastAccessed": 1776355232840,
-      "type": "file"
-    },
-    {
-      "path": "macmlx-cli/Tests/macmlxTests/CommandSmokeTests.swift",
-      "accessCount": 1,
-      "lastAccessed": 1776355373252,
-      "type": "file"
-    },
-    {
-      "path": "macmlx-cli/Package.swift",
-      "accessCount": 1,
-      "lastAccessed": 1776355381534,
-      "type": "file"
-    },
-    {
-      "path": "macmlx-cli/Sources/macmlx/MacmlxCommand.swift",
-      "accessCount": 1,
-      "lastAccessed": 1776355390615,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Sources/MacMLXCore/ModelPool/ModelPool.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783445673254,
-      "type": "file"
-    },
-    {
-      "path": "macMLX/macMLX/Views/ModelLibrary/ModelLibraryView.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783445764170,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Managers/ModelLibraryManagerVLMTests.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783446175283,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Helpers/StubInferenceEngine.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783446191974,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Server/HummingbirdServerTests.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783446192702,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/Engine/MLXSwiftEnginePreflightTests.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783448136215,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Tests/MacMLXCoreTests/PromptCache/PromptCacheStoreTests.swift",
-      "accessCount": 1,
-      "lastAccessed": 1783448186834,
-      "type": "file"
+    "public/assets": {
+      "path": "public/assets",
+      "purpose": "Static assets",
+      "fileCount": 0,
+      "lastAccessed": 1783505526353,
+      "keyFiles": []
     }
-  ],
+  },
+  "hotPaths": [],
   "userDirectives": []
 }
