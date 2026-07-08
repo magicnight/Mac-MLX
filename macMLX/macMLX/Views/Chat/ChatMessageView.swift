@@ -21,18 +21,25 @@ struct ChatMessageView: View {
     var onTruncate: (() -> Void)? = nil
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            if message.role == .user {
-                Spacer(minLength: 60)
-                bubble
-            } else {
-                bubble
-                Spacer(minLength: 60)
+        if let activity = message.toolActivity {
+            // MCP tool-loop row (v0.6 wave 2): native tool-call / result card
+            // instead of a chat bubble.
+            ToolActivityView(activity: activity, content: message.content)
+                .contextMenu { contextMenuItems }
+        } else {
+            HStack(alignment: .bottom, spacing: 0) {
+                if message.role == .user {
+                    Spacer(minLength: 60)
+                    bubble
+                } else {
+                    bubble
+                    Spacer(minLength: 60)
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 4)
+            .contextMenu { contextMenuItems }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 4)
-        .contextMenu { contextMenuItems }
     }
 
     // MARK: - Context menu (#11)
@@ -148,9 +155,8 @@ struct ChatMessageView: View {
         case .user:      return .accentColor
         case .assistant: return Color(.secondarySystemFill)
         case .system:    return Color(.tertiarySystemFill)
-        // Placeholder so the app keeps compiling now that `MessageRole` has a
-        // `.tool` case (v0.5 MCP routing). Dedicated tool-result bubble
-        // rendering is wired in wave 2 (GUI).
+        // Fallback only: real `.tool` rows carry a `toolActivity` and render
+        // via `ToolActivityView` (v0.6 wave 2), never reaching this bubble.
         case .tool:      return Color(.tertiarySystemFill)
         }
     }

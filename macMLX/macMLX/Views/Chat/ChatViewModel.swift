@@ -14,6 +14,20 @@ import MacMLXCore
 /// ChatMessage / StoredMessage — adds `isGenerating` and `tokenCount`
 /// for live streaming display).
 struct UIChatMessage: Identifiable {
+
+    /// Native representation of one MCP tool-loop row (v0.6 wave 2). Nil for
+    /// ordinary chat turns. These rows are **UI-ephemeral**: they render live
+    /// during a tool-calling session but are excluded from persistence and
+    /// from the history re-sent to the model on the next turn (see
+    /// `ChatViewModel.persist()` / `generate()`).
+    enum ToolActivity: Equatable {
+        /// The assistant asked to call `name`, routed to MCP `server`.
+        /// `argumentsJSON` is the pretty-printed call arguments.
+        case call(name: String, server: String, argumentsJSON: String)
+        /// The result of a tool call. `isError` tints the card + icon.
+        case result(isError: Bool)
+    }
+
     let id: UUID
     let role: MessageRole
     var content: String
@@ -22,6 +36,10 @@ struct UIChatMessage: Identifiable {
     var isGenerating: Bool
     /// VLM image attachments tied to this message (v0.4.1+).
     var images: [ImageAttachment]
+    /// Non-nil for an MCP tool-call / tool-result row (v0.6 wave 2). Drives
+    /// the native tool-card rendering in `ChatMessageView` and marks the row
+    /// as ephemeral everywhere else.
+    var toolActivity: ToolActivity?
 
     init(
         id: UUID = UUID(),
@@ -30,7 +48,8 @@ struct UIChatMessage: Identifiable {
         timestamp: Date = Date(),
         tokenCount: Int? = nil,
         isGenerating: Bool = false,
-        images: [ImageAttachment] = []
+        images: [ImageAttachment] = [],
+        toolActivity: ToolActivity? = nil
     ) {
         self.id = id
         self.role = role
@@ -39,9 +58,11 @@ struct UIChatMessage: Identifiable {
         self.tokenCount = tokenCount
         self.isGenerating = isGenerating
         self.images = images
+        self.toolActivity = toolActivity
     }
 
-    /// Restore from persistence.
+    /// Restore from persistence. Tool-activity rows are UI-ephemeral and
+    /// never persisted, so a restored message always has `toolActivity == nil`.
     init(stored: StoredMessage) {
         self.id = stored.id
         self.role = stored.role
@@ -50,6 +71,7 @@ struct UIChatMessage: Identifiable {
         self.tokenCount = stored.tokenCount
         self.isGenerating = false
         self.images = stored.images
+        self.toolActivity = nil
     }
 
     /// Dehydrate for persistence. Transient `isGenerating` is dropped.
@@ -110,6 +132,15 @@ final class ChatViewModel {
     /// we save (updatedAt bump) or start a new chat (fresh UUID).
     private var current: Conversation
     private var generationTask: Task<Void, Never>? = nil
+
+    /// MCP tool routing (v0.6 wave 2). Injected by `AppState` after
+    /// construction (the pool doesn't exist until bootstrap). When the
+    /// session provider returns nil — no `mcp.json`, nothing connected, or not
+    /// yet connected — `generate()` takes the exact non-tool path (zero
+    /// behaviour change). `toolSpecsProvider` supplies the OpenAI specs to
+    /// attach to the request when a session is active.
+    var toolSessionProvider: (@MainActor () -> ToolCallingSession?)?
+    var toolSpecsProvider: (@MainActor () -> [JSONValue])?
 
     // MARK: - Init
 
@@ -386,8 +417,11 @@ final class ChatViewModel {
 
         isGenerating = true
 
+        // Exclude UI-ephemeral tool-activity rows: the model sees clean
+        // user/assistant history and the tool session grows its own tool
+        // turns internally for the current send.
         let coreMessages: [ChatMessage] = messages
-            .filter { !$0.isGenerating }
+            .filter { !$0.isGenerating && $0.toolActivity == nil }
             .map { ChatMessage(role: $0.role, content: $0.content, images: $0.images) }
 
         let params = parameters.parameters
@@ -397,6 +431,17 @@ final class ChatViewModel {
             systemPrompt: params.systemPrompt.isEmpty ? nil : params.systemPrompt,
             parameters: params.asGenerationParameters()
         )
+
+        // Route through the MCP tool loop when a session is available (pool
+        // connected + tools indexed). Otherwise fall through to the exact
+        // pre-wave non-tool path below — zero behaviour change without mcp.json.
+        if let session = toolSessionProvider?() {
+            var toolRequest = request
+            let specs = toolSpecsProvider?() ?? []
+            toolRequest.tools = specs.isEmpty ? nil : specs
+            await runToolLoop(session: session, request: toolRequest, model: currentModel)
+            return
+        }
 
         await LogManager.shared.info(
             "Starting generation for \(currentModel.id) (messages=\(coreMessages.count), maxTokens=\(params.maxTokens))",
@@ -453,6 +498,138 @@ final class ChatViewModel {
         await generationTask?.value
     }
 
+    /// Drive one user turn through the MCP tool loop (v0.6 wave 2). Consumes
+    /// `ToolLoopEvent`s: assistant deltas stream into a live assistant bubble
+    /// (a fresh one after each tool call); tool calls and results append
+    /// native tool-activity rows. Runs inside `generationTask` so `Stop`
+    /// (which cancels that task) unwinds the session stream → the coordinator
+    /// generation → the engine.
+    private func runToolLoop(
+        session: ToolCallingSession,
+        request: GenerateRequest,
+        model: LocalModel
+    ) async {
+        await LogManager.shared.info(
+            "Starting tool-enabled generation for \(model.id) (messages=\(request.messages.count), tools=\(request.tools?.count ?? 0))",
+            category: .inference
+        )
+
+        generationTask = Task { [weak self] in
+            guard let self else { return }
+
+            // Track the live assistant bubble by ID (not index): the loop
+            // inserts tool rows between turns, which shifts indices. Nested
+            // helpers are @MainActor — unlike the enclosing Task closure they
+            // don't inherit isolation, and they touch @MainActor `messages`.
+            var liveAssistantID: UUID? = nil
+            @MainActor func indexOf(_ id: UUID) -> Int? { self.messages.firstIndex { $0.id == id } }
+            @MainActor func appendLiveAssistant() -> UUID {
+                let msg = UIChatMessage(role: .assistant, content: "", isGenerating: true)
+                self.messages.append(msg)
+                return msg.id
+            }
+
+            do {
+                for try await event in session.run(request) {
+                    guard !Task.isCancelled else { break }
+                    switch event {
+                    case .assistantDelta(let chunk):
+                        let id = liveAssistantID ?? appendLiveAssistant()
+                        liveAssistantID = id
+                        if let i = indexOf(id) {
+                            self.messages[i].content += chunk.text
+                            if let usage = chunk.usage {
+                                self.messages[i].tokenCount = usage.completionTokens
+                            }
+                        }
+
+                    case .toolCallStarted(let call, let server):
+                        // Finalise the current assistant turn. Drop it if it was
+                        // a pure (empty) tool-call turn so the transcript reads
+                        // cleanly: user → tool call → tool result → answer.
+                        // Reset `liveAssistantID` whenever it was set, even if
+                        // the bubble is already gone (e.g. `delete(_:)` fired
+                        // out-of-band mid-loop) — otherwise the next
+                        // `assistantDelta` would reuse a stale id whose
+                        // `indexOf` always misses, silently dropping text.
+                        if let id = liveAssistantID {
+                            if let i = indexOf(id) {
+                                if self.messages[i].content.isEmpty && self.messages[i].images.isEmpty {
+                                    self.messages.remove(at: i)
+                                } else {
+                                    self.messages[i].isGenerating = false
+                                }
+                            }
+                            liveAssistantID = nil
+                        }
+                        self.messages.append(UIChatMessage(
+                            role: .assistant,
+                            content: "",
+                            toolActivity: .call(
+                                name: call.name,
+                                server: server,
+                                argumentsJSON: Self.prettyJSON(call.arguments))))
+
+                    case .toolResult(_, let content, let isError):
+                        self.messages.append(UIChatMessage(
+                            role: .tool,
+                            content: content,
+                            toolActivity: .result(isError: isError)))
+
+                    case .finished:
+                        if let id = liveAssistantID, let i = indexOf(id) {
+                            self.messages[i].isGenerating = false
+                        }
+                    }
+                }
+            } catch {
+                // A Stop button cancels this task, which `ToolCallingSession.run`
+                // propagates by re-throwing `CancellationError` (see its
+                // `run(_:)`). That's an ordinary stop, not a failure — mirror
+                // the non-tool path's silent `guard !Task.isCancelled` and
+                // don't surface it as an error bubble.
+                if error is CancellationError || Task.isCancelled {
+                    // Clean stop — nothing to report.
+                } else {
+                    await LogManager.shared.error(
+                        "Tool-enabled generation failed: \(error.localizedDescription)",
+                        category: .inference
+                    )
+                    if let id = liveAssistantID, let i = indexOf(id) {
+                        self.messages[i].content += "\n[Error: \(error.localizedDescription)]"
+                    } else {
+                        self.messages.append(UIChatMessage(
+                            role: .assistant,
+                            content: "[Error: \(error.localizedDescription)]"))
+                    }
+                }
+            }
+
+            // Finalise any still-streaming bubble and settle VM state.
+            if let id = liveAssistantID, let i = indexOf(id) {
+                self.messages[i].isGenerating = false
+                if self.messages[i].content.isEmpty && self.messages[i].images.isEmpty {
+                    self.messages[i].content = "[No output — model returned zero tokens. Check Logs tab for details.]"
+                }
+            }
+            self.isGenerating = false
+            self.persist()
+        }
+        await generationTask?.value
+    }
+
+    /// Pretty-print a tool call's decoded arguments for the native tool card.
+    /// Stable key order so the same call always renders identically.
+    private static func prettyJSON(_ arguments: [String: JSONValue]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(arguments),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
     // MARK: - Stop
 
     func stopGeneration() {
@@ -490,8 +667,9 @@ final class ChatViewModel {
     /// don't block the UI on I/O and we tolerate transient failures.
     private func persist() {
         var conv = current
+        // Tool-activity rows (v0.6 wave 2) are UI-ephemeral — never persisted.
         conv.messages = messages
-            .filter { !$0.isGenerating }
+            .filter { !$0.isGenerating && $0.toolActivity == nil }
             .map(\.asStored)
         conv.systemPrompt = parameters.parameters.systemPrompt
         conv.modelID = coordinator.currentModel?.id
@@ -510,8 +688,9 @@ final class ChatViewModel {
     /// switch/createNew/delete paths to flush outgoing state without
     /// spamming empty rows into the sidebar.
     private func persistNow() {
-        // Only persist if the conversation has at least one stored message.
-        let storable = messages.filter { !$0.isGenerating }
+        // Only persist if the conversation has at least one stored (non-tool)
+        // message — tool-activity rows are ephemeral and never saved.
+        let storable = messages.filter { !$0.isGenerating && $0.toolActivity == nil }
         guard !storable.isEmpty else { return }
         persist()
     }

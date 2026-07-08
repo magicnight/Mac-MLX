@@ -35,6 +35,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var updater: SPUUpdater { updaterController.updater }
     #endif
 
+    /// Best-effort teardown invoked on normal app termination. Wired once the
+    /// AppState is ready (see macMLXApp), it lets AppState disconnect the MCP
+    /// pool so spawned MCP subprocesses don't outlive the app.
+    var onWillTerminate: (@MainActor () -> Void)?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onWillTerminate?()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Fix #2: single-instance check. If another macMLX is already
         // running, raise that instance and quit ourselves. Prevents the
