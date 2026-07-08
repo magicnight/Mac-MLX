@@ -838,7 +838,11 @@ public actor HummingbirdServer {
         // Bearer-token auth — when the server is configured with an API
         // key, gate every route except the health probes. Added after
         // logging so rejected requests still show up in the Logs tab.
-        if let apiKey {
+        // An empty string counts as "no auth" (matches the nil default):
+        // installing the middleware with "" would expect the literal
+        // header "Bearer " and 401 every normal request — a bricked
+        // server that provides no security either.
+        if let apiKey, !apiKey.isEmpty {
             router.add(middleware: BearerAuthMiddleware(apiKey: apiKey))
         }
 
