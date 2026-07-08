@@ -83,6 +83,52 @@ jobs:
       - name: Smoke-run macmlx --version
         run: swift run --package-path macmlx-cli macmlx --version
 
+  metal:
+    name: Metal Tests (xcodebuild)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # Xcode 26.4.1 ships Swift 6.3, which (unlike 6.0 in Xcode 16.4)
+      # tolerates mlx-swift-lm's `private let context = CIContext()` in
+      # MLXVLM/MediaProcessing.swift under strict concurrency. Pinning to
+      # the GA build (not the 26.5 beta) so toolchain churn stays low.
+      - name: Pin Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      # Xcode 26 ships the Metal compiler as a separate downloadable
+      # component; without it MLX cannot JIT its shaders and every
+      # MLX-gated test aborts. No-ops when already installed.
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Cache SPM checkouts + DerivedData
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: metal-${{ runner.os }}-${{ hashFiles('MacMLXCore/Package.resolved') }}
+          restore-keys: |
+            metal-${{ runner.os }}-
+
+      # Runs the FULL MacMLXCore suite in a Metal-capable environment so
+      # the MLX-gated tests (numerical-parity fixtures, LoRA converter,
+      # speed sampler) actually execute — under plain `swift test` they
+      # self-skip via MLXTestSupport.requireMLXRuntimeOrSkip. Without this
+      # job the parity fixtures protect nothing in CI. First-run caveat:
+      # if the runner VM exposes no Metal device, MLX aborts and this job
+      # fails — in that case gate the tests on a device probe rather than
+      # deleting the job.
+      - name: Test MacMLXCore under xcodebuild (Metal)
+        working-directory: MacMLXCore
+        run: |
+          xcodebuild test \
+            -scheme MacMLXCore \
+            -destination 'platform=macOS' \
+            -skipPackagePluginValidation
+
   app:
     name: Xcode App Build
     runs-on: macos-26

@@ -37,23 +37,20 @@ import MLXLMCommon
 public enum ModelOverlay {
 
     /// Register every macMLX-owned architecture into the shared factory
-    /// registry. Currently a no-op — the hook is in place; the first real
-    /// architecture (DeepSeek V4 / GLM-5.2) lands in a follow-up.
+    /// registry. Idempotent: re-registering a `model_type` overwrites the
+    /// prior creator with the same closure, so double-calls are safe.
     ///
     /// - Note: `async` because `ModelTypeRegistry` is an `actor`.
     public static func registerAll() async {
-        // Registrations go here, e.g.:
-        //
-        //   await LLMTypeRegistry.shared.registerModelType(
-        //       "deepseek_v4",
-        //       creator: { data in
-        //           let config = try JSONDecoder.json5()
-        //               .decode(DeepseekV4Configuration.self, from: data)
-        //           return DeepseekV4Model(config)
-        //       }
-        //   )
-        //
-        // Nothing registered yet — the mechanism is proven by
-        // `ModelOverlaySpikeTests`.
+        // DeepSeek V3.2 — pure-Swift port (see `Models/DeepseekV32.swift`).
+        // The creator closure is inlined because the package's `create`
+        // helper is `private`. `JSONDecoder.json5()` matches the decoder the
+        // stock factory uses for `config.json` (tolerant of comments/trailing
+        // commas), mirroring `MTPDrafterModelFactory` in mlx-swift-lm.
+        await LLMTypeRegistry.shared.registerModelType("deepseek_v32") { data in
+            let config = try JSONDecoder.json5()
+                .decode(DeepseekV32Configuration.self, from: data)
+            return DeepseekV32Model(config)
+        }
     }
 }

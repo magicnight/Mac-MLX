@@ -3,25 +3,13 @@ import MLX
 @testable import MacMLXCore
 
 /// MLX-backed converter tests — `MLXArray` allocation pulls in the
-/// Metal stack, which the SPM test binary does not always bundle
-/// (`default.metallib` ships with Xcode-archive builds only). These
-/// tests skip cleanly when run under `swift test` and execute under
-/// `xcodebuild`.
+/// Metal stack. Gated by the shared `requireMLXRuntimeOrSkip()`
+/// (MLXTestSupport): skip under bare `swift test`, run under
+/// `xcodebuild` where the Metal toolchain JITs the shaders.
 final class LoRAAdapterConverterMLXTests: XCTestCase {
 
-    /// Mirror of the helper used in `PromptCacheStoreTests` — same
-    /// rationale, same skip behaviour.
-    private func requireMetalOrSkip() throws {
-        let bundle = Bundle(identifier: "mlx-swift_Cmlx.resources")
-            ?? Bundle.allBundles.first(where: { $0.bundlePath.contains("Cmlx") })
-        let metallib = bundle?.url(forResource: "default", withExtension: "metallib")
-        if metallib == nil {
-            throw XCTSkip("Requires default.metallib (SPM test binaries often lack it — run under xcodebuild)")
-        }
-    }
-
     func testTranslateWeightsTransposesAndRenamesLoRAPair() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
 
         // PEFT shape: lora_A is [rank, in], lora_B is [out, rank].
         let peftA = MLXArray([Float](repeating: 0.1, count: 8 * 4), [8, 4])  // r=8, in=4
@@ -47,7 +35,7 @@ final class LoRAAdapterConverterMLXTests: XCTestCase {
     }
 
     func testTranslateWeightsDropsNonLoRAKeys() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
 
         let lora = MLXArray([Float](repeating: 0.1, count: 8 * 4), [8, 4])
         let stray = MLXArray([Float](repeating: 0.5, count: 16), [16])
@@ -61,7 +49,7 @@ final class LoRAAdapterConverterMLXTests: XCTestCase {
     }
 
     func testTranslateWeightsTracksDeepestLayerAcrossPair() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
 
         let p0 = MLXArray([Float](repeating: 0.1, count: 8 * 4), [8, 4])
         let p11 = MLXArray([Float](repeating: 0.1, count: 8 * 4), [8, 4])
@@ -76,7 +64,7 @@ final class LoRAAdapterConverterMLXTests: XCTestCase {
     }
 
     func testConvertPEFTAdapterWritesMLXConfigAndSafetensors() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
 
         let temp = try TempDir()
         let source = temp.url.appendingPathComponent("peft-source", isDirectory: true)
@@ -128,7 +116,7 @@ final class LoRAAdapterConverterMLXTests: XCTestCase {
     }
 
     func testConvertThrowsForMissingConfig() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
 
         let temp = try TempDir()
         let source = temp.url.appendingPathComponent("empty", isDirectory: true)
@@ -140,7 +128,7 @@ final class LoRAAdapterConverterMLXTests: XCTestCase {
     }
 
     func testConvertThrowsForMissingWeights() throws {
-        try requireMetalOrSkip()
+        try requireMLXRuntimeOrSkip()
 
         let temp = try TempDir()
         let source = temp.url.appendingPathComponent("config-only", isDirectory: true)

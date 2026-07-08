@@ -7,10 +7,6 @@ Silicon in **pure Swift**, as a zero-fork overlay on top of Apple's
 
 > Status: in progress. This document tracks the approach and the reasoning
 > behind it; live per-component progress lives in the implementation plan.
->
-> **The code lives on the `feat/deepseek-v32-overlay` branch, not yet merged
-> into `main`.** This write-up is published ahead of the port landing; file
-> references such as `DeepseekV32.swift` point to that branch.
 
 ## Why do this at all
 

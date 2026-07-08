@@ -36,7 +36,12 @@ let package = Package(
         ),
         .testTarget(
             name: "MacMLXCoreTests",
-            dependencies: ["MacMLXCore"]
+            dependencies: ["MacMLXCore"],
+            resources: [
+                // Numerical-parity fixtures captured from the Python
+                // mlx-lm reference (weights + inputs + expected output).
+                .copy("Fixtures"),
+            ]
         ),
     ]
 )
