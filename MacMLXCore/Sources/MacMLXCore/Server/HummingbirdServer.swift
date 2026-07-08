@@ -1139,7 +1139,15 @@ public actor HummingbirdServer {
         // are split here: text parts → `content`, image_url data URLs
         // → `images` via `extractImages()`. See MultimodalContent.
         let messages: [ChatMessage] = chatReq.messages.compactMap { msg in
-            guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
+            // `.tool` is excluded until wave 2 wires proper tool-turn decode
+            // (tool_call_id + assistant tool_calls pairing) — admitting it
+            // half-formed (toolCallID always nil here, preceding assistant
+            // tool_calls dropped) can make a client replaying OpenAI tool
+            // history hit a chat-template pairing assertion. Preserves the
+            // pre-wave-1 behaviour of silently dropping this role.
+            guard let role = MessageRole(rawValue: msg.role),
+                  role != .system, role != .tool
+            else { return nil }
             return ChatMessage(
                 role: role,
                 content: msg.content.text,
@@ -1262,7 +1270,15 @@ public actor HummingbirdServer {
 
         let systemPrompt = req.messages.first(where: { $0.role == "system" })?.content
         let messages: [ChatMessage] = req.messages.compactMap { msg in
-            guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
+            // `.tool` is excluded until wave 2 wires proper tool-turn decode
+            // (tool_call_id + assistant tool_calls pairing) — admitting it
+            // half-formed (toolCallID always nil here, preceding assistant
+            // tool_calls dropped) can make a client replaying OpenAI tool
+            // history hit a chat-template pairing assertion. Preserves the
+            // pre-wave-1 behaviour of silently dropping this role.
+            guard let role = MessageRole(rawValue: msg.role),
+                  role != .system, role != .tool
+            else { return nil }
             return ChatMessage(role: role, content: msg.content)
         }
 
@@ -2040,7 +2056,15 @@ public actor HummingbirdServer {
         // roles are dropped. Text blocks → `content`, image blocks →
         // `images` via `extractImages()`. See AnthropicContent.
         let messages: [ChatMessage] = req.messages.compactMap { msg in
-            guard let role = MessageRole(rawValue: msg.role), role != .system else { return nil }
+            // `.tool` is excluded until wave 2 wires proper tool-turn decode
+            // (tool_call_id + assistant tool_calls pairing) — admitting it
+            // half-formed (toolCallID always nil here, preceding assistant
+            // tool_calls dropped) can make a client replaying OpenAI tool
+            // history hit a chat-template pairing assertion. Preserves the
+            // pre-wave-1 behaviour of silently dropping this role.
+            guard let role = MessageRole(rawValue: msg.role),
+                  role != .system, role != .tool
+            else { return nil }
             return ChatMessage(
                 role: role,
                 content: msg.content.text,
@@ -2866,6 +2890,7 @@ private func writeAnthropicSSE(
 private func anthropicStopReason(_ reason: FinishReason?) -> String {
     switch reason {
     case .length: return "max_tokens"
+    case .toolCalls: return "tool_use"
     case .stop, .error, .none: return "end_turn"
     }
 }

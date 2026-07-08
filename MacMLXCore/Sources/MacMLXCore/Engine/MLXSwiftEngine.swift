@@ -328,14 +328,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// loaded or the template can't be applied.
     public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
         guard let container = loadedSupport.container else { return false }
-        let chatMessages: [Chat.Message] = request.allMessages.map { msg in
-            let role: Chat.Message.Role
-            switch msg.role {
-            case .user: role = .user
-            case .assistant: role = .assistant
-            case .system: role = .system
-            }
-            return Chat.Message(role: role, content: msg.content)
+        // Same tool-aware mapping as generation, without image attachments —
+        // this heuristic only inspects the rendered token tail.
+        let chatMessages: [Chat.Message] = request.allMessages.map {
+            Self.upstreamChatMessage(from: $0, images: [])
         }
         do {
             let lmInput = try await container.prepare(input: UserInput(
@@ -406,16 +402,11 @@ public actor MLXSwiftEngine: InferenceEngine {
         // drop attachments with a debug-level warning so `[image attached]`
         // stub strings don't sneak into the chat template.
         let chatMessages: [Chat.Message] = request.allMessages.map { msg in
-            let role: Chat.Message.Role
-            switch msg.role {
-            case .user:      role = .user
-            case .assistant: role = .assistant
-            case .system:    role = .system
-            }
+            let images: [UserInput.Image]
             if isVLM {
-                let images: [UserInput.Image] = msg.images.map { .url($0.fileURL) }
-                return Chat.Message(role: role, content: msg.content, images: images)
+                images = msg.images.map { .url($0.fileURL) }
             } else {
+                images = []
                 if !msg.images.isEmpty {
                     Task.detached { [count = msg.images.count] in
                         await LogManager.shared.debug(
@@ -424,16 +415,32 @@ public actor MLXSwiftEngine: InferenceEngine {
                         )
                     }
                 }
-                return Chat.Message(role: role, content: msg.content)
+            }
+            return Self.upstreamChatMessage(from: msg, images: images)
+        }
+
+        // Convert any OpenAI tool specs (v0.5) to the tokenizer's `[ToolSpec]`
+        // shape. Non-object elements are dropped (never force-cast) with a
+        // debug note so a malformed spec degrades instead of crashing.
+        let toolSpecs = request.tools.map { Self.toolSpecs(from: $0) }
+        if let requested = request.tools, let converted = toolSpecs,
+           converted.count < requested.count {
+            Task.detached { [dropped = requested.count - converted.count] in
+                await LogManager.shared.debug(
+                    "Dropping \(dropped) non-object tool spec(s) from GenerateRequest.tools",
+                    category: .inference
+                )
             }
         }
 
         // Forward per-model chat-template kwargs (v0.5.1) as
         // `additionalContext` — the tokenizer hands them to the Jinja
         // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
-        // to the plain Sendable shape the upstream API expects.
+        // to the plain Sendable shape the upstream API expects. Tools (when
+        // present) reach the template via `UserInput.tools`.
         let userInput = UserInput(
             chat: chatMessages,
+            tools: toolSpecs,
             additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
         )
 
@@ -474,6 +481,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 container: container,
                 generateParams: generateParams,
                 modelID: loadedModelSnapshot.id,
+                hasTools: request.tools?.isEmpty == false,
                 into: continuation
             )
         }
@@ -487,6 +495,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         container: ModelContainer,
         generateParams: GenerateParameters,
         modelID: String,
+        hasTools: Bool,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
         // Flat Int token array for key construction. `LMInput.text.tokens`
@@ -526,7 +535,11 @@ public actor MLXSwiftEngine: InferenceEngine {
         let priorCacheBox: PromptCacheSnapshot? = priorCache.map { PromptCacheSnapshot($0) }
         let inputBox = NonSendableBox(lmInput)
 
-        let setup: (cache: PromptCacheSnapshot, stream: AsyncStream<TokenGeneration>) =
+        let setup: (
+            cache: PromptCacheSnapshot,
+            stream: AsyncStream<TokenGeneration>,
+            toolCallFormat: ToolCallFormat?
+        ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = priorCacheBox?.caches
                     ?? context.model.newCache(parameters: generateParams)
@@ -536,10 +549,20 @@ public actor MLXSwiftEngine: InferenceEngine {
                     parameters: generateParams,
                     context: context
                 )
-                return (PromptCacheSnapshot(cache), stream)
+                // `ToolCallFormat?` is Sendable, so it rides back out of the
+                // actor alongside the cache + stream.
+                return (PromptCacheSnapshot(cache), stream, context.configuration.toolCallFormat)
             }
         let workingCache = setup.cache.caches
         let stream = setup.stream
+
+        // Only route through the streaming `ToolCallProcessor` when the caller
+        // actually requested tools this turn — see `makeToolProcessor` for why
+        // the gate exists (else EVERY generation on a tool-capable model, incl.
+        // plain non-tool chat, would have `{...}`-shaped content silently
+        // stripped and misreported as `finish_reason: tool_calls`).
+        let toolProcessor = Self.makeToolProcessor(
+            format: setup.toolCallFormat, hasTools: hasTools)
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         var generatedTokenIDs: [Int] = []
@@ -558,14 +581,35 @@ public actor MLXSwiftEngine: InferenceEngine {
                 generatedTokenIDs.append(token)
                 detokenizer.append(token: token)
                 if let piece = detokenizer.next() {
-                    let chunk = GenerateChunk(text: piece)
-                    if case .terminated = continuation.yield(chunk) {
+                    if let toolProcessor {
+                        // Emit only the processor's display text; nil means the
+                        // piece is being buffered as (potential) tool-call syntax.
+                        if let display = toolProcessor.processChunk(piece), !display.isEmpty {
+                            if case .terminated = continuation.yield(GenerateChunk(text: display)) {
+                                return
+                            }
+                        }
+                    } else if case .terminated = continuation.yield(GenerateChunk(text: piece)) {
                         return
                     }
                 }
             case .info(let info):
                 completionInfo = info
             }
+        }
+
+        // Finalise tool-call parsing: flush any residual buffered text (a
+        // false-positive tool-call start that never completed) as display
+        // output, then drain the fully-parsed calls.
+        var drainedToolCalls: [ToolCallRequest] = []
+        if let toolProcessor {
+            if let residual = toolProcessor.processEOS(returnBufferedText: true), !residual.isEmpty {
+                continuation.yield(GenerateChunk(text: residual))
+            }
+            // `drainToolCalls()` is internal to MLXLMCommon; the equivalent
+            // public `toolCalls` property holds every parsed call after EOS,
+            // and the processor is discarded here so there's nothing to drain.
+            drainedToolCalls = toolProcessor.toolCalls.map { Self.toolCallRequest(from: $0) }
         }
 
         // Save the post-generation cache under the extended key. The
@@ -578,7 +622,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             snapshot: PromptCacheSnapshot(workingCache)
         )
 
-        emitFinalChunk(completionInfo: completionInfo, into: continuation)
+        emitFinalChunk(
+            completionInfo: completionInfo,
+            toolCalls: drainedToolCalls,
+            into: continuation
+        )
         continuation.finish()
     }
 
@@ -652,26 +700,153 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// finish-bearing chunk.
     private func emitFinalChunk(
         completionInfo: GenerateCompletionInfo?,
+        toolCalls: [ToolCallRequest] = [],
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) {
-        let finishReason: FinishReason
+        let infoReason: FinishReason
         let usage: TokenUsage
         if let info = completionInfo {
             switch info.stopReason {
             case .length:
-                finishReason = .length
+                infoReason = .length
             case .stop, .cancelled:
-                finishReason = .stop
+                infoReason = .stop
             }
             usage = TokenUsage(
                 promptTokens: info.promptTokenCount,
                 completionTokens: info.generationTokenCount
             )
         } else {
-            finishReason = .stop
+            infoReason = .stop
             usage = TokenUsage(promptTokens: 0, completionTokens: 0)
         }
-        let finalChunk = GenerateChunk(text: "", finishReason: finishReason, usage: usage)
+        // A generation that produced tool calls finishes with `.toolCalls`
+        // (OpenAI semantics), overriding the raw stop reason; usage still
+        // comes from the `.info` record exactly as before.
+        let finishReason: FinishReason = toolCalls.isEmpty ? infoReason : .toolCalls
+        let finalChunk = GenerateChunk(
+            text: "",
+            finishReason: finishReason,
+            usage: usage,
+            toolCalls: toolCalls.isEmpty ? nil : toolCalls
+        )
         continuation.yield(finalChunk)
+    }
+
+    // MARK: Tool-call helpers
+
+    /// Decide whether `runLLMGeneration` should route pieces through a
+    /// streaming `ToolCallProcessor` this turn.
+    ///
+    /// Gated on `hasTools` (the request actually supplied `GenerateRequest.tools`)
+    /// — NOT merely on the loaded model declaring a `toolCallFormat`. Most
+    /// popular models (Qwen, Llama, Mistral, …) declare a format unconditionally,
+    /// so gating on format-presence alone would route every generation on those
+    /// models — including plain `/v1/chat/completions` calls and ordinary GUI
+    /// chat with no tools attached — through tool-call parsing. For `.json`
+    /// format specifically that silently strips any bare `{"name":…,
+    /// "arguments":…}`-shaped model output from the visible content while
+    /// mis-tagging `finish_reason` as `tool_calls`, with no `tool_calls` payload
+    /// to compensate. Requiring `hasTools` confines that buffering to requests
+    /// that actually asked for tools, restoring byte-for-byte passthrough
+    /// otherwise (prior, pre-tool-routing behaviour).
+    static func makeToolProcessor(format: ToolCallFormat?, hasTools: Bool) -> ToolCallProcessor? {
+        guard hasTools else { return nil }
+        return format.map { ToolCallProcessor(format: $0) }
+    }
+
+    /// Convert macMLX `[JSONValue]` tool specs into the tokenizer's `[ToolSpec]`
+    /// (`[[String: any Sendable]]`) shape. Elements that aren't JSON objects are
+    /// dropped rather than force-cast — the project forbids `as!`, and a
+    /// malformed spec must never crash generation. The caller compares counts
+    /// to log how many were dropped.
+    static func toolSpecs(from tools: [JSONValue]) -> [ToolSpec] {
+        tools.compactMap { element in
+            guard case .object(let object) = element else { return nil }
+            return object.mapValues { $0.toSendable() }
+        }
+    }
+
+    /// Convert an upstream parsed `ToolCall` into macMLX's `ToolCallRequest`.
+    /// `ToolCallProcessor` normalises every drained call to a non-empty id, but
+    /// we synthesise `call_<uuid>` defensively if one is ever missing.
+    static func toolCallRequest(from call: ToolCall) -> ToolCallRequest {
+        let id: String
+        if let callID = call.id, !callID.isEmpty {
+            id = callID
+        } else {
+            id = "call_\(UUID().uuidString)"
+        }
+        let arguments = call.function.arguments.mapValues { ToolValueBridge.jsonValue(from: $0) }
+        return ToolCallRequest(id: id, name: call.function.name, arguments: arguments)
+    }
+
+    /// Convert a macMLX `ToolCallRequest` back into an upstream `ToolCall` so the
+    /// chat template can render it as an assistant tool-call block. Uses the
+    /// `[String: any Sendable]` `Function` initialiser (no `as!`).
+    static func upstreamToolCall(from request: ToolCallRequest) -> ToolCall {
+        ToolCall(
+            function: .init(
+                name: request.name,
+                arguments: request.arguments.mapValues { $0.toSendable() }
+            ),
+            id: request.id
+        )
+    }
+
+    /// Map one macMLX `ChatMessage` to an upstream `Chat.Message`, honouring the
+    /// `.tool` role and assistant-issued tool calls. `images` is supplied by the
+    /// caller (the VLM path folds in attachments; text and think-block paths
+    /// pass `[]`).
+    static func upstreamChatMessage(
+        from msg: ChatMessage,
+        images: [UserInput.Image]
+    ) -> Chat.Message {
+        // Tool-result turn → upstream tool message carrying the correlating id.
+        if msg.role == .tool {
+            return .tool(msg.content, id: msg.toolCallID)
+        }
+        // Assistant turn that issued tool calls → attach them so the template
+        // reproduces the assistant's tool-call block.
+        if msg.role == .assistant, let toolCalls = msg.toolCalls, !toolCalls.isEmpty {
+            return .assistant(
+                msg.content,
+                images: images,
+                toolCalls: toolCalls.map { upstreamToolCall(from: $0) }
+            )
+        }
+        let role: Chat.Message.Role
+        switch msg.role {
+        case .user:      role = .user
+        case .assistant: role = .assistant
+        case .system:    role = .system
+        case .tool:      role = .user  // unreachable — handled above
+        }
+        return Chat.Message(role: role, content: msg.content, images: images)
+    }
+
+    /// Test seam: run the streaming `ToolCallProcessor` over pre-detokenized
+    /// text `pieces` exactly as `runLLMGeneration`'s loop does, returning the
+    /// concatenated display text and the drained tool calls. Pure string
+    /// processing — no MLX — so tool-call detection is unit-testable without a
+    /// model or Metal.
+    static func processToolCallStream(
+        format: ToolCallFormat,
+        pieces: [String]
+    ) -> (display: String, toolCalls: [ToolCallRequest]) {
+        let processor = ToolCallProcessor(format: format)
+        var display = ""
+        for piece in pieces {
+            if let out = processor.processChunk(piece), !out.isEmpty {
+                display += out
+            }
+        }
+        if let residual = processor.processEOS(returnBufferedText: true), !residual.isEmpty {
+            display += residual
+        }
+        // `toolCalls` (public) mirrors the internal `drainToolCalls()` for a
+        // one-shot read; see `runLLMGeneration`.
+        let calls = processor.toolCalls.map { toolCallRequest(from: $0) }
+        return (display, calls)
     }
 }
