@@ -2426,8 +2426,18 @@ public actor HummingbirdServer {
         }
 
         // Serialise MLX compute with generation — both touch global MLX
-        // allocator state that isn't safe to share concurrently.
-        await acquireGenerationLock()
+        // allocator state that isn't safe to share concurrently. The acquire
+        // throws only on cancellation (v0.5.3 cancellation-aware waiters);
+        // a throw means the lock is NOT held, so no release on that path.
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled"
+            )
+        }
         let vectors: [[Float]]
         do {
             vectors = try await embedder.embed(req.input.values)
@@ -2501,7 +2511,16 @@ public actor HummingbirdServer {
             )
         }
 
-        await acquireGenerationLock()
+        // Same lock discipline as /v1/embeddings: throw = not held = no release.
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled"
+            )
+        }
         let embeddings: [[Float]]
         do {
             embeddings = try await embedder.embed([req.query] + req.documents)
