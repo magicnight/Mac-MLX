@@ -3,7 +3,6 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
-@preconcurrency import Tokenizers
 
 // MARK: - Sendable-box helpers
 
@@ -17,64 +16,9 @@ private struct NonSendableBox<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
-// MARK: - Tokenizer loader
-
-/// Concrete TokenizerLoader that uses the HuggingFace swift-transformers library.
-///
-/// This is the manual equivalent of the #huggingFaceTokenizerLoader() macro
-/// from MLXHuggingFace, inlined here so MacMLXCore does not need the macro-only
-/// MLXHuggingFace product.
-private struct HuggingFaceTokenizerLoader: TokenizerLoader, @unchecked Sendable {
-    func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        let upstream = try await AutoTokenizer.from(modelFolder: directory)
-        return TokenizerBridge(upstream)
-    }
-}
-
-/// Bridge between Tokenizers.Tokenizer (swift-transformers) and MLXLMCommon.Tokenizer.
-private struct TokenizerBridge: MLXLMCommon.Tokenizer, @unchecked Sendable {
-    private let upstream: any Tokenizers.Tokenizer
-
-    init(_ upstream: any Tokenizers.Tokenizer) {
-        self.upstream = upstream
-    }
-
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
-    }
-
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
-    }
-
-    func convertTokenToId(_ token: String) -> Int? {
-        upstream.convertTokenToId(token)
-    }
-
-    func convertIdToToken(_ id: Int) -> String? {
-        upstream.convertIdToToken(id)
-    }
-
-    var bosToken: String? { upstream.bosToken }
-    var eosToken: String? { upstream.eosToken }
-    var unknownToken: String? { upstream.unknownToken }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        do {
-            return try upstream.applyChatTemplate(
-                messages: messages, tools: tools, additionalContext: additionalContext)
-        } catch let tokenizerError as Tokenizers.TokenizerError {
-            if case .chatTemplate = tokenizerError {
-                throw MLXLMCommon.TokenizerError.missingChatTemplate
-            }
-            throw tokenizerError
-        }
-    }
-}
+// Note: `HuggingFaceTokenizerLoader` and `TokenizerBridge` were promoted to
+// `Engine/HuggingFaceTokenizerLoader.swift` (shared internal types) so the
+// embedding engine can reuse the same swift-transformers-backed loader.
 
 // MARK: - MLXSwiftEngine
 
@@ -199,10 +143,12 @@ public actor MLXSwiftEngine: InferenceEngine {
                 )
                 support = .vlm(container)
 
-            case .gguf, .unknown:
+            case .gguf, .unknown, .embedder:
                 // Surfaced via the Models tab — these formats never
                 // reach the engine in practice, but throw a clean
                 // error if someone hand-constructs a `LocalModel`.
+                // Embedder models are served by `EmbeddingEngine`, not
+                // this generation engine.
                 let reason = "Unsupported model format: \(model.format.rawValue). " +
                     "MLXSwiftEngine handles `mlx` (text) and `mlxVLM` (vision-language) only."
                 status = .error(reason)

@@ -16,6 +16,16 @@ struct LocalModelRow: View {
     let onTogglePin: () -> Void
     let onDelete: () -> Void
 
+    /// Short capsule label for the model's format: "Vision" for VLMs,
+    /// "Embed" for text embedders, "MLX" for plain text models.
+    private var formatLabel: String {
+        switch model.format {
+        case .mlxVLM: return "Vision"
+        case .embedder: return "Embed"
+        default: return "MLX"
+        }
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             // Status dot
@@ -44,7 +54,7 @@ struct LocalModelRow: View {
                             .background(.quaternary, in: Capsule())
                     }
 
-                    Text("MLX")
+                    Text(formatLabel)
                         .font(.caption2)
                         .foregroundStyle(.green)
                         .padding(.horizontal, 4)

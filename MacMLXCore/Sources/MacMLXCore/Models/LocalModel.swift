@@ -59,6 +59,13 @@ public enum ModelFormat: String, Codable, Hashable, Sendable, CaseIterable {
     /// from the file listing, then upgrades `.mlx` → `.mlxVLM` if the
     /// `model_type` matches a known VLM family.
     case mlxVLM
+    /// Text-embedding model (v0.5.2+). Same on-disk shape as `.mlx`
+    /// (config.json + tokenizer + `.safetensors`), distinguished by an
+    /// encoder `model_type` (`bert`, `roberta`, …) in `config.json`. Served
+    /// by `EmbeddingEngine` via `/v1/embeddings` + `/v1/rerank`, never by the
+    /// generation engine. Set by `ModelLibraryManager.upgradeFormat` after
+    /// the initial `.mlx` file-listing detection.
+    case embedder
     case gguf
     case unknown
 

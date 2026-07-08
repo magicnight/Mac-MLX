@@ -10,6 +10,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Embeddings + rerank (v0.5.2)** — MLXEmbedders-backed `EmbeddingEngine` + `POST /v1/embeddings` (OpenAI shape) and `POST /v1/rerank` (bi-encoder cosine MVP; a true cross-encoder reranker is a follow-up). `.embedder` model-format detection for encoder families (decoder-family embedders like Qwen3-Embedding stay `.mlx` — a documented limitation) + Models-tab type badge. Pooling is mask-aware. Caveat: `/v1/embeddings` does not gate on `.embedder`, so a chat model returns vectors (possibly meaningless).
+- **Server hardening (v0.5.1)** — optional `--api-key` bearer auth on `/v1/*` + `/api/*` (PR #48); Anthropic-compatible `POST /v1/messages` incl. named-event streaming (PR #49); per-model aliases, idle TTL (GUI-wired, in-flight-safe sweep), and chat-template kwargs threaded to server + CLI (PR #49/#50).
 - **MCP client pool** (v0.5 MCP track, part 2 of 2). `MCPClientPool`
   actor spawns each configured `mcpServers` entry as a subprocess,
   speaks MCP over stdio via swift-sdk's `StdioTransport`, and exposes
