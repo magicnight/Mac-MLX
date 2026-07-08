@@ -48,15 +48,15 @@ open /Applications/macMLX.app
 
 （或右键点 app → **打开** → 再 **打开**。）
 
-## 功能亮点 (v0.2 → v0.5)
+## 功能亮点 (v0.2 → v0.5.3)
 
 自 v0.1 MVP 起发了十六个以上版本，按领域。**这一节记录最新的已发布状态——
 新功能先落到这里，再到下面路线图加一行。**
 
-- **引擎与模型** —— 进程内 MLX Swift 引擎（文本 + 16 种 VLM 架构，模型到约 70B）；分层 KV prompt cache（RAM + SSD）、带 LRU 淘汰的多模型池、LoRA adapter 推理、MCP server（`macmlx mcp serve`）。
+- **引擎与模型** —— 进程内 MLX Swift 引擎（文本 + 16 种 VLM 架构，模型到约 70B）；分层 KV prompt cache（RAM + SSD）、带 LRU 淘汰的多模型池、LoRA adapter 推理、MCP server（`macmlx mcp serve`）；纯 Swift **DeepSeek V3.2** 架构（DSA 稀疏注意力 + absorbed MLA + MoE），零 fork overlay 注册，对 Python 参考逐组件数值对齐。
 - **下载** —— 跨取消和退出的断点续传、实时速度/ETA、HuggingFace 镜像源、Hub commit 更新检测。
 - **聊天** —— 对话侧栏（重命名、删除、回溯）、流式 Markdown、逐消息操作、按模型参数面板、可折叠 `<think>` 推理块。
-- **API** —— 常驻 OpenAI 兼容服务器，外加 Ollama 兼容层（NDJSON）、按 ID 冷换模型、CORS + 探测端点、生成跨客户端串行化。
+- **API** —— 常驻 OpenAI 兼容服务器，外加 Ollama（NDJSON）与 Anthropic（`/v1/messages`）兼容、`/v1/embeddings` + `/v1/rerank`、可选 bearer 鉴权、模型别名 + 闲置 TTL、`reasoning_content` 分离、按 ID 冷换模型、停滞看门狗、CORS + 探测端点、生成跨客户端串行化。
 - **CLI** —— `pull` / `serve` / `run` 的原生 ANSI 仪表盘、与 GUI 共享 PID 协调。
 - **Benchmark 与 Logs 标签页** —— 本机 tok/s · TTFT · 峰值内存 + 社区排行榜；Pulse 日志查看器，MLX stdout/stderr 已转入。
 
@@ -131,8 +131,8 @@ swift test  --package-path MacMLXCore    # 测试（约 3 秒）
 > 并同步更新上面的功能亮点。
 
 - **已发布（v0.1 → v0.5）** —— 原生 GUI + 菜单栏 + CLI + OpenAI API（v0.1）；下载与聊天打磨（v0.2）；Benchmark、Logs、聊天历史、API 冷换、Ollama 兼容、关闭 sandbox（v0.3）；以及 v0.5 的引擎大跃进——VLM、分层 KV cache、多模型池、LoRA、MCP server。按 tag 细节见 [CHANGELOG.md](CHANGELOG.md)。
-- **下个 release（在 `main` 上）** —— MCP client pool（接进聊天的工具路由为下一步）、`reasoning_content` API 分离（[#30](../../issues/30)）。
-- **进行中 —— DeepSeek V3.2 架构** —— 纯 Swift 移植 DSA 稀疏注意力 + absorbed MLA，以外部 overlay 注册进 mlx-swift-lm 工厂（零 fork），对 Python 参考做数值验证。在 Ollama 和 LM Studio 也上了 MLX 后端的当下，这是 macMLX 的差异化。
+- **下个 release（在 `main` 上）** —— 服务端加固：api-key 鉴权、Anthropic `/v1/messages`、别名 + 闲置 TTL、模板 kwargs（v0.5.1）；embeddings + rerank 端点（v0.5.2）；server/pool 稳定性波——换模与生成原子化、不泄漏的生成锁、停滞看门狗、模型池 pin + 真取消（v0.5.3）；MCP client pool；`reasoning_content` 分离（[#30](../../issues/30)）；以及 **DeepSeek V3.2 纯 Swift 移植**——DSA 稀疏注意力 + absorbed MLA + MoE 以零 fork overlay 注册进 mlx-swift-lm 工厂，逐组件对 Python 参考 `1e-4` 数值对齐。在 Ollama 和 LM Studio 也上了 MLX 后端的当下，这是 macMLX 的差异化。
+- **进行中** —— 接进聊天的 MCP 工具路由；DeepSeek 后续（真权重 smoke，然后 V4 增量）；服务端加固 backlog（cross-encoder 重排、并发加载字节账目）。
 - **更远** —— v0.6 语音 I/O（MLX 原生 STT/TTS）；v0.7+ 社区 benchmark 服务 + 等上游支持后的连续批处理。
 - **可重开**（sandbox 关闭后可行）—— Python / SwiftLM 子进程引擎（[#12](../../issues/12) / [#13](../../issues/13)）、Homebrew tap（[#20](../../issues/20)）、签名 + 公证 DMG（[#19](../../issues/19)）。
 

@@ -10,6 +10,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **DeepSeek V3.2 pure-Swift port** — the full architecture (DSA sparse
+  attention with the lightning indexer, absorbed MLA, noaux_tc MoE routing)
+  implemented natively and registered into mlx-swift-lm's model factory as an
+  external overlay (`model_type: deepseek_v32`, zero fork). Every component
+  parity-gated at `1e-4` against the Python mlx-lm reference; full-model,
+  sanitize round-trip, and registration tests. Real-checkpoint smoke pending
+  a downloaded model. (PR #52)
+
 - **Embeddings + rerank (v0.5.2)** — MLXEmbedders-backed `EmbeddingEngine` + `POST /v1/embeddings` (OpenAI shape) and `POST /v1/rerank` (bi-encoder cosine MVP; a true cross-encoder reranker is a follow-up). `.embedder` model-format detection for encoder families (decoder-family embedders like Qwen3-Embedding stay `.mlx` — a documented limitation) + Models-tab type badge. Pooling is mask-aware. Caveat: `/v1/embeddings` does not gate on `.embedder`, so a chat model returns vectors (possibly meaningless).
 - **Server hardening (v0.5.1)** — optional `--api-key` bearer auth on `/v1/*` + `/api/*` (PR #48); Anthropic-compatible `POST /v1/messages` incl. named-event streaming (PR #49); per-model aliases, idle TTL (GUI-wired, in-flight-safe sweep), and chat-template kwargs threaded to server + CLI (PR #49/#50).
 - **MCP client pool** (v0.5 MCP track, part 2 of 2). `MCPClientPool`
@@ -30,6 +38,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   new `InferenceEngine.promptOpensThinkBlock` that seeds the streaming
   splitter from whether the chat template opened a `<think>` block
   (qwen3's implicit opener). Non-reasoning models are untouched. (PR #46)
+
+### Fixed
+- **v0.5.3 server/pool stability wave** — 7 defects found by a systematic
+  debug round (PR #51): the GUI-launched server no longer generates from a
+  frozen engine reference after a pool cold-swap (could silently answer as
+  the wrong model or 500 forever); model swap + generation are now atomic
+  under the generation lock; the lock can no longer leak on early client
+  aborts (cancellation-aware waiters, same-scope acquire/release); a
+  stall-based generation watchdog (`generationStallTimeoutSeconds`, default
+  120 s, 0 = off) bounds the issue-#29 hang presentation; the active model
+  is pinned against pool eviction (incl. dangling-pointer reconciliation on
+  failed loads); Stop now cancels engine-side generation end-to-end instead
+  of burning GPU to completion; `evict` respects in-flight generations and
+  server generations are marked in-flight. Streaming unknown-model requests
+  return 404 before headers again on all four streaming paths. 7 regression
+  tests cover the exact escape mechanisms. Embeddings/rerank handlers
+  adapted to the throwing generation lock (PR #53).
 
 ### Changed
 - **Release workflow bumped to `softprops/action-gh-release@v3`**

@@ -49,16 +49,16 @@ open /Applications/macMLX.app
 
 (Or right-click the app → **Open** → **Open**.)
 
-## Feature highlights (v0.2 → v0.5)
+## Feature highlights (v0.2 → v0.5.3)
 
 Sixteen-plus releases since the v0.1 MVP, by area. **This section tracks the
 latest shipped state — new features land here first, then get a one-line
 roadmap entry below.**
 
-- **Engine & models** — in-process MLX Swift engine (text + 16 VLM architectures, models to ~70B); tiered KV prompt cache (RAM + SSD), multi-model pool with LRU eviction, LoRA adapter inference, MCP server (`macmlx mcp serve`).
+- **Engine & models** — in-process MLX Swift engine (text + 16 VLM architectures, models to ~70B); tiered KV prompt cache (RAM + SSD), multi-model pool with LRU eviction, LoRA adapter inference, MCP server (`macmlx mcp serve`); pure-Swift **DeepSeek V3.2** architecture (DSA sparse attention + absorbed MLA + MoE) registered as a zero-fork overlay, parity-verified against the Python reference.
 - **Downloads** — resumable across cancels and app quits, live speed/ETA, HuggingFace mirror support, Hub-commit update detection.
 - **Chat** — conversation sidebar (rename, delete, rewind), streaming Markdown, per-message actions, per-model Parameters Inspector, collapsible `<think>` reasoning blocks.
-- **API** — always-on OpenAI-compatible server plus an Ollama compatibility layer (NDJSON), model cold-swap by ID, CORS + probe endpoints, generation serialized across clients.
+- **API** — always-on OpenAI-compatible server plus Ollama (NDJSON) and Anthropic (`/v1/messages`) compatibility, `/v1/embeddings` + `/v1/rerank`, optional bearer auth, model aliases + idle TTL, `reasoning_content` separation, model cold-swap by ID, stall watchdog, CORS + probe endpoints, generation serialized across clients.
 - **CLI** — native ANSI dashboards for `pull` / `serve` / `run`, PID coordination shared with the GUI.
 - **Benchmark & Logs tabs** — local tok/s · TTFT · peak memory with a community leaderboard; a Pulse-backed log viewer with MLX stdout/stderr teed in.
 
@@ -136,8 +136,8 @@ swift test  --package-path MacMLXCore    # tests (~3s)
 > up to **Shipped**, and the feature highlights above get updated to match.
 
 - **Shipped (v0.1 → v0.5)** — native GUI + menu bar + CLI + OpenAI API (v0.1); download & chat polish (v0.2); Benchmark, Logs, chat history, API cold-swap, Ollama compat, sandbox-off (v0.3); and the v0.5 engine leap — VLMs, tiered KV cache, model pool, LoRA, MCP server. Per-tag detail in [CHANGELOG.md](CHANGELOG.md).
-- **Next release (on `main`)** — MCP client pool (chat-side tool routing next) and `reasoning_content` API separation ([#30](../../issues/30)).
-- **In progress — DeepSeek V3.2 architecture** — pure-Swift port of DSA sparse attention + absorbed MLA as an external overlay into mlx-swift-lm's factory (zero fork), validated numerically against the Python reference. macMLX's differentiation now that Ollama and LM Studio also ship MLX backends.
+- **Next release (on `main`)** — server hardening: api-key auth, Anthropic `/v1/messages`, aliases + idle TTL, template kwargs (v0.5.1); embeddings + rerank endpoints (v0.5.2); the server/pool stability wave — atomic swap+generate, leak-proof generation lock, stall watchdog, pool pinning + true cancellation (v0.5.3); MCP client pool; `reasoning_content` separation ([#30](../../issues/30)); and the **DeepSeek V3.2 pure-Swift port** — DSA sparse attention + absorbed MLA + MoE as a zero-fork overlay into mlx-swift-lm's factory, every component parity-verified at `1e-4` against the Python reference. macMLX's differentiation now that Ollama and LM Studio also ship MLX backends.
+- **In progress** — chat-side MCP tool routing; DeepSeek follow-ups (real-checkpoint smoke, then the V4 increment); server hardening backlog (cross-encoder reranker, byte-accounting for concurrent loads).
 - **Later** — v0.6 speech I/O (MLX-native STT/TTS); v0.7+ community benchmarks service and continuous batching once upstream ships it.
 - **Reopenable** (feasible since sandbox-off) — Python / SwiftLM subprocess engines ([#12](../../issues/12) / [#13](../../issues/13)), Homebrew tap ([#20](../../issues/20)), signed + notarized DMG ([#19](../../issues/19)).
 
