@@ -19,12 +19,22 @@ public struct PooledEngineEntry: Sendable, Equatable {
     /// idle longer than `ttlSeconds` — even within the byte budget.
     /// `nil` means "never idle-unload"; pinned entries are exempt.
     public var ttlSeconds: Int?
-    /// In-flight marker (v0.5.1 A4). `true` while a generation is actively
-    /// streaming against this entry's engine. `ModelPool.sweepIdle(now:)`
-    /// never unloads an entry with `isGenerating == true`, so a concurrent
-    /// `load(_:)`'s idle sweep can't evict a model mid-stream. Toggled by
-    /// `ModelPool.setGenerating(_:_:)` around the generation.
-    public var isGenerating: Bool = false
+    /// In-flight generation refcount (v0.5.3 A3; was a `Bool` in v0.5.1 A4).
+    /// The number of generations currently streaming against this entry's
+    /// engine. `ModelPool.sweepIdle(now:)` and `evict(toFit:)` never reclaim
+    /// an entry while this is `> 0`, so neither an idle sweep nor a
+    /// budget-pressure evict can pull a model out from under an in-flight
+    /// stream. A refcount (not a bool) because concurrent GUI-chat + server
+    /// generations on the SAME model each begin/end independently: with a
+    /// bool, whichever finished first cleared the flag while the other was
+    /// still streaming, defeating the guard. Mutated by
+    /// `ModelPool.beginGenerating(_:)` / `endGenerating(_:)`; the latter
+    /// clamps at 0 so an unbalanced end can never underflow.
+    public var generatingCount: Int = 0
+
+    /// `true` while at least one generation is in flight (`generatingCount > 0`).
+    /// Computed convenience so the evict/sweep guards read unchanged.
+    public var isGenerating: Bool { generatingCount > 0 }
 
     public init(
         modelID: String,
