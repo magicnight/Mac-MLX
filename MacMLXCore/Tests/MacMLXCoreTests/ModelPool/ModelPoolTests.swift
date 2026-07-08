@@ -155,4 +155,57 @@ final class ModelPoolTests: XCTestCase {
         residents = await pool.residentModelIDs()
         XCTAssertFalse(residents.contains("A"), "cleared entry past TTL must sweep")
     }
+
+    // MARK: - v0.5.3 stability wave (POOL-1 / POOL-3)
+
+    /// POOL-1: mirrors the pin/unpin sequence `EngineCoordinator.load`
+    /// now performs on every successful load — pin the newly-active
+    /// model, then unpin whichever model was previously active. A former-
+    /// active model that's been unpinned must become evictable again;
+    /// the newly-pinned current model must survive budget pressure.
+    /// (`EngineCoordinator` itself has no test target — this validates
+    /// the `ModelPool`-side invariant its fix depends on.)
+    func testPinThenUnpinPreviousAllowsEviction() async throws {
+        let pool = ModelPool(maxBytes: 2_500_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A", size: 1_000_000_000))
+        await pool.setPinned("A", true)  // A becomes "current" — pinned
+
+        _ = try await pool.load(mkModel("B", size: 1_000_000_000))
+        await pool.setPinned("B", true)   // B becomes "current" — pinned
+        await pool.setPinned("A", false)  // ...and A (no longer current) is unpinned
+
+        // Budget 2.5 GB: A(1)+B(1) = 2 GB fits. Loading C(1) pushes to
+        // 3 GB — over budget. A is unpinned + oldest → must be evicted;
+        // B (pinned) must survive.
+        _ = try await pool.load(mkModel("C", size: 1_000_000_000))
+        let residents = await pool.residentModelIDs()
+        XCTAssertFalse(residents.contains("A"), "unpinned former-active model must become evictable")
+        XCTAssertTrue(residents.contains("B"), "pinned current model must survive budget pressure")
+        XCTAssertTrue(residents.contains("C"))
+    }
+
+    /// POOL-3: `evict(toFit:)` must skip `isGenerating` entries, mirroring
+    /// the guard `sweepIdle` already applies. Without this, a concurrent
+    /// `load(_:)` could evict a model that's actively mid-generation.
+    func testEvictSkipsGeneratingEntry() async throws {
+        let pool = ModelPool(maxBytes: 2_500_000_000, engineFactory: { _ in StubEngine() })
+        _ = try await pool.load(mkModel("A", size: 1_000_000_000))
+        await pool.setGenerating("A", true)
+        _ = try await pool.load(mkModel("B", size: 1_000_000_000))
+        // A+B = 2 GB fits budget so far.
+        _ = try await pool.load(mkModel("C", size: 1_000_000_000))
+        // A+B+C = 3 GB — over. A is oldest but isGenerating → must be
+        // SKIPPED; B (next-oldest, not generating) is evicted instead.
+        var residents = await pool.residentModelIDs()
+        XCTAssertTrue(residents.contains("A"), "generating entry must survive evict(toFit:)")
+        XCTAssertFalse(residents.contains("B"), "non-generating next-oldest should be evicted instead")
+        XCTAssertTrue(residents.contains("C"))
+
+        // Once generation finishes, A becomes evictable again — proving
+        // the in-flight marker (not something else) is what spared it.
+        await pool.setGenerating("A", false)
+        _ = try await pool.load(mkModel("D", size: 1_000_000_000))
+        residents = await pool.residentModelIDs()
+        XCTAssertFalse(residents.contains("A"), "cleared entry becomes evictable again once over budget")
+    }
 }
