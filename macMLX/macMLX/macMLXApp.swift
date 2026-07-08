@@ -36,6 +36,8 @@ struct macMLXApp: App {
                     await appState.bootstrap()
                     // Wire the menu bar manager once AppState is ready.
                     appDelegate.menuBarManager.setup(appState: appState)
+                    // Disconnect MCP subprocesses on normal termination.
+                    appDelegate.onWillTerminate = { appState.teardown() }
                 }
         }
         .windowResizability(.contentSize)

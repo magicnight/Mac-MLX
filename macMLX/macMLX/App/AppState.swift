@@ -88,6 +88,24 @@ public final class AppState {
     /// a spinner and disable double-click.
     public private(set) var isServerToggling: Bool = false
 
+    // MARK: - MCP tool routing (v0.6 wave 2)
+
+    /// Config store for `~/.mac-mlx/mcp.json`. Read once on bootstrap.
+    private let mcpConfigStore = MCPClientConfigStore()
+
+    /// Live pool of connected MCP servers. Nil until `bootstrap()` connects
+    /// at least one server, and stays nil for zero-config users so the tools
+    /// feature is simply inactive (no behaviour change without `mcp.json`).
+    public private(set) var mcpPool: MCPClientPool?
+
+    /// Tool name → owning MCP server name, derived from the connected pool's
+    /// tool listing. Empty until a successful connect. Drives call routing.
+    public private(set) var mcpToolIndex: [String: String] = [:]
+
+    /// OpenAI function specs for every connected tool, attached to a
+    /// `GenerateRequest.tools` when a tool session runs. Empty until connect.
+    public private(set) var mcpToolSpecs: [JSONValue] = []
+
     // MARK: - Init
 
     public init() {
@@ -179,6 +197,14 @@ public final class AppState {
                 self?.currentSettings.modelDirectory ?? Settings.default.modelDirectory
             }
         )
+
+        // Wire the chat VM's MCP tool-routing providers. Assigned here (not at
+        // `chat` construction) because they must capture the fully-initialised
+        // `self`, and evaluated lazily per send — the pool doesn't exist until
+        // `bootstrap()` connects it, and returns nil until then, so the chat
+        // path stays on the plain non-tool flow for zero-config users.
+        self.chat.toolSessionProvider = { [weak self] in self?.makeToolCallingSession() }
+        self.chat.toolSpecsProvider = { [weak self] in self?.mcpToolSpecs ?? [] }
     }
 
     // MARK: - Lifecycle
@@ -193,6 +219,12 @@ public final class AppState {
         await applyHFEndpoint(loaded.hfEndpoint)
         await logs.log("App bootstrapped", level: .info, category: .system)
         await refreshAdapters()
+
+        // MCP tool routing (v0.6 wave 2): connect the servers configured in
+        // `~/.mac-mlx/mcp.json` in the background, so a slow or hanging server
+        // can't delay app startup. Zero-config users have no `mcp.json` → this
+        // is a no-op and the tools feature stays inactive.
+        Task { await bootstrapMCP() }
         // Kick off an initial library scan now that settings are loaded —
         // otherwise the Models tab's .task fires against the default
         // Settings snapshot before bootstrap completes, and users who
@@ -233,6 +265,89 @@ public final class AppState {
             level: .debug,
             category: .system
         )
+    }
+
+    // MARK: - MCP tool routing (v0.6 wave 2)
+
+    /// Load `~/.mac-mlx/mcp.json`, connect every configured server, and build
+    /// the tool routing index + specs. Idempotent-friendly: a nil result (no
+    /// config, or nothing connected) leaves the tools feature inactive.
+    /// Partial connect failures are tolerated by `MCPClientPool.connectAll`.
+    private func bootstrapMCP() async {
+        let config = await mcpConfigStore.load()
+        guard !config.mcpServers.isEmpty else { return }  // zero-config → inactive
+
+        let pool = MCPClientPool(config: config)
+        let connected = (try? await pool.connectAll()) ?? []
+        guard !connected.isEmpty else {
+            await logs.log(
+                "MCP: no servers connected from mcp.json (\(config.mcpServers.count) configured)",
+                level: .warning,
+                category: .system
+            )
+            await pool.disconnectAll()
+            return
+        }
+
+        let toolsByServer = await pool.listAllTools()
+        let (index, specs) = ToolValueBridge.toolIndexAndSpecs(from: toolsByServer)
+
+        mcpPool = pool
+        mcpToolIndex = index
+        mcpToolSpecs = specs
+        await logs.log(
+            "MCP: connected \(connected.count) server(s) — \(connected.joined(separator: ", ")); \(index.count) tool(s) available",
+            level: .info,
+            category: .system
+        )
+    }
+
+    /// Build a `ToolCallingSession` configured for the current MCP setup, or
+    /// nil when no servers are connected (tools feature inactive → callers use
+    /// the plain generation path). The session injects the coordinator's
+    /// `generate` as the model-turn driver (bridged onto the main actor) and
+    /// the live pool for tool dispatch. MacMLXCore stays free of app imports —
+    /// only the closure crosses the boundary.
+    func makeToolCallingSession() -> ToolCallingSession? {
+        guard let pool = mcpPool, !mcpToolIndex.isEmpty else { return nil }
+        let coordinator = self.coordinator
+        let generate: @Sendable (GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> = { request in
+            AsyncThrowingStream { continuation in
+                // Hop onto the main actor to call the @MainActor coordinator,
+                // then relay chunks to the session's stream. Honour the yield
+                // result so a cancelled consumer stops the pull, and cancel
+                // this task on termination so Stop unwinds through here into
+                // the engine (mirrors the coordinator's own onTermination).
+                let task = Task { @MainActor in
+                    do {
+                        for try await chunk in coordinator.generate(request) {
+                            if case .terminated = continuation.yield(chunk) { break }
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { @Sendable _ in task.cancel() }
+            }
+        }
+        return ToolCallingSession(generate: generate, pool: pool, toolIndex: mcpToolIndex)
+    }
+
+    /// Best-effort synchronous teardown for app termination: disconnect the MCP
+    /// pool so its spawned subprocesses (npx / uvx / …) don't linger past app
+    /// exit. Briefly blocks the calling thread (bounded to 3s) because
+    /// `disconnectAll` is async on the pool actor and `applicationWillTerminate`
+    /// gives us no async context. No-op when no pool was ever connected.
+    public func teardown() {
+        guard let pool = mcpPool else { return }
+        mcpPool = nil
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            await pool.disconnectAll()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 3)
     }
 
     // MARK: - Server lifecycle

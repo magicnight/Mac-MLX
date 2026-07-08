@@ -131,4 +131,41 @@ public enum ToolValueBridge {
             ]),
         ])
     }
+
+    // MARK: - Pool tool listing → routing index + specs
+
+    /// Flatten `MCPClientPool.listAllTools()` — a `[serverName: [Tool]]` map —
+    /// into the two artefacts the chat-side router needs:
+    ///
+    /// - `index`: tool name → owning MCP server name, so a model's tool call
+    ///   can be routed back to the server that provides it.
+    /// - `specs`: one OpenAI function spec per **unique** tool name, ready to
+    ///   drop into `GenerateRequest.tools`.
+    ///
+    /// - Note: **Duplicate tool names across servers resolve first-wins by
+    ///   sorted server name.** Servers are visited in `keys.sorted()` order
+    ///   (matching `MCPClientPool.connectAll`), and the first server to declare
+    ///   a given tool name owns it; later duplicates are dropped from *both* the
+    ///   index and the spec list. The model therefore never sees two functions
+    ///   with the same name (which OpenAI tool semantics forbid), and routing is
+    ///   deterministic regardless of the input dictionary's iteration order.
+    ///
+    /// Pure and free of MLX/Metal, so it is unit-tested directly.
+    public static func toolIndexAndSpecs(
+        from toolsByServer: [String: [MCP.Tool]]
+    ) -> (index: [String: String], specs: [JSONValue]) {
+        var index: [String: String] = [:]
+        var specs: [JSONValue] = []
+        for server in toolsByServer.keys.sorted() {
+            guard let tools = toolsByServer[server] else { continue }
+            for tool in tools {
+                // First-wins: skip a tool name already claimed by an
+                // alphabetically-earlier server.
+                guard index[tool.name] == nil else { continue }
+                index[tool.name] = server
+                specs.append(openAIToolSpec(from: tool))
+            }
+        }
+        return (index, specs)
+    }
 }
