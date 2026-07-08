@@ -343,7 +343,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         _ request: GenerateRequest
     ) -> AsyncThrowingStream<GenerateChunk, Error> {
         AsyncThrowingStream { continuation in
-            Task { [weak self] in
+            let task = Task { [weak self] in
                 guard let self else {
                     continuation.finish()
                     return
@@ -353,6 +353,16 @@ public actor MLXSwiftEngine: InferenceEngine {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            // POOL-2: propagate abandonment/cancellation of this stream's
+            // iteration down into the generation Task. `onTermination`
+            // fires when the consumer stops iterating (including when the
+            // consuming task itself is cancelled) — without this, walking
+            // away from the stream never stops the underlying token loop,
+            // so GPU work burns to completion even after a Stop button or
+            // a server-side stall watchdog (SRV-4) gives up on the response.
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }
@@ -590,6 +600,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         var completionInfo: GenerateCompletionInfo?
 
         for await event in stream {
+            // POOL-2: stop promptly once the consumer has abandoned/
+            // cancelled this stream (see `generate`'s `onTermination`
+            // hook) instead of running to maxTokens/EOS regardless.
+            if Task.isCancelled {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
             switch event {
             case .token(let token):
                 generatedTokenIDs.append(token)
@@ -646,6 +663,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         var completionInfo: GenerateCompletionInfo?
 
         for await event in stream {
+            // POOL-2: stop promptly once the consumer has abandoned/
+            // cancelled this stream (see `generate`'s `onTermination`
+            // hook) instead of running to maxTokens/EOS regardless.
+            if Task.isCancelled {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
             switch event {
             case .token(let token):
                 detokenizer.append(token: token)
