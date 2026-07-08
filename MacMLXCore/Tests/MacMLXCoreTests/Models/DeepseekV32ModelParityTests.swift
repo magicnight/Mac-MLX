@@ -69,7 +69,7 @@ final class DeepseekV32ModelParityTests: XCTestCase {
     /// embedding, the dense + MoE decoder layers via the predicate, the causal
     /// mask sourced from `cache[0][0]`, the final norm, and `lm_head`.
     func testFullModelMatchesPythonReference() throws {
-        try requireMLXRuntimeOrSkip()
+        try requireTrustworthyMetalOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(
@@ -134,9 +134,17 @@ final class DeepseekV32ModelParityTests: XCTestCase {
     /// `sanitize` must: stack per-expert MoE projections into `switch_mlp`,
     /// split `kv_b_proj.weight` into `embed_q` / `unembed_out`, drop the
     /// per-expert / `kv_b_proj` / MTP (`layers.99`) / fp8 keys, and pass
-    /// unrelated keys through untouched. Pure dict transform — no Metal (shape
-    /// metadata only), so it runs even under bare `swift test`.
+    /// unrelated keys through untouched.
+    ///
+    /// Needs the MLX runtime after all: `DeepseekV32Model(config)` and the
+    /// `arr(_:)` helper create real `MLXArray`s, whose first stream init
+    /// fatally aborts when `default.metallib` is missing (bare `swift test`)
+    /// — CI proved the earlier "Metal-free" claim wrong. The ops are exact
+    /// (reshape/stack/swap), so plain `requireMLXRuntimeOrSkip` suffices; it
+    /// still runs on the CI Metal job.
     func testSanitizeRoundTrip() throws {
+        try requireMLXRuntimeOrSkip()
+
         let config = try sanitizeConfig()
         let model = DeepseekV32Model(config)
 

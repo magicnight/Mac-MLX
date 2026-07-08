@@ -58,7 +58,7 @@ final class DeepseekV32MoEParityTests: XCTestCase {
     /// reference within 1e-4. Exercises the router (all five V3.2 fixes), the
     /// routed `SwitchGLU` bank, and the shared expert end-to-end.
     func testMoEMatchesPythonReference() throws {
-        try requireMLXRuntimeOrSkip()
+        try requireTrustworthyMetalOrSkip()
 
         let url = try XCTUnwrap(
             Bundle.module.url(
