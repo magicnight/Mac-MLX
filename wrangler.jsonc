@@ -1,0 +1,30 @@
+{
+  "name": "macmlx-site",
+  "compatibility_date": "2026-07-10",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "macmlx.app",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./public",
+    "html_handling": "force-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "env": {
+    "staging": {
+      "name": "macmlx-site-staging",
+      "workers_dev": true,
+      "preview_urls": true,
+      "routes": [],
+      "assets": {
+        "directory": "./public",
+        "html_handling": "force-trailing-slash",
+        "not_found_handling": "404-page"
+      }
+    }
+  }
+}

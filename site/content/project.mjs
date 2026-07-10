@@ -1,0 +1,42 @@
+const locales = Object.freeze({
+  en: Object.freeze({
+    htmlLang: "en",
+    ogLocale: "en_US",
+    title: "macMLX — Native Swift inference for Apple Silicon",
+    description: "Run local language and vision models through a native SwiftUI app, CLI, and compatible API — all powered by one Swift in-process MLX engine.",
+    socialDescription: "A native SwiftUI app, CLI, and compatible API over one in-process MLX engine.",
+    twitterDescription: "Local MLX inference with a native app, CLI, and API. The default inference path requires no Python runtime.",
+    structuredDescription: "macMLX runs local language and vision models on Apple Silicon through a native SwiftUI app, Swift CLI, and compatible HTTP API, backed by one Swift-native in-process MLX engine.",
+    primaryNavigationLabel: "Primary navigation",
+    themeToggleLabel: "Switch color theme",
+    languageLinkLabel: "查看简体中文版",
+    copySuccess: "Copied",
+    copyFailure: "Copy failed",
+  }),
+  "zh-Hans": Object.freeze({
+    htmlLang: "zh-CN",
+    ogLocale: "zh_CN",
+    title: "macMLX — Apple 芯片上的原生 Swift 推理",
+    description: "通过原生 SwiftUI 应用、CLI 和兼容 API 在 Apple 芯片 Mac 上运行本地语言与视觉模型，三者共用同一个 Swift 进程内 MLX 引擎。",
+    socialDescription: "原生 SwiftUI 应用、CLI 与兼容 API，共用同一个 Swift 进程内 MLX 引擎。",
+    twitterDescription: "通过原生应用、CLI 与 API 运行本地 MLX 推理；默认推理路径不需要 Python 运行时。",
+    structuredDescription: "macMLX 通过原生 SwiftUI 应用、Swift CLI 与兼容 HTTP API，在 Apple 芯片上运行本地语言和视觉模型，并由同一个 Swift 原生进程内 MLX 引擎提供支持。",
+    primaryNavigationLabel: "主导航",
+    themeToggleLabel: "切换颜色主题",
+    languageLinkLabel: "View the English version",
+    copySuccess: "已复制",
+    copyFailure: "复制失败",
+  }),
+});
+
+export const project = Object.freeze({
+  origin: "https://macmlx.app",
+  repositoryURL: "https://github.com/magicnight/mac-mlx",
+  downloadURL: "https://github.com/magicnight/mac-mlx/releases/latest",
+  currentVersion: "0.5.3",
+  releaseDate: "2026-07-08",
+  lastVerified: "2026-07-10",
+  licenseURL: "https://www.apache.org/licenses/LICENSE-2.0",
+  operatingSystem: "macOS 14.0+ on Apple Silicon",
+  locales,
+});

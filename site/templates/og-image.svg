@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="macMLX — Native Swift inference for Apple Silicon">
+  <defs>
+    <pattern id="grid" width="56" height="56" patternUnits="userSpaceOnUse">
+      <path d="M56 0H0V56" fill="none" stroke="#d5d1c7" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#111411" flood-opacity=".22"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="#f3f1ea"/>
+  <rect width="1200" height="630" fill="url(#grid)" opacity=".6"/>
+  <rect x="64" y="55" width="1072" height="520" rx="30" fill="#f3f1ea" stroke="#bdb9af"/>
+
+  <g transform="translate(112 106)">
+    <rect width="56" height="56" rx="15" fill="#131613"/>
+    <path d="M15 37V19l13 14 13-14v18" fill="none" stroke="#9ac6ff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="74" y="39" fill="#131613" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="37" font-weight="750" letter-spacing="-1.5">macMLX</text>
+  </g>
+
+  <g transform="translate(112 219)">
+    <text fill="#131613" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="67" font-weight="760" letter-spacing="-4">
+      <tspan x="0" y="0">Your Mac. Its models.</tspan>
+      <tspan x="0" y="76" fill="#0868e8" font-family="Iowan Old Style, Baskerville, Times New Roman, serif" font-weight="400" font-style="italic">One native engine.</tspan>
+    </text>
+    <text x="0" y="143" fill="#5b615a" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="22">
+      SwiftUI app  ·  CLI  ·  Compatible API  ·  No Python runtime
+    </text>
+  </g>
+
+  <g transform="translate(889 249) rotate(-3)" filter="url(#shadow)">
+    <rect width="170" height="170" rx="50" fill="#151815"/>
+    <rect x="42" y="42" width="86" height="86" rx="19" fill="none" stroke="#9ac6ff" stroke-width="7"/>
+    <path d="M62 89l15-20 17 29 15-21" fill="none" stroke="#c7f36b" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+    <g stroke="#9ac6ff" stroke-width="6" stroke-linecap="round">
+      <path d="M60 28v14M85 28v14M110 28v14M60 128v14M85 128v14M110 128v14"/>
+      <path d="M28 60h14M28 85h14M28 110h14M128 60h14M128 85h14M128 110h14"/>
+    </g>
+  </g>
+
+  <g transform="translate(112 506)">
+    <rect width="188" height="34" rx="17" fill="#131613"/>
+    <circle cx="19" cy="17" r="5" fill="#54d486"/>
+    <text x="34" y="22" fill="#f3f1ea" font-family="SFMono-Regular, Consolas, monospace" font-size="13" font-weight="700">v{{currentVersion}} · available</text>
+  </g>
+  <text x="1059" y="528" fill="#777d76" text-anchor="end" font-family="SFMono-Regular, Consolas, monospace" font-size="15">macmlx.app</text>
+</svg>

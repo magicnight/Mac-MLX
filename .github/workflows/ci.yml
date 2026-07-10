@@ -38,6 +38,33 @@ env:
   MACMLX_SKIP_LOG_MANAGER_TESTS: "1"
 
 jobs:
+  website:
+    name: Static Website Build & Test
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show Node.js
+        run: node --version
+
+      - name: Build and verify static website
+        run: |
+          node scripts/validate-social-cards.mjs
+          node scripts/build-public-site.mjs
+          node --test site/tests/*.test.mjs
+          node scripts/crawl-public-site.mjs
+          node scripts/test-public-site.mjs
+          node --check scripts/build-public-site.mjs
+          node --check scripts/crawl-public-site.mjs
+          node --check scripts/render-social-cards.mjs
+          node --check scripts/validate-social-cards.mjs
+          node --check scripts/verify-cloudflare-deploy.mjs
+          node --check public/assets/js/main.js
+          if command -v xmllint >/dev/null 2>&1; then
+            xmllint --noout public/assets/og-image.svg public/sitemap.xml
+          fi
+
   spm:
     name: SPM Build & Test
     runs-on: macos-26

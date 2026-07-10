@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="{{htmlLang}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!--site-metadata-->
+  <meta name="theme-color" content="#f3f1ea" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111311" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="/assets/css/main.css?v=2026071004">
+  <noscript>
+    <link rel="stylesheet" href="/assets/css/no-js.css?v=2026071004">
+  </noscript>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-en="Skip to content" data-zh="跳到正文">Skip to content</a>
+
+  <header class="site-header">
+    <div class="nav-shell">
+      <a class="wordmark" href="#top" aria-label="macMLX home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>macMLX</span>
+      </a>
+      <nav class="nav-links" aria-label="{{primaryNavigationLabel}}">
+        <a href="#why" data-en="Why" data-zh="为什么">Why</a>
+        <a href="#features" data-en="Capabilities" data-zh="能力">Capabilities</a>
+        <a href="#engine" data-en="Engine" data-zh="引擎">Engine</a>
+        <a href="#progress" data-en="Progress" data-zh="进展">Progress</a>
+        <a href="#quickstart" data-en="Start" data-zh="开始">Start</a>
+        <a href="{{architecturePath}}">{{learnLabel}}</a>
+      </nav>
+      <div class="nav-actions">
+        <button class="utility-button" id="theme-toggle" type="button" aria-label="{{themeToggleLabel}}" title="{{themeToggleLabel}}">
+          <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+          <svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.2A8.6 8.6 0 0 1 8.8 4a8.6 8.6 0 1 0 11.2 11.2Z"></path></svg>
+        </button>
+        <a class="language-button" id="lang-toggle" href="{{languageHref}}" hreflang="{{counterpartLocale}}" lang="{{counterpartHtmlLang}}" aria-label="{{languageLinkLabel}}">
+          <span class="{{englishLanguageClass}}">EN</span><b>/</b><span class="{{chineseLanguageClass}}">中</span>
+        </a>
+        <a class="nav-download" href="{{downloadURL}}" data-en="Download" data-zh="下载">Download</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="hero-grid" aria-hidden="true"></div>
+      <div class="page-shell hero-layout">
+        <div class="hero-copy">
+          <div class="status-pill"><span></span><b>v{{currentVersion}}</b><span data-en="available now" data-zh="现已发布">available now</span></div>
+          <h1 data-en="Your Mac.<br>Its models.<br><em>One native engine.</em>" data-zh="你的 Mac。<br>你的模型。<br><em>一个原生<br>引擎。</em>">Your Mac.<br>Its models.<br><em>One native engine.</em></h1>
+          <p class="hero-lede" data-en="Run language and vision models through a native SwiftUI app, a real CLI, or a compatible API — all backed by the same Swift in-process MLX engine." data-zh="通过原生 SwiftUI 应用、完整 CLI 或兼容 API 运行语言与视觉模型；三者共用同一个 Swift 进程内 MLX 引擎。">Run language and vision models through a native SwiftUI app, a real CLI, or a compatible API — all backed by the same Swift in-process MLX engine.</p>
+          <div class="hero-actions">
+            <a class="primary-action" href="{{downloadURL}}">
+              <span data-en="Get macMLX" data-zh="下载 macMLX">Get macMLX</span>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"></path></svg>
+            </a>
+            <a class="text-action" href="{{repositoryURL}}">
+              <span data-en="View source" data-zh="查看源码">View source</span>
+              <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <p class="requirements" data-en="macOS 14+ · Apple Silicon · Apache 2.0" data-zh="macOS 14+ · Apple 芯片 · Apache 2.0">macOS 14+ · Apple Silicon · Apache 2.0</p>
+        </div>
+
+        <div class="engine-object" aria-label="A diagram showing one native core serving the app, CLI, and API">
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="engine-core">
+            <span class="core-kicker">MacMLXCore</span>
+            <svg viewBox="0 0 80 80" aria-hidden="true"><rect x="19" y="19" width="42" height="42" rx="10"></rect><path d="M29 12v7M40 12v7M51 12v7M29 61v7M40 61v7M51 61v7M12 29h7M12 40h7M12 51h7M61 29h7M61 40h7M61 51h7"></path><path class="core-wave" d="m29 43 7-9 8 13 7-10"></path></svg>
+            <strong data-en="Swift-native<br>in-process" data-zh="Swift 原生<br>进程内运行">Swift-native<br>in-process</strong>
+          </div>
+          <div class="satellite satellite-app"><span class="satellite-icon">◫</span><b data-en="App" data-zh="应用">App</b></div>
+          <div class="satellite satellite-cli"><span class="satellite-icon">›_</span><b>CLI</b></div>
+          <div class="satellite satellite-api"><span class="satellite-icon">{ }</span><b>API</b></div>
+          <div class="local-note"><span></span><span data-en="Inference stays on this Mac" data-zh="推理始终留在这台 Mac">Inference stays on this Mac</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="fact-strip" aria-label="Project facts">
+      <div class="page-shell fact-grid">
+        <div><strong>~50 MB</strong><span data-en="single app bundle" data-zh="单一应用包">single app bundle</span></div>
+        <div><strong>Default</strong><span data-en="no Python runtime required" data-zh="无需 Python 运行时">no Python runtime required</span></div>
+        <div><strong>3</strong><span data-en="surfaces, one core" data-zh="三种入口，一个核心">surfaces, one core</span></div>
+        <div><strong>100%</strong><span data-en="local by default" data-zh="默认完全本地">local by default</span></div>
+      </div>
+    </section>
+
+    <section class="section why-section" id="why">
+      <div class="page-shell">
+        <div class="section-intro reveal">
+          <p class="section-label"><span>01</span><span data-en="Why macMLX" data-zh="为什么选择 macMLX">Why macMLX</span></p>
+          <h2 data-en="Native is more than<br>a window frame." data-zh="原生，不只是<br>套一层窗口。">Native is more than<br>a window frame.</h2>
+          <p data-en="The difference is underneath: the inference engine itself is Swift, runs inside the app process, and powers every interface." data-zh="真正的差异在底层：推理引擎本身由 Swift 实现，运行在应用进程内，并为所有入口提供能力。">The difference is underneath: the inference engine itself is Swift, runs inside the app process, and powers every interface.</p>
+        </div>
+
+        <div class="why-list">
+          <article class="why-row reveal">
+            <span class="why-number">A</span>
+            <div>
+              <h3 data-en="Swift-native in-process engine" data-zh="Swift 原生进程内引擎">Swift-native in-process engine</h3>
+              <p data-en="Model loading, generation, caching, and serving happen in one Swift process through Apple MLX. No Python service to install, supervise, or keep in sync." data-zh="模型加载、生成、缓存与服务均通过 Apple MLX 在同一个 Swift 进程中完成，无需安装、守护或同步 Python 服务。">Model loading, generation, caching, and serving happen in one Swift process through Apple MLX. No Python service to install, supervise, or keep in sync.</p>
+            </div>
+            <span class="why-tag">Swift 6</span>
+          </article>
+          <article class="why-row reveal">
+            <span class="why-number">B</span>
+            <div>
+              <h3 data-en="One core, three first-class surfaces" data-zh="一个核心，三种一等入口">One core, three first-class surfaces</h3>
+              <p data-en="Use the SwiftUI app, script with macmlx, or connect an existing OpenAI, Anthropic, Ollama, or MCP workflow. They share the same models and engine behavior." data-zh="可使用 SwiftUI 应用、通过 macmlx 编写脚本，或接入现有的 OpenAI、Anthropic、Ollama 与 MCP 工作流；它们共享相同的模型与引擎行为。">Use the SwiftUI app, script with macmlx, or connect an existing OpenAI, Anthropic, Ollama, or MCP workflow. They share the same models and engine behavior.</p>
+            </div>
+            <span class="why-tag">GUI · CLI · API</span>
+          </article>
+          <article class="why-row reveal">
+            <span class="why-number">C</span>
+            <div>
+              <h3 data-en="Engine work you can inspect" data-zh="看得见的引擎能力">Engine work you can inspect</h3>
+              <p data-en="macMLX ships prompt caching, model pooling, LoRA, VLM support, and a pure-Swift DeepSeek V3.2 port. The project improves the engine instead of hiding another runtime behind the UI." data-zh="macMLX 已提供提示缓存、模型池、LoRA、VLM 支持，以及纯 Swift 的 DeepSeek V3.2 移植。项目直接改进引擎，而不是在界面背后隐藏另一套运行时。">macMLX ships prompt caching, model pooling, LoRA, VLM support, and a pure-Swift DeepSeek V3.2 port. The project improves the engine instead of hiding another runtime behind the UI.</p>
+            </div>
+            <span class="why-tag">Apache 2.0</span>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section features-section" id="features">
+      <div class="page-shell">
+        <div class="section-heading reveal">
+          <p class="section-label light"><span>02</span><span data-en="What ships today" data-zh="当前已交付">What ships today</span></p>
+          <h2 data-en="A small app with<br>a serious backend." data-zh="小巧的应用，<br>扎实的后端。">A small app with<br>a serious backend.</h2>
+          <p data-en="Everything below is available in v{{currentVersion}} — not a concept render or a future promise." data-zh="以下能力均已在 v{{currentVersion}} 中提供，不是概念展示，也不是未来承诺。">Everything below is available in v{{currentVersion}} — not a concept render or a future promise.</p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card feature-card-wide reveal">
+            <div class="feature-top"><span>01</span><span class="live-dot" data-en="LOCAL" data-zh="本地">LOCAL</span></div>
+            <div class="chat-demo" aria-hidden="true">
+              <div class="chat-sidebar"><i></i><i></i><i></i><i></i></div>
+              <div class="chat-canvas">
+                <div class="model-chip">Qwen3 · MLX</div>
+                <div class="bubble bubble-user">Explain this image</div>
+                <div class="bubble bubble-model"><span></span><span></span><span></span></div>
+                <div class="composer"><span>Ask anything…</span><b>↑</b></div>
+              </div>
+            </div>
+            <h3 data-en="Native chat, from text to vision" data-zh="从文本到视觉的原生聊天">Native chat, from text to vision</h3>
+            <p data-en="Streaming Markdown, reasoning blocks, image attachments, conversation history, rewind, and per-model parameters in a focused macOS interface." data-zh="在专注的 macOS 界面中提供流式 Markdown、推理折叠、图片附件、对话历史、回退与逐模型参数。">Streaming Markdown, reasoning blocks, image attachments, conversation history, rewind, and per-model parameters in a focused macOS interface.</p>
+          </article>
+
+          <article class="feature-card reveal">
+            <div class="feature-top"><span>02</span><span>API</span></div>
+            <div class="terminal-lines" aria-hidden="true"><code>POST /v1/chat/completions</code><code>POST /v1/messages</code><code>POST /v1/embeddings</code><code>macmlx mcp serve</code></div>
+            <h3 data-en="Fits existing workflows" data-zh="融入现有工作流">Fits existing workflows</h3>
+            <p data-en="OpenAI, Anthropic, Ollama, embeddings, rerank, and MCP integration surfaces let local models work with the tools you already use." data-zh="兼容 OpenAI、Anthropic、Ollama、嵌入、重排并提供 MCP 集成入口，让本地模型接入你已有的工具。">OpenAI, Anthropic, Ollama, embeddings, rerank, and MCP integration surfaces let local models work with the tools you already use.</p>
+          </article>
+
+          <article class="feature-card reveal">
+            <div class="feature-top"><span>03</span><span data-en="ENGINE" data-zh="引擎">ENGINE</span></div>
+            <div class="cache-viz" aria-hidden="true"><span style="--w:92%"></span><span style="--w:72%"></span><span style="--w:48%"></span><span style="--w:30%"></span></div>
+            <h3 data-en="Built for repeated work" data-zh="为重复工作而优化">Built for repeated work</h3>
+            <p data-en="Hot and cold KV caches, a memory-aware multi-model pool, cold swap, LoRA adapters, and stall-safe serving keep long sessions practical." data-zh="冷热 KV 缓存、内存感知的多模型池、冷切换、LoRA 适配器与防停滞服务，让长会话保持实用。">Hot and cold KV caches, a memory-aware multi-model pool, cold swap, LoRA adapters, and stall-safe serving keep long sessions practical.</p>
+          </article>
+
+          <article class="feature-card feature-card-wide feature-card-horizontal reveal">
+            <div>
+              <div class="feature-top"><span>04</span><span>HUGGING FACE</span></div>
+              <h3 data-en="Models without terminal archaeology" data-zh="无需在终端里考古找模型">Models without terminal archaeology</h3>
+              <p data-en="Browse, download, resume, update, and load MLX models in the app. Mirrors and commit-aware update detection are built in." data-zh="直接在应用中浏览、下载、续传、更新并加载 MLX 模型；内置镜像支持与基于提交记录的更新检测。">Browse, download, resume, update, and load MLX models in the app. Mirrors and commit-aware update detection are built in.</p>
+            </div>
+            <div class="download-viz" aria-hidden="true"><div><span>Qwen3-8B-4bit</span><b>82%</b></div><i><span></span></i><small>8.4 MB/s · 00:21</small></div>
+          </article>
+
+          <article class="feature-card reveal">
+            <div class="feature-top"><span>05</span><span>CLI</span></div>
+            <pre class="mini-code" aria-hidden="true"><span>$</span> macmlx pull qwen
+<span>$</span> macmlx run qwen
+<span>$</span> macmlx serve</pre>
+            <h3 data-en="A CLI that shares the core" data-zh="共享核心的 CLI">A CLI that shares the core</h3>
+            <p data-en="Pull, run, serve, inspect, and stop from scripts or SSH without switching to a separate runtime." data-zh="可在脚本或 SSH 中下载、运行、服务、查看与停止，无需切换到另一套运行时。">Pull, run, serve, inspect, and stop from scripts or SSH without switching to a separate runtime.</p>
+          </article>
+
+          <article class="feature-card reveal">
+            <div class="feature-top"><span>06</span><span data-en="OBSERVE" data-zh="观测">OBSERVE</span></div>
+            <div class="metric-viz" aria-hidden="true"><div><b>42.8</b><span>tok/s</span></div><div><b>0.31</b><span>TTFT</span></div></div>
+            <h3 data-en="Measure the machine you own" data-zh="测量你手里的机器">Measure the machine you own</h3>
+            <p data-en="Benchmark throughput, time to first token, and memory locally, then inspect engine and server events in the built-in Logs view." data-zh="在本地测量吞吐、首字延迟与内存，并在内置日志视图中检查引擎和服务事件。">Benchmark throughput, time to first token, and memory locally, then inspect engine and server events in the built-in Logs view.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section engine-section" id="engine">
+      <div class="page-shell">
+        <div class="section-intro reveal">
+          <p class="section-label light"><span>03</span><span data-en="Inside the engine" data-zh="走进引擎内部">Inside the engine</span></p>
+          <h2 data-en="One Mac.<br>Five layers of control." data-zh="一台 Mac，<br>五层精密控制。">One Mac.<br>Five layers of control.</h2>
+          <p data-en="Follow one inference journey from Apple Silicon to sparse experts, shareable memory, adaptive admission, and controlled generation." data-zh="沿着一次推理旅程，看 Apple 芯片、稀疏专家、可共享记忆、自适应准入与可控生成如何协同。">Follow one inference journey from Apple Silicon to sparse experts, shareable memory, adaptive admission, and controlled generation.</p>
+        </div>
+
+        <div class="engine-story" data-engine-story data-engine-step="0">
+          <ol class="engine-steps">
+            <li class="engine-step is-active" data-engine-index="0">
+              <article>
+                <div class="engine-meta"><span>01</span><span class="engine-status" data-en="Platform advantage" data-zh="平台优势">Platform advantage</span></div>
+                <h3 data-en="The memory is the architecture." data-zh="内存，本身就是架构。">The memory is the architecture.</h3>
+                <p data-en="Unified memory keeps model weights, activations, and cache close to both CPU orchestration and integrated-GPU compute. MLX can move the work without building a second runtime around it." data-zh="统一内存让模型权重、激活值与缓存同时靠近 CPU 编排和集成 GPU 计算；MLX 无需再围绕它搭建第二套运行时。">Unified memory keeps model weights, activations, and cache close to both CPU orchestration and integrated-GPU compute. MLX can move the work without building a second runtime around it.</p>
+                <div class="engine-tags"><span>Unified Memory</span><span>CPU + GPU</span><span>MLX</span><span>In-process</span></div>
+                <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/mac-silicon-foundation.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              </article>
+            </li>
+            <li class="engine-step" data-engine-index="1">
+              <article>
+                <div class="engine-meta"><span>02</span><span class="engine-status" data-en="Available" data-zh="已支持">Available</span></div>
+                <h3 data-en="Activate expertise, not every parameter." data-zh="激活专家，而不是激活全部参数。">Activate expertise, not every parameter.</h3>
+                <p data-en="A router selects a small expert set for each token, combines it with shared expertise, and merges the weighted result. macMLX ships a parity-verified pure-Swift DeepSeek V3.2 MoE path without claiming every MoE family." data-zh="路由器为每个词元选择少量专家，与共享专家协同后合并加权结果。macMLX 已提供经过数值对齐验证的纯 Swift DeepSeek V3.2 MoE 路径，但并不宣称支持所有 MoE 家族。">A router selects a small expert set for each token, combines it with shared expertise, and merges the weighted result. macMLX ships a parity-verified pure-Swift DeepSeek V3.2 MoE path without claiming every MoE family.</p>
+                <div class="engine-tags"><span>Router</span><span>Active Experts</span><span>Shared Expert</span><span>Top-k Routing</span></div>
+                <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/moe-routing.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              </article>
+            </li>
+            <li class="engine-step" data-engine-index="2">
+              <article>
+                <div class="engine-meta"><span>03</span><span class="engine-status" data-en="Current + next" data-zh="当前 + 下一步">Current + next</span></div>
+                <h3 data-en="Reuse the prompt. Branch only when needed." data-zh="复用提示，只在必要时分支。">Reuse the prompt. Branch only when needed.</h3>
+                <p data-en="Today, hot RAM entries can demote to a content-addressed SSD cold tier and return later. Paged allocation, block sharing, and copy-on-write are the next steps toward sharing prefixes across more concurrent work." data-zh="当前，热 RAM 条目可以降级到内容寻址的 SSD 冷层，并在需要时重新提升。分页分配、块共享与写时复制，是让更多并发请求共享前缀的下一步。">Today, hot RAM entries can demote to a content-addressed SSD cold tier and return later. Paged allocation, block sharing, and copy-on-write are the next steps toward sharing prefixes across more concurrent work.</p>
+                <div class="engine-tags"><span>Paged KV</span><span>Block Sharing</span><span>CoW</span><span>SSD Cold Tier</span></div>
+                <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/paged-kv-memory.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              </article>
+            </li>
+            <li class="engine-step" data-engine-index="3">
+              <article>
+                <div class="engine-meta"><span>04</span><span class="engine-status" data-en="On main + evolving" data-zh="主线已有 + 持续演进">On main + evolving</span></div>
+                <h3 data-en="Admit work at the speed memory can sustain." data-zh="按照内存承受的速度接纳工作。">Admit work at the speed memory can sustain.</h3>
+                <p data-en="Bounded prefill admission prevents a prompt wave from consuming every batch slot at once. Memory probes, pool limits, and eviction already shape admission; a unified adaptive guard is the next feedback layer." data-zh="有限的 prefill 准入避免一波长提示同时占满批处理槽位。内存探针、模型池上限与淘汰机制已经参与调节；统一的自适应守卫将成为下一层反馈控制。">Bounded prefill admission prevents a prompt wave from consuming every batch slot at once. Memory probes, pool limits, and eviction already shape admission; a unified adaptive guard is the next feedback layer.</p>
+                <div class="engine-tags"><span>Prefill Throttle</span><span>Memory Probe</span><span>Admission</span><span>Eviction</span></div>
+                <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/adaptive-runtime.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              </article>
+            </li>
+            <li class="engine-step" data-engine-index="4">
+              <article>
+                <div class="engine-meta"><span>05</span><span class="engine-status" data-en="Core controls + planned" data-zh="核心参数 + 规划中">Core controls + planned</span></div>
+                <h3 data-en="Shape probability. Preserve reproducibility." data-zh="塑造概率，也保留可复现性。">Shape probability. Preserve reproducibility.</h3>
+                <p data-en="Temperature and top-p are available today. Top-k, min-p, penalties, per-request seed, and exposed KV-quantization controls belong to the next control surface—not the current release." data-zh="当前已提供 temperature 与 top-p。top-k、min-p、惩罚项、逐请求 seed 与开放的 KV 量化控制属于下一阶段控制面，而不是当前版本能力。">Temperature and top-p are available today. Top-k, min-p, penalties, per-request seed, and exposed KV-quantization controls belong to the next control surface—not the current release.</p>
+                <div class="engine-tags"><span>top-k</span><span>min-p</span><span>Penalties</span><span>Seed</span><span>KV Quant</span></div>
+                <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/generation-controls.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              </article>
+            </li>
+          </ol>
+
+          <div class="engine-stage" aria-hidden="true">
+            <div class="engine-visuals">
+              <figure class="engine-visual is-active" data-engine-panel="0"><img class="engine-image" src="/assets/images/engine/mac-silicon-foundation.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              <figure class="engine-visual" data-engine-panel="1"><img class="engine-image" src="/assets/images/engine/moe-routing.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              <figure class="engine-visual" data-engine-panel="2"><img class="engine-image" src="/assets/images/engine/paged-kv-memory.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              <figure class="engine-visual" data-engine-panel="3"><img class="engine-image" src="/assets/images/engine/adaptive-runtime.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+              <figure class="engine-visual" data-engine-panel="4"><img class="engine-image" src="/assets/images/engine/generation-controls.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
+            </div>
+            <div class="engine-progress">
+              <span class="is-active" data-engine-progress="0"></span><span data-engine-progress="1"></span><span data-engine-progress="2"></span><span data-engine-progress="3"></span><span data-engine-progress="4"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section progress-section" id="progress">
+      <div class="page-shell">
+        <div class="section-intro reveal">
+          <p class="section-label"><span>04</span><span data-en="Development progress" data-zh="开发进展">Development progress</span></p>
+          <h2 data-en="Shipping first.<br>Then going faster." data-zh="先稳定交付，<br>再继续提速。">Shipping first.<br>Then going faster.</h2>
+          <p data-en="The website now separates released capability from active engineering work, so the roadmap reads as progress rather than promises." data-zh="网站将已发布能力与正在进行的工程工作明确分开，让路线图呈现真实进展，而不是空泛承诺。">The website now separates released capability from active engineering work, so the roadmap reads as progress rather than promises.</p>
+        </div>
+
+        <div class="release-board">
+          <article class="release-column shipped reveal">
+            <div class="release-head"><span data-en="Released" data-zh="已发布">Released</span><strong>v{{currentVersion}}</strong></div>
+            <h3 data-en="A capable local inference stack" data-zh="完整的本地推理栈">A capable local inference stack</h3>
+            <ul>
+              <li data-en="Language models + 14 detected VLM families" data-zh="语言模型 + 检测到的 14 个 VLM 家族">Language models + 14 detected VLM families</li>
+              <li data-en="Prompt cache, model pool, and LoRA adapters" data-zh="提示缓存、模型池与 LoRA 适配器">Prompt cache, model pool, and LoRA adapters</li>
+              <li data-en="OpenAI, Anthropic, Ollama, MCP, embeddings, rerank" data-zh="兼容 OpenAI、Anthropic、Ollama、MCP、嵌入与重排">OpenAI, Anthropic, Ollama, MCP, embeddings, rerank</li>
+              <li data-en="Pure-Swift DeepSeek V3.2 architecture" data-zh="纯 Swift 的 DeepSeek V3.2 架构">Pure-Swift DeepSeek V3.2 architecture</li>
+            </ul>
+            <a href="{{changelogURL}}" data-en="Read the changelog ↗" data-zh="查看更新日志 ↗">Read the changelog ↗</a>
+          </article>
+
+          <article class="release-column building reveal">
+            <div class="release-head"><span data-en="In development" data-zh="开发中">In development</span><strong>v0.6</strong></div>
+            <h3 data-en="A faster agent backend" data-zh="更快的智能体后端">A faster agent backend</h3>
+            <ul>
+              <li data-en="Continuous-batching scheduler and server routing foundations merged" data-zh="连续批处理调度器与服务路由基础已合并">Continuous-batching scheduler and server routing foundations merged</li>
+              <li data-en="Classic draft-model speculative decoding merged" data-zh="经典草稿模型投机解码已合并">Classic draft-model speculative decoding merged</li>
+              <li data-en="Chat-side MCP tool routing and OpenAI tools pass-through merged" data-zh="聊天侧 MCP 工具路由与 OpenAI tools 透传已合并">Chat-side MCP tool routing and OpenAI tools pass-through merged</li>
+              <li data-en="Longest-prefix prompt reuse is the next cache milestone" data-zh="最长前缀复用是下一项缓存里程碑">Longest-prefix prompt reuse is the next cache milestone</li>
+              <li data-en="Schema-constrained JSON output follows" data-zh="随后推进 Schema 约束的 JSON 输出">Schema-constrained JSON output follows</li>
+            </ul>
+            <a href="{{repositoryURL}}" data-en="Follow development ↗" data-zh="关注开发进展 ↗">Follow development ↗</a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section quickstart-section" id="quickstart">
+      <div class="page-shell quickstart-layout">
+        <div class="quickstart-copy reveal">
+          <p class="section-label"><span>05</span><span data-en="Get started" data-zh="开始使用">Get started</span></p>
+          <h2 data-en="From download<br>to first token." data-zh="下载模型，<br>开始对话。">From download<br>to first token.</h2>
+          <p data-en="Install the app for the full macOS experience, or use the CLI when the terminal is already home." data-zh="安装应用即可获得完整 macOS 体验；如果终端就是你的主场，也可以直接使用 CLI。">Install the app for the full macOS experience, or use the CLI when the terminal is already home.</p>
+          <div class="quick-actions">
+            <a class="primary-action" href="{{downloadURL}}" data-en="Download latest release" data-zh="下载最新版本">Download latest release</a>
+            <a class="text-action" href="{{buildSourceURL}}" data-en="Build from source ↗" data-zh="从源码构建 ↗">Build from source ↗</a>
+          </div>
+        </div>
+        <div class="quickstart-card reveal">
+          <div class="code-toolbar"><span data-en="Terminal · CLI installed" data-zh="终端 · 已安装 CLI">Terminal · CLI installed</span><button id="copy-command" type="button" data-copy="macmlx pull mlx-community/Qwen3-8B-4bit" data-copy-success="{{copySuccess}}" data-copy-failure="{{copyFailure}}" data-en="Copy" data-zh="复制">Copy</button></div>
+          <pre><span class="prompt">$</span> macmlx pull mlx-community/Qwen3-8B-4bit
+<span class="prompt">$</span> macmlx run Qwen3-8B-4bit <span class="string">"Hello, Mac."</span>
+<span class="prompt">$</span> macmlx serve</pre>
+          <div class="endpoint"><span></span><code>http://localhost:8000/v1</code><b data-en="ready" data-zh="就绪">ready</b></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="page-shell footer-layout">
+      <div>
+        <a class="wordmark footer-wordmark" href="#top"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>macMLX</span></a>
+        <p data-en="Native Swift inference for Apple Silicon." data-zh="为 Apple 芯片打造的原生 Swift 推理。">Native Swift inference for Apple Silicon.</p>
+      </div>
+      <div class="footer-links">
+        <a href="{{architecturePath}}">{{architectureLabel}}</a>
+        <a href="{{apiPath}}">{{apiLabel}}</a>
+        <a href="{{modelsPath}}">{{modelsLabel}}</a>
+        <a href="{{comparePath}}">{{compareLabel}}</a>
+        <a href="{{faqPath}}">{{faqLabel}}</a>
+        <a href="{{releasesPath}}">{{releasesLabel}}</a>
+        <a href="{{repositoryURL}}" data-en="Source" data-zh="源码">Source</a>
+        <a href="{{releasesURL}}" data-en="Releases" data-zh="版本">Releases</a>
+        <a href="{{issuesURL}}" data-en="Issues" data-zh="问题">Issues</a>
+        <a href="{{repositoryLicenseURL}}" data-en="License" data-zh="许可证">License</a>
+      </div>
+    </div>
+    <div class="page-shell footer-bottom">
+      <span>© 2026 macMLX contributors</span>
+      <span data-en="Local by design. Open by choice." data-zh="为本地而生，因开放而自由。">Local by design. Open by choice.</span>
+    </div>
+  </footer>
+
+  <script type="module" src="/assets/js/main.js?v=2026071004"></script>
+</body>
+</html>

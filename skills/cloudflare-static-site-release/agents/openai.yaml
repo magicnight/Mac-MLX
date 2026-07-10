@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloudflare Static Site Release"
+  short_description: "Stage, verify, deploy, and roll back static sites"
+  default_prompt: "Release this static site to Cloudflare with Bun Wrangler using staging verification, custom-domain preflight, production verification, and a recorded rollback path."

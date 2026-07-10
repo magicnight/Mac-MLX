@@ -1,0 +1,38 @@
+.reveal {
+  opacity: 1;
+  transform: none;
+}
+
+.engine-story {
+  display: block;
+}
+
+.engine-steps {
+  display: grid;
+  gap: 48px;
+}
+
+.engine-step {
+  min-height: auto;
+  opacity: 1;
+  transform: none;
+  clip-path: none;
+  transition: none;
+}
+
+.engine-mobile-figure {
+  aspect-ratio: 16 / 9;
+  margin: 28px 0 0;
+  display: block;
+  border: 1px solid var(--line-strong);
+  border-radius: 15px;
+  overflow: hidden;
+  opacity: 1;
+  transform: none;
+  clip-path: none;
+  transition: none;
+}
+
+.engine-stage {
+  display: none;
+}
