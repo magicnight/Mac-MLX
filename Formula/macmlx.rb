@@ -18,7 +18,13 @@ class Macmlx < Formula
   depends_on arch: :arm64
 
   def install
-    bin.install "macmlx"
+    # The mlx-swift resource bundle (default.metallib) must sit next to
+    # the executable — MLX resolves its Metal library relative to the
+    # binary, and a bare install aborts on the first inference with
+    # "Failed to load the default metallib". Keep both in libexec and
+    # expose a bin shim.
+    libexec.install "macmlx", "mlx-swift_Cmlx.bundle"
+    bin.write_exec_script libexec/"macmlx"
   end
 
   test do
