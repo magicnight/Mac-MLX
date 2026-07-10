@@ -56,6 +56,47 @@ struct MLXSwiftEngineDraftContainerActionTests {
     }
 }
 
+@Suite("MLXSwiftEngine speculative-decoding cache-trimmability precheck (D1 fallback fix)")
+struct MLXSwiftEngineSpeculativeCachePrecheckTests {
+
+    // `canUseSpeculativeDecoding` is the stubbable seam of the fallback
+    // decision: the actual `canTrimPromptCache` check against a real
+    // `[KVCache]` has to run inside `ModelContainer.perform` against a
+    // loaded model (not stubbable cheaply), but the AND-decision that
+    // follows from its two booleans is pure and — per this bug's real E2E
+    // repro (a hybrid/linear-attention target model's `MambaCache` is
+    // non-trimmable) — is exactly the logic that must route to a fallback
+    // instead of letting `SpeculativeTokenIterator.init` throw.
+
+    @Test("both target and draft caches trimmable: speculation is allowed")
+    func bothTrimmableAllowsSpeculation() {
+        #expect(MLXSwiftEngine.canUseSpeculativeDecoding(
+            targetCacheIsTrimmable: true, draftCacheIsTrimmable: true
+        ))
+    }
+
+    @Test("target cache not trimmable (e.g. hybrid architecture's MambaCache): falls back")
+    func targetNotTrimmableFallsBack() {
+        #expect(!MLXSwiftEngine.canUseSpeculativeDecoding(
+            targetCacheIsTrimmable: false, draftCacheIsTrimmable: true
+        ))
+    }
+
+    @Test("draft cache not trimmable: falls back")
+    func draftNotTrimmableFallsBack() {
+        #expect(!MLXSwiftEngine.canUseSpeculativeDecoding(
+            targetCacheIsTrimmable: true, draftCacheIsTrimmable: false
+        ))
+    }
+
+    @Test("neither cache trimmable: falls back")
+    func neitherTrimmableFallsBack() {
+        #expect(!MLXSwiftEngine.canUseSpeculativeDecoding(
+            targetCacheIsTrimmable: false, draftCacheIsTrimmable: false
+        ))
+    }
+}
+
 @Suite("MLXSwiftEngine draft model directory resolution (D1)")
 struct MLXSwiftEngineDraftModelDirectoryTests {
 

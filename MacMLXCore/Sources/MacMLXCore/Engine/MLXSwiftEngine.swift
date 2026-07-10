@@ -576,6 +576,31 @@ public actor MLXSwiftEngine: InferenceEngine {
             && target.unknownTokenId == draft.unknownTokenId
     }
 
+    /// Whether classic per-request speculative decoding (D1) may proceed,
+    /// given a cache-trimmability precheck already run against the target
+    /// and draft models. Pure decision function (no I/O, no MLX dispatch) —
+    /// mirrors `DraftContainerAction.decide`'s "pure decision, real work
+    /// stays in the caller" split, so the true/false fallback decision is
+    /// unit-testable without loading a model or touching Metal. The actual
+    /// trimmability check (`canTrimPromptCache` against a freshly-allocated
+    /// probe `[KVCache]`) has to run inside `ModelContainer.perform` against
+    /// a real model and can't be stubbed cheaply — this seam starts one step
+    /// later, at the two resulting booleans, which IS cheap to stub.
+    ///
+    /// mlx-swift-lm's `SpeculativeTokenIterator.init` requires BOTH the main
+    /// and draft `[KVCache]` to satisfy `canTrimPromptCache` and THROWS
+    /// `KVCacheError` otherwise — hybrid/linear-attention architectures
+    /// (e.g. Qwen3.5's GatedDeltaNet layers, which allocate a non-trimmable
+    /// `MambaCache`) fail this unconditionally and architecture-wide, so a
+    /// draft-model request against such a target must be caught by a
+    /// precheck and routed to plain decoding instead of letting that throw
+    /// bubble up as a request failure. See `runLLMGeneration`'s call site.
+    static func canUseSpeculativeDecoding(
+        targetCacheIsTrimmable: Bool, draftCacheIsTrimmable: Bool
+    ) -> Bool {
+        targetCacheIsTrimmable && draftCacheIsTrimmable
+    }
+
     // MARK: Private generation helper
 
     /// Actor-isolated generation driver called from within `generate(_:)`.
@@ -751,16 +776,58 @@ public actor MLXSwiftEngine: InferenceEngine {
         // comment) rather than threading a third branch through the cache
         // logic below.
         if let draftContainer {
-            try await runSpeculativeLLMGeneration(
-                lmInput: lmInput,
-                container: container,
-                draftContainer: draftContainer,
-                generateParams: generateParams,
-                numDraftTokens: numDraftTokens,
-                hasTools: hasTools,
-                into: continuation
+            // D1 follow-up fix: cache-trimmability precheck BEFORE
+            // committing to the speculative branch. mlx-swift-lm's
+            // `SpeculativeTokenIterator.init` (invoked inside
+            // `runSpeculativeLLMGeneration`) requires BOTH the target and
+            // draft `[KVCache]` to satisfy `canTrimPromptCache` and THROWS
+            // `KVCacheError` otherwise — hybrid/linear-attention
+            // architectures (e.g. Qwen3.5's GatedDeltaNet layers, which
+            // allocate a non-trimmable `MambaCache`) fail this
+            // unconditionally, architecture-wide, so without this precheck a
+            // draft-model request against such a target bubbled that throw
+            // straight out as a request failure (E2E-observed).
+            //
+            // Probe with a throwaway `[KVCache]` from `newCache(parameters:)`
+            // on BOTH containers — lightweight: no prefill, just the
+            // allocation shape, discarded immediately after the check.
+            let targetCacheIsTrimmable = await container.perform { context in
+                MLXLMCommon.canTrimPromptCache(context.model.newCache(parameters: generateParams))
+            }
+            let draftCacheIsTrimmable = await draftContainer.perform { context in
+                MLXLMCommon.canTrimPromptCache(context.model.newCache(parameters: generateParams))
+            }
+            if Self.canUseSpeculativeDecoding(
+                targetCacheIsTrimmable: targetCacheIsTrimmable,
+                draftCacheIsTrimmable: draftCacheIsTrimmable
+            ) {
+                try await runSpeculativeLLMGeneration(
+                    lmInput: lmInput,
+                    container: container,
+                    draftContainer: draftContainer,
+                    generateParams: generateParams,
+                    numDraftTokens: numDraftTokens,
+                    hasTools: hasTools,
+                    into: continuation
+                )
+                return
+            }
+
+            // Not trimmable — fall back to plain decoding below rather than
+            // let `SpeculativeTokenIterator.init` throw. Clean, non-recursive
+            // control flow: `runSpeculativeLLMGeneration` is simply never
+            // called on this path, and execution falls through into the same
+            // prompt-cache / plain-decode logic used when no draft model was
+            // requested at all — no recursive re-entry into
+            // `runLLMGeneration`, no double-run.
+            await LogManager.shared.warning(
+                "Speculative decoding requested (draft model resident) but the "
+                    + "target and/or draft model's KV cache is not trimmable — "
+                    + "likely a hybrid/linear-attention architecture (e.g. "
+                    + "GatedDeltaNet's MambaCache). Falling back to plain "
+                    + "decoding for this request.",
+                category: .inference
             )
-            return
         }
 
         // Flat Int token array for key construction. `LMInput.text.tokens`
@@ -901,7 +968,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// draft-model path, distinct from the MTP block-drafter path this
     /// engine does not use). Called from `runLLMGeneration` once
     /// `ensureDraftContainer` has confirmed `draftContainer` matches the
-    /// request's `draftModelID`.
+    /// request's `draftModelID` AND the cache-trimmability precheck
+    /// (`canUseSpeculativeDecoding`) has confirmed both models' freshly
+    /// allocated caches are trimmable — this function assumes that precheck
+    /// already passed and does not repeat it.
     ///
     /// v1 tradeoffs, documented here rather than silently absorbed elsewhere:
     ///  - **Bypasses `promptCacheStore` entirely.** `SpeculativeTokenIterator.init`
@@ -912,7 +982,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///    batch-positioned cache — see `Batching/`), so every speculative
     ///    request pays a cold prefill on both models rather than risk that
     ///    throw. `cache`/`draftCache` are omitted below, so mlx-swift-lm
-    ///    allocates fresh (trimmable-by-default) caches for both models.
+    ///    allocates fresh caches for both models. Freshness alone does NOT
+    ///    guarantee trimmability, though — a hybrid/linear-attention
+    ///    architecture's `MambaCache` is non-trimmable no matter how fresh
+    ///    (architectural, not a snapshot-staleness issue), which is exactly
+    ///    what `runLLMGeneration`'s precheck now catches before this
+    ///    function is ever called.
     ///  - **Mutually exclusive with continuous batching** — see
     ///    `GenerateRequest.draftModelID`'s doc comment. Not enforced here;
     ///    batching isn't wired to the server yet, so this is a documented

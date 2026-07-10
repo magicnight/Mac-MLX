@@ -114,6 +114,14 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// engine currently has resident — there is no separate "unload draft"
     /// verb. Ignored on VLM requests (text-only, D1).
     ///
+    /// - Note: Silently falls back to plain (non-speculative) decoding when
+    ///   either the target or draft model's KV cache isn't trimmable — e.g. a
+    ///   hybrid/linear-attention architecture such as Qwen3.5, whose
+    ///   GatedDeltaNet layers use a non-trimmable `MambaCache`. No error is
+    ///   raised in that case; the response simply carries no
+    ///   `speculativeDecoding` telemetry. See
+    ///   `MLXSwiftEngine.canUseSpeculativeDecoding`.
+    ///
     /// - Important: Mutually exclusive with continuous batching, mirroring
     ///   mlx-lm's `is_batchable` semantics — a batched decode request must
     ///   never also carry a draft model. Batching isn't wired to the server
