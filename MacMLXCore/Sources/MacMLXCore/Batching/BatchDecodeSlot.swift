@@ -88,7 +88,11 @@ final class BatchDecodeSlot {
     /// lockstep with the live rows. The fallback (empty history) only applies if
     /// the very first token was itself a stop token.
     var feedbackToken: Int {
-        generatedTokens.last ?? eosTokenIds.first ?? unknownTokenId ?? 0
+        // `Set.first` is hash-order (nondeterministic across runs); `.min()` makes
+        // the empty-history pad token deterministic. Only reached if the very first
+        // sampled token was itself a stop token, so the exact value is cosmetic —
+        // but a stable one keeps batched runs reproducible (L1).
+        generatedTokens.last ?? eosTokenIds.min() ?? unknownTokenId ?? 0
     }
 
     /// Feed one freshly sampled token ID for this row. Emits any decodable text

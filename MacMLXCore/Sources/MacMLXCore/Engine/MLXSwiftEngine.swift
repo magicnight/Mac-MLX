@@ -11,7 +11,10 @@ import MLXVLM
 /// isolation boundaries when we know the handoff is safe — we `consume`
 /// them into the actor via `ModelContainer.perform(nonSendable:_:)` and
 /// the actor owns them exclusively afterwards.
-private struct NonSendableBox<T>: @unchecked Sendable {
+///
+/// `internal` (not `private`) so the batch-serving extension can carry a
+/// non-`Sendable` `BatchDecodeSession` across `container.perform` segments (H1).
+struct NonSendableBox<T>: @unchecked Sendable {
     let value: T
     init(_ value: T) { self.value = value }
 }
@@ -114,6 +117,59 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// idempotent; this flag just avoids the redundant actor hop.
     private var overlayRegistered = false
 
+    // MARK: Batch serving (A2d-2)
+    //
+    // These back the `BatchGenerationServing` seam implemented in
+    // `MLXSwiftEngine+BatchGenerationServing.swift`. They are `internal` (not
+    // `private`) only so that extension can reach them; nothing here is `public`.
+    // A `ModelContainer`'s serial-access mutex is the model-mutex primitive the
+    // batch drive loop and every other `container.perform` converge on — see the
+    // extension's type doc.
+
+    /// MLX-free coordinator for the seam's admission queue, drain epoch, and
+    /// per-row cancellation. Persists across cold-swaps on this engine instance.
+    let batchCoordinator = BatchServingCoordinator()
+
+    /// Whether the RESIDENT model can be batched — set once per load by a cheap
+    /// MLX-free coverage probe (dense caches + verified-`ropeOffset` architecture,
+    /// LLM only). `false` routes every request to the legacy single-stream path.
+    var batchServingCoverage = false
+
+    /// The resident model's complete stop-token set (config `eosTokenIds` +
+    /// tokenizer EOS + encoded `extraEOSTokens`), captured at load so batched decode
+    /// stops each row exactly as the single-stream path does.
+    var batchServingEOSTokenIds: Set<Int> = []
+
+    /// The resident tokenizer's unknown-token id, treated as a stop token like the
+    /// single-stream path.
+    var batchServingUnknownTokenId: Int?
+
+    /// Serial admission tokenizer for the batched path, built once per load with a
+    /// DEDICATED tokenizer instance (separate from `context.tokenizer`) so concurrent
+    /// admissions neither race each other nor the drive loop's detokenizer, all while
+    /// staying OFF the container mutex the drive loop holds for whole cohorts (H2).
+    /// Nil unless the resident model is batchable.
+    var batchAdmissionProcessor: BatchAdmissionProcessor?
+
+    /// The resident model's container, captured at load for the batched decode loop.
+    /// Nil unless the resident model is batchable.
+    var batchServingContainer: ModelContainer?
+
+    /// Hard per-row token ceiling for the batched path (safety net above each row's
+    /// own `maxTokens`), matching ``BatchScheduler``'s default.
+    static let batchServingGlobalMaxTokens = 4096
+
+    /// Max decode steps the drive loop runs in ONE `container.perform` before it
+    /// returns to release the model mutex, then re-acquires it to continue the same
+    /// cohort (H1). This bounds how long a single-stream `container.prepare` (GUI
+    /// chat, speculative, VLM) can wait behind an active batch cohort: at most one
+    /// budget window, NOT the cohort's whole multi-thousand-token lifetime. 32 steps
+    /// is a fraction of a second at typical decode rates — short enough that a queued
+    /// single-stream request is served promptly (the vendored `AsyncMutex` is
+    /// FIFO-fair), long enough to amortize the perform/mutex re-acquire cost so
+    /// batched throughput stays high.
+    static let batchServingStepBudget = 32
+
     // MARK: Initialiser
 
     public init() {
@@ -189,6 +245,16 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
             loadedSupport = support
             loadedModel = model
+            // A2d-2: probe batch-serving coverage for the resident model once, while
+            // the container's serial mutex is free (the drive loop later holds it for
+            // whole cohorts). A VLM never batches, so clear the state for it.
+            switch support {
+            case .llm(let container):
+                await refreshBatchServingCoverage(container: container)
+            case .vlm, .none:
+                clearBatchServingState()
+                await batchCoordinator.resumeAdmissions()
+            }
             // Symmetric with `unload()`: a freshly-loaded target model must
             // not inherit a draft container that was paired with whatever
             // model was previously loaded on this actor instance — a stale
@@ -259,6 +325,12 @@ public actor MLXSwiftEngine: InferenceEngine {
         loadedModel = nil
         draftContainer = nil
         loadedDraftModelID = nil
+        // A2d-2: no model resident ⇒ nothing is batchable. Any in-flight cohort's
+        // drive loop captured its container locally and finishes on its own; new
+        // submits decline (coverage now false). The server drains the cohort before
+        // reaching here on a swap; a direct unload is guarded by POOL-3 in-flight
+        // refcounting against evicting a model with live rows.
+        clearBatchServingState()
         status = .idle
     }
 

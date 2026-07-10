@@ -416,13 +416,23 @@ public final class AppState {
         // user who set `serverAPIKey` still got an unauthenticated GUI
         // server (no `BearerAuthMiddleware` installed). Reads it the same way
         // `ServeCommand` does — straight from the settings snapshot.
+        // A2d-2: continuous batching on by default when the resident engine
+        // supports it. `ModelPool` mints a new `MLXSwiftEngine` per model, so the
+        // seam must re-resolve the active engine per call (like `engineProvider`) —
+        // this also makes a cold-swap drain the OUTGOING engine's cohort before the
+        // swap. A non-batch resident engine resolves to `nil`, keeping the legacy
+        // single-stream path; the per-model coverage gate handles uncoverable models.
+        let batchServing = ProvidedBatchServing {
+            await coord.activeEngine as? (any BatchGenerationServing)
+        }
         let instance = HummingbirdServer(
             engineProvider: engineProvider,
             modelResolver: resolver,
             loadHook: loadHook,
             inFlightHook: inFlightHook,
             apiKey: currentSettings.serverAPIKey,
-            stallTimeoutSeconds: TimeInterval(currentSettings.generationStallTimeoutSeconds)
+            stallTimeoutSeconds: TimeInterval(currentSettings.generationStallTimeoutSeconds),
+            batchServing: batchServing
         )
         do {
             let actualPort = try await instance.start(
