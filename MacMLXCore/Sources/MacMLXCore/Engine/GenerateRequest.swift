@@ -124,8 +124,10 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     ///
     /// - Important: Mutually exclusive with continuous batching, mirroring
     ///   mlx-lm's `is_batchable` semantics — a batched decode request must
-    ///   never also carry a draft model. Batching isn't wired to the server
-    ///   yet, so this is a documented invariant rather than an enforced one.
+    ///   never also carry a draft model. Enforced at the HTTP gate by
+    ///   `BatchRoutingPolicy.shouldAttemptBatch(hasDraftModel:)`: a non-nil
+    ///   `draftModelID` always routes to the legacy single-stream path, so
+    ///   the batched path never sees a request carrying one.
     public var draftModelID: String?
     /// Number of tokens the draft model proposes per speculative round.
     /// Clamped to `1...8` on every construction path (this initialiser AND
