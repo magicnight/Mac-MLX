@@ -483,6 +483,17 @@ public actor HummingbirdServer {
     public typealias InFlightHook = @Sendable (_ modelID: String, _ active: Bool) async -> Void
     private let inFlightHook: InFlightHook?
 
+    /// A2d continuous-batching seam (default `nil` = disabled → every request
+    /// takes the legacy single-stream path, byte-for-byte unchanged). When
+    /// installed, an OpenAI chat/completions request the ``BatchRoutingPolicy``
+    /// deems eligible AND the seam accepts (``BatchGenerationServing/submit(_:)``
+    /// returns a stream) is served batched, BYPASSING the FIFO generation lock —
+    /// the seam's own admission provides concurrency control. A cold-swap first
+    /// drains the seam (SRV-2 generalized). Injected like the other hooks so
+    /// MacMLXCore stays free of scheduler construction; the CLI/GUI wire the real
+    /// scheduler, tests wire a stub.
+    private let batchServing: (any BatchGenerationServing)?
+
     /// Inter-chunk stall timeout in seconds (SRV-4 / issue #29). If a live
     /// generation emits no new chunk for this long, the watchdog cancels it,
     /// releases the generation lock, and fails loudly (HTTP 504 for
@@ -680,6 +691,7 @@ public actor HummingbirdServer {
         self.inFlightHook = nil
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
+        self.batchServing = nil
     }
 
     /// Create a server with cold-swap support — chat completion
@@ -697,6 +709,7 @@ public actor HummingbirdServer {
         self.inFlightHook = nil
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
+        self.batchServing = nil
     }
 
     /// Create a server with cold-swap + a custom load hook. Back-compat
@@ -716,6 +729,7 @@ public actor HummingbirdServer {
         self.inFlightHook = nil
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
+        self.batchServing = nil
     }
 
     /// Primary initialiser (SRV-1). `engineProvider` is invoked fresh on
@@ -732,7 +746,8 @@ public actor HummingbirdServer {
         loadHook: LoadHook? = nil,
         inFlightHook: InFlightHook? = nil,
         apiKey: String? = nil,
-        stallTimeoutSeconds: TimeInterval = HummingbirdServer.defaultStallTimeoutSeconds
+        stallTimeoutSeconds: TimeInterval = HummingbirdServer.defaultStallTimeoutSeconds,
+        batchServing: (any BatchGenerationServing)? = nil
     ) {
         self.engineProvider = engineProvider
         self.modelResolver = modelResolver
@@ -740,6 +755,7 @@ public actor HummingbirdServer {
         self.inFlightHook = inFlightHook
         self.apiKey = apiKey
         self.stallTimeoutSeconds = stallTimeoutSeconds
+        self.batchServing = batchServing
     }
 
     // MARK: Lifecycle
@@ -1229,6 +1245,48 @@ public actor HummingbirdServer {
         // (acquire → swap → re-resolve engine, all under the lock) instead
         // of us doing it here, unlocked, ahead of time.
         let wantsStream = chatReq.stream ?? false
+
+        // A2d: route an eligible request to the continuous-batching path when a
+        // seam is installed and accepts it. `submit` returning nil — no seam, a
+        // VLM/uncoverable resident model, or a non-resident model — falls through
+        // to the legacy single-stream responders below, byte-for-byte unchanged
+        // and with no batched work performed (so no double-billing on fallback).
+        // Only this OpenAI chat path (and its legacy `/v1/completions` alias,
+        // which decodes into the same `chatReq`) is ever batched; every other
+        // endpoint keeps the existing single-stream path untouched.
+        if BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: batchServing != nil,
+            hasDraftModel: genRequest.draftModelID != nil
+        ) {
+            // MEDIUM#3: resolve the in-flight key the same alias-aware way the
+            // single-stream path does (mirrors the resolve at ~line 1897) — the
+            // resident model's own id when one is loaded, falling back to the
+            // request's raw `model` field otherwise.
+            let batchModelID = await engineProvider()?.loadedModel?.id ?? genRequest.model
+            // MEDIUM#2 / POOL-3: mark in-flight BEFORE calling `submit`, not
+            // after. Per the seam's contract (`submit` is a billing/timing
+            // anchor — see `BatchGenerationServing`), admission IS the start of
+            // decode, so by the time `submit` returns the row may already be
+            // running; marking afterward would leave a window where a
+            // concurrent load could LRU-evict the model out from under an
+            // already-decoding row.
+            await markInFlight(batchModelID, true)
+            if let batchStream = await batchServing?.submit(genRequest) {
+                // Submit accepted the row: ownership of the "false" mark passes
+                // to the batch responder's own `defer`. Neither responder marks
+                // `true` again — that would double-count.
+                if wantsStream {
+                    return batchStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream)
+                } else {
+                    return try await batchNonStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream)
+                }
+            }
+            // Submit declined (nil): undo the speculative mark before falling
+            // through to the legacy single-stream path below, which marks
+            // in-flight itself — leaving this mark set would double-count.
+            await markInFlight(batchModelID, false)
+        }
+
         if wantsStream {
             return try await streamingChatResponse(genRequest: genRequest)
         } else {
@@ -1795,6 +1853,14 @@ public actor HummingbirdServer {
         // in sync. Otherwise fall back to raw engine calls against
         // whatever `engineProvider` currently resolves to (CLI path,
         // where the provider is a fixed single engine — SRV-1).
+        // A2d (SRV-2 generalized to drain-after-swap): a resident batched cohort
+        // must drain before the model is swapped out from under its live rows.
+        // No-op when no seam is installed (default) — zero regression. This runs
+        // under the FIFO generation lock held by `beginGeneration`, and the batched
+        // path never takes that lock, so a swap waits for rows while rows never
+        // wait for the swap: no deadlock.
+        await batchServing?.drainForModelChange()
+
         let hook = loadHook
         let provider = engineProvider
         let swapTask = Task {
@@ -2144,6 +2210,199 @@ public actor HummingbirdServer {
             headers: headers,
             body: responseBody
         )
+    }
+
+    // MARK: - A2d batched-path responders
+
+    /// Batched-path counterpart to `nonStreamingChatResponse`. The stream is
+    /// already resolved by the seam (`BatchGenerationServing.submit`), so this
+    /// does NOT acquire the FIFO generation lock — the scheduler's admission is
+    /// the concurrency control, and bypassing the lock is the whole point of
+    /// batching. It reuses the same stall watchdog (`nextGenerationStep`),
+    /// in-flight refcount (`markInFlight`, POOL-3), reasoning split, and JSON body
+    /// shape as the single path. The batched stream never carries tool calls or
+    /// speculative-decoding telemetry (out of the v1 batch scope), so those
+    /// branches are intentionally absent.
+    private func batchNonStreamingChatResponse(
+        genRequest: GenerateRequest,
+        modelID: String,
+        stream: AsyncThrowingStream<GenerateChunk, Error>
+    ) async throws -> Response {
+        // POOL-3: the "true" mark already happened in `handleChatCompletions`
+        // BEFORE `submit` was called (MEDIUM#2 — admission is the start of
+        // decode, so marking here would be too late). Only the "false" mark
+        // belongs to this responder, exactly once, on every exit path.
+        defer { Task { [weak self] in await self?.markInFlight(modelID, false) } }
+
+        let box = ChunkIteratorBox(stream)
+        var fullText = ""
+        var finishReason = "stop"
+        var promptTokens = 0
+        var completionTokens = 0
+        do {
+            loop: while true {
+                switch try await nextGenerationStep(box, stallTimeout: stallTimeoutSeconds) {
+                case .finished:
+                    break loop
+                case .stalled:
+                    // SRV-4: a wedged slot trips its own watchdog and fails loudly
+                    // (per slot — a stalled row never hangs its siblings).
+                    return errorResponse(
+                        status: .gatewayTimeout,
+                        message: "Generation stalled: no output for over \(Int(stallTimeoutSeconds))s.",
+                        code: "generation_stalled"
+                    )
+                case .chunk(let chunk):
+                    fullText += chunk.text
+                    if let usage = chunk.usage {
+                        promptTokens = usage.promptTokens
+                        completionTokens = usage.completionTokens
+                    }
+                    if let reason = chunk.finishReason {
+                        finishReason = reason.rawValue
+                    }
+                }
+            }
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: error.localizedDescription,
+                code: "engine_error"
+            )
+        }
+
+        incrementTokens(completionTokens)
+
+        let completionID = "chatcmpl-\(UUID().uuidString)"
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let (reasoning, answer) = MessageSegmenter.splitReasoning(fullText)
+        var message: [String: Any] = ["role": "assistant", "content": answer]
+        if let reasoning {
+            message["reasoning_content"] = reasoning
+        }
+        let usage: [String: Any] = [
+            "prompt_tokens": promptTokens,
+            "completion_tokens": completionTokens,
+            "total_tokens": promptTokens + completionTokens,
+        ]
+        let body: [String: Any] = [
+            "id": completionID,
+            "object": "chat.completion",
+            "created": timestamp,
+            "model": genRequest.model,
+            "choices": [
+                [
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finishReason,
+                ] as [String: Any]
+            ],
+            "usage": usage,
+        ]
+        return try jsonResponseAny(body)
+    }
+
+    /// Batched-path counterpart to `streamingChatResponse`. Streams the
+    /// seam-resolved batch stream as OpenAI SSE frames WITHOUT the FIFO generation
+    /// lock (the scheduler admits concurrently), reusing the same stall watchdog,
+    /// in-flight refcount, reasoning-stream splitter, and `[DONE]` framing. There
+    /// is no cold-swap-under-lock (the seam only accepts a request against the
+    /// resident model) and no tool-call framing (out of v1 batch scope).
+    private func batchStreamingChatResponse(
+        genRequest: GenerateRequest,
+        modelID: String,
+        stream: AsyncThrowingStream<GenerateChunk, Error>
+    ) -> Response {
+        let completionID = "chatcmpl-\(UUID().uuidString)"
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let model = genRequest.model
+        let server = self
+
+        let responseBody = ResponseBody { writer in
+            var completionTokens = 0
+
+            // POOL-3: the "true" mark already happened in `handleChatCompletions`
+            // BEFORE `submit` was called (MEDIUM#2). Only the "false" mark
+            // belongs here, exactly once, regardless of how this closure exits.
+            defer { Task { await server.markInFlight(modelID, false) } }
+
+            // The batched path does not seed `startInReasoning` from the rendered
+            // prompt (that needs a `container.prepare` on the resident model, which
+            // must be serialised against the live cohort — a construction-wave
+            // concern). In-stream <think> tags are still split correctly.
+            let stallTimeout = await server.stallTimeoutSeconds
+            var splitter = ReasoningStreamSplitter(startInReasoning: false)
+            let box = ChunkIteratorBox(stream)
+            do {
+                loop: while true {
+                    switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
+                    case .finished:
+                        break loop
+                    case .stalled:
+                        // SRV-4: no chunk for the stall timeout — emit an in-band
+                        // SSE error then close, without disturbing sibling slots.
+                        let errPayload = "data: {\"error\":{\"message\":\"Generation stalled: no output for over \(Int(stallTimeout))s.\",\"code\":\"generation_stalled\"}}\n\n"
+                        var buf = ByteBuffer()
+                        buf.writeString(errPayload)
+                        try? await writer.write(buf)
+                        break loop
+                    case .chunk(let chunk):
+                        if let usage = chunk.usage { completionTokens = usage.completionTokens }
+                        let (reasoning, answer) = splitter.push(chunk.text)
+                        var delta: [String: Any] = [:]
+                        if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
+                        if !answer.isEmpty { delta["content"] = answer }
+                        if chunk.finishReason != nil {
+                            // Flush any buffered tail into this terminal chunk.
+                            let (rTail, aTail) = splitter.finish()
+                            let r = (delta["reasoning_content"] as? String ?? "") + rTail
+                            let a = (delta["content"] as? String ?? "") + aTail
+                            if !r.isEmpty { delta["reasoning_content"] = r }
+                            if !a.isEmpty { delta["content"] = a }
+                        } else if delta.isEmpty {
+                            // Chunk fully buffered as a partial tag — nothing yet.
+                            continue
+                        }
+                        var choice: [String: Any] = ["index": 0, "delta": delta]
+                        if let reason = chunk.finishReason {
+                            choice["finish_reason"] = reason.rawValue
+                        }
+                        let payload: [String: Any] = [
+                            "id": completionID,
+                            "object": "chat.completion.chunk",
+                            "created": timestamp,
+                            "model": model,
+                            "choices": [choice],
+                        ]
+                        let jsonData = try JSONSerialization.data(withJSONObject: payload)
+                        let jsonStr = String(decoding: jsonData, as: UTF8.self)
+                        var buf = ByteBuffer()
+                        buf.writeString("data: \(jsonStr)\n\n")
+                        try await writer.write(buf)
+                    }
+                }
+            } catch {
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "\\\"")
+                let errPayload = "data: {\"error\":{\"message\":\"\(msg)\"}}\n\n"
+                var buf = ByteBuffer()
+                buf.writeString(errPayload)
+                try? await writer.write(buf)
+            }
+
+            var doneBuf = ByteBuffer()
+            doneBuf.writeString("data: [DONE]\n\n")
+            try await writer.write(doneBuf)
+            try await writer.finish(nil)
+
+            await server.incrementTokens(completionTokens)
+        }
+
+        var headers = HTTPFields()
+        headers[.contentType] = "text/event-stream"
+        headers[.cacheControl] = "no-cache"
+        headers[.connection] = "keep-alive"
+
+        return Response(status: .ok, headers: headers, body: responseBody)
     }
 
     // MARK: - Anthropic Messages API compatibility
@@ -2551,6 +2810,11 @@ public actor HummingbirdServer {
                 code: "cancelled"
             )
         }
+        // A2d: drain any resident batched cohort before the mutating load — the
+        // same drain-before-model-change invariant the generation cold-swap uses,
+        // reached here through the manual `/x/models/load` door. No-op without a
+        // seam (default), so zero regression.
+        await batchServing?.drainForModelChange()
         // Measure the load itself, not the time spent waiting for the lock.
         let start = Date()
         do {
@@ -2593,6 +2857,10 @@ public actor HummingbirdServer {
                 code: "cancelled"
             )
         }
+        // A2d: drain any resident batched cohort before the unload frees the
+        // model out from under its live rows (the manual `/x/models/unload`
+        // door). No-op without a seam (default), so zero regression.
+        await batchServing?.drainForModelChange()
         do {
             try await engine.unload()
             releaseGenerationLock()
