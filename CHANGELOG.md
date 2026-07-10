@@ -9,6 +9,62 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Continuous batching** — a self-built orchestrator over upstream's batch
+  cache primitives: RoPE-correct batch cache infrastructure, a ragged
+  `BatchKVCache` port, a continuous admission/eviction scheduler, and a
+  server seam with drain-on-swap. 2.5-3.2× aggregate throughput with 4
+  concurrent clients versus the serial path. Batching engages only under
+  real concurrency — a sole in-flight request keeps the proven
+  single-stream path (and its prompt cache). Per-model coverage gate with
+  automatic fallback to the legacy FIFO path. (PRs #65-#67, #69-#71)
+- **Prefix (LCP) prompt cache** — the exact-key prompt cache is now a
+  token-prefix trie: multi-turn agent conversations reuse the longest
+  common prefix, trim, and incrementally prefill only the new suffix
+  instead of a cold prefill each round. Classified-LRU hot tier (RAM) +
+  safetensors cold tier (SSD); `usage.prompt_tokens` keeps OpenAI billing
+  semantics (full prompt length, reused + incremental). (PR #74)
+- **Structured output** — `response_format: {"type": "json_object"}` and a
+  JSON-schema subset, enforced during decoding by a byte-level pushdown
+  automaton masking illegal tokens each step. Zero third-party
+  dependencies; unsupported schema keywords are explicit 400s, never
+  silent. (PR #75)
+- **Speculative decoding** — classic draft-model path wired to upstream's
+  iterator: `draft_model` / `num_draft_tokens` on the API, a per-model GUI
+  toggle with acceptance-rate telemetry. Hybrid/linear-attention targets
+  (non-trimmable caches) are detected and fall back gracefully.
+  (PRs #68, #77)
+- **API compatibility pack** — `logit_bias`, `logprobs` + `top_logprobs`,
+  the XTC sampler, per-request LoRA `adapters`, KV-cache quantization
+  (`kv_bits` / `kv_group_size` / `quantized_kv_start`), and OpenAI `tools`
+  pass-through with `tool_calls` responses (the client runs the loop).
+  Parameter combinations form an explicit matrix — unsupported pairs
+  return 400 instead of silently degrading. (PRs #64, #76)
+- **GUI wave** — discover models already in `~/.cache/huggingface` (zero
+  re-download) with a multi-directory editor; ModelCard upgrade; copy-ID
+  buttons; speculative-decoding controls. (PR #77)
+- **New architectures** (see [docs/model-support.md](docs/model-support.md)):
+  Qwen3.6 weights validated (20.6 tok/s); **Mellum2-12B-A2.5B** ported
+  tested-tier (68.9 tok/s); **Solar-Open-100B** and **GLM-5.1/DSA** ported
+  theoretical-tier (parity-verified, real weights untested); Kimi K2.5
+  blocked on an upstream internal initializer (loud error, contract test
+  in place). (PRs #72, #78, #79)
+
+### Changed
+- **mlx-swift dependency** moved to a controlled minimal fork
+  (`magicnight/mlx-swift@0.31.6-rope3498`) carrying exactly one
+  upstream-merged fix (ml-explore/mlx#3498, batched single-token RoPE
+  dispatch); no API-surface changes, dropped as soon as upstream ships a
+  release containing it. A tripwire test watches for the upstream
+  regression landing. (PR #73)
+
+### Fixed
+- `usage.prompt_tokens` after a prompt-cache hit reported only the
+  incremental tokens; it now reports the full prompt length (reused +
+  incremental), matching OpenAI semantics. (PR #74)
+- Model sizes for HuggingFace-cache discoveries now resolve symlinks, so
+  blob-backed snapshots report true sizes instead of link sizes. (PR #77)
+
 ## [0.5.3] - 2026-07-08
 
 ### Added
