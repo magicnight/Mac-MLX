@@ -52,5 +52,14 @@ public enum ModelOverlay {
                 .decode(DeepseekV32Configuration.self, from: data)
             return DeepseekV32Model(config)
         }
+
+        // Mellum 2 (12B-A2.5B) — pure-Swift port (see `Models/Mellum2.swift`).
+        // A Qwen3-lineage sparse-MoE decoder with alternating sliding/full
+        // attention; upstream mlx-swift-lm has no `mellum` type.
+        await LLMTypeRegistry.shared.registerModelType("mellum") { data in
+            let config = try JSONDecoder.json5()
+                .decode(Mellum2Configuration.self, from: data)
+            return Mellum2Model(config)
+        }
     }
 }
