@@ -10,6 +10,15 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
     public let quantization: String?
     public let parameterCount: String?
     public let architecture: String?
+    /// `true` when this entry was discovered by scanning a Hugging Face
+    /// Hub cache directory (Track F HF-cache discovery) rather than the
+    /// app's managed model directory. `directory` still points straight
+    /// at the cache snapshot — nothing is copied — so the GUI uses this
+    /// flag to hide destructive actions (deleting it would remove files
+    /// from the user's shared HF cache, not an app-owned copy). Defaults
+    /// to `false` so every pre-existing call site (and pre-Track-F
+    /// persisted JSON, if any) keeps working unchanged.
+    public let isExternalReference: Bool
 
     public init(
         id: String,
@@ -19,7 +28,8 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
         format: ModelFormat,
         quantization: String?,
         parameterCount: String?,
-        architecture: String?
+        architecture: String?,
+        isExternalReference: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -29,6 +39,56 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
         self.quantization = quantization
         self.parameterCount = parameterCount
         self.architecture = architecture
+        self.isExternalReference = isExternalReference
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, displayName, directory, sizeBytes, format
+        case quantization, parameterCount, architecture, isExternalReference
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.displayName = try c.decode(String.self, forKey: .displayName)
+        self.directory = try c.decode(URL.self, forKey: .directory)
+        self.sizeBytes = try c.decode(Int64.self, forKey: .sizeBytes)
+        self.format = try c.decode(ModelFormat.self, forKey: .format)
+        self.quantization = try c.decodeIfPresent(String.self, forKey: .quantization)
+        self.parameterCount = try c.decodeIfPresent(String.self, forKey: .parameterCount)
+        self.architecture = try c.decodeIfPresent(String.self, forKey: .architecture)
+        self.isExternalReference =
+            try c.decodeIfPresent(Bool.self, forKey: .isExternalReference) ?? false
+    }
+
+    /// Filters `models` down to viable speculative-decoding draft-model
+    /// candidates for a chat session currently targeting `currentModelID`
+    /// (Track F GUI over the D1 engine plumbing).
+    ///
+    /// A candidate must be:
+    /// 1. `.mlx` format — an obviously-wrong-shape filter for
+    ///    `.mlxVLM`/`.embedder`/`.gguf`, not a full compatibility probe;
+    ///    tokenizer/cache compatibility is still checked (and silently
+    ///    falls back) at generation time by the engine.
+    /// 2. Not the currently-loaded target model itself.
+    /// 3. Not an HF-cache external reference (`isExternalReference`):
+    ///    those ids are always shaped `"org/name"`, and
+    ///    `MLXSwiftEngine.isValidDraftModelID`'s allowlist
+    ///    (`[A-Za-z0-9._-]+`, no `/`) unconditionally rejects them —
+    ///    surfacing one here would let the user pick a draft model that
+    ///    hard-fails every generation round with
+    ///    `EngineError.invalidDraftModelID` AND gets persisted to disk via
+    ///    `ModelParametersStore`.
+    ///
+    /// Extracted as a pure, Core-side function (rather than left inline in
+    /// `ParametersInspector`'s SwiftUI body) so this filtering logic is
+    /// unit-testable without a view hierarchy.
+    public static func draftCandidates(
+        from models: [LocalModel], excluding currentModelID: String?
+    ) -> [LocalModel] {
+        models.filter {
+            $0.format == .mlx && $0.id != currentModelID && !$0.isExternalReference
+        }
     }
 
     /// Human-readable size, e.g. "4.50 GB" or "950 MB".

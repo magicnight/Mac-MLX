@@ -40,6 +40,13 @@ struct UIChatMessage: Identifiable {
     /// the native tool-card rendering in `ChatMessageView` and marks the row
     /// as ephemeral everywhere else.
     var toolActivity: ToolActivity?
+    /// Speculative decoding acceptance telemetry for this turn (Track F GUI
+    /// over the D1 engine plumbing). Non-nil only when the generation
+    /// actually ran the speculative path and the engine returned
+    /// telemetry — same "never fabricated" contract as
+    /// `GenerateChunk.speculativeDecoding`. UI-ephemeral like
+    /// `isGenerating`/`toolActivity`: not persisted to `StoredMessage`.
+    var speculativeDecoding: SpeculativeDecodingUsage?
 
     init(
         id: UUID = UUID(),
@@ -49,7 +56,8 @@ struct UIChatMessage: Identifiable {
         tokenCount: Int? = nil,
         isGenerating: Bool = false,
         images: [ImageAttachment] = [],
-        toolActivity: ToolActivity? = nil
+        toolActivity: ToolActivity? = nil,
+        speculativeDecoding: SpeculativeDecodingUsage? = nil
     ) {
         self.id = id
         self.role = role
@@ -59,6 +67,7 @@ struct UIChatMessage: Identifiable {
         self.isGenerating = isGenerating
         self.images = images
         self.toolActivity = toolActivity
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Restore from persistence. Tool-activity rows are UI-ephemeral and
@@ -429,7 +438,9 @@ final class ChatViewModel {
             model: currentModel.id,
             messages: coreMessages,
             systemPrompt: params.systemPrompt.isEmpty ? nil : params.systemPrompt,
-            parameters: params.asGenerationParameters()
+            parameters: params.asGenerationParameters(),
+            draftModelID: params.draftModelID,
+            numDraftTokens: params.numDraftTokens
         )
 
         // Route through the MCP tool loop when a session is available (pool
@@ -465,6 +476,9 @@ final class ChatViewModel {
                     self.messages[assistantIdx].content += chunk.text
                     if let usage = chunk.usage {
                         self.messages[assistantIdx].tokenCount = usage.completionTokens
+                    }
+                    if let speculativeDecoding = chunk.speculativeDecoding {
+                        self.messages[assistantIdx].speculativeDecoding = speculativeDecoding
                     }
                 }
                 await LogManager.shared.info(

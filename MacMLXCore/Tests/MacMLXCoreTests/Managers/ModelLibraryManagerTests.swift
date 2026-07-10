@@ -121,3 +121,61 @@ private func populateDir(_ url: URL, files: [String]) throws {
     #expect(results.count == 1)
     #expect(results[0].sizeBytes == 100)
 }
+
+// MARK: - delete(_:)
+
+@Test func deleteThrowsForExternalReference() async throws {
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let modelDir = root.appending(path: "CachedModel", directoryHint: .isDirectory)
+    try populateDir(modelDir, files: ["config.json", "tokenizer.json", "model.safetensors"])
+    let model = LocalModel(
+        id: "org/CachedModel",
+        displayName: "org/CachedModel",
+        directory: modelDir,
+        sizeBytes: 0,
+        format: .mlx,
+        quantization: nil,
+        parameterCount: nil,
+        architecture: nil,
+        isExternalReference: true
+    )
+
+    let manager = ModelLibraryManager()
+    do {
+        try await manager.delete(model)
+        Issue.record("Expected delete(_:) to throw for an external reference")
+    } catch let error as ModelLibraryError {
+        if case .cannotDeleteExternalReference(let id) = error {
+            #expect(id == "org/CachedModel")
+        } else {
+            Issue.record("Expected cannotDeleteExternalReference, got \(error)")
+        }
+    }
+    // Guardrail must not delete the files either.
+    #expect(FileManager.default.fileExists(atPath: modelDir.path))
+}
+
+@Test func deleteRemovesOwnedModelDirectory() async throws {
+    let root = makeTestRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let modelDir = root.appending(path: "OwnedModel", directoryHint: .isDirectory)
+    try populateDir(modelDir, files: ["config.json", "tokenizer.json", "model.safetensors"])
+    let model = LocalModel(
+        id: "OwnedModel",
+        displayName: "OwnedModel",
+        directory: modelDir,
+        sizeBytes: 0,
+        format: .mlx,
+        quantization: nil,
+        parameterCount: nil,
+        architecture: nil
+    )
+
+    let manager = ModelLibraryManager()
+    try await manager.delete(model)
+
+    #expect(!FileManager.default.fileExists(atPath: modelDir.path))
+}
