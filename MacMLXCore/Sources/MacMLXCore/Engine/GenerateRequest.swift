@@ -69,16 +69,180 @@ public struct GenerationParameters: Codable, Hashable, Sendable {
     public var maxTokens: Int
     public var stream: Bool
 
+    // MARK: Track E — API-compatibility extensions
+    //
+    // All optional and decoded via `decodeIfPresent` (see `init(from:)`), so
+    // every pre-Track-E serialized `GenerationParameters` keeps decoding with
+    // these defaulting to nil / disabled.
+
+    /// Additive per-token logit bias (OpenAI `logit_bias`). Maps a token id to a
+    /// bias in `[-100, 100]` added to that token's logit before sampling, matching
+    /// mlx-lm's `logit_bias` processor. `nil` (and an empty map) ⇒ no bias.
+    /// Composed BEFORE any structured-output constraint mask (bias first,
+    /// constraint last — the constraint's last-applied invariant).
+    public var logitBias: [Int: Float]?
+
+    /// XTC (Exclude Top Choices) sampling probability (mlx-lm `xtc_probability`).
+    /// With probability `p`, every token whose probability exceeds `xtcThreshold`
+    /// is removed EXCEPT the least-probable such token, before the base sampler
+    /// runs. `nil` or `0` ⇒ XTC disabled. Meaningful only at `temperature > 0`.
+    public var xtcProbability: Float?
+
+    /// XTC probability threshold (mlx-lm `xtc_threshold`). Tokens with probability
+    /// strictly greater than this are candidates for exclusion. `nil` defers to
+    /// mlx-lm's default (`0.1`) when `xtcProbability` is set; ignored otherwise.
+    public var xtcThreshold: Float?
+
+    /// Whether to emit per-token logprobs (OpenAI `logprobs`). When true the
+    /// engine attaches each generated token's logprob (and up to `topLogprobs`
+    /// alternatives) to the stream. Default false.
+    public var logprobs: Bool
+
+    /// Number of top-alternative logprobs per token (OpenAI `top_logprobs`,
+    /// `0...10`). Only meaningful when `logprobs` is true. `nil` ⇒ 0 (the sampled
+    /// token's logprob only).
+    public var topLogprobs: Int?
+
+    /// KV-cache quantization bit width (mlx-lm `kv_bits`). `nil` ⇒ no KV-cache
+    /// quantization. Passed through to mlx-swift-lm's `GenerateParameters.kvBits`.
+    public var kvBits: Int?
+
+    /// KV-cache quantization group size (mlx-lm `kv_group_size`). `nil` defers to
+    /// mlx-swift-lm's default (`64`). Meaningful only with `kvBits`.
+    public var kvGroupSize: Int?
+
+    /// Token offset at which to begin quantizing the KV cache (mlx-lm
+    /// `quantized_kv_start`). `nil` defers to mlx-swift-lm's default (`0`).
+    /// Meaningful only with `kvBits`.
+    public var quantizedKVStart: Int?
+
     public init(
         temperature: Double = 0.7,
         topP: Double = 0.95,
         maxTokens: Int = 2048,
-        stream: Bool = true
+        stream: Bool = true,
+        logitBias: [Int: Float]? = nil,
+        xtcProbability: Float? = nil,
+        xtcThreshold: Float? = nil,
+        logprobs: Bool = false,
+        topLogprobs: Int? = nil,
+        kvBits: Int? = nil,
+        kvGroupSize: Int? = nil,
+        quantizedKVStart: Int? = nil
     ) {
         self.temperature = temperature
         self.topP = topP
         self.maxTokens = maxTokens
         self.stream = stream
+        self.logitBias = Self.normalizeLogitBias(logitBias)
+        self.xtcProbability = Self.clampXTCProbability(xtcProbability)
+        self.xtcThreshold = Self.clampXTCThreshold(xtcThreshold)
+        self.logprobs = logprobs
+        self.topLogprobs = Self.clampTopLogprobs(topLogprobs)
+        self.kvBits = Self.clampKVBits(kvBits)
+        self.kvGroupSize = Self.clampKVGroupSize(kvGroupSize)
+        self.quantizedKVStart = Self.clampQuantizedKVStart(quantizedKVStart)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case temperature, topP, maxTokens, stream
+        case logitBias, xtcProbability, xtcThreshold, logprobs, topLogprobs
+        case kvBits, kvGroupSize, quantizedKVStart
+    }
+
+    /// Custom decoder so every clamp/normalization runs on the raw-JSON decode
+    /// path too (a persisted/replayed request must not bypass it), mirroring
+    /// `GenerateRequest.init(from:)`. The four base fields decode as before; the
+    /// Track-E additions are all optional so legacy JSON keeps decoding.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.temperature = try c.decode(Double.self, forKey: .temperature)
+        self.topP = try c.decode(Double.self, forKey: .topP)
+        self.maxTokens = try c.decode(Int.self, forKey: .maxTokens)
+        self.stream = try c.decode(Bool.self, forKey: .stream)
+        self.logitBias = Self.normalizeLogitBias(
+            try c.decodeIfPresent([Int: Float].self, forKey: .logitBias))
+        self.xtcProbability = Self.clampXTCProbability(
+            try c.decodeIfPresent(Float.self, forKey: .xtcProbability))
+        self.xtcThreshold = Self.clampXTCThreshold(
+            try c.decodeIfPresent(Float.self, forKey: .xtcThreshold))
+        self.logprobs = try c.decodeIfPresent(Bool.self, forKey: .logprobs) ?? false
+        self.topLogprobs = Self.clampTopLogprobs(
+            try c.decodeIfPresent(Int.self, forKey: .topLogprobs))
+        self.kvBits = Self.clampKVBits(try c.decodeIfPresent(Int.self, forKey: .kvBits))
+        self.kvGroupSize = Self.clampKVGroupSize(try c.decodeIfPresent(Int.self, forKey: .kvGroupSize))
+        self.quantizedKVStart = Self.clampQuantizedKVStart(
+            try c.decodeIfPresent(Int.self, forKey: .quantizedKVStart))
+    }
+
+    // MARK: Clamps (pure, unit-testable without Metal)
+
+    /// Drop an empty map to nil and clamp each bias to OpenAI's `[-100, 100]`.
+    static func normalizeLogitBias(_ value: [Int: Float]?) -> [Int: Float]? {
+        guard let value, !value.isEmpty else { return nil }
+        return value.mapValues { Swift.min(100, Swift.max(-100, $0)) }
+    }
+
+    /// Parse OpenAI's wire `logit_bias` — a map of STRING token ids to bias
+    /// numbers (`{"50256": -100}`) — into the engine's `[Int: Float]`, then
+    /// normalize (clamp + drop-empty). Unparseable keys are dropped. Public so
+    /// the server can convert at the request boundary and tests can exercise the
+    /// string-key parsing directly.
+    public static func logitBias(fromOpenAI raw: [String: Double]?) -> [Int: Float]? {
+        guard let raw, !raw.isEmpty else { return nil }
+        var parsed: [Int: Float] = [:]
+        for (key, value) in raw {
+            if let id = Int(key) { parsed[id] = Float(value) }
+        }
+        return normalizeLogitBias(parsed)
+    }
+
+    /// Clamp XTC probability to `[0, 1]`; `0` (or nil) leaves XTC disabled.
+    static func clampXTCProbability(_ value: Float?) -> Float? {
+        guard let value else { return nil }
+        return Swift.min(1, Swift.max(0, value))
+    }
+
+    /// Clamp XTC threshold to `[0, 0.5]` (mlx-lm's meaningful range — above 0.5 no
+    /// two tokens can both exceed it, so XTC can never fire).
+    static func clampXTCThreshold(_ value: Float?) -> Float? {
+        guard let value else { return nil }
+        return Swift.min(0.5, Swift.max(0, value))
+    }
+
+    /// Clamp `top_logprobs` to OpenAI's `0...10`.
+    static func clampTopLogprobs(_ value: Int?) -> Int? {
+        guard let value else { return nil }
+        return Swift.min(10, Swift.max(0, value))
+    }
+
+    /// Snap `kv_bits` to the DISCRETE set MLX's affine quantizer supports
+    /// ({2, 3, 4, 6, 8}) — it is a set, not a range. An in-between value
+    /// (5, 7) would otherwise pass validation and fail mid-generation as a
+    /// Metal/runtime error instead of being corrected at the boundary.
+    static func clampKVBits(_ value: Int?) -> Int? {
+        guard let value else { return nil }
+        let supported = [2, 3, 4, 6, 8]
+        // Nearest supported width; ties resolve to the smaller (safer) width.
+        return supported.min {
+            (abs($0 - value), $0) < (abs($1 - value), $1)
+        }
+    }
+
+    /// Snap `kv_group_size` to the DISCRETE set MLX quantization supports
+    /// ({32, 64, 128}); nil defers to the upstream default of 64.
+    static func clampKVGroupSize(_ value: Int?) -> Int? {
+        guard let value else { return nil }
+        let supported = [32, 64, 128]
+        return supported.min {
+            (abs($0 - value), $0) < (abs($1 - value), $1)
+        }
+    }
+
+    /// Clamp `quantized_kv_start` to a non-negative offset.
+    static func clampQuantizedKVStart(_ value: Int?) -> Int? {
+        guard let value else { return nil }
+        return Swift.max(0, value)
     }
 }
 
@@ -152,6 +316,19 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     ///   decoded via `decodeIfPresent`, so pre-Track-C serialized requests keep
     ///   decoding.
     public var responseFormat: ResponseFormat?
+    /// Per-request LoRA adapter to apply for this generation (Track E, mlx-lm
+    /// `adapters`). A bare name resolved under `~/.mac-mlx/adapters/<name>` or an
+    /// absolute path to an adapter directory. The engine reloads the model with
+    /// the new (model, adapter) pairing only when it differs from what is resident
+    /// — an unchanged pairing is a no-op, and `nil` unloads any resident adapter
+    /// (reloads the base model), mirroring mlx-lm's server semantics. Default nil
+    /// and decoded via `decodeIfPresent`, so pre-Track-E serialized requests keep
+    /// decoding.
+    ///
+    /// - Important: Mutually exclusive with continuous batching in v1 (the batched
+    ///   step evaluator runs the resident model without per-request adapter
+    ///   swaps), so a request carrying `adapters` routes to the single-stream path.
+    public var adapters: String?
 
     public init(
         model: String,
@@ -162,7 +339,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         tools: [JSONValue]? = nil,
         draftModelID: String? = nil,
         numDraftTokens: Int? = nil,
-        responseFormat: ResponseFormat? = nil
+        responseFormat: ResponseFormat? = nil,
+        adapters: String? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -173,11 +351,12 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         self.draftModelID = draftModelID
         self.numDraftTokens = Self.clampNumDraftTokens(numDraftTokens)
         self.responseFormat = responseFormat
+        self.adapters = Self.normalizeAdapters(adapters)
     }
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, systemPrompt, parameters, templateKwargs, tools
-        case draftModelID, numDraftTokens, responseFormat
+        case draftModelID, numDraftTokens, responseFormat, adapters
     }
 
     /// Custom decoder (mirrors `ChatMessage.init(from:)`) so the `1...8`
@@ -199,6 +378,18 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
             try c.decodeIfPresent(Int.self, forKey: .numDraftTokens)
         )
         self.responseFormat = try c.decodeIfPresent(ResponseFormat.self, forKey: .responseFormat)
+        self.adapters = Self.normalizeAdapters(
+            try c.decodeIfPresent(String.self, forKey: .adapters))
+    }
+
+    /// Trim an adapter identifier and collapse the empty string to nil (an empty
+    /// `adapters` string means "no adapter", same as absent), so downstream
+    /// combo/equality checks treat `""` and `nil` identically.
+    static func normalizeAdapters(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else { return nil }
+        return trimmed
     }
 
     /// Clamp to mlx-swift-lm's sane speculative round-size range. `nil`

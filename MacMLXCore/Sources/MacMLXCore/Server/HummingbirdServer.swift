@@ -56,6 +56,27 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// Absent/`null` (and `{"type":"text"}`) mean no constraint. Optional +
     /// synthesised `decodeIfPresent` ⇒ every pre-Track-C client is unchanged.
     let response_format: JSONValue?
+    // MARK: Track E — API-compatibility extensions (all optional / back-compat)
+    /// OpenAI `logit_bias`: STRING token id → additive bias in `[-100, 100]`.
+    let logit_bias: [String: Double]?
+    /// OpenAI `logprobs`: emit per-token logprobs when true.
+    let logprobs: Bool?
+    /// OpenAI `top_logprobs`: alternatives per token, `0...10`.
+    let top_logprobs: Int?
+    /// mlx-lm `xtc_probability` — per-step chance of applying XTC.
+    let xtc_probability: Double?
+    /// mlx-lm `xtc_threshold` — probability above which a token is an XTC candidate.
+    let xtc_threshold: Double?
+    /// mlx-lm `kv_bits` — KV-cache quantization bit width (nil ⇒ off).
+    let kv_bits: Int?
+    /// mlx-lm `kv_group_size` — KV-cache quantization group size.
+    let kv_group_size: Int?
+    /// mlx-lm `quantized_kv_start` — token offset to begin quantizing.
+    let quantized_kv_start: Int?
+    /// mlx-lm `adapters` — LoRA adapter name/path to hot-swap for this request
+    /// (nil/absent ⇒ base model; an explicit change reloads the model with the
+    /// new adapter). See `GenerateRequest.adapters`.
+    let adapters: String?
 }
 
 /// Legacy OpenAI text-completions body (`/v1/completions`, and the
@@ -77,6 +98,16 @@ private struct LegacyCompletionRequest: Decodable, Sendable {
     let draft_model: String?
     /// See `ChatCompletionRequest.num_draft_tokens`.
     let num_draft_tokens: Int?
+    // Track E — honored on the legacy route too (shares `handleChatCompletions`).
+    let logit_bias: [String: Double]?
+    let logprobs: Bool?
+    let top_logprobs: Int?
+    let xtc_probability: Double?
+    let xtc_threshold: Double?
+    let kv_bits: Int?
+    let kv_group_size: Int?
+    let quantized_kv_start: Int?
+    let adapters: String?
 }
 
 /// OpenAI multimodal content payload. Either a plain string (text-only
@@ -1181,7 +1212,17 @@ public actor HummingbirdServer {
                 draft_model: legacy.draft_model,
                 num_draft_tokens: legacy.num_draft_tokens,
                 // Legacy text-completions bodies carry no response_format.
-                response_format: nil
+                response_format: nil,
+                // Track E extensions are honored on the legacy route too.
+                logit_bias: legacy.logit_bias,
+                logprobs: legacy.logprobs,
+                top_logprobs: legacy.top_logprobs,
+                xtc_probability: legacy.xtc_probability,
+                xtc_threshold: legacy.xtc_threshold,
+                kv_bits: legacy.kv_bits,
+                kv_group_size: legacy.kv_group_size,
+                quantized_kv_start: legacy.quantized_kv_start,
+                adapters: legacy.adapters
             )
         }
 
@@ -1218,7 +1259,18 @@ public actor HummingbirdServer {
             temperature: chatReq.temperature ?? 0.7,
             topP: chatReq.top_p ?? 0.95,
             maxTokens: chatReq.max_tokens ?? 2048,
-            stream: chatReq.stream ?? false
+            stream: chatReq.stream ?? false,
+            // Track E — the `GenerationParameters` initializer clamps every one of
+            // these (see its clamp helpers), so a hostile/malformed value can't
+            // reach the engine unbounded.
+            logitBias: GenerationParameters.logitBias(fromOpenAI: chatReq.logit_bias),
+            xtcProbability: chatReq.xtc_probability.map { Float($0) },
+            xtcThreshold: chatReq.xtc_threshold.map { Float($0) },
+            logprobs: chatReq.logprobs ?? false,
+            topLogprobs: chatReq.top_logprobs,
+            kvBits: chatReq.kv_bits,
+            kvGroupSize: chatReq.kv_group_size,
+            quantizedKVStart: chatReq.quantized_kv_start
         )
 
         // Tool pass-through (v0.5, OpenAI `/v1/chat/completions` only): forward
@@ -1252,6 +1304,37 @@ public actor HummingbirdServer {
             )
         }
 
+        // Track E combination guards: reject combinations the engine cannot
+        // honor, rather than silently dropping a requested feature. `logprobs`
+        // capture is not composed with the constraint mask (structured output)
+        // and cannot ride the speculative-decoding iterator, so both are 400s.
+        // OpenAI semantics: `top_logprobs` requires `logprobs: true`.
+        if !params.logprobs, let top = chatReq.top_logprobs, top > 0 {
+            return errorResponse(
+                status: .badRequest,
+                message: "`top_logprobs` requires `logprobs` to be true.",
+                code: "invalid_request_error"
+            )
+        }
+        if params.logprobs {
+            if responseFormat != nil {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`logprobs` is not supported together with `response_format` "
+                        + "(structured output) in this version.",
+                    code: "invalid_request_error"
+                )
+            }
+            if chatReq.draft_model != nil {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`logprobs` is not supported together with `draft_model` "
+                        + "(speculative decoding) in this version.",
+                    code: "invalid_request_error"
+                )
+            }
+        }
+
         let genRequest = GenerateRequest(
             model: chatReq.model,
             messages: messages,
@@ -1261,7 +1344,8 @@ public actor HummingbirdServer {
             tools: toolsToSend,
             draftModelID: chatReq.draft_model,
             numDraftTokens: chatReq.num_draft_tokens,
-            responseFormat: responseFormat
+            responseFormat: responseFormat,
+            adapters: chatReq.adapters
         )
 
         // Cold-swap (v0.3.3) is no longer resolved here. SRV-2: the swap
@@ -1279,10 +1363,20 @@ public actor HummingbirdServer {
         // Only this OpenAI chat path (and its legacy `/v1/completions` alias,
         // which decodes into the same `chatReq`) is ever batched; every other
         // endpoint keeps the existing single-stream path untouched.
+        // Track E: any per-request sampling/adapter feature the batched step
+        // evaluator can't honor forces the single-stream path (see
+        // `BatchRoutingPolicy`).
+        let hasUnbatchableSamplingFeature =
+            params.logitBias != nil
+            || params.logprobs
+            || (params.xtcProbability ?? 0) > 0
+            || params.kvBits != nil
+            || genRequest.adapters != nil
         if BatchRoutingPolicy.shouldAttemptBatch(
             batchingEnabled: batchServing != nil,
             hasDraftModel: genRequest.draftModelID != nil,
-            hasResponseFormat: genRequest.responseFormat != nil
+            hasResponseFormat: genRequest.responseFormat != nil,
+            hasUnbatchableSamplingFeature: hasUnbatchableSamplingFeature
         ) {
             // MEDIUM#3: resolve the in-flight key the same alias-aware way the
             // single-stream path does (mirrors the resolve at ~line 1897) — the
@@ -1960,6 +2054,10 @@ public actor HummingbirdServer {
         // chunk only when the request actually ran the speculative path AND
         // mlx-swift-lm reported counts for it; nil otherwise (never faked).
         var capturedSpeculativeDecoding: SpeculativeDecodingUsage?
+        // Track E: per-token logprobs accumulated in emission order across all
+        // chunks, flattened into the choice's `logprobs.content[]` below. Only
+        // populated when the request set `logprobs` (the engine attaches them).
+        var capturedLogprobs: [TokenLogprob] = []
 
         do {
             loop: while true {
@@ -1988,6 +2086,9 @@ public actor HummingbirdServer {
                     }
                     if let speculativeDecoding = chunk.speculativeDecoding {
                         capturedSpeculativeDecoding = speculativeDecoding
+                    }
+                    if let logprobs = chunk.logprobs {
+                        capturedLogprobs.append(contentsOf: logprobs)
                     }
                 }
             }
@@ -2042,18 +2143,23 @@ public actor HummingbirdServer {
             ] as [String: Any]
         }
 
+        var choice: [String: Any] = [
+            "index": 0,
+            "message": message,
+            "finish_reason": finishReason,
+        ]
+        // Track E: OpenAI `choices[].logprobs` — present (with a `content` array)
+        // only when the request asked for logprobs.
+        if genRequest.parameters.logprobs {
+            choice["logprobs"] = openAILogprobs(capturedLogprobs)
+        }
+
         let body: [String: Any] = [
             "id": completionID,
             "object": "chat.completion",
             "created": timestamp,
             "model": genRequest.model,
-            "choices": [
-                [
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finishReason,
-                ] as [String: Any]
-            ],
+            "choices": [choice],
             "usage": usage,
         ]
         return try jsonResponseAny(body)
@@ -2079,10 +2185,16 @@ public actor HummingbirdServer {
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
         let model = genRequest.model
+        // Track E: whether to emit `choices[].logprobs` on delta frames.
+        let wantsLogprobs = genRequest.parameters.logprobs
         let server = self
 
         let responseBody = ResponseBody { writer in
             var completionTokens = 0
+            // Track E: per-token logprobs not yet attached to an emitted frame (a
+            // chunk fully buffered as a partial reasoning tag carries its logprobs
+            // forward until the next frame flushes).
+            var pendingStreamLogprobs: [TokenLogprob] = []
 
             let engine: any InferenceEngine
             do {
@@ -2134,6 +2246,13 @@ public actor HummingbirdServer {
                         // count (delivered on the terminal chunk's usage), not
                         // the number of SSE/NDJSON frames.
                         if let usage = chunk.usage { completionTokens = usage.completionTokens }
+                        // Track E: accumulate this chunk's logprobs BEFORE any
+                        // `continue` (a fully-buffered partial-tag chunk still
+                        // carries logprobs for its tokens), attached to the next
+                        // emitted frame below.
+                        if wantsLogprobs, let logprobs = chunk.logprobs {
+                            pendingStreamLogprobs.append(contentsOf: logprobs)
+                        }
                         let (reasoning, answer) = splitter.push(chunk.text)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
@@ -2193,6 +2312,12 @@ public actor HummingbirdServer {
                         var choice: [String: Any] = ["index": 0, "delta": delta]
                         if let reason = chunk.finishReason {
                             choice["finish_reason"] = reason.rawValue
+                        }
+                        // Track E: attach any logprobs accumulated since the last
+                        // emitted frame (OpenAI `choices[].logprobs`), then clear.
+                        if wantsLogprobs, !pendingStreamLogprobs.isEmpty {
+                            choice["logprobs"] = openAILogprobs(pendingStreamLogprobs)
+                            pendingStreamLogprobs.removeAll()
                         }
                         let payload: [String: Any] = [
                             "id": completionID,
@@ -3329,6 +3454,31 @@ private func openAIToolCallDelta(index: Int, call: ToolCallRequest) -> [String: 
     var object = openAIToolCallObject(call)
     object["index"] = index
     return object
+}
+
+// MARK: - OpenAI logprobs serialization (Track E)
+
+/// One OpenAI `choices[].logprobs` object:
+/// `{"content":[{token,logprob,bytes,top_logprobs:[{token,logprob,bytes}]}]}`.
+/// `content` is empty when logprobs were requested but no tokens were generated.
+/// Free function (not actor-isolated) so it also runs inside the streaming
+/// `ResponseBody` closure — mirrors `openAIToolCallObject`.
+private func openAILogprobs(_ tokens: [TokenLogprob]) -> [String: Any] {
+    let content: [[String: Any]] = tokens.map { token in
+        [
+            "token": token.token,
+            "logprob": token.logprob,
+            "bytes": token.bytes ?? [],
+            "top_logprobs": token.topLogprobs.map { alternative -> [String: Any] in
+                [
+                    "token": alternative.token,
+                    "logprob": alternative.logprob,
+                    "bytes": alternative.bytes ?? [],
+                ]
+            },
+        ]
+    }
+    return ["content": content]
 }
 
 // MARK: - Anthropic SSE helpers

@@ -41,6 +41,15 @@ public enum BatchRoutingPolicy {
     ///     path where the constraint logit mask is installed. Same
     ///     `is_batchable` spirit as `hasDraftModel`.
     ///
+    ///   - hasUnbatchableSamplingFeature: the request set at least one Track E
+    ///     per-request feature the v1 batched step evaluator does not implement —
+    ///     `logit_bias`, `logprobs`, XTC, `kv_bits`, or `adapters`. Each would be
+    ///     silently ignored on the batched path (wrong output, or missing
+    ///     logprobs), so any of them forces the single-stream path where the
+    ///     custom processor/sampler/adapter machinery lives. Consolidated into one
+    ///     flag (rather than five arguments) because they share the same "route to
+    ///     single-stream" consequence; the caller ORs them together.
+    ///
     /// - Note: mlx-lm's `is_batchable` also excludes a per-request `seed`. macMLX
     ///   has no per-request `seed` request field yet (see
     ///   `ChatCompletionRequest`), so there is nothing to gate on today. Add a
@@ -49,8 +58,10 @@ public enum BatchRoutingPolicy {
     public static func shouldAttemptBatch(
         batchingEnabled: Bool,
         hasDraftModel: Bool,
-        hasResponseFormat: Bool
+        hasResponseFormat: Bool,
+        hasUnbatchableSamplingFeature: Bool = false
     ) -> Bool {
         batchingEnabled && !hasDraftModel && !hasResponseFormat
+            && !hasUnbatchableSamplingFeature
     }
 }

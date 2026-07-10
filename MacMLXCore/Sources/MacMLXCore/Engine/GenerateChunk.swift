@@ -16,19 +16,28 @@ public struct GenerateChunk: Codable, Hashable, Sendable {
     /// requested/used — never fabricated. Default nil keeps existing call
     /// sites and the synthesised `Codable` wire-compatible.
     public let speculativeDecoding: SpeculativeDecodingUsage?
+    /// Per-token logprobs for the token(s) this chunk carries (Track E, OpenAI
+    /// `logprobs`). Non-nil ONLY when the request set `logprobs: true` and the
+    /// engine ran the capture path; the array holds one entry per generated
+    /// token in emission order. Nil for ordinary generations and on the terminal
+    /// usage-only chunk. Default nil keeps existing call sites and the
+    /// synthesised `Codable` wire-compatible.
+    public let logprobs: [TokenLogprob]?
 
     public init(
         text: String,
         finishReason: FinishReason? = nil,
         usage: TokenUsage? = nil,
         toolCalls: [ToolCallRequest]? = nil,
-        speculativeDecoding: SpeculativeDecodingUsage? = nil
+        speculativeDecoding: SpeculativeDecodingUsage? = nil,
+        logprobs: [TokenLogprob]? = nil
     ) {
         self.text = text
         self.finishReason = finishReason
         self.usage = usage
         self.toolCalls = toolCalls
         self.speculativeDecoding = speculativeDecoding
+        self.logprobs = logprobs
     }
 }
 
