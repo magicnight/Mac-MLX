@@ -188,17 +188,22 @@ final class BatchPositionedCacheWrapperTests: XCTestCase {
             batchedCrossRow, 1e-5,
             "the .batch offset path must keep identical rows bit-identical (the fix)")
 
-        // Buggy path — a SCALAR offset over a `B > 1` single-token decode. Lanes
-        // 1..<B read uninitialized memory, so rows diverge (or NaN). This is the
-        // deletion tripwire: if it ever passes cleanly, mlx-swift has vendored the
-        // mlx-core ≥ 0.32 fix (mlx-swift#441) and BatchPositionedCacheWrapper /
-        // batchPositioned(_:batch:) can be removed.
+        // Scalar path — a SCALAR offset over a `B > 1` single-token decode.
+        // INVERTED TRIPWIRE (2026-07-10): the dependency now points at the
+        // controlled minimal fork (magicnight/mlx-swift @ 0.31.6-rope3498,
+        // carrying the ml-explore/mlx#3498 cherry-pick), so the scalar path
+        // MUST be numerically correct. If this assertion ever fails, the
+        // dependency was switched to a core WITHOUT the fix (e.g. back to an
+        // upstream release that still vendors core < 0.32) — do not ship that.
+        // When upstream mlx-swift vendors core >= 0.32, switch back to the
+        // official package: this test stays green and the fork branch dies.
         let scalar = rope(x, offset: position)
         let scalarCrossRow = crossRow(scalar)
-        XCTAssertTrue(
-            scalarCrossRow.isNaN || scalarCrossRow > 1e-3,
-            "scalar batched-decode RoPE is expected broken (cross-row NaN/divergent); "
-                + "a clean pass here signals mlx-swift#441 landed and the wrapper is deletable "
-                + "(observed cross-row = \(scalarCrossRow))")
+        XCTAssertFalse(scalarCrossRow.isNaN, "scalar batched-decode RoPE must not produce NaN")
+        XCTAssertLessThan(
+            scalarCrossRow, 1e-5,
+            "scalar batched-decode RoPE must keep identical rows bit-identical — the "
+                + "controlled fork carries the mlx#3498 fix; a failure here means the "
+                + "dependency lost the fix (observed cross-row = \(scalarCrossRow))")
     }
 }
