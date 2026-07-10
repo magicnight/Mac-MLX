@@ -236,6 +236,20 @@ public actor MLXSwiftEngine: InferenceEngine {
                     from: model.directory,
                     using: HuggingFaceTokenizerLoader()
                 )
+                // Backfill the tool-call format upstream `ToolCallFormat.infer`
+                // leaves nil for some tool-capable families (e.g. plain Qwen3),
+                // so the streaming `ToolCallProcessor` actually fires for them.
+                // Applied via the container's own `update` seam and gated on nil
+                // ⇒ a format upstream already set is never overridden, and every
+                // downstream read (streaming / non-streaming / batch / speculative)
+                // sees the corrected value.
+                if let fallback = Self.inferToolCallFormatFallback(configURL: configURL) {
+                    await container.update { ctx in
+                        if ctx.configuration.toolCallFormat == nil {
+                            ctx.configuration.toolCallFormat = fallback
+                        }
+                    }
+                }
                 support = .llm(container)
 
             case .mlxVLM:
@@ -327,6 +341,33 @@ public actor MLXSwiftEngine: InferenceEngine {
             if let n = container["num_local_experts"] as? Int, n > 0 { return true }
             return false
         }
+    }
+
+    /// macMLX-side backfill for `ModelConfiguration.toolCallFormat` when upstream
+    /// `ToolCallFormat.infer` leaves it nil for a tool-capable family. Upstream
+    /// maps only `qwen3_5` / `qwen3_next` (→ `.xmlFunction`), so plain Qwen3 —
+    /// and Qwen2 / Qwen2.5 — load with NO format and their hermes-style
+    /// `<tool_call>{JSON}</tool_call>` output (the `.json` format) is never
+    /// parsed: the streaming `ToolCallProcessor` doesn't run and the tool call
+    /// leaks into visible content. This returns `.json` for those Qwen LLM
+    /// variants and nil for everything else; the caller applies it ONLY when the
+    /// upstream format is nil, so a format upstream already set is never
+    /// overridden. Read from `config.json`'s `model_type`; any IO/JSON error is
+    /// treated as "no fallback".
+    static func inferToolCallFormatFallback(configURL: URL) -> ToolCallFormat? {
+        guard let data = try? Data(contentsOf: configURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let modelType = root["model_type"] as? String
+        else {
+            return nil
+        }
+        let type = modelType.lowercased()
+        // Upstream already handles these (→ `.xmlFunction`); never shadow them.
+        if type.hasPrefix("qwen3_5") || type.hasPrefix("qwen3_next") { return nil }
+        // Qwen2 / Qwen2.5 / Qwen3 (incl. `_moe`) speak the hermes `<tool_call>` +
+        // JSON body format, which is `ToolCallFormat.json`.
+        if type.hasPrefix("qwen2") || type.hasPrefix("qwen3") { return .json }
+        return nil
     }
 
     /// Release the loaded model from memory.

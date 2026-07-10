@@ -305,17 +305,14 @@ struct HummingbirdServerTests {
         func healthCheck() async -> Bool { true }
     }
 
-    /// Wave-1 regression guard (v0.5 review fix): before wave 1 added
-    /// `MessageRole.tool`, `MessageRole(rawValue: "tool")` was `nil` and the
-    /// OpenAI decode guard's `compactMap` silently dropped tool-role turns.
-    /// Wave 1 made that role resolve, which (absent this exclusion) would
-    /// admit it half-formed — `toolCallID` always nil at this decode site,
-    /// and the preceding assistant `tool_calls` aren't decoded either — which
-    /// can trip a chat-template pairing assertion downstream. This proves the
-    /// pre-wave-1 drop behaviour is preserved until wave 2 wires proper
-    /// tool-turn decode.
+    /// Agent-tools wave: OpenAI tool history is fully decoded. A `role:"tool"`
+    /// turn becomes a `.tool` `ChatMessage` carrying its `tool_call_id`, and the
+    /// preceding assistant `tool_calls` array (with `content:null`) becomes that
+    /// message's `toolCalls` — so the chat template's call ↔ result pairing is
+    /// satisfied instead of the turns being silently dropped. Supersedes the
+    /// pre-wave-2 drop guard.
     @Test
-    func chatCompletionsDropsToolRoleMessageUntilWave2() async throws {
+    func chatCompletionsDecodesOpenAIToolHistory() async throws {
         let engine = CapturingStubEngine()
         let model = LocalModel(
             id: "stub-model",
@@ -336,9 +333,20 @@ struct HummingbirdServerTests {
         let body: [String: Any] = [
             "model": "stub-model",
             "messages": [
-                ["role": "user", "content": "What's the weather?"],
-                ["role": "assistant", "content": "Let me check."],
-                ["role": "tool", "content": "22C, sunny"],
+                ["role": "user", "content": "What's the weather in Paris?"],
+                [
+                    "role": "assistant",
+                    "content": NSNull(),
+                    "tool_calls": [[
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": [
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Paris\"}",
+                        ],
+                    ]],
+                ],
+                ["role": "tool", "tool_call_id": "call_abc123", "content": "22C, sunny"],
             ],
             "stream": false,
         ]
@@ -347,11 +355,282 @@ struct HummingbirdServerTests {
         await server.stop()
 
         #expect(response.statusCode == 200)
-        let captured = await engine.capturedRequest
-        let messages = try #require(captured?.messages)
-        #expect(messages.count == 2)
-        #expect(messages.map(\.role) == [.user, .assistant])
-        #expect(messages.contains { $0.role == .tool } == false)
+        let messages = try #require(await engine.capturedRequest?.messages)
+        #expect(messages.count == 3)
+        #expect(messages.map(\.role) == [.user, .assistant, .tool])
+
+        // Assistant turn carries the decoded tool call (arguments parsed from the
+        // JSON-string wire form into an object).
+        let calls = try #require(messages[1].toolCalls)
+        #expect(calls.count == 1)
+        #expect(calls[0].id == "call_abc123")
+        #expect(calls[0].name == "get_weather")
+        #expect(calls[0].arguments["city"] == .string("Paris"))
+
+        // Tool result pairs on the same id.
+        #expect(messages[2].role == .tool)
+        #expect(messages[2].toolCallID == "call_abc123")
+        #expect(messages[2].content == "22C, sunny")
+    }
+
+    /// A malformed `tool_calls` arguments string is a 400 — never silently
+    /// dropped or coerced to empty args (project rule: no silent degradation).
+    /// The engine is never invoked.
+    @Test
+    func chatCompletionsMalformedToolArgumentsReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_000)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [[
+                "role": "assistant",
+                "content": NSNull(),
+                "tool_calls": [[
+                    "id": "call_x",
+                    "type": "function",
+                    "function": ["name": "get_weather", "arguments": "not-json"],
+                ]],
+            ]],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A `role:"tool"` message with a missing `tool_call_id` is a 400 — the
+    /// exact half-formed shape (`toolCallID: nil`) the original pre-wave-2 guard
+    /// existed to avoid; symmetric with the Anthropic `tool_result` guard.
+    @Test
+    func chatCompletionsMissingToolCallIDReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_001)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                ["role": "user", "content": "Weather?"],
+                ["role": "tool", "content": "22C, sunny"],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A `tool_calls` entry with an empty function name is a 400 (the name key
+    /// must be present for `Decodable` to succeed — an EMPTY string is the way to
+    /// reach the post-decode guard rather than the generic "Invalid JSON" 400).
+    @Test
+    func chatCompletionsMissingFunctionNameReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_002)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [[
+                "role": "assistant",
+                "content": NSNull(),
+                "tool_calls": [[
+                    "id": "call_x",
+                    "type": "function",
+                    "function": ["name": "", "arguments": "{}"],
+                ]],
+            ]],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A `tool` message answering a `tool_call_id` that no preceding assistant
+    /// `tool_calls` entry ever issued is an ORPHAN result — a 400, not a
+    /// silently-accepted turn that would reach the chat template unpaired.
+    @Test
+    func chatCompletionsOrphanToolResultReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_003)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                ["role": "user", "content": "Weather?"],
+                ["role": "tool", "tool_call_id": "call_never_issued", "content": "22C"],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// Two assistant `tool_calls` entries (in different turns) reusing the same
+    /// `id` is a 400 — ids must be unique across the whole history, not just
+    /// within one turn.
+    @Test
+    func chatCompletionsDuplicateToolCallIDReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_004)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let toolCallEntry: [String: Any] = [
+            "id": "call_dup",
+            "type": "function",
+            "function": ["name": "get_weather", "arguments": "{\"city\":\"Paris\"}"],
+        ]
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                ["role": "user", "content": "Weather?"],
+                ["role": "assistant", "content": NSNull(), "tool_calls": [toolCallEntry]],
+                ["role": "tool", "tool_call_id": "call_dup", "content": "22C"],
+                ["role": "user", "content": "And tomorrow?"],
+                ["role": "assistant", "content": NSNull(), "tool_calls": [toolCallEntry]],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A SECOND `tool` message answering an `id` that already has a result is a
+    /// 400 — distinct from the orphan case (the id WAS issued, but is already
+    /// consumed).
+    @Test
+    func chatCompletionsToolResultAnsweringAlreadyConsumedCallReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_005)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                ["role": "user", "content": "Weather?"],
+                [
+                    "role": "assistant", "content": NSNull(),
+                    "tool_calls": [[
+                        "id": "call_once",
+                        "type": "function",
+                        "function": ["name": "get_weather", "arguments": "{\"city\":\"Paris\"}"],
+                    ]],
+                ],
+                ["role": "tool", "tool_call_id": "call_once", "content": "22C"],
+                ["role": "tool", "tool_call_id": "call_once", "content": "22C again"],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// `tools: []` (present but empty) behaves exactly like an absent `tools`
+    /// field: `GenerateRequest.tools` is empty and the response is a plain
+    /// assistant message with no `tool_calls` — the engine's tool-call detector
+    /// gates on `tools?.isEmpty == false` (see `ChatCompletionRequest.tools`
+    /// doc), so `[]` and `nil` are behaviorally identical.
+    @Test
+    func chatCompletionsEmptyToolsArrayBehavesLikeAbsent() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_006)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Hello"]],
+            "stream": false,
+            "tools": [],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let tools = await engine.capturedRequest?.tools
+        #expect(tools?.isEmpty ?? true)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let choices = try #require(json["choices"] as? [[String: Any]])
+        let message = try #require(choices[0]["message"] as? [String: Any])
+        #expect(message["content"] as? String == "stub-response")
+        #expect(message["tool_calls"] == nil)
+    }
+
+    /// Regression invariant (no tools in play): a plain MULTI-TURN conversation
+    /// with NO tool_calls/tool messages decodes through `decodeOpenAIMessages`
+    /// (and its `validateToolCallPairing` pass, which is unconditional) exactly
+    /// as it did before this wave — same message count, roles, and content,
+    /// byte for byte, with no tool fields set. Guards against the tool-history
+    /// decode/pairing-validation path added this wave corrupting ordinary,
+    /// tool-free chat. Anthropic's analogous guard is
+    /// `anthropicMessagesWithoutToolsUnchanged`.
+    @Test
+    func chatCompletionsPlainMultiTurnHistoryUnchanged() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_007)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                ["role": "user", "content": "What's the weather?"],
+                ["role": "assistant", "content": "I don't have that information."],
+                ["role": "user", "content": "OK, never mind."],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let messages = try #require(await engine.capturedRequest?.messages)
+        #expect(messages.map(\.role) == [.user, .assistant, .user])
+        #expect(messages.map(\.content) == [
+            "What's the weather?", "I don't have that information.", "OK, never mind.",
+        ])
+        #expect(messages.allSatisfy { $0.toolCalls == nil && $0.toolCallID == nil })
     }
 
     // MARK: - Tool pass-through (v0.5, OpenAI /v1/chat/completions)
@@ -392,6 +671,50 @@ struct HummingbirdServerTests {
 
         nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
             AsyncThrowingStream { continuation in
+                let call = ToolCallRequest(
+                    id: "call_abc123",
+                    name: "get_weather",
+                    arguments: ["city": .string("Paris")]
+                )
+                continuation.yield(GenerateChunk(
+                    text: "",
+                    finishReason: .toolCalls,
+                    usage: TokenUsage(promptTokens: 3, completionTokens: 4),
+                    toolCalls: [call]
+                ))
+                continuation.finish()
+            }
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
+    /// Stub engine that streams SOME free text before ending the turn in a
+    /// tool call — unlike `ToolCallStubEngine` (tool-only, empty text
+    /// throughout). Lets a MIXED text+tool_use reply be exercised, distinct
+    /// from the tool-only special case (`ToolCallStubEngine`'s empty text block
+    /// is omitted entirely on the Anthropic surface — see
+    /// `anthropicMessagesStreamingEmitsToolUse` / `…NonStreamingEmitsToolUse`).
+    private actor TextThenToolCallStubEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        private(set) var status: EngineStatus = .idle
+        private(set) var loadedModel: LocalModel?
+        let version = "text-then-toolcall-1"
+
+        func load(_ model: LocalModel) async throws {
+            status = .loading(model: model.id)
+            loadedModel = model
+            status = .ready(model: model.id)
+        }
+
+        func unload() async throws {
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.yield(GenerateChunk(text: "Let me check.", finishReason: nil))
                 let call = ToolCallRequest(
                     id: "call_abc123",
                     name: "get_weather",
@@ -912,6 +1235,549 @@ struct HummingbirdServerTests {
         #expect(text.contains("event: content_block_delta"))
         #expect(text.contains("text_delta"))
         #expect(text.contains("event: message_stop"))
+    }
+
+    // MARK: - Anthropic tool loop (agent-tools wave)
+    //
+    // Claude Code speaks this protocol natively. These prove request decode
+    // (tools + tool_use/tool_result history) and response encode (tool_use
+    // content blocks, non-streaming + streaming) with stub engines — no model.
+    //
+    // Port assignments (spaced by 10): 20_010 … 20_080.
+
+    /// Parse an Anthropic named-event SSE body into `(event, json)` pairs.
+    private func anthropicEvents(_ data: Data) -> [(event: String, json: [String: Any])] {
+        let text = String(decoding: data, as: UTF8.self)
+        return text.components(separatedBy: "\n\n").compactMap { block in
+            guard let eRange = block.range(of: "event: "),
+                  let dRange = block.range(of: "\ndata: ")
+            else { return nil }
+            let event = String(block[eRange.upperBound..<dRange.lowerBound])
+            let payload = String(block[dRange.upperBound...])
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
+            else { return nil }
+            return (event, obj)
+        }
+    }
+
+    /// A single Anthropic `tools[]` entry `{name, description, input_schema}`.
+    private var anthropicWeatherTool: [String: Any] {
+        [
+            "name": "get_weather",
+            "description": "Get the weather for a city",
+            "input_schema": [
+                "type": "object",
+                "properties": ["city": ["type": "string"]],
+                "required": ["city"],
+            ],
+        ]
+    }
+
+    /// Anthropic `tools` convert to the internal OpenAI-function-spec shape that
+    /// lands verbatim in `GenerateRequest.tools` (`input_schema` → `parameters`).
+    @Test
+    func anthropicMessagesToolsPopulateGenerateRequestTools() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_010)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "tools": [anthropicWeatherTool],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let tools = try #require(await engine.capturedRequest?.tools)
+        #expect(tools.count == 1)
+        guard case .object(let spec) = tools[0] else {
+            Issue.record("tool spec did not decode as a JSON object")
+            return
+        }
+        #expect(spec["type"] == .string("function"))
+        guard case .object(let fn)? = spec["function"] else {
+            Issue.record("function payload missing")
+            return
+        }
+        #expect(fn["name"] == .string("get_weather"))
+        // input_schema maps to function.parameters verbatim.
+        guard case .object(let params)? = fn["parameters"] else {
+            Issue.record("parameters missing")
+            return
+        }
+        #expect(params["type"] == .string("object"))
+    }
+
+    /// Full Anthropic tool history decodes with pairing: an assistant turn's
+    /// `tool_use` block → `ChatMessage.toolCalls`, and a following user turn's
+    /// `tool_result` block → a `.tool` message (emitted before the residual user
+    /// text, which is NOT lost). tool_result content given as an array of text
+    /// blocks flattens correctly.
+    @Test
+    func anthropicMessagesDecodeToolHistory() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_020)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [
+                ["role": "user", "content": "Weather in Paris?"],
+                [
+                    "role": "assistant",
+                    "content": [
+                        ["type": "text", "text": "Let me check."],
+                        [
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "get_weather",
+                            "input": ["city": "Paris"],
+                        ],
+                    ],
+                ],
+                [
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [["type": "text", "text": "22C and sunny"]],
+                        ],
+                        ["type": "text", "text": "Is that warm?"],
+                    ],
+                ],
+            ],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let messages = try #require(await engine.capturedRequest?.messages)
+        // user, assistant(+toolCalls), tool(result), user(residual text).
+        #expect(messages.map(\.role) == [.user, .assistant, .tool, .user])
+
+        let calls = try #require(messages[1].toolCalls)
+        #expect(calls.count == 1)
+        #expect(calls[0].id == "toolu_1")
+        #expect(calls[0].name == "get_weather")
+        #expect(calls[0].arguments["city"] == .string("Paris"))
+        #expect(messages[1].content == "Let me check.")
+
+        #expect(messages[2].toolCallID == "toolu_1")
+        #expect(messages[2].content == "22C and sunny")
+
+        // The user text in the same turn as the tool_result is preserved.
+        #expect(messages[3].content == "Is that warm?")
+    }
+
+    /// Non-streaming, TOOL-ONLY reply (no free text — `ToolCallStubEngine` yields
+    /// `text: ""`): the empty text block is OMITTED entirely (real Anthropic never
+    /// emits one), so `content[0]` IS the `tool_use` block, whose `input` is a
+    /// DECODED JSON object (not a string), with `stop_reason:"tool_use"`.
+    @Test
+    func anthropicMessagesNonStreamingEmitsToolUse() async throws {
+        let engine = ToolCallStubEngine()
+        try await engine.load(fixtureModel(id: "tool-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_040)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "tool-model",
+            "max_tokens": 64,
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "tools": [anthropicWeatherTool],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["stop_reason"] as? String == "tool_use")
+        let content = try #require(json["content"] as? [[String: Any]])
+        // No empty text block — content is JUST the tool_use block, at index 0.
+        #expect(content.count == 1)
+        #expect(content.contains { $0["type"] as? String == "text" } == false)
+        let toolBlock = try #require(content.first { $0["type"] as? String == "tool_use" })
+        #expect(toolBlock["id"] as? String == "call_abc123")
+        #expect(toolBlock["name"] as? String == "get_weather")
+        // input is an OBJECT, not a JSON string.
+        let input = try #require(toolBlock["input"] as? [String: Any])
+        #expect(input["city"] as? String == "Paris")
+    }
+
+    /// Streaming, TOOL-ONLY reply (no free text): the text content_block never
+    /// opens (real Anthropic never emits an empty one), so the `tool_use` block
+    /// streams at index 0 — content_block_start → one `input_json_delta` (full
+    /// args) → content_block_stop — and `message_delta` carries
+    /// `stop_reason:"tool_use"`.
+    @Test
+    func anthropicMessagesStreamingEmitsToolUse() async throws {
+        let engine = ToolCallStubEngine()
+        try await engine.load(fixtureModel(id: "tool-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_050)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "tool-model",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "tools": [anthropicWeatherTool],
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+        await server.stop()
+
+        #expect(http.statusCode == 200)
+        let events = anthropicEvents(data)
+
+        // No text content_block_start at all (tool-only reply).
+        #expect(events.contains {
+            $0.event == "content_block_start"
+                && (($0.json["content_block"] as? [String: Any])?["type"] as? String) == "text"
+        } == false)
+        // No text_delta either.
+        #expect(events.contains {
+            $0.event == "content_block_delta"
+                && (($0.json["delta"] as? [String: Any])?["type"] as? String) == "text_delta"
+        } == false)
+
+        // tool_use content_block_start at index 0 (no text block precedes it).
+        let toolStart = try #require(events.first {
+            $0.event == "content_block_start"
+                && (($0.json["content_block"] as? [String: Any])?["type"] as? String) == "tool_use"
+        })
+        #expect(toolStart.json["index"] as? Int == 0)
+        let cb = try #require(toolStart.json["content_block"] as? [String: Any])
+        #expect(cb["id"] as? String == "call_abc123")
+        #expect(cb["name"] as? String == "get_weather")
+
+        // input_json_delta carrying the full arguments JSON.
+        let inputDelta = try #require(events.first {
+            $0.event == "content_block_delta"
+                && (($0.json["delta"] as? [String: Any])?["type"] as? String) == "input_json_delta"
+        })
+        let partial = try #require((inputDelta.json["delta"] as? [String: Any])?["partial_json"] as? String)
+        let argsObj = try #require(
+            try JSONSerialization.jsonObject(with: Data(partial.utf8)) as? [String: Any])
+        #expect(argsObj["city"] as? String == "Paris")
+
+        // message_delta carries the tool_use stop reason.
+        let msgDelta = try #require(events.first { $0.event == "message_delta" })
+        #expect((msgDelta.json["delta"] as? [String: Any])?["stop_reason"] as? String == "tool_use")
+    }
+
+    /// Mixed reply: the model emits SOME free text before/around a tool call
+    /// (unlike `ToolCallStubEngine`, which is tool-only). The text block DOES
+    /// open in this case, so the tool_use block streams at index 1 — proving the
+    /// index-0 special case above is specifically about the tool-ONLY reply, not
+    /// tool calls in general.
+    @Test
+    func anthropicMessagesStreamingMixedTextAndToolUseIndexesToolBlockAfterText() async throws {
+        let engine = TextThenToolCallStubEngine()
+        try await engine.load(fixtureModel(id: "tool-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_045)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "tool-model",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "tools": [anthropicWeatherTool],
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+        await server.stop()
+
+        #expect(http.statusCode == 200)
+        let events = anthropicEvents(data)
+
+        #expect(events.contains {
+            $0.event == "content_block_start"
+                && (($0.json["content_block"] as? [String: Any])?["type"] as? String) == "text"
+        })
+        let toolStart = try #require(events.first {
+            $0.event == "content_block_start"
+                && (($0.json["content_block"] as? [String: Any])?["type"] as? String) == "tool_use"
+        })
+        #expect(toolStart.json["index"] as? Int == 1)
+    }
+
+    /// An unsupported `tool_choice` mode (anything but `auto`) is a 400 — we
+    /// don't silently ignore a force/suppress directive we can't honor.
+    @Test
+    func anthropicMessagesToolChoiceNonAutoReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_060)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "tools": [anthropicWeatherTool],
+            "tool_choice": ["type": "any"],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A malformed `tool_use` block (`input` not a JSON object) is a 400 — never
+    /// silently dropped.
+    @Test
+    func anthropicMessagesMalformedToolUseReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_070)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [[
+                "role": "assistant",
+                "content": [[
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "get_weather",
+                    "input": "not-an-object",
+                ]],
+            ]],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A `tool_use` block with a missing `id` is a 400 (a synthesised id would
+    /// mispair with the following `tool_result`, so — unlike the OpenAI call id
+    /// — this is never defaulted).
+    @Test
+    func anthropicMessagesMissingToolUseIDReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_011)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [[
+                "role": "assistant",
+                "content": [[
+                    "type": "tool_use",
+                    "name": "get_weather",
+                    "input": ["city": "Paris"],
+                ]],
+            ]],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A `tool_result` block with a missing `tool_use_id` is a 400 — the
+    /// correlator the chat template pairs on, so admitting one without it would
+    /// reach the template unpaired.
+    @Test
+    func anthropicMessagesMissingToolResultIDReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_012)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [
+                ["role": "user", "content": "Weather in Paris?"],
+                [
+                    "role": "assistant",
+                    "content": [[
+                        "type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                        "input": ["city": "Paris"],
+                    ]],
+                ],
+                [
+                    "role": "user",
+                    "content": [["type": "tool_result", "content": "22C and sunny"]],
+                ],
+            ],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A `tool_result` answering a `tool_use_id` that no preceding assistant
+    /// `tool_use` block ever issued is an ORPHAN result — a 400, mirroring the
+    /// OpenAI orphan-result guard.
+    @Test
+    func anthropicMessagesOrphanToolResultReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_013)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [
+                ["role": "user", "content": "Weather in Paris?"],
+                [
+                    "role": "user",
+                    "content": [[
+                        "type": "tool_result", "tool_use_id": "toolu_never_issued",
+                        "content": "22C and sunny",
+                    ]],
+                ],
+            ],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// Two assistant `tool_use` blocks (in different turns) reusing the same
+    /// `id` is a 400 — ids must be unique across the whole history, mirroring
+    /// the OpenAI duplicate-call-id guard.
+    @Test
+    func anthropicMessagesDuplicateToolUseIDReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_014)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let toolUseBlock: [String: Any] = [
+            "type": "tool_use", "id": "toolu_dup", "name": "get_weather",
+            "input": ["city": "Paris"],
+        ]
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [
+                ["role": "user", "content": "Weather in Paris?"],
+                ["role": "assistant", "content": [toolUseBlock]],
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "tool_result", "tool_use_id": "toolu_dup", "content": "22C"]
+                    ],
+                ],
+                ["role": "user", "content": "And tomorrow?"],
+                ["role": "assistant", "content": [toolUseBlock]],
+            ],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// A SECOND `tool_result` answering a `tool_use_id` that already has a
+    /// result is a 400 — distinct from the orphan case (the id WAS issued, but
+    /// is already consumed), mirroring the OpenAI already-consumed guard.
+    @Test
+    func anthropicMessagesToolResultAnsweringAlreadyConsumedCallReturns400() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_015)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [
+                ["role": "user", "content": "Weather in Paris?"],
+                [
+                    "role": "assistant",
+                    "content": [[
+                        "type": "tool_use", "id": "toolu_once", "name": "get_weather",
+                        "input": ["city": "Paris"],
+                    ]],
+                ],
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "tool_result", "tool_use_id": "toolu_once", "content": "22C"],
+                        ["type": "tool_result", "tool_use_id": "toolu_once", "content": "22C again"],
+                    ],
+                ],
+            ],
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// Regression: an Anthropic request WITHOUT tools decodes exactly as before —
+    /// `GenerateRequest.tools` is nil and the response is a single text block
+    /// with `stop_reason:"end_turn"`.
+    @Test
+    func anthropicMessagesWithoutToolsUnchanged() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_080)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "max_tokens": 64,
+            "messages": [["role": "user", "content": "Hello"]],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(await engine.capturedRequest?.tools == nil)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let content = try #require(json["content"] as? [[String: Any]])
+        #expect(content.count == 1)
+        #expect(content[0]["type"] as? String == "text")
+        #expect(json["stop_reason"] as? String == "end_turn")
     }
 
     // MARK: - Cold-swap (v0.3.3)
