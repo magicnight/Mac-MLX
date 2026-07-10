@@ -8,6 +8,17 @@ let package = Package(
         .library(name: "MacMLXCore", targets: ["MacMLXCore"]),
     ],
     dependencies: [
+        // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
+        // upstream mlx-swift 0.31.6 plus ONE cherry-pick — ml-explore/mlx#3498
+        // (batched single-token RoPE fix, in mlx-core 0.32.0 but not yet
+        // vendored by any mlx-swift release; see ml-explore/mlx-swift#441).
+        // The fork carries no API changes. Drop this override and return to
+        // the upstream package as soon as mlx-swift vendors core >= 0.32
+        // (the inverted tripwire in BatchPositionedCacheWrapperTests guards
+        // the switch-back). Pinned by revision so it can never drift.
+        .package(
+            url: "https://github.com/magicnight/mlx-swift.git",
+            revision: "283e9917e209075390b449594a3520cb5ec1907f"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
