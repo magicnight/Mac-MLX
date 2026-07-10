@@ -9,17 +9,26 @@ public struct GenerateChunk: Codable, Hashable, Sendable {
     /// nil keeps existing call sites and the synthesised `Codable` (which
     /// omits the key when absent) wire-compatible.
     public let toolCalls: [ToolCallRequest]?
+    /// Speculative decoding acceptance counters for this generation (D1 —
+    /// classic draft-model path only). Non-nil ONLY on the terminal chunk of
+    /// a generation that actually ran the speculative path AND mlx-swift-lm
+    /// returned telemetry for it; nil whenever speculative decoding wasn't
+    /// requested/used — never fabricated. Default nil keeps existing call
+    /// sites and the synthesised `Codable` wire-compatible.
+    public let speculativeDecoding: SpeculativeDecodingUsage?
 
     public init(
         text: String,
         finishReason: FinishReason? = nil,
         usage: TokenUsage? = nil,
-        toolCalls: [ToolCallRequest]? = nil
+        toolCalls: [ToolCallRequest]? = nil,
+        speculativeDecoding: SpeculativeDecodingUsage? = nil
     ) {
         self.text = text
         self.finishReason = finishReason
         self.usage = usage
         self.toolCalls = toolCalls
+        self.speculativeDecoding = speculativeDecoding
     }
 }
 

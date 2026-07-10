@@ -39,6 +39,16 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// Decoded as a free-form `JSONValue` so both the string and object forms
     /// round-trip without a bespoke enum.
     let tool_choice: JSONValue?
+    /// Draft model id for classic per-request speculative decoding (D1).
+    /// NOT an OpenAI-standard field — mirrors mlx-lm's Python server
+    /// `draft_model` request field. Absent/`null` disables speculative
+    /// decoding and unloads any draft model the engine currently has
+    /// resident (see `GenerateRequest.draftModelID`).
+    let draft_model: String?
+    /// Draft tokens proposed per speculative round — NOT an OpenAI-standard
+    /// field, mirrors mlx-lm's `num_draft_tokens`. Clamped to 1...8 by
+    /// `GenerateRequest`; meaningless without `draft_model`.
+    let num_draft_tokens: Int?
 }
 
 /// Legacy OpenAI text-completions body (`/v1/completions`, and the
@@ -55,6 +65,11 @@ private struct LegacyCompletionRequest: Decodable, Sendable {
     let temperature: Double?
     let top_p: Double?
     let max_tokens: Int?
+    /// See `ChatCompletionRequest.draft_model` — same non-standard D1 field,
+    /// honored on this legacy route too since it shares `handleChatCompletions`.
+    let draft_model: String?
+    /// See `ChatCompletionRequest.num_draft_tokens`.
+    let num_draft_tokens: Int?
 }
 
 /// OpenAI multimodal content payload. Either a plain string (text-only
@@ -1139,7 +1154,9 @@ public actor HummingbirdServer {
                 max_tokens: legacy.max_tokens,
                 // Legacy text-completions bodies carry no tools.
                 tools: nil,
-                tool_choice: nil
+                tool_choice: nil,
+                draft_model: legacy.draft_model,
+                num_draft_tokens: legacy.num_draft_tokens
             )
         }
 
@@ -1201,7 +1218,9 @@ public actor HummingbirdServer {
             systemPrompt: systemPrompt,
             parameters: params,
             templateKwargs: await templateKwargs(for: chatReq.model),
-            tools: toolsToSend
+            tools: toolsToSend,
+            draftModelID: chatReq.draft_model,
+            numDraftTokens: chatReq.num_draft_tokens
         )
 
         // Cold-swap (v0.3.3) is no longer resolved here. SRV-2: the swap
@@ -1845,6 +1864,10 @@ public actor HummingbirdServer {
         // Tool calls the model requested this turn (v0.5). Populated from the
         // terminal chunk when generation ends in `.toolCalls`; empty otherwise.
         var capturedToolCalls: [ToolCallRequest] = []
+        // Speculative decoding telemetry (D1). Populated from the terminal
+        // chunk only when the request actually ran the speculative path AND
+        // mlx-swift-lm reported counts for it; nil otherwise (never faked).
+        var capturedSpeculativeDecoding: SpeculativeDecodingUsage?
 
         do {
             loop: while true {
@@ -1870,6 +1893,9 @@ public actor HummingbirdServer {
                     }
                     if let calls = chunk.toolCalls, !calls.isEmpty {
                         capturedToolCalls = calls
+                    }
+                    if let speculativeDecoding = chunk.speculativeDecoding {
+                        capturedSpeculativeDecoding = speculativeDecoding
                     }
                 }
             }
@@ -1908,6 +1934,22 @@ public actor HummingbirdServer {
             }
         }
 
+        var usage: [String: Any] = [
+            "prompt_tokens": promptTokens,
+            "completion_tokens": completionTokens,
+            "total_tokens": promptTokens + completionTokens,
+        ]
+        // Non-standard OpenAI extension (D1), mirroring mlx-lm's Python
+        // server: accepted/proposed draft-token counts for this turn. Only
+        // present when speculative decoding actually ran — see
+        // `capturedSpeculativeDecoding`'s doc comment above.
+        if let speculativeDecoding = capturedSpeculativeDecoding {
+            usage["speculative_decoding"] = [
+                "proposed_tokens": speculativeDecoding.proposedTokens,
+                "accepted_tokens": speculativeDecoding.acceptedTokens,
+            ] as [String: Any]
+        }
+
         let body: [String: Any] = [
             "id": completionID,
             "object": "chat.completion",
@@ -1920,11 +1962,7 @@ public actor HummingbirdServer {
                     "finish_reason": finishReason,
                 ] as [String: Any]
             ],
-            "usage": [
-                "prompt_tokens": promptTokens,
-                "completion_tokens": completionTokens,
-                "total_tokens": promptTokens + completionTokens,
-            ] as [String: Any],
+            "usage": usage,
         ]
         return try jsonResponseAny(body)
     }

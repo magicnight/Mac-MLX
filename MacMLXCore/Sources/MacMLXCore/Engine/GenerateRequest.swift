@@ -105,6 +105,35 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// and (being optional) decoded via the synthesised `decodeIfPresent`, so
     /// existing serialized requests keep decoding.
     public var tools: [JSONValue]?
+    /// Model id of a draft model to speculate with (D1 — classic per-request
+    /// draft-model speculative decoding, mirrors mlx-lm Python server's
+    /// `draft_model` request field). Resolved by the engine the same way it
+    /// resolves `model` — the id of a directory under the models root. `nil`
+    /// (the default, and any value explicitly set back to `nil`) disables
+    /// speculative decoding for this request and unloads any draft model the
+    /// engine currently has resident — there is no separate "unload draft"
+    /// verb. Ignored on VLM requests (text-only, D1).
+    ///
+    /// - Note: Silently falls back to plain (non-speculative) decoding when
+    ///   either the target or draft model's KV cache isn't trimmable — e.g. a
+    ///   hybrid/linear-attention architecture such as Qwen3.5, whose
+    ///   GatedDeltaNet layers use a non-trimmable `MambaCache`. No error is
+    ///   raised in that case; the response simply carries no
+    ///   `speculativeDecoding` telemetry. See
+    ///   `MLXSwiftEngine.canUseSpeculativeDecoding`.
+    ///
+    /// - Important: Mutually exclusive with continuous batching, mirroring
+    ///   mlx-lm's `is_batchable` semantics — a batched decode request must
+    ///   never also carry a draft model. Batching isn't wired to the server
+    ///   yet, so this is a documented invariant rather than an enforced one.
+    public var draftModelID: String?
+    /// Number of tokens the draft model proposes per speculative round.
+    /// Clamped to `1...8` on every construction path (this initialiser AND
+    /// JSON decode — see `init(from:)`) so a malformed or hostile request
+    /// can't ask mlx-swift-lm for a pathological round size. `nil` (the
+    /// default) defers to mlx-swift-lm's own default (2 as of 3.31.3).
+    /// Meaningless when `draftModelID` is nil.
+    public var numDraftTokens: Int?
 
     public init(
         model: String,
@@ -112,7 +141,9 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         systemPrompt: String? = nil,
         parameters: GenerationParameters = .init(),
         templateKwargs: [String: JSONValue]? = nil,
-        tools: [JSONValue]? = nil
+        tools: [JSONValue]? = nil,
+        draftModelID: String? = nil,
+        numDraftTokens: Int? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -120,6 +151,40 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         self.parameters = parameters
         self.templateKwargs = templateKwargs
         self.tools = tools
+        self.draftModelID = draftModelID
+        self.numDraftTokens = Self.clampNumDraftTokens(numDraftTokens)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case model, messages, systemPrompt, parameters, templateKwargs, tools
+        case draftModelID, numDraftTokens
+    }
+
+    /// Custom decoder (mirrors `ChatMessage.init(from:)`) so the `1...8`
+    /// `numDraftTokens` clamp is enforced on EVERY decode path, not just the
+    /// memberwise initialiser above — a raw `JSONDecoder().decode(GenerateRequest.self,…)`
+    /// (e.g. a persisted/replayed request) must not bypass it. All fields
+    /// besides `model`/`messages`/`parameters` are optional and decoded via
+    /// `decodeIfPresent`, so pre-D1 serialized requests keep decoding.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.model = try c.decode(String.self, forKey: .model)
+        self.messages = try c.decode([ChatMessage].self, forKey: .messages)
+        self.systemPrompt = try c.decodeIfPresent(String.self, forKey: .systemPrompt)
+        self.parameters = try c.decode(GenerationParameters.self, forKey: .parameters)
+        self.templateKwargs = try c.decodeIfPresent([String: JSONValue].self, forKey: .templateKwargs)
+        self.tools = try c.decodeIfPresent([JSONValue].self, forKey: .tools)
+        self.draftModelID = try c.decodeIfPresent(String.self, forKey: .draftModelID)
+        self.numDraftTokens = Self.clampNumDraftTokens(
+            try c.decodeIfPresent(Int.self, forKey: .numDraftTokens)
+        )
+    }
+
+    /// Clamp to mlx-swift-lm's sane speculative round-size range. `nil`
+    /// passes through unchanged (defers to the upstream default).
+    private static func clampNumDraftTokens(_ value: Int?) -> Int? {
+        guard let value else { return nil }
+        return Swift.min(8, Swift.max(1, value))
     }
 
     /// Messages with the system prompt (if any) prepended.
