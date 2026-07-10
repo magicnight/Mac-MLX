@@ -65,11 +65,19 @@ struct ServeCommand: AsyncParsableCommand {
         // the old captured reference — but using the provider-based
         // primary init (rather than the `engine:` back-compat convenience)
         // lets us also plumb the configured stall-watchdog timeout (SRV-4).
+        // A2d-2: continuous batching is on by default when the resident engine
+        // supports it. The CLI's single engine instance is the seam directly (a
+        // fixed reference is correct here — it is mutated in place by cold-swap).
+        // A non-batch engine casts to `nil`, so the seam is simply absent and every
+        // request keeps the legacy single-stream path (zero regression). The
+        // per-model coverage gate inside `submit` routes uncoverable models
+        // (VLM/off-allowlist/non-dense) to the legacy path too.
         let server = HummingbirdServer(
             engineProvider: { engine },
             modelResolver: resolver,
             apiKey: apiKey ?? ctx.settings.serverAPIKey,
-            stallTimeoutSeconds: TimeInterval(ctx.settings.generationStallTimeoutSeconds)
+            stallTimeoutSeconds: TimeInterval(ctx.settings.generationStallTimeoutSeconds),
+            batchServing: engine as? (any BatchGenerationServing)
         )
         let actualPort = try await server.start(preferredPort: port)
 
