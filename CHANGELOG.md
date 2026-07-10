@@ -9,7 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-11
+
 ### Added
+- **Agent tool loops on both protocols** — multi-turn tool calling now
+  works end-to-end for real agent clients. OpenAI
+  `/v1/chat/completions`: assistant `tool_calls` + `role:"tool"` history
+  fully decoded with strict `tool_call_id` pairing validation
+  (orphaned/duplicate/double-answered results are explicit 400s).
+  Anthropic `/v1/messages`: `tools` / `tool_choice` decoding,
+  `tool_use`/`tool_result` content blocks, `tool_use` response blocks
+  (non-streaming + streaming), `stop_reason:"tool_use"`, native
+  Anthropic error envelope, and no empty text block on tool-only
+  replies. Engine-side: `toolCallFormat` backfill for model families
+  upstream's inference misses (plain Qwen3 / Qwen2.x), fixing tool-call
+  detection for the GUI MCP loop too. Verified by a real-world
+  benchmark: Claude Code pointed at `localhost:8000` autonomously fixed
+  a failing test suite in 4m22s over 6 tool-loop rounds
+  (Qwen3.6-27B-4bit). (PR #81)
 - **Continuous batching** — a self-built orchestrator over upstream's batch
   cache primitives: RoPE-correct batch cache infrastructure, a ragged
   `BatchKVCache` port, a continuous admission/eviction scheduler, and a
@@ -64,6 +81,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   incremental), matching OpenAI semantics. (PR #74)
 - Model sizes for HuggingFace-cache discoveries now resolve symlinks, so
   blob-backed snapshots report true sizes instead of link sizes. (PR #77)
+- **CLI tarball inference was broken since its introduction** — the
+  packaged binary shipped without mlx-swift's Metal library and aborted
+  on the first inference with "Failed to load the default metallib".
+  The tarball now bundles `mlx-swift_Cmlx.bundle` next to the binary
+  (built via the Xcode pipeline, which is the only one that compiles
+  the Metal shaders) and the Homebrew formula installs both into
+  `libexec` behind a `bin` shim. The GUI DMG was never affected.
+  (PR #82)
 
 ## [0.5.3] - 2026-07-08
 
