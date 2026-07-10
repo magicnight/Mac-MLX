@@ -111,6 +111,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// the same LLM. VLM generations bypass it.
     private let promptCacheStore: PromptCacheStore
 
+    /// Per-model token→JSON-classification tables (Track C structured output).
+    /// Built once per resident model on the first constrained request and reused
+    /// thereafter, so the vocabulary-decode cost is amortized. Empty and inert
+    /// for every unconstrained request.
+    private let tokenVocabularyCache = TokenVocabularyCache()
+
     /// Guards the one-time `ModelOverlay.registerAll()` so macMLX-owned
     /// architectures are registered into the shared factory registry
     /// exactly once, before the first model load. `registerAll` is itself
@@ -823,9 +829,75 @@ public actor MLXSwiftEngine: InferenceEngine {
                 modelID: loadedModelSnapshot.id,
                 hasTools: request.tools?.isEmpty == false,
                 numDraftTokens: request.numDraftTokens,
+                responseFormat: request.responseFormat,
                 into: continuation
             )
         }
+    }
+
+    /// Build a constrained raw-token stream for a structured-output request
+    /// (Track C). Installs a ``JSONConstraintProcessor`` — which masks every
+    /// token the JSON grammar (C1) or compiled schema (C2) would reject, after
+    /// any penalty processor — on a hand-built `TokenIterator`, then runs it
+    /// through the same `generateTokenTask` the unconstrained path uses so all
+    /// downstream streaming and detokenization is byte-for-byte identical.
+    ///
+    /// Runs inside `ModelContainer.perform` (hence `static` + an explicit
+    /// `context`) so the non-`Sendable` MLX state never leaves the actor; the
+    /// captured `vocabCache` and `tokenizer` are `Sendable`.
+    private static func constrainedTokenStream(
+        input: LMInput,
+        cache: [any KVCache],
+        generateParams: GenerateParameters,
+        context: ModelContext,
+        responseFormat: ResponseFormat,
+        modelID: String,
+        vocabCache: TokenVocabularyCache
+    ) throws -> AsyncStream<TokenGeneration> {
+        // Complete stop-token set, mirroring upstream `buildStopTokenIds`:
+        // config EOS ids ∪ the tokenizer's EOS id ∪ any extra stop tokens. The
+        // constraint masks every one of these until the document is complete, so
+        // the model cannot terminate mid-JSON.
+        var stopTokenIDs = context.configuration.eosTokenIds
+        if let eos = context.tokenizer.eosTokenId { stopTokenIDs.insert(eos) }
+        for token in context.configuration.extraEOSTokens {
+            if let id = context.tokenizer.convertTokenToId(token) { stopTokenIDs.insert(id) }
+        }
+
+        let processor = JSONConstraintProcessor(
+            format: responseFormat,
+            inner: generateParams.processor(),
+            cache: vocabCache,
+            modelID: modelID,
+            tokenizer: context.tokenizer,
+            stopTokenIDs: stopTokenIDs,
+            greedy: generateParams.temperature == 0
+        )
+
+        // Caveat: `maxTokens` bounds the constrained stream just like any other.
+        // The constraint guarantees every emitted token keeps the output on a
+        // path to a complete JSON document, but it cannot guarantee that path is
+        // *reached* before the length cap — hitting `maxTokens` mid-document
+        // yields a valid-but-truncated JSON prefix, not a complete value. That is
+        // surfaced as `finish_reason: length` (not `stop`), which is the client's
+        // signal to treat the body as incomplete rather than parse it as final.
+        let iterator = try TokenIterator(
+            input: input,
+            model: context.model,
+            cache: cache,
+            processor: processor,
+            sampler: generateParams.sampler(),
+            prefillStepSize: generateParams.prefillStepSize,
+            maxTokens: generateParams.maxTokens
+        )
+
+        let (stream, _) = MLXLMCommon.generateTokenTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator
+        )
+        return stream
     }
 
     /// Text-only path: tokenise, look up the prompt cache, prefill only
@@ -838,8 +910,22 @@ public actor MLXSwiftEngine: InferenceEngine {
         modelID: String,
         hasTools: Bool,
         numDraftTokens: Int?,
+        responseFormat: ResponseFormat?,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
+        // Track C: a structured-output request must NOT speculate. A draft
+        // model proposes tokens from its own logits, which the constraint mask
+        // never sees, so accepted drafts could violate the JSON grammar. When a
+        // draft container is resident AND this request is constrained, skip the
+        // speculative branch and fall through to the plain (constrained) path.
+        if responseFormat != nil, draftContainer != nil {
+            await LogManager.shared.debug(
+                "Structured output (response_format) disables speculative decoding "
+                    + "for this request — the draft model cannot honor the constraint.",
+                category: .inference
+            )
+        }
+
         // D1: `ensureDraftContainer` (called just before this, in
         // `runGeneration`) has already reconciled `draftContainer` with the
         // request — a resident draft container IS this request's signal to
@@ -847,7 +933,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         // prompt cache entirely (see `runSpeculativeLLMGeneration`'s doc
         // comment) rather than threading a third branch through the cache
         // logic below.
-        if let draftContainer {
+        if let draftContainer, responseFormat == nil {
             // D1 follow-up fix: cache-trimmability precheck BEFORE
             // committing to the speculative branch. mlx-swift-lm's
             // `SpeculativeTokenIterator.init` (invoked inside
@@ -963,6 +1049,10 @@ public actor MLXSwiftEngine: InferenceEngine {
         let priorCacheBox: PromptCacheSnapshot? = priorCache.map { PromptCacheSnapshot($0) }
         // `promptInput` is the suffix to prefill (full prompt on a miss).
         let inputBox = NonSendableBox(promptInput)
+        // Captured into the perform closure for a constrained generation. The
+        // cache is Sendable (`@unchecked` behind a lock); `responseFormat` and
+        // `modelID` are value types.
+        let vocabCache = tokenVocabularyCache
 
         let setup: (
             cache: PromptCacheSnapshot,
@@ -972,12 +1062,31 @@ public actor MLXSwiftEngine: InferenceEngine {
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = priorCacheBox?.caches
                     ?? context.model.newCache(parameters: generateParams)
-                let stream = try MLXLMCommon.generateTokens(
-                    input: inputBox.value,
-                    cache: cache,
-                    parameters: generateParams,
-                    context: context
-                )
+                let stream: AsyncStream<TokenGeneration>
+                if let responseFormat {
+                    // Track C constrained path: install the JSON/schema logit
+                    // mask via a hand-built `TokenIterator`, then run it through
+                    // the same raw-token task the unconstrained path uses so all
+                    // downstream streaming/detokenization is byte-for-byte the
+                    // same. The constraint mask is applied LAST (after any
+                    // penalty processor) inside `JSONConstraintProcessor`.
+                    stream = try Self.constrainedTokenStream(
+                        input: inputBox.value,
+                        cache: cache,
+                        generateParams: generateParams,
+                        context: context,
+                        responseFormat: responseFormat,
+                        modelID: modelID,
+                        vocabCache: vocabCache
+                    )
+                } else {
+                    stream = try MLXLMCommon.generateTokens(
+                        input: inputBox.value,
+                        cache: cache,
+                        parameters: generateParams,
+                        context: context
+                    )
+                }
                 // `ToolCallFormat?` is Sendable, so it rides back out of the
                 // actor alongside the cache + stream.
                 return (PromptCacheSnapshot(cache), stream, context.configuration.toolCallFormat)
