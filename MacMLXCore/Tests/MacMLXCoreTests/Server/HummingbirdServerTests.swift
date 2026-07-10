@@ -628,6 +628,170 @@ struct HummingbirdServerTests {
         #expect(message["tool_calls"] == nil)
     }
 
+    // MARK: - Speculative decoding pass-through (D1, OpenAI /v1/chat/completions)
+    //
+    // NOT OpenAI-standard fields — mirrors mlx-lm's Python server `draft_model`
+    // / `num_draft_tokens` request fields. These tests use stub engines so no
+    // real model (or draft model) is needed; the real draft-model load/swap
+    // state machine is covered by `MLXSwiftEngineSpeculativeDecodingTests`,
+    // and real on/off token parity by the gated
+    // `SpeculativeDecodingModelTests`.
+    //
+    // Port assignments (spaced by 10):
+    //   chatCompletionsDraftModelAndNumDraftTokensPopulateGenerateRequest : 19_850
+    //   chatCompletionsNumDraftTokensClampsOutOfRangeValue                : 19_860
+    //   chatCompletionsNonStreamingSurfacesSpeculativeDecodingUsage       : 19_870
+    //   chatCompletionsWithoutDraftModelOmitsSpeculativeDecodingUsage     : 19_880
+
+    /// A request carrying `draft_model`/`num_draft_tokens` populates
+    /// `GenerateRequest.draftModelID`/`numDraftTokens` verbatim.
+    @Test
+    func chatCompletionsDraftModelAndNumDraftTokensPopulateGenerateRequest() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_850)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": false,
+            "draft_model": "small-draft-model",
+            "num_draft_tokens": 5,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let captured = try #require(await engine.capturedRequest)
+        #expect(captured.draftModelID == "small-draft-model")
+        #expect(captured.numDraftTokens == 5)
+    }
+
+    /// `num_draft_tokens` outside 1...8 is clamped (via `GenerateRequest`)
+    /// before it ever reaches the engine.
+    @Test
+    func chatCompletionsNumDraftTokensClampsOutOfRangeValue() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_860)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": false,
+            "draft_model": "small-draft-model",
+            "num_draft_tokens": 99,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(await engine.capturedRequest?.numDraftTokens == 8)
+    }
+
+    /// Stub engine whose terminal chunk carries speculative decoding
+    /// telemetry — the shape `MLXSwiftEngine` produces when mlx-swift-lm
+    /// reports accepted/proposed counts for a speculative generation. Lets
+    /// the server's non-standard `usage.speculative_decoding` pass-through be
+    /// exercised without a real model or a real draft model.
+    private actor SpeculativeStubEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        private(set) var status: EngineStatus = .idle
+        private(set) var loadedModel: LocalModel?
+        let version = "spec-1"
+
+        func load(_ model: LocalModel) async throws {
+            status = .loading(model: model.id)
+            loadedModel = model
+            status = .ready(model: model.id)
+        }
+
+        func unload() async throws {
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.yield(GenerateChunk(
+                    text: "spec-response",
+                    finishReason: .stop,
+                    usage: TokenUsage(promptTokens: 5, completionTokens: 6),
+                    speculativeDecoding: SpeculativeDecodingUsage(proposedTokens: 6, acceptedTokens: 4)
+                ))
+                continuation.finish()
+            }
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
+    /// The non-streaming response surfaces accepted/proposed draft-token
+    /// counts as a non-standard `usage.speculative_decoding` sub-object when
+    /// the terminal chunk carries them.
+    @Test
+    func chatCompletionsNonStreamingSurfacesSpeculativeDecodingUsage() async throws {
+        let engine = SpeculativeStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_870)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": false,
+            "draft_model": "small-draft-model",
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let usage = try #require(json["usage"] as? [String: Any])
+        #expect(usage["prompt_tokens"] as? Int == 5)
+        #expect(usage["completion_tokens"] as? Int == 6)
+        let spec = try #require(usage["speculative_decoding"] as? [String: Any])
+        #expect(spec["proposed_tokens"] as? Int == 6)
+        #expect(spec["accepted_tokens"] as? Int == 4)
+    }
+
+    /// Back-compat / no-fake-fields: a generation that never ran the
+    /// speculative path (terminal chunk's `speculativeDecoding` is nil, as
+    /// with every existing stub/engine before D1) omits
+    /// `usage.speculative_decoding` entirely rather than emitting a
+    /// zero-filled placeholder.
+    @Test
+    func chatCompletionsWithoutDraftModelOmitsSpeculativeDecodingUsage() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 19_880)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Hi"]],
+            "stream": false,
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(await engine.capturedRequest?.draftModelID == nil)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let usage = try #require(json["usage"] as? [String: Any])
+        #expect(usage["speculative_decoding"] == nil)
+    }
+
     /// Split an SSE response body into decoded `data:` JSON frames, dropping the
     /// terminal `[DONE]` sentinel. Used by the streaming tool-call test.
     private func sseFrames(_ data: Data) -> [[String: Any]] {

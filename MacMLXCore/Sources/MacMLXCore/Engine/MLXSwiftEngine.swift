@@ -72,6 +72,37 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     private var loadedSupport: LoadedSupport = .none
 
+    /// Resident draft model container for classic per-request speculative
+    /// decoding (D1, text-only), or nil when no draft model is loaded.
+    /// Swapped/unloaded by `ensureDraftContainer` when a request's
+    /// `draftModelID` differs from `loadedDraftModelID`. Reuses the same
+    /// `LLMModelFactory` container-loading path as the primary model — a
+    /// draft model is always a plain text LLM, never a VLM.
+    ///
+    /// - Note: known v1 tradeoff — unlike primary models in `ModelPool`,
+    ///   a resident draft container has no idle/TTL-based eviction; it stays
+    ///   resident until swapped, explicitly unloaded, or the target model
+    ///   reloads.
+    private var draftContainer: ModelContainer?
+
+    /// Model id of the currently-loaded `draftContainer`, or nil. Tracked
+    /// separately from `draftContainer` so `ensureDraftContainer` can decide
+    /// keep/swap/unload by comparing ids without touching the container.
+    private var loadedDraftModelID: String?
+
+    /// Fast-fail re-entrancy guard for the speculative decoding path (D1)
+    /// ONLY — the non-speculative path is unaffected. Swift actors are
+    /// reentrant across `await` suspension points, so nothing about being
+    /// an actor method alone prevents two overlapping calls into
+    /// `runSpeculativeLLMGeneration` from interleaving on this instance
+    /// (see that method's doc comment for what actually serializes callers
+    /// today, and where it does not). A silent race here would let two
+    /// callers both "loan out" and mutate the SAME `draftContainer`'s model
+    /// concurrently — surfacing as garbled tokens or a crash, not a clean
+    /// error — so this guard fails loudly instead. Set true for the
+    /// duration of `runSpeculativeLLMGeneration`, reset via `defer`.
+    private var speculativeGenerationInFlight = false
+
     /// Two-tier prompt cache (hot dict + cold safetensors sidecar). Used
     /// by `runGeneration` to reuse KV state across successive turns on
     /// the same LLM. VLM generations bypass it.
@@ -158,6 +189,15 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
             loadedSupport = support
             loadedModel = model
+            // Symmetric with `unload()`: a freshly-loaded target model must
+            // not inherit a draft container that was paired with whatever
+            // model was previously loaded on this actor instance — a stale
+            // draft left resident across a target swap only wastes memory
+            // (the tokenizer-compatibility check in
+            // `runSpeculativeLLMGeneration` already fails safely on a
+            // mismatched pairing either way).
+            draftContainer = nil
+            loadedDraftModelID = nil
             status = .ready(model: model.id)
         } catch let engineError as EngineError {
             // Already shaped — preserve the typed error.
@@ -207,11 +247,27 @@ public actor MLXSwiftEngine: InferenceEngine {
     }
 
     /// Release the loaded model from memory.
+    ///
+    /// Also releases the D1 draft container (if any) — "the loaded model
+    /// and any caches" (protocol doc) reasonably includes the speculative
+    /// decoding drafter, and a stale draft left resident across a target
+    /// swap would only waste memory (the per-request tokenizer compatibility
+    /// check in `runSpeculativeLLMGeneration` already fails safely on a
+    /// mismatched pairing, but there's no reason to keep it around).
     public func unload() async throws {
         loadedSupport = .none
         loadedModel = nil
+        draftContainer = nil
+        loadedDraftModelID = nil
         status = .idle
     }
+
+    /// Test seam: whether a draft container is currently resident. Internal
+    /// (not `private`) so `@testable import` tests can observe D1
+    /// draft-state resets (e.g. after `unload()` / a successful `load(_:)`)
+    /// without needing a real model load — mirrors `isUnsupportedGemma4MoE`'s
+    /// "kept internal so tests can exercise it" precedent below.
+    var hasDraftContainer: Bool { draftContainer != nil }
 
     /// Apply a LoRA adapter (v0.5+) to the currently-loaded model.
     ///
@@ -354,6 +410,172 @@ public actor MLXSwiftEngine: InferenceEngine {
         await promptCacheStore.clearAll()
     }
 
+    // MARK: D1 — speculative decoding draft container lifecycle
+
+    /// Action to take on `draftContainer` for a request's `draftModelID`.
+    /// Pure decision function (no I/O) so the keep/swap/unload state machine
+    /// is unit-testable without loading any model or touching Metal — see
+    /// `ensureDraftContainer`, the only caller, for the actual load/unload.
+    enum DraftContainerAction: Equatable {
+        /// Nothing requested and nothing resident, OR the resident draft
+        /// already matches the request — do nothing.
+        case keep
+        /// The request has no draft model (nil) but one is resident — unload it.
+        case unload
+        /// The request names a draft model that isn't currently resident
+        /// (either nothing was loaded, or a DIFFERENT one was) — load it,
+        /// replacing any existing draft container.
+        case load(id: String)
+
+        static func decide(currentDraftModelID: String?, requestedDraftModelID: String?) -> Self {
+            switch (currentDraftModelID, requestedDraftModelID) {
+            case (.none, .none):
+                return .keep
+            case (.some(let current), .some(let requested)) where current == requested:
+                return .keep
+            case (.some, .none):
+                return .unload
+            case (_, .some(let requested)):
+                return .load(id: requested)
+            }
+        }
+    }
+
+    /// Ensure `draftContainer`/`loadedDraftModelID` match `requestedDraftModelID`
+    /// before a generation request. A no-op when they already match (the
+    /// common case: repeated requests with the same — or no — draft model).
+    ///
+    /// - Throws: `EngineError.modelLoadFailed` if the draft directory doesn't
+    ///   exist or fails to load through the same `LLMModelFactory` path
+    ///   `load(_:)` uses for the primary model. On failure, any previously
+    ///   loaded draft container is dropped too — a half-applied swap must
+    ///   never leave a stale, silently-mismatched draft resident.
+    private func ensureDraftContainer(requestedDraftModelID: String?) async throws {
+        switch DraftContainerAction.decide(
+            currentDraftModelID: loadedDraftModelID,
+            requestedDraftModelID: requestedDraftModelID
+        ) {
+        case .keep:
+            return
+        case .unload:
+            draftContainer = nil
+            loadedDraftModelID = nil
+        case .load(let id):
+            do {
+                let container = try await LLMModelFactory.shared.loadContainer(
+                    from: Self.draftModelDirectory(id: id),
+                    using: HuggingFaceTokenizerLoader()
+                )
+                draftContainer = container
+                loadedDraftModelID = id
+            } catch {
+                draftContainer = nil
+                loadedDraftModelID = nil
+                throw EngineError.modelLoadFailed(
+                    reason: "Draft model '\(id)' failed to load: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// Default on-disk location for a draft model named by bare id —
+    /// `~/.mac-mlx/models/<id>`, mirroring `SettingsManager`'s default
+    /// `modelDirectory`.
+    ///
+    /// - Note: v1 limitation — does not honor a user-customized model
+    ///   directory setting. `MLXSwiftEngine` has no dependency on
+    ///   `SettingsManager`/`ModelLibraryManager` today: resolving the
+    ///   PRIMARY model's id to a directory happens one layer up (server's
+    ///   `ModelResolver` / GUI's `ModelPool`), which hands the engine an
+    ///   already-resolved `LocalModel`. The draft model, by contrast, is
+    ///   named by a bare id in the wire request with no equivalent resolver
+    ///   plumbed through — revisit if draft models need the same injection.
+    ///
+    /// - Important: `id` arrives verbatim from the wire
+    ///   (`GenerateRequest.draftModelID`, client-controlled) and is used to
+    ///   build a filesystem path — a path-traversal surface if unchecked
+    ///   (`"../../etc"`, a leading dot reaching into a hidden dotfile, an
+    ///   embedded path separator, …). Validated twice:
+    ///   1. Before construction: `id` must pass `isValidDraftModelID` — an
+    ///      allowlist (`[A-Za-z0-9._-]+`, no leading `.`), which rejects
+    ///      `/`, `\`, NUL, `..`, and any dotfile-style id in one rule.
+    ///   2. After construction: the standardized candidate path must still
+    ///      resolve under the standardized models root — defense in depth
+    ///      that doesn't rely on the allowlist alone having anticipated
+    ///      every trick.
+    ///   Either failure throws `EngineError.invalidDraftModelID(id:)`,
+    ///   carrying only the raw `id` the client sent — never the resolved/
+    ///   standardized path — so a client probing for filesystem layout via
+    ///   error text learns nothing beyond its own input.
+    /// - Throws: `EngineError.invalidDraftModelID` when `id` fails either check.
+    static func draftModelDirectory(id: String) throws -> URL {
+        guard Self.isValidDraftModelID(id) else {
+            throw EngineError.invalidDraftModelID(id: id)
+        }
+        let root = DataRoot.macMLX("models")
+        let candidate = root.appending(path: id, directoryHint: .isDirectory)
+
+        // Belt-and-braces: confirm the standardized candidate is still
+        // rooted under the standardized models directory.
+        // `standardizedFileURL` lexically resolves `.`/`..` components, so
+        // this catches anything the allowlist above didn't anticipate.
+        let rootPath = root.standardizedFileURL.path
+        let candidatePath = candidate.standardizedFileURL.path
+        guard candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/") else {
+            throw EngineError.invalidDraftModelID(id: id)
+        }
+        return candidate
+    }
+
+    /// Whether `id` is safe to use as a single filesystem path component.
+    /// An allowlist — not a blocklist — so anything outside plain ASCII
+    /// letters/digits/`.`/`_`/`-` is rejected outright (covers `/`, `\`,
+    /// NUL, and any other separator), plus an explicit leading-dot ban,
+    /// which blocks `.`, `..`, and dotfile-style ids (`.hidden`) in one rule.
+    static func isValidDraftModelID(_ id: String) -> Bool {
+        guard !id.isEmpty, id.first != "." else { return false }
+        return id.allSatisfy { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "." || char == "_" || char == "-")
+        }
+    }
+
+    /// Simple tokenizer-compatibility probe for speculative decoding.
+    /// mlx-swift-lm's `SpeculativeTokenIterator` documents that the target
+    /// and draft models "must share the same tokenizer" but does not itself
+    /// verify this — a silent mismatch would misinterpret draft-proposed
+    /// token ids against the target vocabulary (garbled output, not a
+    /// crash). Not a full vocabulary diff, but enough to catch "wrong model
+    /// family" mistakes cheaply and without touching MLX:
+    ///  1. Compares the three special-token STRINGS the `Tokenizer` protocol
+    ///     exposes (`bosToken`/`eosToken`/`unknownToken`).
+    ///  2. Also compares their underlying numeric ids — two tokenizers can
+    ///     share special-token SPELLING while assigning it a different
+    ///     vocabulary id (e.g. after a vocab resize/retrain on an otherwise
+    ///     similar config), which the string-only check above would miss
+    ///     and which would misindex the target's embedding table just the
+    ///     same as a spelling mismatch. `eosTokenId`/`unknownTokenId` are
+    ///     `MLXLMCommon.Tokenizer`'s own protocol-extension-provided id
+    ///     lookups (derived internally via `convertTokenToId`).
+    ///     `MLXLMCommon.Tokenizer` — the type actually in scope here via
+    ///     `import MLXLMCommon` — has no `bosTokenId` member (unlike
+    ///     swift-transformers' distinct `Tokenizers.Tokenizer` protocol,
+    ///     which does), so the BOS id is derived the same way the extension
+    ///     derives the other two, via `convertTokenToId`, keeping the check
+    ///     symmetric across all three special tokens.
+    static func tokenizersAreCompatible(target: any Tokenizer, draft: any Tokenizer) -> Bool {
+        guard target.bosToken == draft.bosToken,
+              target.eosToken == draft.eosToken,
+              target.unknownToken == draft.unknownToken
+        else {
+            return false
+        }
+        let targetBOSId = target.bosToken.flatMap { target.convertTokenToId($0) }
+        let draftBOSId = draft.bosToken.flatMap { draft.convertTokenToId($0) }
+        return targetBOSId == draftBOSId
+            && target.eosTokenId == draft.eosTokenId
+            && target.unknownTokenId == draft.unknownTokenId
+    }
+
     // MARK: Private generation helper
 
     /// Actor-isolated generation driver called from within `generate(_:)`.
@@ -469,6 +691,22 @@ public actor MLXSwiftEngine: InferenceEngine {
             // VLM path: bypass the prompt cache (the cache key would
             // need to fold image content hashes into the chained hash
             // — deferred to a follow-up).
+            //
+            // D1 speculative decoding is text-only — a VLM request that
+            // sets `draftModelID` is not an error, just ignored (silently
+            // per the field's own doc comment, but logged for visibility).
+            // Known v1 tradeoff: this branch never calls `ensureDraftContainer`,
+            // so a draft container resident from an earlier LLM request stays
+            // resident (memory only, not correctness) through VLM generations.
+            if request.draftModelID != nil {
+                Task.detached {
+                    await LogManager.shared.debug(
+                        "Ignoring draftModelID on a VLM request — speculative decoding "
+                            + "(D1) is text-only.",
+                        category: .inference
+                    )
+                }
+            }
             try await runVLMGeneration(
                 lmInput: lmInput,
                 container: container,
@@ -476,12 +714,18 @@ public actor MLXSwiftEngine: InferenceEngine {
                 into: continuation
             )
         } else {
+            // D1: bring the draft container in line with this request
+            // BEFORE dispatching — throws (rather than silently falling
+            // back to non-speculative generation) if the requested draft
+            // model fails to load.
+            try await ensureDraftContainer(requestedDraftModelID: request.draftModelID)
             try await runLLMGeneration(
                 lmInput: lmInput,
                 container: container,
                 generateParams: generateParams,
                 modelID: loadedModelSnapshot.id,
                 hasTools: request.tools?.isEmpty == false,
+                numDraftTokens: request.numDraftTokens,
                 into: continuation
             )
         }
@@ -496,8 +740,29 @@ public actor MLXSwiftEngine: InferenceEngine {
         generateParams: GenerateParameters,
         modelID: String,
         hasTools: Bool,
+        numDraftTokens: Int?,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
+        // D1: `ensureDraftContainer` (called just before this, in
+        // `runGeneration`) has already reconciled `draftContainer` with the
+        // request — a resident draft container IS this request's signal to
+        // speculate. Fork out to the dedicated path, which bypasses the
+        // prompt cache entirely (see `runSpeculativeLLMGeneration`'s doc
+        // comment) rather than threading a third branch through the cache
+        // logic below.
+        if let draftContainer {
+            try await runSpeculativeLLMGeneration(
+                lmInput: lmInput,
+                container: container,
+                draftContainer: draftContainer,
+                generateParams: generateParams,
+                numDraftTokens: numDraftTokens,
+                hasTools: hasTools,
+                into: continuation
+            )
+            return
+        }
+
         // Flat Int token array for key construction. `LMInput.text.tokens`
         // is an `MLXArray`; `asArray(Int.self)` materialises to Swift.
         let inputTokens = lmInput.text.tokens.asArray(Int.self)
@@ -630,6 +895,189 @@ public actor MLXSwiftEngine: InferenceEngine {
         continuation.finish()
     }
 
+    /// D1: classic per-request speculative decoding, via mlx-swift-lm's
+    /// public `generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)`
+    /// overload (`SpeculativeTokenIterator` under the hood — the "classic"
+    /// draft-model path, distinct from the MTP block-drafter path this
+    /// engine does not use). Called from `runLLMGeneration` once
+    /// `ensureDraftContainer` has confirmed `draftContainer` matches the
+    /// request's `draftModelID`.
+    ///
+    /// v1 tradeoffs, documented here rather than silently absorbed elsewhere:
+    ///  - **Bypasses `promptCacheStore` entirely.** `SpeculativeTokenIterator.init`
+    ///    requires BOTH the target and draft caches to be trimmable
+    ///    (`canTrimPromptCache`) and throws `KVCacheError` otherwise. Our
+    ///    stored snapshots aren't guaranteed to satisfy that for every cache
+    ///    variant this codebase might produce (e.g. a future quantized or
+    ///    batch-positioned cache — see `Batching/`), so every speculative
+    ///    request pays a cold prefill on both models rather than risk that
+    ///    throw. `cache`/`draftCache` are omitted below, so mlx-swift-lm
+    ///    allocates fresh (trimmable-by-default) caches for both models.
+    ///  - **Mutually exclusive with continuous batching** — see
+    ///    `GenerateRequest.draftModelID`'s doc comment. Not enforced here;
+    ///    batching isn't wired to the server yet, so this is a documented
+    ///    invariant rather than a runtime guard.
+    private func runSpeculativeLLMGeneration(
+        lmInput: LMInput,
+        container: ModelContainer,
+        draftContainer: ModelContainer,
+        generateParams: GenerateParameters,
+        numDraftTokens: Int?,
+        hasTools: Bool,
+        into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
+    ) async throws {
+        // Fast-fail re-entrancy guard (speculative path only — see
+        // `speculativeGenerationInFlight`'s doc comment for why this exists
+        // and what it protects against). Reset via `defer` on every exit:
+        // success, throw, or cancellation.
+        guard !speculativeGenerationInFlight else {
+            throw EngineError.generationInProgress
+        }
+        speculativeGenerationInFlight = true
+        defer { speculativeGenerationInFlight = false }
+
+        await LogManager.shared.debug(
+            "Speculative decoding (D1): deliberate prompt-cache bypass — cold prefill on "
+                + "BOTH target and draft models this turn (see runSpeculativeLLMGeneration's "
+                + "doc comment for why the prompt cache is skipped on this path)",
+            category: .inference
+        )
+
+        let targetTokenizer = await container.tokenizer
+        let draftTokenizer = await draftContainer.tokenizer
+        guard Self.tokenizersAreCompatible(target: targetTokenizer, draft: draftTokenizer) else {
+            throw EngineError.draftModelTokenizerMismatch(
+                reason: "target and draft models must share the same tokenizer "
+                    + "(bosToken/eosToken/unknownToken or their ids differ)"
+            )
+        }
+
+        // Extract the draft model out of its own container's isolation so it
+        // can be handed into the TARGET container's `perform` call below —
+        // `generateTokens(...)` needs the draft model and the target
+        // `ModelContext` in the same call. `any LanguageModel` isn't
+        // `Sendable` (it wraps `MLXNN.Module`), so this crosses the
+        // container boundary the same way `LMInput` already does elsewhere
+        // in this file: boxed via `NonSendableBox`, which IS Sendable
+        // (`@unchecked`) even though its payload isn't.
+        //
+        // Safety of "on loan" here does NOT come from actor isolation —
+        // Swift actors are REENTRANT across `await` suspension points, so
+        // two overlapping calls into an `async` method on this SAME actor
+        // instance can interleave; the actor alone does not serialize them.
+        // What actually keeps this safe today is caller-side serialization:
+        // - Server path: `HummingbirdServer`'s `generationLocked` FIFO lock
+        //   (`HummingbirdServer.swift:516`) admits only one request through
+        //   `generate(_:)` at a time, so at most one caller can have a
+        //   draft model "on loan" via this actor at once.
+        // - GUI path: verified NOT equivalently serialized.
+        //   `EngineCoordinator.generate(_:)` (macMLX/macMLX/App/EngineCoordinator.swift)
+        //   has no analogous lock — it just looks up the current engine from
+        //   the shared `ModelPool` and calls `engine.generate(request)`.
+        //   `ChatViewModel` and `BenchmarkViewModel` each guard only their
+        //   OWN re-entrancy (`isGenerating` / `runTask`), and both drive the
+        //   same shared `EngineCoordinator` instance (see `AppState`), so a
+        //   chat generation and a benchmark run against the same resident
+        //   engine could overlap in principle. `speculativeGenerationInFlight`
+        //   above is this engine's own guard against exactly that gap for
+        //   the speculative path — scoped narrowly so the non-speculative
+        //   path's behavior is unchanged.
+        let draftModelBox: NonSendableBox<any LanguageModel> = await draftContainer.perform { context in
+            NonSendableBox(context.model)
+        }
+
+        let inputBox = NonSendableBox(lmInput)
+
+        let setup: (stream: AsyncStream<TokenGeneration>, toolCallFormat: ToolCallFormat?) =
+            try await container.perform(nonSendable: inputBox) { context, inputBox in
+                let stream: AsyncStream<TokenGeneration>
+                // Omit `numDraftTokens` entirely (rather than substitute a
+                // number we hardcode) when the request didn't set one, so a
+                // `nil` genuinely defers to whatever mlx-swift-lm's own
+                // default is, tracking it even if that default changes.
+                if let numDraftTokens {
+                    stream = try MLXLMCommon.generateTokens(
+                        input: inputBox.value,
+                        parameters: generateParams,
+                        context: context,
+                        draftModel: draftModelBox.value,
+                        numDraftTokens: numDraftTokens
+                    )
+                } else {
+                    stream = try MLXLMCommon.generateTokens(
+                        input: inputBox.value,
+                        parameters: generateParams,
+                        context: context,
+                        draftModel: draftModelBox.value
+                    )
+                }
+                return (stream, context.configuration.toolCallFormat)
+            }
+        let stream = setup.stream
+
+        // Same tool-call gating as the non-speculative path — see
+        // `makeToolProcessor`: only route through the processor when the
+        // caller actually requested tools this turn.
+        let toolProcessor = Self.makeToolProcessor(format: setup.toolCallFormat, hasTools: hasTools)
+
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: targetTokenizer)
+        var completionInfo: GenerateCompletionInfo?
+
+        for await event in stream {
+            // POOL-2: stop promptly once the consumer has abandoned/
+            // cancelled this stream, mirroring the non-speculative path.
+            if Task.isCancelled {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
+            switch event {
+            case .token(let token):
+                detokenizer.append(token: token)
+                if let piece = detokenizer.next() {
+                    if let toolProcessor {
+                        if let display = toolProcessor.processChunk(piece), !display.isEmpty {
+                            if case .terminated = continuation.yield(GenerateChunk(text: display)) {
+                                return
+                            }
+                        }
+                    } else if case .terminated = continuation.yield(GenerateChunk(text: piece)) {
+                        return
+                    }
+                }
+            case .info(let info):
+                completionInfo = info
+            }
+        }
+
+        var drainedToolCalls: [ToolCallRequest] = []
+        if let toolProcessor {
+            if let residual = toolProcessor.processEOS(returnBufferedText: true), !residual.isEmpty {
+                continuation.yield(GenerateChunk(text: residual))
+            }
+            drainedToolCalls = toolProcessor.toolCalls.map { Self.toolCallRequest(from: $0) }
+        }
+
+        // Telemetry: pass through accepted/proposed counts when mlx-swift-lm
+        // reported them on the terminal `.info` record; never fabricate the
+        // field when it didn't. Known v1 tradeoff: only the terminal chunk
+        // carries this — there is no incremental/streaming acceptance-rate
+        // telemetry per token as the speculative loop runs.
+        let speculativeDecoding = completionInfo?.speculativeDecodingTelemetry.map {
+            SpeculativeDecodingUsage(
+                proposedTokens: $0.draftTokenCount,
+                acceptedTokens: $0.acceptedDraftTokenCount
+            )
+        }
+
+        emitFinalChunk(
+            completionInfo: completionInfo,
+            toolCalls: drainedToolCalls,
+            speculativeDecoding: speculativeDecoding,
+            into: continuation
+        )
+        continuation.finish()
+    }
+
     /// Vision-language path: prepare the multimodal input (which already
     /// includes processed image embeddings via the VLM's UserInputProcessor),
     /// allocate a fresh KV cache, and stream tokens. Bypasses the prompt
@@ -701,6 +1149,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     private func emitFinalChunk(
         completionInfo: GenerateCompletionInfo?,
         toolCalls: [ToolCallRequest] = [],
+        speculativeDecoding: SpeculativeDecodingUsage? = nil,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) {
         let infoReason: FinishReason
@@ -728,7 +1177,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             text: "",
             finishReason: finishReason,
             usage: usage,
-            toolCalls: toolCalls.isEmpty ? nil : toolCalls
+            toolCalls: toolCalls.isEmpty ? nil : toolCalls,
+            speculativeDecoding: speculativeDecoding
         )
         continuation.yield(finalChunk)
     }
