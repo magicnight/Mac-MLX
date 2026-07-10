@@ -129,4 +129,66 @@ struct SettingsManagerTests {
         #expect(current.serverPort == 7777)
         #expect(current.sparkleUpdateChannel == "beta")
     }
+
+    // MARK: Hugging Face cache discovery (Track F)
+
+    @Test("HF cache scanning defaults to off, seeded with the standard cache path")
+    func hfCacheDefaults() async throws {
+        let url = makeTempSettingsURL()
+        let manager = SettingsManager(fileURL: url)
+        let current = await manager.load()
+
+        #expect(current.scanHuggingFaceCache == false)
+        #expect(current.huggingFaceCacheDirectories == [Settings.defaultHuggingFaceCacheDirectory])
+    }
+
+    @Test("HF cache toggle and directory list persist and reload correctly")
+    func hfCacheSettingsRoundTrip() async throws {
+        let url = makeTempSettingsURL()
+
+        let managerA = SettingsManager(fileURL: url)
+        await managerA.load()
+        let customDirs = [
+            URL(filePath: "/Volumes/External/hf-cache", directoryHint: .isDirectory),
+            Settings.defaultHuggingFaceCacheDirectory,
+        ]
+        try await managerA.update {
+            $0.scanHuggingFaceCache = true
+            $0.huggingFaceCacheDirectories = customDirs
+        }
+
+        let managerB = SettingsManager(fileURL: url)
+        await managerB.load()
+        let current = await managerB.current
+        #expect(current.scanHuggingFaceCache == true)
+        #expect(current.huggingFaceCacheDirectories == customDirs)
+    }
+
+    @Test("legacy settings.json missing the HF cache keys decodes with safe defaults")
+    func hfCacheFieldsDefaultForLegacyFile() async throws {
+        let url = makeTempSettingsURL()
+        // A settings.json predating Track F — none of the HF cache keys.
+        let legacy = """
+        {
+            "modelDirectory": "file:///Users/test/.mac-mlx/models/",
+            "preferredEngine": "mlx-swift-lm",
+            "serverPort": 8000,
+            "autoStartServer": false,
+            "onboardingComplete": true,
+            "sparkleUpdateChannel": "release",
+            "logRetentionDays": 7
+        }
+        """
+        try Data(legacy.utf8).write(to: url)
+
+        let manager = SettingsManager(fileURL: url)
+        let current = await manager.load()
+        // Confirms the *legacy JSON decoded successfully* (back-compat path)
+        // rather than silently falling back to `Settings.default` wholesale —
+        // `onboardingComplete: true` only survives via a real decode, since
+        // `Settings.default.onboardingComplete` is `false`.
+        #expect(current.onboardingComplete == true)
+        #expect(current.scanHuggingFaceCache == false)
+        #expect(current.huggingFaceCacheDirectories == [Settings.defaultHuggingFaceCacheDirectory])
+    }
 }

@@ -15,6 +15,8 @@ struct LocalModelRow: View {
     let onUnload: () -> Void
     let onTogglePin: () -> Void
     let onDelete: () -> Void
+    /// Opens the Track F model card (Overview / Parameters / Files).
+    let onShowDetails: () -> Void
 
     /// Short capsule label for the model's format: "Vision" for VLMs,
     /// "Embed" for text embedders, "MLX" for plain text models.
@@ -45,6 +47,12 @@ struct LocalModelRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    if let parameterCount = model.parameterCount {
+                        Text(parameterCount)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     if let quant = model.quantization {
                         Text(quant)
                             .font(.caption)
@@ -60,6 +68,17 @@ struct LocalModelRow: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
                         .background(Color.green.opacity(0.12), in: Capsule())
+
+                    if model.isExternalReference {
+                        Label("HF Cache", systemImage: "link")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                            .labelStyle(.titleAndIcon)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.blue.opacity(0.12), in: Capsule())
+                            .help("Referenced from your Hugging Face cache — not copied. Manage the actual files via Finder or huggingface-cli.")
+                    }
 
                     if hasUpdateAvailable {
                         Label("Update available", systemImage: "arrow.triangle.2.circlepath.circle.fill")
@@ -87,6 +106,15 @@ struct LocalModelRow: View {
                     .controlSize(.small)
             }
 
+            Button(action: onShowDetails) {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Model details")
+
+            CopyIDButton(id: model.id)
+
             Button(action: onTogglePin) {
                 Image(systemName: isPinned ? "pin.fill" : "pin")
                     .foregroundStyle(isPinned ? .orange : .secondary)
@@ -94,11 +122,16 @@ struct LocalModelRow: View {
             .buttonStyle(.plain)
             .help(isPinned ? "Pinned — won't auto-evict" : "Pin to keep resident")
 
-            Button(role: .destructive, action: onDelete) {
-                Image(systemName: "trash")
+            // HF-cache-referenced models aren't owned by macMLX — hide the
+            // destructive action rather than let it delete shared cache
+            // files other tools may still need (see LocalModel.isExternalReference).
+            if !model.isExternalReference {
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
@@ -126,7 +159,8 @@ struct LocalModelRow: View {
             onLoad: {},
             onUnload: {},
             onTogglePin: {},
-            onDelete: {}
+            onDelete: {},
+            onShowDetails: {}
         )
         LocalModelRow(
             model: model,
@@ -137,7 +171,8 @@ struct LocalModelRow: View {
             onLoad: {},
             onUnload: {},
             onTogglePin: {},
-            onDelete: {}
+            onDelete: {},
+            onShowDetails: {}
         )
     }
     .frame(width: 500, height: 200)

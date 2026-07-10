@@ -49,6 +49,16 @@ public struct ModelParameters: Codable, Hashable, Sendable {
     /// `{"enable_thinking": true}` for Qwen3. `nil` means "no extra
     /// context".
     public var templateKwargs: [String: JSONValue]?
+    /// Model id of a draft model to speculate with (Track F GUI over the
+    /// D1 engine plumbing — see `GenerateRequest.draftModelID`). `nil`
+    /// (default) means "no draft model configured" — the Parameters
+    /// Inspector's picker represents this as "None".
+    public var draftModelID: String?
+    /// Number of tokens the draft model proposes per speculative round.
+    /// Mirrors `GenerateRequest.numDraftTokens`'s `1...8` range; `nil`
+    /// defers to mlx-swift-lm's own default. Meaningless when
+    /// `draftModelID` is nil.
+    public var numDraftTokens: Int?
 
     public init(
         temperature: Double = 0.7,
@@ -58,7 +68,9 @@ public struct ModelParameters: Codable, Hashable, Sendable {
         adapterName: String? = nil,
         alias: String? = nil,
         ttlSeconds: Int? = nil,
-        templateKwargs: [String: JSONValue]? = nil
+        templateKwargs: [String: JSONValue]? = nil,
+        draftModelID: String? = nil,
+        numDraftTokens: Int? = nil
     ) {
         self.temperature = temperature
         self.topP = topP
@@ -68,15 +80,18 @@ public struct ModelParameters: Codable, Hashable, Sendable {
         self.alias = alias
         self.ttlSeconds = ttlSeconds
         self.templateKwargs = templateKwargs
+        self.draftModelID = draftModelID
+        self.numDraftTokens = numDraftTokens
     }
 
     /// Backwards-compatible decoder. Pre-v0.5 JSON has no
-    /// `adapterName` key, and pre-v0.5.1 JSON has no `alias` /
-    /// `ttlSeconds` / `templateKwargs` keys — default to nil so
+    /// `adapterName` key, pre-v0.5.1 JSON has no `alias` /
+    /// `ttlSeconds` / `templateKwargs` keys, and pre-Track-F JSON has no
+    /// `draftModelID` / `numDraftTokens` keys — default to nil so
     /// existing per-model override files load unchanged.
     private enum CodingKeys: String, CodingKey {
         case temperature, topP, maxTokens, systemPrompt, adapterName
-        case alias, ttlSeconds, templateKwargs
+        case alias, ttlSeconds, templateKwargs, draftModelID, numDraftTokens
     }
 
     public init(from decoder: Decoder) throws {
@@ -89,6 +104,8 @@ public struct ModelParameters: Codable, Hashable, Sendable {
         self.alias = try c.decodeIfPresent(String.self, forKey: .alias)
         self.ttlSeconds = try c.decodeIfPresent(Int.self, forKey: .ttlSeconds)
         self.templateKwargs = try c.decodeIfPresent([String: JSONValue].self, forKey: .templateKwargs)
+        self.draftModelID = try c.decodeIfPresent(String.self, forKey: .draftModelID)
+        self.numDraftTokens = try c.decodeIfPresent(Int.self, forKey: .numDraftTokens)
     }
 
     /// Factory for the factory defaults — handy in "Reset" buttons.

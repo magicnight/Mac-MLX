@@ -120,6 +120,15 @@ struct ChatMessageView: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+
+                if let acceptanceRate = message.speculativeDecoding?.acceptancePercent {
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                        .font(.caption2)
+                    Text("\(acceptanceRate)% draft accepted")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
     }

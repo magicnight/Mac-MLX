@@ -195,6 +195,10 @@ public final class AppState {
             sizeCache: self.hfSizeCache,
             modelDirectoryProvider: { [weak self] in
                 self?.currentSettings.modelDirectory ?? Settings.default.modelDirectory
+            },
+            hfCacheSettingsProvider: { [weak self] in
+                let s = self?.currentSettings ?? Settings.default
+                return (s.scanHuggingFaceCache, s.huggingFaceCacheDirectories)
             }
         )
 

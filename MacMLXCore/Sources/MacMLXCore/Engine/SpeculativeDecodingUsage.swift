@@ -14,4 +14,14 @@ public struct SpeculativeDecodingUsage: Codable, Hashable, Sendable {
         self.proposedTokens = proposedTokens
         self.acceptedTokens = acceptedTokens
     }
+
+    /// Acceptance rate as a whole-number percentage
+    /// (`acceptedTokens / proposedTokens * 100`, rounded). `nil` when
+    /// `proposedTokens` is `0` — avoids a division by zero and lets
+    /// callers (Track F's chat message footer) distinguish "no
+    /// speculative round ran" from "0% accepted".
+    public var acceptancePercent: Int? {
+        guard proposedTokens > 0 else { return nil }
+        return Int((Double(acceptedTokens) / Double(proposedTokens) * 100).rounded())
+    }
 }
