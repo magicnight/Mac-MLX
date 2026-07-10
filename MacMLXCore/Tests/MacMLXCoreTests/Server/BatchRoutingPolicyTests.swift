@@ -46,4 +46,22 @@ struct BatchRoutingPolicyTests {
         #expect(!BatchRoutingPolicy.shouldAttemptBatch(
             batchingEnabled: true, hasDraftModel: false, hasResponseFormat: true))
     }
+
+    @Test
+    func unbatchableSamplingFeatureForcesSequential() {
+        // Track E: logit_bias / logprobs / XTC / kv_bits / adapters have no
+        // batched-path support in v1, so any of them (folded into one flag) forces
+        // the single-stream path.
+        #expect(!BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: true, hasDraftModel: false, hasResponseFormat: false,
+            hasUnbatchableSamplingFeature: true))
+    }
+
+    @Test
+    func unbatchableFlagDefaultsFalseKeepsPlainBatching() {
+        // The new parameter defaults to false, so pre-Track-E call sites (and a
+        // plain request) still attempt the batched path unchanged.
+        #expect(BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: true, hasDraftModel: false, hasResponseFormat: false))
+    }
 }
