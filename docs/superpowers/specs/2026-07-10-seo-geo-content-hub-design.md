@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-10
 
-**Status:** Awaiting written specification approval
+**Status:** Approved for implementation planning
 
 **Surface:** `public/` marketing website and its build-time source files
 
@@ -264,7 +264,7 @@ Structured data mirrors visible content and never adds claims that are absent fr
 - Page entities use `inLanguage`, `headline`, `description`, `dateModified`, `mainEntityOfPage`, and `about` where applicable.
 - Comparison pages remain editorial technical articles. They do not use review ratings, product scores, or winner badges.
 - FAQ questions and answers remain visible and machine-readable. `FAQPage` semantics may be emitted only when valid, but the design makes no Google FAQ rich-result claim because Google removed that feature in 2026.
-- The software entity includes truthful name, operating system, application category, price, repository, download URL, version, license, runtime platform, and screenshot properties.
+- The software entity includes truthful name, operating system, application category, price, repository, download URL, version, license, runtime platform, and image properties. Add `screenshot` only after a real, current application screenshot exists; do not relabel a marketing card as an app screenshot.
 - Do not invent an aggregate rating or review to satisfy Google's software-app rich-result requirements.
 
 Validate every JSON-LD block as JSON and verify that key claims are present in visible text.
