@@ -679,16 +679,16 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///
     /// Flow:
     /// 1. Prepare the `LMInput` (tokenisation + chat template application).
-    /// 2. Hash the full input-token sequence into a `PromptCacheKey`.
-    /// 3. Look up a prior cache snapshot in `promptCacheStore`. On hit,
-    ///    reuse its `[KVCache]` so the shared prefix skips prefill. On
-    ///    miss, allocate a fresh cache via `model.newCache(...)`.
-    /// 4. Drive the low-level `generateTokens(input:cache:...)` call so
-    ///    we see raw token IDs and can build the extended key
+    /// 2. Nearest-prefix (LCP) lookup in `promptCacheStore.fetchNearest`. On a
+    ///    hit the store returns a cache already trimmed to the longest shared
+    ///    prefix; we prefill only the remaining suffix. On a miss, allocate a
+    ///    fresh cache via `model.newCache(...)` and prefill the whole prompt.
+    /// 3. Drive the low-level `generateTokens(input:cache:...)` call so
+    ///    we see raw token IDs and can `insert` the full sequence
     ///    `inputTokens + generatedTokenIDs` after the stream ends.
-    /// 5. The `KVCache` protocol is class-bound — the same reference we
+    /// 4. The `KVCache` protocol is class-bound — the same reference we
     ///    passed in is mutated in-place during generation, so at the
-    ///    end we can save that same reference under the extended key.
+    ///    end we store that same reference under the full token sequence.
     private func runGeneration(
         _ request: GenerateRequest,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
@@ -902,28 +902,52 @@ public actor MLXSwiftEngine: InferenceEngine {
             )
         }
 
-        // Flat Int token array for key construction. `LMInput.text.tokens`
-        // is an `MLXArray`; `asArray(Int.self)` materialises to Swift.
+        // Flat Int token array for the cache lookup + telemetry.
+        // `LMInput.text.tokens` is an `MLXArray`; `asArray(Int.self)`
+        // materialises to Swift.
         let inputTokens = lmInput.text.tokens.asArray(Int.self)
-        let priorKey = PromptCacheKey(modelID: modelID, tokens: inputTokens)
 
-        // Try the store. On hit we reuse the restored cache; on miss we
-        // let the iterator allocate a fresh one inside `generateTokens`.
-        let priorSnapshot = await promptCacheStore.get(priorKey)
+        // Track B — nearest-prefix (LCP) lookup. On a hit the store returns a
+        // cache already TRIMMED to the shared prefix, so we prefill only the
+        // remaining suffix `prompt[reused...]`; the reused KV already covers
+        // positions `0..<reused`. On a miss we feed the whole prompt and let
+        // the iterator allocate a fresh cache inside `generateTokens`. This is
+        // what turns a tool-loop / multi-turn agent's per-turn full cold
+        // prefill into an incremental one (only the newly-appended tokens).
+        let hit = await promptCacheStore.fetchNearest(modelID: modelID, tokens: inputTokens)
         let priorCache: [any KVCache]?
-        if let snapshot = priorSnapshot {
-            priorCache = snapshot.caches
+        let promptInput: LMInput
+        if let hit {
+            priorCache = hit.snapshot.caches
+            // Suffix-only prefill input, reconstructed from the sliced token
+            // array alone: `lmInput.text.mask` is intentionally dropped here.
+            // On this text-only single-sequence path the mask is `nil` anyway
+            // (no padding, no batch), so nothing is lost today. If a future
+            // path ever attaches an attention mask to a cached-prefix request,
+            // it must likewise be sliced to `[reusedTokenCount...]` and threaded
+            // through this `LMInput` — otherwise the suffix would be prefilled
+            // against a full-length mask.
+            promptInput = LMInput(tokens: lmInput.text.tokens[hit.reusedTokenCount...])
             await LogManager.shared.debug(
-                "Prompt cache HIT — restored \(priorKey.tokenCount) tokens (model=\(modelID))",
+                "Prompt cache HIT — reused \(hit.reusedTokenCount)/\(inputTokens.count) tokens, "
+                    + "incremental prefill of \(inputTokens.count - hit.reusedTokenCount) "
+                    + "(model=\(modelID))",
                 category: .inference
             )
         } else {
             priorCache = nil
+            promptInput = lmInput
             await LogManager.shared.debug(
-                "Prompt cache MISS — cold prefill of \(priorKey.tokenCount) tokens (model=\(modelID))",
+                "Prompt cache MISS — cold prefill of \(inputTokens.count) tokens (model=\(modelID))",
                 category: .inference
             )
         }
+
+        // On a HIT the iterator only sees the suffix, so `info.promptTokenCount`
+        // will report just the incremental prefill length. Carry the reused
+        // count so the final usage restores the full prompt length (OpenAI
+        // `prompt_tokens` semantics). MISS ⇒ 0, i.e. unchanged.
+        let reusedPromptTokens = hit?.reusedTokenCount ?? 0
 
         // Build the working cache. When we have a prior snapshot we pass
         // that reference straight through; otherwise we ask the model to
@@ -937,7 +961,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         // non-Sendable value by `consuming` it into the actor.
         let tokenizer = await container.tokenizer
         let priorCacheBox: PromptCacheSnapshot? = priorCache.map { PromptCacheSnapshot($0) }
-        let inputBox = NonSendableBox(lmInput)
+        // `promptInput` is the suffix to prefill (full prompt on a miss).
+        let inputBox = NonSendableBox(promptInput)
 
         let setup: (
             cache: PromptCacheSnapshot,
@@ -1020,15 +1045,16 @@ public actor MLXSwiftEngine: InferenceEngine {
         // same `workingCache` reference has been mutated in-place by the
         // iterator, so it now reflects prompt + generated tokens.
         let finalTokens = inputTokens + generatedTokenIDs
-        let newKey = PromptCacheKey(modelID: modelID, tokens: finalTokens)
-        await promptCacheStore.put(
-            key: newKey,
+        await promptCacheStore.insert(
+            modelID: modelID,
+            tokens: finalTokens,
             snapshot: PromptCacheSnapshot(workingCache)
         )
 
         emitFinalChunk(
             completionInfo: completionInfo,
             toolCalls: drainedToolCalls,
+            reusedPromptTokens: reusedPromptTokens,
             into: continuation
         )
         continuation.finish()
@@ -1297,6 +1323,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         completionInfo: GenerateCompletionInfo?,
         toolCalls: [ToolCallRequest] = [],
         speculativeDecoding: SpeculativeDecodingUsage? = nil,
+        reusedPromptTokens: Int = 0,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) {
         let infoReason: FinishReason
@@ -1308,8 +1335,14 @@ public actor MLXSwiftEngine: InferenceEngine {
             case .stop, .cancelled:
                 infoReason = .stop
             }
+            // On a prompt-cache HIT the iterator only prefilled the suffix, so
+            // `info.promptTokenCount` is the incremental count; add back the
+            // reused prefix to report the FULL prompt length (OpenAI
+            // `prompt_tokens` semantics). `reusedPromptTokens` is 0 on a MISS
+            // and on the VLM / speculative paths (which don't reuse), leaving
+            // their reported counts unchanged.
             usage = TokenUsage(
-                promptTokens: info.promptTokenCount,
+                promptTokens: info.promptTokenCount + reusedPromptTokens,
                 completionTokens: info.generationTokenCount
             )
         } else {
