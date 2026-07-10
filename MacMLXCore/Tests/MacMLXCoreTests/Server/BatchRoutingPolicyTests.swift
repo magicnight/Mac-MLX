@@ -15,21 +15,35 @@ struct BatchRoutingPolicyTests {
     func batchingDisabledNeverAttempts() {
         // No seam installed (the default-off switch) → always legacy, regardless
         // of the request. This is the zero-regression guarantee.
-        #expect(!BatchRoutingPolicy.shouldAttemptBatch(batchingEnabled: false, hasDraftModel: false))
-        #expect(!BatchRoutingPolicy.shouldAttemptBatch(batchingEnabled: false, hasDraftModel: true))
+        #expect(!BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: false, hasDraftModel: false, hasResponseFormat: false))
+        #expect(!BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: false, hasDraftModel: true, hasResponseFormat: false))
     }
 
     @Test
     func plainRequestWithSeamAttempts() {
-        // Seam installed + an ordinary request (no speculative decoding) → attempt
-        // the batched path. The seam still has the final say (may return nil).
-        #expect(BatchRoutingPolicy.shouldAttemptBatch(batchingEnabled: true, hasDraftModel: false))
+        // Seam installed + an ordinary request (no speculative decoding, no
+        // constraint) → attempt the batched path. The seam still has the final
+        // say (may return nil).
+        #expect(BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: true, hasDraftModel: false, hasResponseFormat: false))
     }
 
     @Test
     func draftModelForcesSequentialEvenWithSeam() {
         // A resident draft model (speculative decoding) is mutually exclusive with
         // batching in v1 — mirrors mlx-lm's `is_batchable`.
-        #expect(!BatchRoutingPolicy.shouldAttemptBatch(batchingEnabled: true, hasDraftModel: true))
+        #expect(!BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: true, hasDraftModel: true, hasResponseFormat: false))
+    }
+
+    @Test
+    func responseFormatForcesSequentialEvenWithSeam() {
+        // A structured-output (Track C) request must take the single-stream path
+        // where the constraint logit mask is installed; the batched evaluator has
+        // no constraint support in v1.
+        #expect(!BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: true, hasDraftModel: false, hasResponseFormat: true))
     }
 }

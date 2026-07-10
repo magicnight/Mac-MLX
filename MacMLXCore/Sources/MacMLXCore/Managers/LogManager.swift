@@ -153,6 +153,30 @@ public actor LogManager {
         log(message, level: .critical, category: category)
     }
 
+    // MARK: Synchronous (nonisolated) logging
+
+    /// Record a message WITHOUT hopping onto the actor's executor — for callers
+    /// on a synchronous, nonisolated hot path that cannot `await` (e.g. a
+    /// `LogitProcessor.process(logits:)` conformance).
+    ///
+    /// Writes straight to the Sendable backing ``store``, exactly like
+    /// ``log(_:level:category:)``. Safe because `store` is `nonisolated` and
+    /// `LoggerStore` is internally synchronized (the same reason it can be handed
+    /// to `@MainActor` UI). Use the `async` methods above from ordinary async
+    /// code; reach for this only where `await` is genuinely impossible.
+    public nonisolated func logSync(
+        _ message: String,
+        level: LogLevel = .info,
+        category: LogCategory = .system
+    ) {
+        store.storeMessage(
+            label: category.rawValue,
+            level: level.pulse,
+            message: message,
+            metadata: nil
+        )
+    }
+
     // MARK: Flushing
 
     /// Synchronously flush any pending writes to disk.

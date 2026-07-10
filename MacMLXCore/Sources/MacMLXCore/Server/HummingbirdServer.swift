@@ -49,6 +49,13 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// field, mirrors mlx-lm's `num_draft_tokens`. Clamped to 1...8 by
     /// `GenerateRequest`; meaningless without `draft_model`.
     let num_draft_tokens: Int?
+    /// OpenAI `response_format` (Track C structured output). Decoded as a
+    /// free-form `JSONValue` and validated by `ResponseFormatDecoder`, which
+    /// maps `{"type":"json_object"}` / `{"type":"json_schema",…}` to a
+    /// `ResponseFormat` or rejects unsupported schema features with a 400.
+    /// Absent/`null` (and `{"type":"text"}`) mean no constraint. Optional +
+    /// synthesised `decodeIfPresent` ⇒ every pre-Track-C client is unchanged.
+    let response_format: JSONValue?
 }
 
 /// Legacy OpenAI text-completions body (`/v1/completions`, and the
@@ -1172,7 +1179,9 @@ public actor HummingbirdServer {
                 tools: nil,
                 tool_choice: nil,
                 draft_model: legacy.draft_model,
-                num_draft_tokens: legacy.num_draft_tokens
+                num_draft_tokens: legacy.num_draft_tokens,
+                // Legacy text-completions bodies carry no response_format.
+                response_format: nil
             )
         }
 
@@ -1228,6 +1237,21 @@ public actor HummingbirdServer {
         }
         let toolsToSend = toolChoiceIsNone ? nil : chatReq.tools
 
+        // Track C: decode + validate `response_format`. Unsupported schema
+        // features or malformed bodies are rejected here with a 400 (aligned
+        // with every other request-validation 400 on this path) rather than
+        // silently downgraded.
+        let responseFormat: ResponseFormat?
+        do {
+            responseFormat = try ResponseFormatDecoder.decode(chatReq.response_format)
+        } catch let error as ResponseFormatError {
+            return errorResponse(
+                status: .badRequest,
+                message: error.description,
+                code: "invalid_request_error"
+            )
+        }
+
         let genRequest = GenerateRequest(
             model: chatReq.model,
             messages: messages,
@@ -1236,7 +1260,8 @@ public actor HummingbirdServer {
             templateKwargs: await templateKwargs(for: chatReq.model),
             tools: toolsToSend,
             draftModelID: chatReq.draft_model,
-            numDraftTokens: chatReq.num_draft_tokens
+            numDraftTokens: chatReq.num_draft_tokens,
+            responseFormat: responseFormat
         )
 
         // Cold-swap (v0.3.3) is no longer resolved here. SRV-2: the swap
@@ -1256,7 +1281,8 @@ public actor HummingbirdServer {
         // endpoint keeps the existing single-stream path untouched.
         if BatchRoutingPolicy.shouldAttemptBatch(
             batchingEnabled: batchServing != nil,
-            hasDraftModel: genRequest.draftModelID != nil
+            hasDraftModel: genRequest.draftModelID != nil,
+            hasResponseFormat: genRequest.responseFormat != nil
         ) {
             // MEDIUM#3: resolve the in-flight key the same alias-aware way the
             // single-stream path does (mirrors the resolve at ~line 1897) — the

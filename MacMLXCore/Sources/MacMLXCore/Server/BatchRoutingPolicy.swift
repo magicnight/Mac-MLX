@@ -35,6 +35,11 @@ public enum BatchRoutingPolicy {
     ///     Batching × speculative decoding is mutually exclusive in v1 — mirrors
     ///     mlx-lm's server `is_batchable`, where a resident draft model forces
     ///     the sequential path.
+    ///   - hasResponseFormat: the request set `response_format` (Track C
+    ///     structured output). The batched step evaluator has no constraint
+    ///     support in v1, so a constrained request must take the single-stream
+    ///     path where the constraint logit mask is installed. Same
+    ///     `is_batchable` spirit as `hasDraftModel`.
     ///
     /// - Note: mlx-lm's `is_batchable` also excludes a per-request `seed`. macMLX
     ///   has no per-request `seed` request field yet (see
@@ -43,8 +48,9 @@ public enum BatchRoutingPolicy {
     ///   introduced, rather than inventing a dead argument now.
     public static func shouldAttemptBatch(
         batchingEnabled: Bool,
-        hasDraftModel: Bool
+        hasDraftModel: Bool,
+        hasResponseFormat: Bool
     ) -> Bool {
-        batchingEnabled && !hasDraftModel
+        batchingEnabled && !hasDraftModel && !hasResponseFormat
     }
 }

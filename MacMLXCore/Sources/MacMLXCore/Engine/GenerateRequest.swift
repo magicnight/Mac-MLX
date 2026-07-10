@@ -136,6 +136,22 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// default) defers to mlx-swift-lm's own default (2 as of 3.31.3).
     /// Meaningless when `draftModelID` is nil.
     public var numDraftTokens: Int?
+    /// Structured-output constraint (Track C). When non-nil the engine
+    /// constrains generation so the output is guaranteed well-formed JSON
+    /// (`.jsonObject`, C1) or conforms to the compiled schema subset
+    /// (`.jsonSchema`, C2), via a decode-time logit mask. Decoded by the server
+    /// from OpenAI's `response_format` (unsupported schema features are rejected
+    /// with a 400 before a request is ever built — see `ResponseFormatDecoder`).
+    ///
+    /// - Important: Mutually exclusive with both continuous batching and
+    ///   speculative decoding in v1. The batch gate
+    ///   (`BatchRoutingPolicy.shouldAttemptBatch(hasResponseFormat:)`) routes a
+    ///   constrained request to the single-stream path, and the engine disables
+    ///   any resident draft model for it — a draft proposal cannot be guaranteed
+    ///   to honor the constraint, so the two never combine. Default nil and
+    ///   decoded via `decodeIfPresent`, so pre-Track-C serialized requests keep
+    ///   decoding.
+    public var responseFormat: ResponseFormat?
 
     public init(
         model: String,
@@ -145,7 +161,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         templateKwargs: [String: JSONValue]? = nil,
         tools: [JSONValue]? = nil,
         draftModelID: String? = nil,
-        numDraftTokens: Int? = nil
+        numDraftTokens: Int? = nil,
+        responseFormat: ResponseFormat? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -155,11 +172,12 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         self.tools = tools
         self.draftModelID = draftModelID
         self.numDraftTokens = Self.clampNumDraftTokens(numDraftTokens)
+        self.responseFormat = responseFormat
     }
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, systemPrompt, parameters, templateKwargs, tools
-        case draftModelID, numDraftTokens
+        case draftModelID, numDraftTokens, responseFormat
     }
 
     /// Custom decoder (mirrors `ChatMessage.init(from:)`) so the `1...8`
@@ -180,6 +198,7 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         self.numDraftTokens = Self.clampNumDraftTokens(
             try c.decodeIfPresent(Int.self, forKey: .numDraftTokens)
         )
+        self.responseFormat = try c.decodeIfPresent(ResponseFormat.self, forKey: .responseFormat)
     }
 
     /// Clamp to mlx-swift-lm's sane speculative round-size range. `nil`
