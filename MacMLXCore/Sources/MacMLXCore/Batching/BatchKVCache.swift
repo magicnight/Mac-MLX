@@ -105,6 +105,24 @@ public final class BatchKVCache: BatchPositionedKVCache {
         self.values = values
     }
 
+    /// Build a single-row (`B == 1`) cache from an already-prefilled stock
+    /// cache's key/value buffers — the A2c admission primitive.
+    ///
+    /// A newly admitted request is prefilled B=1 through a plain `KVCacheSimple`
+    /// (the fully-proven scalar-offset path, sidestepping the batched-prefill
+    /// RoPE bug), producing `[1, H, L, D]` buffers. This wraps them as a
+    /// one-row `BatchKVCache` with ZERO left-padding — its RoPE offset is its
+    /// real length `keys.dim(2)` — so the scheduler can ``extend(other:)`` it
+    /// into the running ragged batch, which left-pads it to the cohort width.
+    /// `keys`/`values` must be `[1, H, L, D]` (a single prefilled row).
+    public static func singleRow(keys: MLXArray, values: MLXArray) -> BatchKVCache {
+        let cache = BatchKVCache(leftPadding: [0])
+        cache.state = [
+            keys, values, MLXArray([Int32(keys.dim(2))]), MLXArray([Int32(0)]),
+        ]
+        return cache
+    }
+
     // MARK: - BatchPositionedKVCache
 
     /// Per-row RoPE offsets, shape `[B]`. Read (pre-`update`) by the model as

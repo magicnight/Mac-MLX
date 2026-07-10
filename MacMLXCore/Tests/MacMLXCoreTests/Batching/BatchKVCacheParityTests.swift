@@ -187,6 +187,66 @@ final class BatchKVCacheParityTests: XCTestCase {
             merged[3], try XCTUnwrap(fixture["extend_left_padding"]), "extend leftPadding")
     }
 
+    /// `extend`'s `right < 0` slice-back branch (A2b review MEDIUM-2). BOTH
+    /// inputs are grown via ``BatchKVCache/update(keys:values:)`` so each holds a
+    /// 256-step over-allocated buffer; merging unequal `idx` (3 vs 5) makes the
+    /// left-justify padding overrun the shared buffer width, forcing extend to
+    /// trim the tail before padding. The tightly-packed (`state`-set, buffer ==
+    /// idx) merge above never reaches this branch.
+    func testExtendRightSliceBranchMatchesPythonReference() throws {
+        try requireMLXRuntimeOrSkip()
+        let fixture = try loadFixture()
+
+        let cacheA = BatchKVCache(leftPadding: [0, 1])
+        _ = cacheA.update(
+            keys: try XCTUnwrap(fixture["extendR_self_keys"]),
+            values: try XCTUnwrap(fixture["extendR_self_values"]))
+        let cacheB = BatchKVCache(leftPadding: [2])
+        _ = cacheB.update(
+            keys: try XCTUnwrap(fixture["extendR_other_keys"]),
+            values: try XCTUnwrap(fixture["extendR_other_values"]))
+
+        cacheA.extend(other: cacheB)
+
+        XCTAssertEqual(
+            cacheA.offset, try XCTUnwrap(fixture["extendR_idx"]).item(Int.self),
+            "extend idx == max(idxA, idxB) after the right<0 slice-back")
+        let merged = cacheA.state
+        assertClose(merged[0], try XCTUnwrap(fixture["extendR_keys"]), "extendR keys")
+        assertClose(merged[1], try XCTUnwrap(fixture["extendR_values"]), "extendR values")
+        assertIntEqual(merged[2], try XCTUnwrap(fixture["extendR_offset"]), "extendR offset")
+        assertIntEqual(
+            merged[3], try XCTUnwrap(fixture["extendR_left_padding"]), "extendR leftPadding")
+    }
+
+    /// `extend` merging an empty (never-`update`d, `keys == nil`) cache with a
+    /// non-empty one (A2b review MEDIUM-2). This is the fresh-accumulator shape:
+    /// extend must zero-fill `self`'s row for the full width and right-justify
+    /// `other`'s real content. Exercises the `k is None` zero-fill sub-branch of
+    /// extend's per-cache `padded(_:)`.
+    func testExtendEmptyIntoNonEmptyMatchesPythonReference() throws {
+        try requireMLXRuntimeOrSkip()
+        let fixture = try loadFixture()
+
+        let cacheEmpty = BatchKVCache(leftPadding: [0])  // never updated
+        let cacheFull = BatchKVCache(leftPadding: [1])
+        _ = cacheFull.update(
+            keys: try XCTUnwrap(fixture["extendE_other_keys"]),
+            values: try XCTUnwrap(fixture["extendE_other_values"]))
+
+        cacheEmpty.extend(other: cacheFull)
+
+        XCTAssertEqual(
+            cacheEmpty.offset, try XCTUnwrap(fixture["extendE_idx"]).item(Int.self),
+            "extend idx == the non-empty cache's idx")
+        let merged = cacheEmpty.state
+        assertClose(merged[0], try XCTUnwrap(fixture["extendE_keys"]), "extendE keys")
+        assertClose(merged[1], try XCTUnwrap(fixture["extendE_values"]), "extendE values")
+        assertIntEqual(merged[2], try XCTUnwrap(fixture["extendE_offset"]), "extendE offset")
+        assertIntEqual(
+            merged[3], try XCTUnwrap(fixture["extendE_left_padding"]), "extendE leftPadding")
+    }
+
     // MARK: - Converter accept path (constructs BatchKVCache → MLX-gated)
 
     /// The dense-only converter turns a cohort of plain `KVCacheSimple` layers
@@ -212,5 +272,56 @@ final class BatchKVCacheParityTests: XCTestCase {
                 batchCache.batchOffset, MLXArray(cohortLeftPadding.map { Int32(-$0) }),
                 "converted cache batchOffset")
         }
+    }
+
+    /// A2c admission geometry, fixture-free: a COMPACT single-row cache (state
+    /// setter, buffer width == L — exactly what `BatchKVCache.singleRow` yields
+    /// from a B=1 prefill) extended into a STEP-GROWN running batch (256-wide
+    /// buffer). With the admitted row LONGER than the running idx, `padded()`
+    /// drives the running side's negative-bound slice-back (`right < 0`) AND
+    /// the compact side's right-pad — the exact buffer geometry of a mid-flight
+    /// admit, which the fixture stanzas (update-grown ⊕ update-grown) do not
+    /// exercise together.
+    func testExtendCompactSingleRowIntoStepGrownBatch() throws {
+        try requireMLXRuntimeOrSkip()
+
+        // Running batch: one row grown via `update` → 256-wide buffer, idx 3.
+        let running = BatchKVCache(leftPadding: [0])
+        let runningKeys = MLXArray(0 ..< 6).reshaped(1, 1, 3, 2).asType(.float32)
+        let runningValues = runningKeys + 100
+        _ = running.update(keys: runningKeys, values: runningValues)
+        XCTAssertEqual(running.offset, 3, "running batch idx after a 3-token update")
+
+        // Admitted row: compact buffer via `singleRow`, idx 5 (LONGER prompt).
+        let admittedKeys = (MLXArray(0 ..< 10).reshaped(1, 1, 5, 2) + 1000).asType(.float32)
+        let admittedValues = admittedKeys + 100
+        let admitted = BatchKVCache.singleRow(keys: admittedKeys, values: admittedValues)
+        XCTAssertEqual(admitted.offset, 5, "singleRow idx equals the compact width")
+        assertIntEqual(admitted.batchOffset, MLXArray([Int32(5)]), "singleRow perRowOffset")
+
+        running.extend(other: admitted)
+
+        // Merged bookkeeping: idx aligns to the larger row; the shorter running
+        // row gains left-padding; per-row RoPE offsets keep each row's REAL
+        // position (never the batch idx).
+        XCTAssertEqual(running.offset, 5, "merged idx aligns to max(idx)")
+        assertIntEqual(
+            running.batchOffset, MLXArray([Int32(3), Int32(5)]),
+            "per-row offsets must be untouched by extend")
+        assertIntEqual(
+            running.state[3], MLXArray([Int32(2), Int32(0)]),
+            "running row is left-padded by 2, admitted row by 0")
+
+        // Content survives both the slice-back and the pad: extract() drops
+        // each row's padding and must return the original tensors verbatim.
+        let extractedRunning = running.extract(0)
+        XCTAssertEqual(extractedRunning.offset, 3, "running row real length")
+        assertClose(extractedRunning.state[0], runningKeys, "running row keys survive")
+        assertClose(extractedRunning.state[1], runningValues, "running row values survive")
+
+        let extractedAdmitted = running.extract(1)
+        XCTAssertEqual(extractedAdmitted.offset, 5, "admitted row real length")
+        assertClose(extractedAdmitted.state[0], admittedKeys, "admitted row keys survive")
+        assertClose(extractedAdmitted.state[1], admittedValues, "admitted row values survive")
     }
 }

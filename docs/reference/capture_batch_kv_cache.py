@@ -2,7 +2,7 @@
 # requires-python = ">=3.13,<3.14"
 # dependencies = ["mlx==0.32.0", "mlx-lm==0.31.3"]
 # ///
-"""Capture mlx-lm BatchKVCache reference for the Swift port (A2b).
+"""Capture mlx-lm BatchKVCache reference for the Swift port (A2b / A2c).
 
 Pure array-op parity: BatchKVCache.update_and_fetch / make_mask / filter /
 extract / extend involve NO RoPE, so the fixture is safe against the
@@ -14,13 +14,67 @@ Lmax = 5, i.e. ``left_padding = [2, 0, 3]``. This exercises the per-row offset
 book-keeping and the left-padding attention mask that stock KVCacheSimple cannot
 express.
 
+A2c hardening (A2b review MEDIUM-2): two extra ``extend`` cases the tightly
+packed merge above does not reach — the ``right < 0`` slice-back branch (both
+inputs grown via ``update_and_fetch`` so each holds a 256-step over-allocated
+buffer) and an empty (never-updated) ⊕ non-empty merge.
+
 Env: the scratchpad uv venv — mlx 0.32.0 + mlx-lm 0.31.3, Python 3.13.
 Offline; no Python enters macMLX. Mirrors the DeepSeek capture precedent in
 docs/reference/.
+
+``BatchKVCache`` is loaded standalone (see ``load_batch_kv_cache``) so that
+running this script never executes ``mlx_lm/__init__`` — that eager import chain
+registers a tokenizer against ``transformers`` and breaks whenever uv resolves a
+newer ``transformers`` than mlx-lm 0.31.3 expects. The cache module itself only
+needs ``mlx.core`` + ``mlx_lm.models.base.create_causal_mask``, so bypassing the
+package init is both sufficient and version-robust.
 """
 
+import importlib.util
+import os
+import sys
+import types
+
 import mlx.core as mx
-from mlx_lm.models.cache import BatchKVCache
+
+
+def load_batch_kv_cache():
+    """Import ``mlx_lm.models.cache.BatchKVCache`` without running the package
+    ``__init__`` (which drags in a broken transformers tokenizer registration).
+
+    Stubs the ``mlx_lm`` / ``mlx_lm.models`` parent packages in ``sys.modules``
+    first, then loads ``base`` (needed by ``cache``'s ``from .base import …``)
+    and ``cache`` straight from their installed source files.
+    """
+    cache_path = base_path = None
+    for entry in sys.path:
+        candidate = os.path.join(entry, "mlx_lm", "models", "cache.py")
+        if os.path.exists(candidate):
+            cache_path = candidate
+            base_path = os.path.join(entry, "mlx_lm", "models", "base.py")
+            break
+    if cache_path is None:
+        raise RuntimeError("mlx_lm/models/cache.py not found on sys.path")
+
+    for name in ("mlx_lm", "mlx_lm.models"):
+        if name not in sys.modules:
+            stub = types.ModuleType(name)
+            stub.__path__ = []
+            sys.modules[name] = stub
+
+    def _load(modname, path):
+        spec = importlib.util.spec_from_file_location(modname, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[modname] = module
+        spec.loader.exec_module(module)
+        return module
+
+    _load("mlx_lm.models.base", base_path)
+    return _load("mlx_lm.models.cache", cache_path).BatchKVCache
+
+
+BatchKVCache = load_batch_kv_cache()
 
 B, H, DK, DV = 3, 2, 4, 4
 LEFT_PADDING = [2, 0, 3]  # real lengths [3, 5, 2], Lmax = 5
@@ -137,6 +191,45 @@ fixture["extend_offset"] = snap(cache_a.offset)  # [3, 4, 3]
 fixture["extend_left_padding"] = snap(cache_a.left_padding)  # [2, 1, 2]
 fixture["extend_idx"] = mx.array([cache_a._idx])  # 5
 
+# --- extend (right < 0 branch): BOTH inputs grown via update_and_fetch, so each
+#     holds a 256-step over-allocated buffer. Merging unequal idx (3 vs 5) drives
+#     the `right = max_size - k.shape[2] - left < 0` slice-back the tightly packed
+#     case above never reaches (there buffer == idx, so right is always >= 0).
+#     The Swift test builds its inputs the same way (via `update`) so it exercises
+#     the identical growth-buffer geometry. ---
+cache_ra = BatchKVCache([0, 1])  # 2 rows, offsets start [0, -1]
+ra_keys, ra_values = det([2, H, 3, DK], 0.02), det([2, H, 3, DV], 0.04)
+cache_ra.update_and_fetch(ra_keys, ra_values)  # idx 3, buffer 256, offset [3, 2]
+cache_rb = BatchKVCache([2])  # 1 row, offset starts [-2]
+rb_keys, rb_values = det([1, H, 5, DK], 0.06), det([1, H, 5, DV], 0.08)
+cache_rb.update_and_fetch(rb_keys, rb_values)  # idx 5, buffer 256, offset [3]
+cache_ra.extend(cache_rb)  # max_idx 5; pad(self): left 2, right 256-256-2 = -2 < 0
+fixture["extendR_self_keys"] = snap(ra_keys)
+fixture["extendR_self_values"] = snap(ra_values)
+fixture["extendR_other_keys"] = snap(rb_keys)
+fixture["extendR_other_values"] = snap(rb_values)
+fixture["extendR_keys"] = snap(cache_ra.keys[..., : cache_ra._idx, :])
+fixture["extendR_values"] = snap(cache_ra.values[..., : cache_ra._idx, :])
+fixture["extendR_offset"] = snap(cache_ra.offset)  # [3, 2, 3]
+fixture["extendR_left_padding"] = snap(cache_ra.left_padding)  # [2, 3, 2]
+fixture["extendR_idx"] = mx.array([cache_ra._idx])  # 5
+
+# --- extend (empty ⊕ non-empty): `self` was never updated (keys is None), so the
+#     `pad(c)` zero-fill branch runs for `self` while `other` carries real content.
+#     This is the admission-into-a-fresh-accumulator shape. ---
+cache_ea = BatchKVCache([0])  # 1 row, keys None, idx 0, offset [0]
+cache_eb = BatchKVCache([1])  # 1 row
+eb2_keys, eb2_values = det([1, H, 4, DK], 0.05), det([1, H, 4, DV], 0.03)
+cache_eb.update_and_fetch(eb2_keys, eb2_values)  # idx 4, offset [3], lp [1]
+cache_ea.extend(cache_eb)  # self.keys is None → zero-fill self, right-justify other
+fixture["extendE_other_keys"] = snap(eb2_keys)
+fixture["extendE_other_values"] = snap(eb2_values)
+fixture["extendE_keys"] = snap(cache_ea.keys[..., : cache_ea._idx, :])
+fixture["extendE_values"] = snap(cache_ea.values[..., : cache_ea._idx, :])
+fixture["extendE_offset"] = snap(cache_ea.offset)  # [0, 3]
+fixture["extendE_left_padding"] = snap(cache_ea.left_padding)  # [4, 1]
+fixture["extendE_idx"] = mx.array([cache_ea._idx])  # 4
+
 mx.eval(*fixture.values())
 
 path = "batch_kv_cache_fixture.safetensors"
@@ -149,3 +242,5 @@ print("offset_after_decode1", fixture["offset_after_decode1"].tolist())
 print("offset_after_decode2", fixture["offset_after_decode2"].tolist())
 print("filter_offset", fixture["filter_offset"].tolist(), "filter_lp", fixture["filter_left_padding"].tolist())
 print("extract_offset", fixture["extract_offset"].tolist())
+print("extendR_offset", fixture["extendR_offset"].tolist(), "extendR_lp", fixture["extendR_left_padding"].tolist(), "extendR_idx", fixture["extendR_idx"].tolist())
+print("extendE_offset", fixture["extendE_offset"].tolist(), "extendE_lp", fixture["extendE_left_padding"].tolist(), "extendE_idx", fixture["extendE_idx"].tolist())
