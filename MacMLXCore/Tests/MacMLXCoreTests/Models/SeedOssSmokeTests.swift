@@ -20,16 +20,14 @@ import XCTest
 ///  c. **generation** — greedy decode produces coherent, non-empty text; tok/s
 ///     is printed for the record (not asserted — hardware-dependent).
 ///
-/// KNOWN UPSTREAM BLOCKER (skip, not fail): Seed-OSS's `chat_template.jinja`
-/// builds its thinking-budget lookup as a Jinja dict literal with INTEGER keys
-/// (`{0: 0, 512: 128, …}`). swift-jinja's parser accepts only string/identifier
-/// object keys, so tokenizer/template compilation inside `load` throws before any
-/// weights load. That is a swift-jinja limitation in the shared template path —
-/// orthogonal to the Seed-OSS architecture, which is proven at 1e-4 by
-/// `SeedOss{Attention,MLP,Model}ParityTests`. When the load fails for exactly
-/// that reason the smoke self-skips with a precise message (any OTHER load error,
-/// or a generation problem, still fails loudly), so it goes green the day
-/// swift-jinja gains integer-key support.
+/// CHAT-TEMPLATE OVERRIDE: Seed-OSS's `chat_template.jinja` builds its
+/// thinking-budget lookup as a Jinja dict literal with INTEGER keys
+/// (`{0: 0, 512: 128, …}`), which swift-jinja's parser rejects. macMLX ships a
+/// built-in override (`SeedOssChatTemplate`, wired via `ChatTemplateOverride`)
+/// that rewrites only that construct, so template compilation inside generate's
+/// lazy input-prep now succeeds and this smoke exercises real end-to-end
+/// generation. The override's semantic equivalence is proven separately and
+/// ungated by `SeedOssChatTemplateParityTests`.
 ///
 /// GATED — never runs in CI (~19 GB on disk). Self-skips unless ALL hold:
 ///   1. `requireMLXRuntimeOrSkip()` passes (real Metal, i.e. xcodebuild),
@@ -136,27 +134,15 @@ final class SeedOssSmokeTests: XCTestCase {
         var text = ""
         var completionTokens: Int?
         let start = Date()
-        do {
-            try await engine.load(localModel(id: modelID, directory: directory))
-            // The chat template is compiled lazily during generate's input-prep,
-            // so the swift-jinja blocker surfaces HERE (wrapped as modelLoadFailed),
-            // not from load — both are inside this do so the skip catches either.
-            for try await chunk in engine.generate(request) {
-                text += chunk.text
-                if let usage = chunk.usage { completionTokens = usage.completionTokens }
-            }
-        } catch let error as EngineError {
-            // Skip ONLY the known swift-jinja integer-dict-key chat-template blocker
-            // (see the suite doc); rethrow everything else so a real regression
-            // still fails loudly.
-            if case .modelLoadFailed(let reason) = error,
-                reason.contains("Expected string literal or identifier for object key") {
-                throw XCTSkip(
-                    "Seed-OSS blocked by swift-jinja: its chat_template.jinja uses integer dict "
-                        + "keys unsupported by the parser (\(reason)). Architecture parity is proven "
-                        + "separately by SeedOss{Attention,MLP,Model}ParityTests.")
-            }
-            throw error
+        try await engine.load(localModel(id: modelID, directory: directory))
+        // The chat template is compiled lazily during generate's input-prep. The
+        // built-in `seed_oss` override (SeedOssChatTemplate, resolved by
+        // ChatTemplateOverride at load) replaces the checkpoint's unparseable
+        // integer-keyed dict template, so this compiles cleanly and generates —
+        // any load OR generation error now fails the test loudly.
+        for try await chunk in engine.generate(request) {
+            text += chunk.text
+            if let usage = chunk.usage { completionTokens = usage.completionTokens }
         }
         let elapsed = Date().timeIntervalSince(start)
 
@@ -165,6 +151,10 @@ final class SeedOssSmokeTests: XCTestCase {
             text.contains("Mars"),
             "greedy continuation of 'Mercury, Venus, Earth,' must name the next planet "
                 + "for output to count as coherent — got: \(text)")
+
+        // Echo the generated continuation for the record (proves the built-in
+        // chat-template override yielded a real prompt end-to-end).
+        print("SEED_OSS_SMOKE_TEXT<<<\(text)>>>")
 
         if let completionTokens, elapsed > 0 {
             let tokPerSec = Double(completionTokens) / elapsed
