@@ -169,6 +169,18 @@ final class ChatTemplateOverrideTests: XCTestCase {
         XCTAssertEqual(resolution.resolved?.template, SeedOssChatTemplate.template)
     }
 
+    /// A whitespace-only file is as unusable as a zero-byte one: accepting it
+    /// would render a blank prompt with no diagnostic. It must take the same
+    /// "empty" skip path as a truly empty file.
+    func testUserFileWhitespaceOnlyIsSkippedWithDiagnosis() throws {
+        try writeConfig(modelType: "seed_oss")
+        try writeUserOverride("  \n\t\n  ")
+
+        let resolution = ChatTemplateOverride.resolveDetailed(modelDirectory: tempDir)
+        XCTAssertEqual(resolution.skippedUserFileReason, "empty")
+        XCTAssertEqual(resolution.resolved?.template, SeedOssChatTemplate.template)
+    }
+
     /// When a broken user file's `model_type` has no built-in either, resolution
     /// still reports the skip reason (for logging) while `resolved` is `nil` —
     /// the "falling back to the checkpoint's own template" branch of the log
