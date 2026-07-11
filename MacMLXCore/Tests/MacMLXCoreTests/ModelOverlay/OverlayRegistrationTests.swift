@@ -192,6 +192,39 @@ struct OverlayRegistrationTests {
             }
             """,
             matches: { $0 is Cohere2Model }),
+
+        // MiniCPM3 (MiniCPM3-4B) → macMLX `MiniCPM3Model`.
+        Case(
+            modelType: "minicpm3",
+            configJSON: """
+            {
+              "model_type": "minicpm3",
+              "vocab_size": 64,
+              "hidden_size": 32,
+              "dim_model_base": 8,
+              "num_hidden_layers": 2,
+              "intermediate_size": 48,
+              "num_attention_heads": 4,
+              "num_key_value_heads": 4,
+              "q_lora_rank": 16,
+              "kv_lora_rank": 12,
+              "qk_nope_head_dim": 8,
+              "qk_rope_head_dim": 4,
+              "scale_emb": 12,
+              "scale_depth": 1.4,
+              "rms_norm_eps": 1e-5,
+              "rope_theta": 10000.0,
+              "attention_bias": false,
+              "tie_word_embeddings": false,
+              "rope_scaling": {
+                "type": "longrope",
+                "long_factor": [1.2, 1.7],
+                "short_factor": [1.2, 1.7],
+                "original_max_position_embeddings": 64
+              }
+            }
+            """,
+            matches: { $0 is MiniCPM3Model }),
     ]
 
     /// `registerAll` registers each `model_type` — the exact query the factory
