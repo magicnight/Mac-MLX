@@ -30,6 +30,13 @@ let package = Package(
         // v0.4.0 server-side MCP feature, but Core needs its own
         // declaration so GUI / HummingbirdServer can speak MCP too.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.0"),
+        // swift-jinja is already resolved transitively (swift-transformers pins
+        // `from: "2.0.0"`, currently 2.3.6). Declared directly with the SAME
+        // requirement — so no new version is introduced — purely so the
+        // chat-template render-parity TEST target can render the Seed-OSS
+        // override through the exact engine production uses. Not linked into the
+        // MacMLXCore library itself.
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0"),
     ],
     targets: [
         .target(
@@ -47,7 +54,14 @@ let package = Package(
         ),
         .testTarget(
             name: "MacMLXCoreTests",
-            dependencies: ["MacMLXCore"],
+            dependencies: [
+                "MacMLXCore",
+                // Render the Seed-OSS chat-template override through swift-jinja
+                // (the same engine swift-transformers uses) to prove, ungated,
+                // that it matches the Python reference render of the ORIGINAL
+                // template. See SeedOssChatTemplateParityTests.
+                .product(name: "Jinja", package: "swift-jinja"),
+            ],
             resources: [
                 // Numerical-parity fixtures captured from the Python
                 // mlx-lm reference (weights + inputs + expected output).
