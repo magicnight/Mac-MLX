@@ -225,6 +225,28 @@ struct OverlayRegistrationTests {
             }
             """,
             matches: { $0 is MiniCPM3Model }),
+
+        // InternLM3 (InternLM3-8B-Instruct) → macMLX `InternLM3Model`.
+        Case(
+            modelType: "internlm3",
+            configJSON: """
+            {
+              "model_type": "internlm3",
+              "vocab_size": 40,
+              "hidden_size": 32,
+              "num_hidden_layers": 2,
+              "intermediate_size": 48,
+              "num_attention_heads": 4,
+              "num_key_value_heads": 2,
+              "rms_norm_eps": 1e-5,
+              "qkv_bias": false,
+              "bias": false,
+              "tie_word_embeddings": false,
+              "rope_theta": 50000000.0,
+              "rope_scaling": {"rope_type": "dynamic", "factor": 6.0}
+            }
+            """,
+            matches: { $0 is InternLM3Model }),
     ]
 
     /// `registerAll` registers each `model_type` — the exact query the factory

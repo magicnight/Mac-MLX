@@ -15,10 +15,12 @@ every component numerically parity-gated at `1e-4` against the Python
 `mlx-lm` reference, **and** a real-checkpoint generation smoke test.
 
 **⚠️ Theoretical** — the architecture is ported and passes the exact same
-per-component parity gates, but the smallest checkpoint is too large to run
-on our hardware, so **no real weights have ever been loaded**. The math is
-verified; the end-to-end model is untested. Treat it as "should work" — if
-you have the hardware and hit a problem, please
+per-component parity gates, but **end-to-end generation has never run**:
+either the smallest checkpoint is too large for our hardware, or a
+toolchain gap blocks the load path (e.g. no `tokenizer.json` exists in any
+published checkpoint — see the per-row notes for which). The math is
+verified; the end-to-end model is untested. Treat it as "should work once
+loadable" — if you get it running and hit a problem, please
 [open an issue](../../../issues); theoretical-tier bugs are fixed
 issue-driven.
 
@@ -35,6 +37,7 @@ issue-driven.
 | Solar-Open-100B | `solar_open` | ⚠️ Theoretical | Config re-skin of upstream GLM4-MoE (~100B) |
 | GLM-5.1 (GLM-DSA) | `glm_moe_dsa` | ⚠️ Theoretical | Subclass of our DeepSeek V3.2 port, no IndexShare; smallest quant ~405 GB. GLM-5.2 IndexShare checkpoints are detected and rejected with a clear error (unsupported until the upstream reference lands) |
 | Kimi K2.5 | `kimi_k25` | 🚫 Blocked | Wraps upstream's DeepSeek V3 core, whose initializer is currently internal; registration errors loudly until upstream makes it public |
+| InternLM3-8B-Instruct | `internlm3` | ⚠️ Theoretical | Dense Llama-family decoder — aggressive 16:1 GQA (32 query / 2 KV heads), SwiGLU, RMSNorm, standard serial pre-norm blocks — with two MISLEADINGLY-named bias switches (`qkv_bias` gates q/k/v AND o_proj; `bias` gates the MLP's gate/up/down) and `head_dim` fixed at `hidden/heads` (the config's explicit `head_dim` is never read). Its DynamicNTK RoPE is an INTENTIONAL DIVERGENCE from mlx-lm's `internlm3.py`, which carries four verified defects — a hard-coded `2.0` position scale, an unconsumed `rope_scaling.factor`, a `seq_len` read off the heads axis, and an NTK base rewrite wrongly applied to the `linear` type on long sequences — all corrected here to match the reference `modeling_internlm3.py` (upstream issue pending); the parity fixtures are captured from a minimally-patched mlx-lm (`docs/reference/capture_internlm3.py`). The architecture is FULLY 1e-4 parity-verified on real Metal (two adversarial configs inverting every switch, the `dynamic_active` config pinning all three RoPE corrections at once), plus decode / sanitize / registration / native-ChatML-render gates. GENERATION IS BLOCKED, though: every published InternLM3 checkpoint (`internlm/internlm3-8b-instruct` and the `mlx-community/*` conversions) ships ONLY a SentencePiece `tokenizer.model` + a custom Python tokenizer and NO `tokenizer.json`, which swift-transformers requires (it has no SentencePiece fallback), so the model cannot tokenize or generate in macMLX. Unblocks when a checkpoint ships a `tokenizer.json` (or the engine gains a SentencePiece path) — a trustworthy `tokenizer.json` cannot be produced without executing the checkpoint's custom remote code |
 
 ## Validated upstream weights
 

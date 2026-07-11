@@ -111,6 +111,21 @@ public enum ModelOverlay {
             return MiniCPM3Model(config)
         }
 
+        // InternLM3 (Shanghai AI Lab InternLM3-8B-Instruct) — pure-Swift port (see
+        // `Models/InternLM3.swift`). A dense Llama-family decoder (aggressive 16:1
+        // GQA, SwiGLU MLP, RMSNorm, standard serial pre-norm blocks) with two
+        // misleadingly-named bias switches (`qkv_bias` drives q/k/v AND o_proj;
+        // `bias` drives the MLP's gate/up/down) and a DynamicNTK RoPE that
+        // INTENTIONALLY corrects three verified mlx-lm `internlm3.py` defects
+        // (hard-coded 2.0 position scale, unconsumed `rope_scaling.factor`, and a
+        // sequence length read off the heads axis), aligned with the reference
+        // `modeling_internlm3.py`. Upstream mlx-swift-lm has no `internlm3` type.
+        await LLMTypeRegistry.shared.registerModelType("internlm3") { data in
+            let config = try JSONDecoder.json5()
+                .decode(InternLM3Configuration.self, from: data)
+            return InternLM3Model(config)
+        }
+
         // --- Theoretical tier -------------------------------------------------
         // Near-zero-engineering registrations: each maps a new `model_type`
         // onto an existing, parity-tested Swift architecture. They are verified
