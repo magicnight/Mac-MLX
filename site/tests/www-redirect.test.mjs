@@ -187,6 +187,25 @@ test("the runbook documents a reversible www release", async () => {
     readme,
     /restore exactly `www\.macmlx\.app CNAME macmlx\.app` as DNS-only/,
   );
+
+  const redirectStart = readme.indexOf("### www permanent redirect release");
+  const bootstrapStart = readme.indexOf("#### First www release (bootstrap)");
+  const updateStart = readme.indexOf("#### Existing www Worker update");
+  const redirectEnd = readme.indexOf("The `_redirects` policy", updateStart);
+  assert.ok(redirectStart >= 0 && bootstrapStart > redirectStart);
+  assert.ok(updateStart > bootstrapStart && redirectEnd > updateStart);
+
+  const sharedPreamble = readme.slice(redirectStart, bootstrapStart);
+  const bootstrapRunbook = readme.slice(bootstrapStart, updateStart);
+  const updateRunbook = readme.slice(updateStart, redirectEnd);
+  assert.doesNotMatch(sharedPreamble, /CNAME macmlx\.app/);
+  assert.match(bootstrapRunbook, /www\.macmlx\.app CNAME macmlx\.app/);
+  assert.match(bootstrapRunbook, /DNS-only/i);
+  assert.doesNotMatch(updateRunbook, /CNAME macmlx\.app/);
+  assert.match(
+    updateRunbook,
+    /confirm .*www\.macmlx\.app.*Custom Domain.*macmlx-www-redirect/i,
+  );
 });
 
 test("CI syntax-checks the redirect Worker and verifier", async () => {

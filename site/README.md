@@ -85,11 +85,11 @@ Worker. It returns an HTTP 308 to the fixed `https://macmlx.app` origin while
 preserving the request path and query. Its configuration and release history
 are intentionally independent from the apex static site.
 
-Before either release path, confirm and record the existing rollback DNS record
-exactly as `www.macmlx.app CNAME macmlx.app`, DNS-only. Do not delete any other
-DNS record.
-
 #### First www release (bootstrap)
+
+Before the bootstrap cutover, confirm and record the existing rollback DNS
+record exactly as `www.macmlx.app CNAME macmlx.app`, DNS-only. Do not delete any
+other DNS record.
 
 There is no previous www version during bootstrap. A failed `versions list`
 probe caused by the Worker not existing must not block the first release, so it
@@ -123,6 +123,7 @@ when no previous www version exists.
 
 #### Existing www Worker update
 
+Before updating, confirm the `www.macmlx.app` Custom Domain belongs to `macmlx-www-redirect`.
 For later releases, list versions and record the previous known-good version
 before the dry run and deployment:
 
