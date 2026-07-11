@@ -22,6 +22,8 @@ node --check scripts/render-brand-icons.mjs
 node --check scripts/render-social-cards.mjs
 node --check scripts/validate-social-cards.mjs
 node --check scripts/verify-cloudflare-deploy.mjs
+node --check site/lib/install-manifest.mjs
+node --check site/lib/png-source-digest.mjs
 node --check public/assets/js/main.js
 xmllint --noout site/assets/brand/macmlx-mark.svg site/assets/brand/favicon.svg public/assets/og-image.svg public/sitemap.xml
 git diff --check

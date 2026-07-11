@@ -12,6 +12,7 @@ import { prepareSite, validateBrandAssets } from "../../scripts/build-public-sit
 import { assetPaths, brandCopiedAssetPaths, copiedAssetPaths } from "../content/assets.mjs";
 import { project } from "../content/project.mjs";
 import { renderSocialCardSVG } from "../lib/social-card.mjs";
+import { installManifestContract } from "../lib/install-manifest.mjs";
 
 const canonicalURL = new URL("../assets/brand/macmlx-mark.svg", import.meta.url);
 const faviconURL = new URL("../assets/brand/favicon.svg", import.meta.url);
@@ -589,18 +590,7 @@ test("PNG validation rejects invalid critical chunks and noncontiguous image pha
 
 test("web manifest has only the exact macMLX install contract", async () => {
   const manifest = JSON.parse(await readFile(manifestURL, "utf8"));
-  assert.deepEqual(manifest, {
-    name: "macMLX",
-    short_name: "macMLX",
-    start_url: "/",
-    display: "standalone",
-    background_color: "#111311",
-    theme_color: "#111311",
-    icons: [
-      { src: "/assets/brand/icon-192.png", sizes: "192x192", type: "image/png" },
-      { src: "/assets/brand/icon-512.png", sizes: "512x512", type: "image/png" },
-    ],
-  });
+  assert.deepEqual(manifest, installManifestContract);
 });
 
 test("Sharp rerenders all brand icons byte-identically", { skip: !sharpIsAvailable() }, async (t) => {

@@ -18,6 +18,8 @@ test("CI website job verifies every generated-site surface", () => {
   assert.match(workflow, /node --check scripts\/render-social-cards\.mjs/);
   assert.match(workflow, /node --check scripts\/validate-social-cards\.mjs/);
   assert.match(workflow, /node --check scripts\/verify-cloudflare-deploy\.mjs/);
+  assert.match(workflow, /node --check site\/lib\/install-manifest\.mjs/);
+  assert.match(workflow, /node --check site\/lib\/png-source-digest\.mjs/);
   assert.match(workflow, /node --check public\/assets\/js\/main\.js/);
   assert.match(workflow, /command -v xmllint/);
   assert.match(workflow, /xmllint --noout site\/assets\/brand\/macmlx-mark\.svg site\/assets\/brand\/favicon\.svg public\/assets\/og-image\.svg public\/sitemap\.xml/);

@@ -1,4 +1,8 @@
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
+import { brandIconSourceDigest, validateBrandIconPNG } from "./render-brand-icons.mjs";
+import { installManifestContract } from "../site/lib/install-manifest.mjs";
 
 const productionOrigin = "https://macmlx.app";
 const documentCache = "public, max-age=0, must-revalidate";
@@ -12,6 +16,7 @@ const securityHeaders = Object.freeze({
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Resource-Policy": "same-origin",
 });
+const expectedBrandSourceDigest = brandIconSourceDigest(readFileSync(new URL("../site/assets/brand/macmlx-mark.svg", import.meta.url)));
 
 function deploymentBase(value) {
   if (typeof value !== "string" || !value) throw new Error(`Invalid deployment base URL: ${value}`);
@@ -284,27 +289,20 @@ export async function verifyCloudflareDeployment(baseURL, {
       if (actual !== scriptCache) throw new Error(`expected ${scriptCache}, received ${actual || "none"}`);
     });
     let manifest;
+    let parsedManifest = false;
     try {
       manifest = JSON.parse(manifestResult.body);
+      parsedManifest = true;
     } catch (error) {
       failures.push(`GET ${manifestPath} JSON: ${error.message}`);
     }
-    if (manifest) {
-      const requiredIcons = [[192, "/assets/brand/icon-192.png"], [512, "/assets/brand/icon-512.png"]];
-      check(`GET ${manifestPath} required install structure`, () => {
-        const validRoot = manifest && typeof manifest === "object" && !Array.isArray(manifest)
-          && manifest.name === "macMLX" && manifest.short_name === "macMLX"
-          && manifest.start_url === "/" && manifest.display === "standalone" && Array.isArray(manifest.icons);
-        if (!validRoot) throw new Error("expected macMLX name, short_name, root start_url, standalone display, and icons array");
-        manifestIcons = requiredIcons.map(([size, path]) => {
-          const icon = manifest.icons.find((entry) => entry?.sizes === `${size}x${size}`);
-          if (!icon || icon.type !== "image/png") throw new Error(`expected ${size}x${size} image/png icon`);
-          const resolved = new URL(icon.src, base);
-          const safe = resolved.origin === base.origin && resolved.pathname === path && !resolved.search && !resolved.hash;
-          if (!safe) throw new Error(`expected same-origin ${path}, received ${icon.src ?? "none"}`);
-          return { size, path };
-        });
+    if (parsedManifest) {
+      let exactContract = false;
+      check(`GET ${manifestPath} exact tracked install contract`, () => {
+        if (!isDeepStrictEqual(manifest, installManifestContract)) throw new Error("response differs from the exact tracked install contract");
+        exactContract = true;
       });
+      if (exactContract) manifestIcons = installManifestContract.icons.map((icon) => ({ size: Number.parseInt(icon.sizes, 10), path: icon.src }));
     }
   }
 
@@ -324,8 +322,7 @@ export async function verifyCloudflareDeployment(baseURL, {
       const cache = headerValue(response, "cache-control");
       if (cache !== imageCache) throw new Error(`expected Cache-Control ${imageCache}, received ${cache || "none"}`);
       if (!body) throw new Error("PNG body is unavailable");
-      const dimensions = pngDimensions(body);
-      if (dimensions.width !== size || dimensions.height !== size) throw new Error(`expected ${size}x${size}, received ${dimensions.width}x${dimensions.height}`);
+      validateBrandIconPNG(Buffer.from(body), size, path, { expectedSourceDigest: expectedBrandSourceDigest });
     });
   }
 

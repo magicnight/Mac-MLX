@@ -61,6 +61,8 @@ jobs:
           node --check scripts/render-social-cards.mjs
           node --check scripts/validate-social-cards.mjs
           node --check scripts/verify-cloudflare-deploy.mjs
+          node --check site/lib/install-manifest.mjs
+          node --check site/lib/png-source-digest.mjs
           node --check site/cloudflare/www-redirect.mjs
           node --check scripts/verify-www-redirect.mjs
           node --check public/assets/js/main.js

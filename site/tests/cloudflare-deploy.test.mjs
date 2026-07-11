@@ -6,6 +6,13 @@ import { digestPreparedSite } from "../lib/determinism.mjs";
 import { prepareSite } from "../../scripts/build-public-site.mjs";
 
 const root = new URL("../../", import.meta.url);
+const trackedManifestSource = await readFile(new URL("site/assets/brand/site.webmanifest", root), "utf8");
+const trackedManifest = JSON.parse(trackedManifestSource);
+const trackedBrandPNGs = Object.freeze({
+  "/assets/brand/apple-touch-icon.png": await readFile(new URL("site/assets/brand/apple-touch-icon.png", root)),
+  "/assets/brand/icon-192.png": await readFile(new URL("site/assets/brand/icon-192.png", root)),
+  "/assets/brand/icon-512.png": await readFile(new URL("site/assets/brand/icon-512.png", root)),
+});
 
 async function deploymentConfig() {
   return JSON.parse(await readFile(new URL("wrangler.jsonc", root), "utf8"));
@@ -159,7 +166,7 @@ function pngHeader(width = 1200, height = 630) {
   return bytes;
 }
 
-function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false, brokenAsset = false, redirectLocations = {}, mimeOverrides = {}, cacheOverrides = {}, manifestOverride, iconDimensions = {}, manifestIconBodies = {}, missingIcon } = {}) {
+function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false, brokenAsset = false, redirectLocations = {}, mimeOverrides = {}, cacheOverrides = {}, manifestOverride, manifestIconBodies = {}, missingIcon } = {}) {
   const calls = [];
   const security = {
     "x-content-type-options": "nosniff",
@@ -210,23 +217,12 @@ function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false
       return new Response(pngHeader(), { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": "image/png", "cache-control": "public, max-age=604800, stale-while-revalidate=86400" }) });
     }
     if (url.pathname === "/assets/brand/site.webmanifest" && method === "GET") {
-      const body = manifestOverride ?? JSON.stringify({
-        name: "macMLX",
-        short_name: "macMLX",
-        start_url: "/",
-        display: "standalone",
-        icons: [
-          { src: "/assets/brand/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/assets/brand/icon-512.png", sizes: "512x512", type: "image/png" },
-        ],
-      });
+      const body = manifestOverride === undefined ? trackedManifestSource : manifestOverride;
       return new Response(body, { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": "application/manifest+json", "cache-control": "public, max-age=3600, stale-while-revalidate=86400" }) });
     }
     if (method === "GET" && ["/assets/brand/icon-192.png", "/assets/brand/icon-512.png"].includes(url.pathname)) {
       if (url.pathname === missingIcon) return new Response("missing", { status: 404, headers: responseHeaders(url.pathname, { "content-type": "text/plain", "cache-control": "public, max-age=0, must-revalidate" }) });
-      const expected = url.pathname.includes("192") ? 192 : 512;
-      const [width, height] = iconDimensions[url.pathname] ?? [expected, expected];
-      const body = manifestIconBodies[url.pathname] ?? pngHeader(width, height);
+      const body = manifestIconBodies[url.pathname] ?? trackedBrandPNGs[url.pathname];
       return new Response(body, { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": "image/png", "cache-control": "public, max-age=604800, stale-while-revalidate=86400" }) });
     }
     if (method === "HEAD" && url.pathname.startsWith("/assets/")) {
@@ -261,17 +257,57 @@ test("remote verifier checks production routes, redirects, discovery output, PNG
 
 test("remote verifier strictly validates the install manifest and its same-origin PNG icons", async () => {
   const { verifyCloudflareDeployment } = await import("../../scripts/verify-cloudflare-deploy.mjs");
-  const cases = [
+  const manifestCases = [
     [{ manifestOverride: "not json" }, /site\.webmanifest.*JSON/i],
-    [{ manifestOverride: JSON.stringify({ name: "macMLX", icons: [] }) }, /site\.webmanifest.*required install structure/i],
-    [{ manifestOverride: JSON.stringify({ name: "macMLX", short_name: "macMLX", start_url: "/", display: "standalone", icons: [{ src: "https://evil.example/icon-192.png", sizes: "192x192", type: "image/png" }, { src: "/assets/brand/icon-512.png", sizes: "512x512", type: "image/png" }] }) }, /same-origin.*icon-192/i],
-    [{ iconDimensions: { "/assets/brand/icon-192.png": [191, 192] } }, /icon-192\.png.*expected 192x192.*191x192/i],
+    ...[null, false, 0, ""].map((value) => [{ manifestOverride: JSON.stringify(value) }, /site\.webmanifest.*exact tracked install contract/i]),
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, extra: true }) }, /exact tracked install contract/i],
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, theme_color: "#ffffff" }) }, /exact tracked install contract/i],
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, icons: [...trackedManifest.icons, trackedManifest.icons[0]] }) }, /exact tracked install contract/i],
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, icons: [{ ...trackedManifest.icons[0], src: "https://macmlx.app/assets/brand/icon-192.png" }, trackedManifest.icons[1]] }) }, /exact tracked install contract/i],
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, icons: [trackedManifest.icons[0], { ...trackedManifest.icons[1], src: "https://evil.example/icon-512.png" }] }) }, /exact tracked install contract/i],
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, icons: [{ ...trackedManifest.icons[0], src: "/assets/brand/../brand/icon-192.png" }, trackedManifest.icons[1]] }) }, /exact tracked install contract/i],
+    [{ manifestOverride: JSON.stringify({ ...trackedManifest, icons: [{ ...trackedManifest.icons[0], extra: true }, trackedManifest.icons[1]] }) }, /exact tracked install contract/i],
+  ];
+  for (const [options, expected] of manifestCases) {
+    const { fetchImpl } = mockDeploymentFetch({ workersDevNoindex: false, ...options });
+    await assert.rejects(verifyCloudflareDeployment("https://macmlx.app/", { fetchImpl }), expected);
+  }
+
+  const iconCases = [
+    [{ manifestIconBodies: { "/assets/brand/icon-192.png": trackedBrandPNGs["/assets/brand/apple-touch-icon.png"] } }, /icon-192\.png.*must be 192x192/i],
     [{ mimeOverrides: { "/assets/brand/icon-512.png": "image/webp" } }, /icon-512\.png.*image\/png/i],
     [{ cacheOverrides: { "/assets/brand/icon-192.png": "public, max-age=0, must-revalidate" } }, /icon-192\.png.*Cache-Control.*max-age=604800/i],
     [{ missingIcon: "/assets/brand/icon-512.png" }, /icon-512\.png.*expected 200.*404/i],
   ];
-  for (const [options, expected] of cases) {
+  for (const [options, expected] of iconCases) {
     const { fetchImpl } = mockDeploymentFetch({ workersDevNoindex: false, ...options });
+    await assert.rejects(verifyCloudflareDeployment("https://macmlx.app/", { fetchImpl }), expected);
+  }
+});
+
+test("remote verifier rejects truncated, corrupt, incomplete, and trailing brand PNG bodies", async () => {
+  const { verifyCloudflareDeployment } = await import("../../scripts/verify-cloudflare-deploy.mjs");
+  const valid = trackedBrandPNGs["/assets/brand/icon-192.png"];
+  const chunks = [];
+  for (let offset = 8; offset < valid.length;) {
+    const length = valid.readUInt32BE(offset);
+    const end = offset + 12 + length;
+    chunks.push({ type: valid.toString("ascii", offset + 4, offset + 8), bytes: valid.subarray(offset, end) });
+    offset = end;
+  }
+  const without = (type) => Buffer.concat([valid.subarray(0, 8), ...chunks.filter((chunk) => chunk.type !== type).map((chunk) => chunk.bytes)]);
+  const badCRC = Buffer.from(valid);
+  badCRC[20] ^= 1;
+  const cases = [
+    [valid.subarray(0, 24), /truncated PNG chunk/i],
+    [badCRC, /CRC mismatch/i],
+    [without("IDAT"), /invalid terminal IEND|missing required PNG chunks/i],
+    [without("IEND"), /missing required PNG chunks/i],
+    [without("tEXt"), /exactly one source digest/i],
+    [Buffer.concat([valid, Buffer.from("trailing")]), /terminal IEND|trailing/i],
+  ];
+  for (const [body, expected] of cases) {
+    const { fetchImpl } = mockDeploymentFetch({ workersDevNoindex: false, manifestIconBodies: { "/assets/brand/icon-192.png": body } });
     await assert.rejects(verifyCloudflareDeployment("https://macmlx.app/", { fetchImpl }), expected);
   }
 });
