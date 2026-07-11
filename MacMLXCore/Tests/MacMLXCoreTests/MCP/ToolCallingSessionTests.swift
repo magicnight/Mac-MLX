@@ -265,6 +265,49 @@ struct ToolCallingSessionTests {
         #expect(scripted.callCount == 1)  // the second generation never ran
     }
 
+    /// Every per-turn request must carry ALL fields of the seed request — only the
+    /// conversation grows. Regression for the tool loop rebuilding each turn's
+    /// request from scratch, which silently dropped `draftModelID` /
+    /// `numDraftTokens` (speculative decoding off for every MCP turn) plus
+    /// `responseFormat` / `adapters`.
+    @Test("per-turn requests preserve every seed field, not just messages")
+    func perTurnRequestsPreserveSeedFields() async throws {
+        let call = ToolCallRequest(id: "call_1", name: "t", arguments: [:])
+        let scripted = ScriptedGenerate([
+            [toolCallChunk(call)],
+            [GenerateChunk(text: "done", finishReason: .stop)],
+        ])
+        let session = ToolCallingSession(
+            generate: { scripted.generate($0) },
+            callTool: { _, _, _ in "ok" },
+            toolIndex: ["t": "srv"]
+        )
+
+        let seed = GenerateRequest(
+            model: "m",
+            messages: [ChatMessage(role: .user, content: "hi")],
+            systemPrompt: "sys",
+            draftModelID: "draft-model",
+            numDraftTokens: 5,
+            adapters: "my-lora"
+        )
+
+        for try await _ in session.run(seed) {}
+
+        #expect(scripted.callCount == 2)
+        // BOTH turns retain the seed's speculative-decoding + adapter fields.
+        for req in scripted.requests {
+            #expect(req.draftModelID == "draft-model")
+            #expect(req.numDraftTokens == 5)
+            #expect(req.adapters == "my-lora")
+            #expect(req.systemPrompt == "sys")
+            #expect(req.model == "m")
+        }
+        // Only the conversation varies: turn 1 = user; turn 2 = user + assistant + tool.
+        #expect(scripted.requests[0].messages.count == 1)
+        #expect(scripted.requests[1].messages.count == 3)
+    }
+
     // MARK: - Helpers
 
     private func request(_ prompt: String) -> GenerateRequest {

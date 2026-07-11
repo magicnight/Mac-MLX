@@ -220,8 +220,15 @@ public struct GenerationParameters: Codable, Hashable, Sendable {
     /// ({2, 3, 4, 6, 8}) — it is a set, not a range. An in-between value
     /// (5, 7) would otherwise pass validation and fail mid-generation as a
     /// Metal/runtime error instead of being corrected at the boundary.
+    ///
+    /// `nil`, `0`, or a negative value all mean "no KV-cache quantization"
+    /// (same semantics as nil). Snapping a non-positive value UP to the lowest
+    /// supported width (2) would silently ENABLE the lossiest quantization the
+    /// caller never asked for — and flip `bypassPromptCache` / the unbatchable
+    /// routing that key off `kvBits != nil` — so it is dropped to nil instead.
+    /// Only a strictly-positive value is snapped to the supported set.
     static func clampKVBits(_ value: Int?) -> Int? {
-        guard let value else { return nil }
+        guard let value, value > 0 else { return nil }
         let supported = [2, 3, 4, 6, 8]
         // Nearest supported width; ties resolve to the smaller (safer) width.
         return supported.min {
@@ -249,7 +256,12 @@ public struct GenerationParameters: Codable, Hashable, Sendable {
 /// Everything an inference engine needs to start a generation.
 public struct GenerateRequest: Codable, Hashable, Sendable {
     public let model: String
-    public let messages: [ChatMessage]
+    /// `var` (not `let`) so a caller that must vary only the conversation across
+    /// otherwise-identical turns — the MCP tool loop (`ToolCallingSession`) — can
+    /// mutate a COPY of the seed request instead of re-initialising it. Re-init
+    /// silently drops every field not re-passed (draft model, response_format,
+    /// adapters, …); mutating preserves them all by construction.
+    public var messages: [ChatMessage]
     public let systemPrompt: String?
     public var parameters: GenerationParameters
     /// Optional per-model chat-template kwargs (v0.5.1) forwarded to the

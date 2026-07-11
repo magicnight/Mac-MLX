@@ -44,6 +44,12 @@ echo "==> Building ${CLI_NAME} ${TAG} (xcodebuild Release, arm64)"
 # SPM package (there is no .xcworkspace/.xcodeproj to point at).
 (
     cd "$PACKAGE_PATH"
+    # Capture xcodebuild's REAL exit via PIPESTATUS[0] — the `grep` is only for log
+    # brevity and must never mask a build failure (the old `| grep … || true` turned
+    # every failed build into success, packaging stale Release products). `set +e`
+    # around the pipeline keeps a grep "no match" — or the build failure itself —
+    # from tripping errexit before we can read PIPESTATUS.
+    set +e
     xcodebuild \
         -scheme "$CLI_NAME" \
         -configuration Release \
@@ -51,7 +57,13 @@ echo "==> Building ${CLI_NAME} ${TAG} (xcodebuild Release, arm64)"
         -skipPackagePluginValidation \
         -derivedDataPath ".xcodebuild" \
         build \
-        | grep -E "BUILD (SUCCEEDED|FAILED)|error:" || true
+        | grep -E "BUILD (SUCCEEDED|FAILED)|error:"
+    xcodebuild_status=${PIPESTATUS[0]}
+    set -e
+    if [[ "$xcodebuild_status" -ne 0 ]]; then
+        echo "error: xcodebuild failed (exit ${xcodebuild_status}); refusing to package stale Release products." >&2
+        exit "$xcodebuild_status"
+    fi
 )
 
 PRODUCTS_DIR="${DERIVED_DATA}/Build/Products/Release"

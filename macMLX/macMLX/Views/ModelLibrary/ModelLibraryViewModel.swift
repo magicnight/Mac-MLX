@@ -141,14 +141,19 @@ final class ModelLibraryViewModel {
                 var found = try await library.scan(dir)
 
                 // Track F: merge in Hugging Face cache discoveries when the
-                // user has opted in. De-duplicate by id — a model already
-                // present via the managed directory scan wins over its cache
-                // twin so the library never shows the "same" model twice.
+                // user has opted in. De-duplicate on the model NAME LEAF — a
+                // model already present via the managed directory scan wins over
+                // its cache twin. The two scans use different id schemes (managed
+                // = bare directory leaf, HF cache = full "org/name"), so comparing
+                // full ids never matched and showed the "same" model twice; the
+                // leaf ("name") is the shared key (mirrors ModelCardView's
+                // adapter reconciliation).
                 let hfCache = hfCacheSettingsProvider()
                 if hfCache.enabled, !hfCache.directories.isEmpty {
                     let cached = await library.scanHuggingFaceCache(directories: hfCache.directories)
-                    let existingIDs = Set(found.map(\.id))
-                    let newFromCache = cached.filter { !existingIDs.contains($0.id) }
+                    let leaf: (String) -> String = { $0.split(separator: "/").last.map(String.init) ?? $0 }
+                    let existingLeaves = Set(found.map { leaf($0.id) })
+                    let newFromCache = cached.filter { !existingLeaves.contains(leaf($0.id)) }
                     found = (found + newFromCache)
                         .sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
                 }
@@ -433,7 +438,14 @@ final class ModelLibraryViewModel {
     }
 
     func isDownloaded(_ model: HFModel) -> Bool {
-        let modelName = model.id.split(separator: "/").last.map(String.init) ?? model.id
-        return localModels.contains { $0.id == modelName }
+        // Compare on the model NAME LEAF for BOTH sides. `localModels` now carries
+        // two id schemes — managed models keep a bare directory leaf, Track F
+        // HF-cache models keep the full "org/name" — so leafing only the incoming
+        // HF id (as before) missed every cache-discovered model (the user could then
+        // re-download tens of GB). Leafing both sides matches either scheme (mirrors
+        // ModelCardView's adapter reconciliation).
+        let leaf: (String) -> String = { $0.split(separator: "/").last.map(String.init) ?? $0 }
+        let targetLeaf = leaf(model.id)
+        return localModels.contains { leaf($0.id) == targetLeaf }
     }
 }

@@ -437,6 +437,20 @@ public actor MLXSwiftEngine: InferenceEngine {
             throw EngineError.adapterApplyFailed(reason: error.localizedDescription)
         }
 
+        // Track E: record the resident adapter's identity. Without this, a GUI /
+        // direct `applyAdapter` (AppState auto-pin, EngineCoordinator) left
+        // `loadedAdapterID` nil even though adapted weights are live — so a later
+        // request's `reconcileAdapter` saw `current: nil` and (a) never shed the
+        // adapter for `adapters: nil` (`.decide(nil, nil) == .keep`), (b) treated a
+        // DIFFERENT adapter as `.applyOnly` (additive → double-stacking), and (c)
+        // left `bypassPromptCache` false so base and adapted caches shared a key.
+        // `applyAdapter` is only ever invoked on an adapter-free base (the GUI
+        // applies right after a fresh load; `reconcileAdapter` reloads the base
+        // before its `.reloadThenApply`), so recording the id here — not merging —
+        // is correct, and a DIFFERENT resident adapter always routes through the
+        // reload-base-then-apply path in `reconcileAdapter`.
+        loadedAdapterID = adapter.name
+
         await LogManager.shared.info(
             "LoRA adapter applied: \(adapter.name) (format=\(adapter.format.rawValue))",
             category: .inference
@@ -500,6 +514,16 @@ public actor MLXSwiftEngine: InferenceEngine {
         }
     }
 
+    /// Whether a request must skip the base-`modelID`-keyed prompt cache. Pure so
+    /// the bypass rule is unit-testable without a model. Bypass when quantizing the
+    /// KV cache (a `QuantizedKVCache` snapshot must not leak into a later plain
+    /// request) OR when a LoRA adapter is resident (base and adapted weights share
+    /// the same `modelID` key, so reusing a base-model entry for adapted weights —
+    /// or vice versa — would poison the cache).
+    static func shouldBypassPromptCache(kvBits: Int?, adapterID: String?) -> Bool {
+        kvBits != nil || adapterID != nil
+    }
+
     /// Reconcile the resident LoRA adapter with a request's `adapters` BEFORE
     /// generation. A no-op when they already match (the common case: no adapter,
     /// or the same adapter as the previous request). A change reloads the base
@@ -515,16 +539,17 @@ public actor MLXSwiftEngine: InferenceEngine {
             return
         case .applyOnly(let id):
             let adapter = try await resolveAdapter(named: id)
+            // `applyAdapter` itself now writes `loadedAdapterID = adapter.name`
+            // (== `id`, by `resolveAdapter`'s name lookup) — no separate write needed.
             try await applyAdapter(adapter)
-            loadedAdapterID = id
         case .reloadOnly:
             // `load(_:)` resets `loadedAdapterID` to nil.
             try await load(baseModel)
         case .reloadThenApply(let id):
             try await load(baseModel)
             let adapter = try await resolveAdapter(named: id)
+            // Same as `.applyOnly` above: `applyAdapter` owns the write.
             try await applyAdapter(adapter)
-            loadedAdapterID = id
         }
     }
 
@@ -1173,7 +1198,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         // base-model cache entry would otherwise be wrongly reused for the adapted
         // model (different weights, same id) — and vice versa. `reconcileAdapter`
         // above has already settled `loadedAdapterID` for this request.
-        let bypassPromptCache = sampling.kvBits != nil || loadedAdapterID != nil
+        let bypassPromptCache = Self.shouldBypassPromptCache(
+            kvBits: sampling.kvBits, adapterID: loadedAdapterID)
 
         // Track C: a structured-output request must NOT speculate. A draft
         // model proposes tokens from its own logits, which the constraint mask
@@ -1396,7 +1422,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         // plain non-tool chat, would have `{...}`-shaped content silently
         // stripped and misreported as `finish_reason: tool_calls`).
         let toolProcessor = Self.makeToolProcessor(
-            format: setup.toolCallFormat, hasTools: hasTools)
+            format: setup.toolCallFormat, hasTools: hasTools,
+            hasResponseFormat: responseFormat != nil)
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         var generatedTokenIDs: [Int] = []
@@ -1618,8 +1645,11 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         // Same tool-call gating as the non-speculative path — see
         // `makeToolProcessor`: only route through the processor when the
-        // caller actually requested tools this turn.
-        let toolProcessor = Self.makeToolProcessor(format: setup.toolCallFormat, hasTools: hasTools)
+        // caller actually requested tools this turn. The speculative branch is
+        // only ever reached with no response_format (constrained output disables
+        // speculation upstream), so `hasResponseFormat` is always false here.
+        let toolProcessor = Self.makeToolProcessor(
+            format: setup.toolCallFormat, hasTools: hasTools, hasResponseFormat: false)
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: targetTokenizer)
         var completionInfo: GenerateCompletionInfo?
@@ -1840,8 +1870,16 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// to compensate. Requiring `hasTools` confines that buffering to requests
     /// that actually asked for tools, restoring byte-for-byte passthrough
     /// otherwise (prior, pre-tool-routing behaviour).
-    static func makeToolProcessor(format: ToolCallFormat?, hasTools: Bool) -> ToolCallProcessor? {
+    static func makeToolProcessor(
+        format: ToolCallFormat?, hasTools: Bool, hasResponseFormat: Bool
+    ) -> ToolCallProcessor? {
         guard hasTools else { return nil }
+        // A grammar-constrained (response_format) turn emits a bare JSON document
+        // that cannot contain tool-call syntax anyway; running the processor over
+        // it would, for a `.json`-format model, buffer the whole document and can
+        // mis-drain the constrained JSON as an (empty-content) tool call. Never
+        // route a constrained turn through the tool processor.
+        guard !hasResponseFormat else { return nil }
         return format.map { ToolCallProcessor(format: $0) }
     }
 

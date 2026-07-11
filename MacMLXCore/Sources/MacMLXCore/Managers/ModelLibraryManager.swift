@@ -170,7 +170,12 @@ public actor ModelLibraryManager {
             }
         }
 
-        return results.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
+        // De-duplicate by id (first configured root wins): a model resolvable under
+        // two overlapping cache roots would otherwise yield two entries with the same
+        // id, breaking SwiftUI List identity downstream.
+        var seenIDs = Set<String>()
+        let deduped = results.filter { seenIDs.insert($0.id).inserted }
+        return deduped.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
     }
 
     /// Deletes `model`'s on-disk directory.

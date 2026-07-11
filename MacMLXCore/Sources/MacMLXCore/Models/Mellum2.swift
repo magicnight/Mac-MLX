@@ -424,17 +424,18 @@ final class Mellum2Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel 
             let prefix = "model.layers.\(l)"
             for n in ["up_proj", "down_proj", "gate_proj"] {
                 guard weights["\(prefix).mlp.experts.0.\(n).weight"] != nil else { continue }
-                var joined: [MLXArray] = []
-                for e in 0 ..< config.numExperts {
-                    guard
-                        let w = weights.removeValue(
-                            forKey: "\(prefix).mlp.experts.\(e).\(n).weight")
-                    else { break }
-                    joined.append(w)
+                // Gather all expert keys NON-DESTRUCTIVELY first: only stack (and only
+                // then remove the per-expert tensors) when the whole set is present. The
+                // previous version `removeValue`d as it went and broke on the first gap,
+                // so a partial set silently lost experts 0..<k — no switch_mlp bank AND
+                // the source tensors already gone.
+                let keys = (0 ..< config.numExperts).map {
+                    "\(prefix).mlp.experts.\($0).\(n).weight"
                 }
-                if joined.count == config.numExperts {
-                    weights["\(prefix).mlp.switch_mlp.\(n).weight"] = stacked(joined)
-                }
+                let joined = keys.compactMap { weights[$0] }
+                guard joined.count == config.numExperts else { continue }
+                for key in keys { weights.removeValue(forKey: key) }
+                weights["\(prefix).mlp.switch_mlp.\(n).weight"] = stacked(joined)
             }
         }
 
