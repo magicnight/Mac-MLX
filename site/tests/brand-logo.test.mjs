@@ -8,10 +8,30 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { renderBrandIcons } from "../../scripts/render-brand-icons.mjs";
+import { prepareSite } from "../../scripts/build-public-site.mjs";
+import { assetPaths, brandCopiedAssetPaths, copiedAssetPaths } from "../content/assets.mjs";
 
 const canonicalURL = new URL("../assets/brand/macmlx-mark.svg", import.meta.url);
 const faviconURL = new URL("../assets/brand/favicon.svg", import.meta.url);
 const manifestURL = new URL("../assets/brand/site.webmanifest", import.meta.url);
+const repositoryRoot = new URL("../../", import.meta.url);
+
+const brandAssetPaths = Object.freeze([
+  "brand/macmlx-mark.svg",
+  "brand/favicon.svg",
+  "brand/apple-touch-icon.png",
+  "brand/icon-192.png",
+  "brand/icon-512.png",
+  "brand/site.webmanifest",
+]);
+
+const brandLinks = Object.freeze([
+  '<link rel="icon" href="/assets/brand/favicon.svg" type="image/svg+xml">',
+  '<link rel="apple-touch-icon" href="/assets/brand/apple-touch-icon.png">',
+  '<link rel="manifest" href="/assets/brand/site.webmanifest">',
+]);
+
+const brandImage = '<img class="brand-mark" src="/assets/brand/macmlx-mark.svg" alt="">';
 
 const rasterIcons = Object.freeze([
   Object.freeze({ filename: "apple-touch-icon.png", width: 180, height: 180 }),
@@ -335,6 +355,50 @@ async function assertOriginalIconState(outputDirectory, originals) {
   assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
   assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
 }
+
+function occurrenceCount(source, value) {
+  return source.split(value).length - 1;
+}
+
+test("every localized document carries the Signal M metadata and wordmark contract", async () => {
+  const { documents } = await prepareSite();
+  assert.equal(documents.size, 26);
+
+  for (const [path, html] of documents) {
+    for (const link of brandLinks) assert.equal(occurrenceCount(html, link), 1, `${path} must contain ${link} exactly once`);
+    assert.equal(occurrenceCount(html, brandImage), 2, `${path} needs one header and one footer Signal M`);
+    assert.doesNotMatch(html, /<span class="brand-mark"[^>]*><i>/, `${path} must not retain the three-bar mark`);
+  }
+
+  for (const path of ["/", "/zh/", "/architecture/", "/zh/architecture/"]) {
+    const html = documents.get(path);
+    assert.ok(html, `missing representative document ${path}`);
+    assert.match(html, new RegExp(`<a class="wordmark"[^>]+aria-label="[^"]+"[^>]*>\\s*${brandImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(html, new RegExp(`<a class="wordmark footer-wordmark"[^>]*>${brandImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  }
+});
+
+test("Signal M CSS reserves stable desktop and compact image dimensions", async () => {
+  const css = await readFile(new URL("../assets/css/main.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /\.brand-mark\s+i(?:\b|:)/);
+  assert.match(css, /\.brand-mark\s*\{[^}]*display:\s*block\s*;[^}]*width:\s*27px\s*;[^}]*height:\s*27px\s*;[^}]*border-radius:\s*8px\s*;[^}]*\}/s);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.brand-mark\s*\{[^}]*width:\s*24px\s*;[^}]*height:\s*24px\s*;[^}]*\}/);
+});
+
+test("the explicit asset manifests contain the exact resolvable Signal M asset set", async () => {
+  assert.deepEqual(brandCopiedAssetPaths, brandAssetPaths);
+  assert.deepEqual(copiedAssetPaths.filter((path) => path.startsWith("brand/")), brandAssetPaths);
+  assert.deepEqual(assetPaths.filter((path) => path.startsWith("brand/")), brandAssetPaths);
+
+  for (const relativePath of brandAssetPaths) await readFile(new URL(`site/assets/${relativePath}`, repositoryRoot));
+
+  const { documents } = await prepareSite();
+  for (const [path, html] of documents) {
+    for (const match of html.matchAll(/(?:src|href)="(\/assets\/brand\/[^"?#]+)"/g)) {
+      await assert.doesNotReject(readFile(new URL(`site${match[1]}`, repositoryRoot)), `${path}: ${match[1]}`);
+    }
+  }
+});
 
 test("SVG safety validation rejects active and externally loaded content", () => {
   const maliciousSVGs = [

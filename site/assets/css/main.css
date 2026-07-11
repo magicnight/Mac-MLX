@@ -114,11 +114,7 @@ a:focus-visible, button:focus-visible { outline: 3px solid var(--blue); outline-
 }
 
 .wordmark { display: inline-flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 760; letter-spacing: -0.04em; }
-.brand-mark { position: relative; width: 27px; height: 27px; display: inline-grid; place-items: center; border-radius: 8px; background: var(--ink); overflow: hidden; }
-.brand-mark i { position: absolute; width: 3px; height: 13px; border-radius: 3px; background: var(--blue-soft); transform: rotate(40deg); }
-.brand-mark i:nth-child(1) { left: 6px; top: 5px; }
-.brand-mark i:nth-child(2) { left: 12px; top: 9px; }
-.brand-mark i:nth-child(3) { left: 18px; top: 5px; }
+.brand-mark { display: block; width: 27px; height: 27px; border-radius: 8px; }
 
 .nav-links { display: flex; align-items: center; gap: 26px; margin-right: auto; }
 .nav-links a { color: var(--ink-soft); font-size: 13px; font-weight: 620; }

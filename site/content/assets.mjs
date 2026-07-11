@@ -25,9 +25,19 @@ export const contentHubCopiedAssetPaths = Object.freeze([
   "images/generated/macmlx-unified-memory.webp",
 ]);
 
+export const brandCopiedAssetPaths = Object.freeze([
+  "brand/macmlx-mark.svg",
+  "brand/favicon.svg",
+  "brand/apple-touch-icon.png",
+  "brand/icon-192.png",
+  "brand/icon-512.png",
+  "brand/site.webmanifest",
+]);
+
 export const copiedAssetPaths = Object.freeze([
   ...phaseOneCopiedAssetPaths,
   ...contentHubCopiedAssetPaths,
+  ...brandCopiedAssetPaths,
 ]);
 
 export const socialCardAssetPaths = Object.freeze([

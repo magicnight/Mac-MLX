@@ -94,6 +94,12 @@ export function socialImageURLFor(project, locale) {
   return siteURL(project, `/assets/social/og-${localeSlug[locale]}.png`);
 }
 
+export function renderBrandLinks() {
+  return `<link rel="icon" href="/assets/brand/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/brand/apple-touch-icon.png">
+  <link rel="manifest" href="/assets/brand/site.webmanifest">`;
+}
+
 export function renderMetadata({ project, route, locale, page = route, faqs = [] }) {
   validateProject(project);
   if (!route?.paths?.[locale]) throw new Error(`Missing route path for ${route?.id ?? "unknown"}/${locale}`);
@@ -108,7 +114,8 @@ export function renderMetadata({ project, route, locale, page = route, faqs = []
     ? homeGraph(project, locale, canonical, description)
     : articleGraph(project, page, locale, canonical, description, faqs);
 
-  return `<title>${escapeHTML(title)}</title>
+  return `${renderBrandLinks()}
+  <title>${escapeHTML(title)}</title>
   <meta name="description" content="${escapeHTML(description)}">
   <link rel="canonical" href="${escapeHTML(canonical)}">
   <link rel="alternate" hreflang="en" href="${escapeHTML(english)}">
