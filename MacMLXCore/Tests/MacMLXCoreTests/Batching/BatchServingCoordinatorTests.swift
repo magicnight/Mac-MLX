@@ -112,6 +112,53 @@ struct BatchServingCoordinatorTests {
         #expect(await flag.value(), "drain must complete once the cohort is idle")
     }
 
+    /// A cohort that FAILS while a drain is open must fail every still-QUEUED row
+    /// fast — not leave it hanging until the 120s stall watchdog. The drive loop
+    /// calls `finishDrive` after `failAll` (which only fails the ACTIVE rows); the
+    /// draining branch skips the re-drive, so `finishDrive` must itself flush the
+    /// orphaned queue.
+    @Test
+    func queuedRowsFailFastWhenCohortFailsDuringDrain() async throws {
+        // completionBatchSize 4, prefillBatchSize 2 → one tick admits exactly two
+        // rows and leaves the rest queued.
+        let coordinator = BatchServingCoordinator(completionBatchSize: 4, prefillBatchSize: 2)
+
+        var streams: [AsyncThrowingStream<GenerateChunk, Error>] = []
+        for _ in 0..<4 {
+            let (pending, stream) = await makePending(coordinator)
+            streams.append(stream)
+            _ = await coordinator.enqueueAndClaim(pending)  // first claims driving = true
+        }
+
+        // Admit 2 rows (ids 0,1) → active; ids 2,3 stay queued.
+        let tick = await coordinator.takeTick(active: [])
+        #expect(tick.admits.count == 2, "prefill headroom admits exactly two rows")
+
+        // Open a drain from a separate task; it parks on the drive claim.
+        let drain = Task { await coordinator.beginDrain() }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await coordinator.isDraining, "drain epoch must be open")
+
+        // Cohort failure while draining: the loop failed its ACTIVE rows and now
+        // calls finishDrive. The still-queued rows must be flushed with an error.
+        let redrive = await coordinator.finishDrive()
+        #expect(redrive == false, "a draining finishDrive releases, never re-drives")
+
+        // Both still-queued rows (2,3) terminate with an error promptly — no
+        // reliance on the stall watchdog.
+        for stream in streams[2...] {
+            var failed = false
+            do {
+                for try await _ in stream {}
+            } catch {
+                failed = true
+            }
+            #expect(failed, "a queued row must error when the cohort dies during drain")
+        }
+
+        await drain.value  // finishDrive resumed the drain waiter
+    }
+
     // MARK: Clause 2 — a dropped stream evicts its row
 
     /// A cancellation of a still-QUEUED row finishes its stream immediately and drops

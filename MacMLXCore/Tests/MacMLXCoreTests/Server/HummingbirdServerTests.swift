@@ -733,6 +733,48 @@ struct HummingbirdServerTests {
         func healthCheck() async -> Bool { true }
     }
 
+    /// Ends a turn in a tool call whose terminal chunk ALSO carries per-token
+    /// logprobs — the shape `MLXSwiftEngine` produces when `logprobs:true` and the
+    /// turn resolves to a tool call. Lets the streaming logprobs-on-tool-call
+    /// attach (FIX 5) be exercised without a real model.
+    private actor ToolCallWithLogprobsStubEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        private(set) var status: EngineStatus = .idle
+        private(set) var loadedModel: LocalModel?
+        let version = "toolcall-logprobs-1"
+
+        func load(_ model: LocalModel) async throws {
+            status = .loading(model: model.id)
+            loadedModel = model
+            status = .ready(model: model.id)
+        }
+
+        func unload() async throws {
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { continuation in
+                let call = ToolCallRequest(
+                    id: "call_abc123", name: "get_weather",
+                    arguments: ["city": .string("Paris")])
+                let logprob = TokenLogprob(
+                    token: "Paris", logprob: -0.25, bytes: nil, topLogprobs: [])
+                continuation.yield(GenerateChunk(
+                    text: "",
+                    finishReason: .toolCalls,
+                    usage: TokenUsage(promptTokens: 3, completionTokens: 4),
+                    toolCalls: [call],
+                    logprobs: [logprob]
+                ))
+                continuation.finish()
+            }
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
     /// A single OpenAI `tools` entry `{"type":"function","function":{...}}`,
     /// as a JSON-object body clients send.
     private var weatherToolSpec: [String: Any] {
@@ -895,6 +937,178 @@ struct HummingbirdServerTests {
             try JSONSerialization.jsonObject(with: Data(argsString.utf8)) as? [String: Any]
         )
         #expect(argsObj["city"] as? String == "Paris")
+    }
+
+    /// FIX 5: on a streaming turn that ends in a tool call, any accumulated
+    /// logprobs must still ride out — the tool-calls SSE branch `continue`s past
+    /// the plain-frame attach, so it must attach them to its own first frame.
+    /// Port: 20_090.
+    @Test
+    func chatCompletionsStreamingLogprobsAttachedOnToolCallTurn() async throws {
+        let engine = ToolCallWithLogprobsStubEngine()
+        try await engine.load(fixtureModel(id: "tool-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_090)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "tool-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": true,
+            "logprobs": true,
+            "tools": [weatherToolSpec],
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let http = try #require(response as? HTTPURLResponse)
+
+        await server.stop()
+
+        #expect(http.statusCode == 200)
+        let frames = sseFrames(data)
+        var sawLogprobs = false
+        for frame in frames {
+            guard let choices = frame["choices"] as? [[String: Any]],
+                  let choice = choices.first,
+                  let logprobs = choice["logprobs"] as? [String: Any]
+            else { continue }
+            if let content = logprobs["content"] as? [[String: Any]], !content.isEmpty {
+                sawLogprobs = true
+            }
+        }
+        #expect(sawLogprobs, "logprobs must ride some SSE frame even on a tool-call turn")
+    }
+
+    /// FIX 6: `tool_calls` on a USER message is ignored (only assistant issues
+    /// them), so a tool result referencing that call is an ORPHAN → clean 400,
+    /// not an opaque 500 / mis-templated prompt. Port: 20_100.
+    @Test
+    func chatCompletionsUserRoleToolCallsIgnoredOrphanResultRejected() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_100)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [
+                [
+                    "role": "user",
+                    "content": "hi",
+                    "tool_calls": [[
+                        "id": "call_x", "type": "function",
+                        "function": ["name": "f", "arguments": "{}"],
+                    ]],
+                ],
+                ["role": "tool", "content": "result", "tool_call_id": "call_x"],
+            ],
+            "stream": false,
+        ]
+        let (_, response) = try await postRaw(url, jsonObject: body)
+
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        // Rejected at the request boundary — never reached the engine.
+        #expect(await engine.capturedRequest == nil)
+    }
+
+    /// FIX 2: image inputs combined with `response_format` (structured output) are
+    /// rejected with a 400 — the VLM decode path carries no constraint mask, so it
+    /// would silently ignore the schema. A vision request WITHOUT response_format
+    /// is unaffected. Port: 20_110.
+    @Test
+    func chatCompletionsImagesWithResponseFormatRejected() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_110)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let imageContent: [String: Any] = [
+            "role": "user",
+            "content": [
+                ["type": "text", "text": "What is in this image?"],
+                ["type": "image_url",
+                 "image_url": ["url": "data:image/png;base64,iVBORw0KGgo="]],
+            ],
+        ]
+
+        // (1) images + response_format → 400.
+        let rejected: [String: Any] = [
+            "model": "stub-model",
+            "messages": [imageContent],
+            "stream": false,
+            "response_format": ["type": "json_object"],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: rejected)
+        #expect(response.statusCode == 400)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("response_format"), "the 400 message should name the combo")
+        #expect(await engine.capturedRequest == nil, "rejected before reaching the engine")
+
+        // (2) same vision request WITHOUT response_format is unaffected → 200.
+        let allowed: [String: Any] = [
+            "model": "stub-model",
+            "messages": [imageContent],
+            "stream": false,
+        ]
+        let (_, okResponse) = try await postRaw(url, jsonObject: allowed)
+        #expect(okResponse.statusCode == 200)
+
+        await server.stop()
+    }
+
+    /// LOW-2 (adversarial review follow-up): `tools` + `response_format` together
+    /// is rejected with a 400 at the HTTP boundary — symmetric with every other
+    /// unsupported combo on this path (images+response_format, logprobs+
+    /// response_format, logprobs+draft_model). Before this, the request was
+    /// silently ACCEPTED and only the tool-call PROCESSOR was disabled deep in
+    /// the engine (`makeToolProcessor`, FIX 3) — tools looked "offered" from the
+    /// client's perspective but were quietly inert. `tool_choice:"none"` still
+    /// suppresses tools entirely, so that combination is unaffected (no tools
+    /// means no conflict). Port: 20_120.
+    @Test
+    func chatCompletionsToolsWithResponseFormatRejected() async throws {
+        let engine = CapturingStubEngine()
+        try await engine.load(fixtureModel(id: "stub-model"))
+        let server = HummingbirdServer(engine: engine)
+        let port = try await server.start(preferredPort: 20_120)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+
+        // (1) tools + response_format → 400, rejected before reaching the engine.
+        let rejected: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": false,
+            "tools": [weatherToolSpec],
+            "response_format": ["type": "json_object"],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: rejected)
+        #expect(response.statusCode == 400)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("response_format") && text.contains("tools"))
+        #expect(await engine.capturedRequest == nil)
+
+        // (2) tools + response_format + tool_choice:"none" → tools are suppressed
+        // entirely, so there's no conflict left to reject → 200.
+        let suppressed: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "Weather in Paris?"]],
+            "stream": false,
+            "tools": [weatherToolSpec],
+            "tool_choice": "none",
+            "response_format": ["type": "json_object"],
+        ]
+        let (_, okResponse) = try await postRaw(url, jsonObject: suppressed)
+        #expect(okResponse.statusCode == 200)
+
+        await server.stop()
     }
 
     /// `tool_choice:"none"` suppresses tools — `GenerateRequest.tools` stays nil

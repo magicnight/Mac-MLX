@@ -440,7 +440,28 @@ final class ChatViewModel {
             systemPrompt: params.systemPrompt.isEmpty ? nil : params.systemPrompt,
             parameters: params.asGenerationParameters(),
             draftModelID: params.draftModelID,
-            numDraftTokens: params.numDraftTokens
+            numDraftTokens: params.numDraftTokens,
+            // Self-describe the GUI's out-of-band pin (AppState.onModelLoaded ->
+            // engine.applyAdapter, fired once on model load — the Inspector's own
+            // adapter picker only updates this persisted value, it never live-
+            // applies). Without this, every request defaulted `adapters` to nil,
+            // so the FIRST chat turn's `reconcileAdapter` saw `decide(pinned, nil)
+            // == .reloadOnly` and silently reloaded the base model out from under
+            // the pin (regression: multi-second reload + adapter silently shed
+            // while the UI kept showing it as active). Mirroring the pin name here
+            // makes `decide(pinned, pinned) == .keep` — no reload — while the API
+            // `adapters: nil` semantic (explicit shed) is untouched for HTTP
+            // clients that never pin anything here.
+            //
+            // Failed-pin edge: whether `onModelLoaded`'s apply actually succeeded
+            // isn't tracked anywhere ChatViewModel can read, so this always sends
+            // the persisted name. If the adapter is missing/broken, `reconcileAdapter`
+            // now retries applying it on EVERY turn and — should it still fail —
+            // surfaces `EngineError.adapterApplyFailed` as a visible per-request
+            // error in the chat bubble, rather than the previous silent fallback to
+            // base weights. That trade matches this project's "no silent
+            // degradation" rule and self-heals a transient apply failure.
+            adapters: params.adapterName
         )
 
         // Route through the MCP tool loop when a session is available (pool
@@ -554,6 +575,11 @@ final class ChatViewModel {
                             self.messages[i].content += chunk.text
                             if let usage = chunk.usage {
                                 self.messages[i].tokenCount = usage.completionTokens
+                            }
+                            // Mirror the direct (non-tool) path so speculative-decoding
+                            // telemetry surfaces for MCP tool-loop turns too.
+                            if let speculativeDecoding = chunk.speculativeDecoding {
+                                self.messages[i].speculativeDecoding = speculativeDecoding
                             }
                         }
 

@@ -147,6 +147,29 @@ struct ModelLibraryManagerHuggingFaceCacheTests {
     }
 
     @Test
+    func deduplicatesSameRepoAcrossOverlappingRoots() async throws {
+        let rootA = try TemporaryDirectory()
+        let rootB = try TemporaryDirectory()
+        // The SAME repo cached under two configured roots (overlapping / aliased
+        // cache paths) must surface exactly once — a duplicate id would break
+        // SwiftUI List identity in the library view.
+        for root in [rootA.url, rootB.url] {
+            try writeCachedModel(
+                in: root,
+                folderName: "models--mlx-community--Qwen3-8B-4bit",
+                revision: "abc123",
+                files: ["config.json", "tokenizer.json", "model.safetensors"]
+            )
+        }
+
+        let mgr = ModelLibraryManager()
+        let results = await mgr.scanHuggingFaceCache(directories: [rootA.url, rootB.url])
+
+        #expect(results.count == 1)
+        #expect(results[0].id == "mlx-community/Qwen3-8B-4bit")
+    }
+
+    @Test
     func prefersRefsMainOverNewestModificationDate() async throws {
         let temp = try TemporaryDirectory()
         // "rev-newer" is written AFTER "rev-main", so it would win a

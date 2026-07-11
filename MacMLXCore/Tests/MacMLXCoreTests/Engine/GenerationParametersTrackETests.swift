@@ -77,6 +77,20 @@ struct GenerationParametersTrackETests {
         #expect(GenerationParameters(kvBits: 7).kvBits == 6)
     }
 
+    @Test("kv_bits 0 / negative means OFF (nil), never snapped up to 2")
+    func kvBitsNonPositiveIsNil() {
+        // A non-positive value must drop to nil (no quantization) rather than snap
+        // UP to the lossiest supported width — snapping would silently enable KV
+        // quantization the caller never asked for and flip bypassPromptCache /
+        // unbatchable routing. `1` still clamps UP to the minimum supported (2).
+        #expect(GenerationParameters.clampKVBits(0) == nil)
+        #expect(GenerationParameters.clampKVBits(-1) == nil)
+        #expect(GenerationParameters.clampKVBits(nil) == nil)
+        #expect(GenerationParameters.clampKVBits(1) == 2)
+        #expect(GenerationParameters(kvBits: 0).kvBits == nil)
+        #expect(GenerationParameters(kvBits: -8).kvBits == nil)
+    }
+
     @Test("kv_group_size snaps to {32,64,128}; quantized_kv_start clamps to non-negative")
     func kvGroupAndStartClamp() {
         // Group size is a discrete set, not a range: out-of-set values snap

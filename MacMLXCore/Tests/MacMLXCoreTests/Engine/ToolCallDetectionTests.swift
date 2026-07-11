@@ -72,19 +72,25 @@ struct ToolCallDetectionTests {
     }
 
     @Test(
-        "makeToolProcessor gates on hasTools, not merely on the model declaring a format",
+        "makeToolProcessor gates on hasTools AND off response_format, not merely on format",
         arguments: [
-            // (format, hasTools, expectNonNil)
-            (ToolCallFormat?.some(.json), true, true),
-            (ToolCallFormat?.some(.json), false, false),   // the regression this guards against
-            (ToolCallFormat?.none, true, false),
-            (ToolCallFormat?.none, false, false),
+            // (format, hasTools, hasResponseFormat, expectNonNil)
+            (ToolCallFormat?.some(.json), true, false, true),
+            (ToolCallFormat?.some(.json), false, false, false),   // the hasTools regression
+            (ToolCallFormat?.none, true, false, false),
+            (ToolCallFormat?.none, false, false, false),
+            // response_format present → never engage the processor even with tools:
+            // a grammar-constrained turn emits bare JSON the `.json` processor would
+            // buffer and mis-drain as an empty tool call.
+            (ToolCallFormat?.some(.json), true, true, false),
+            (ToolCallFormat?.some(.xmlFunction), true, true, false),
         ]
     )
     func makeToolProcessorGatesOnHasTools(
-        format: ToolCallFormat?, hasTools: Bool, expectNonNil: Bool
+        format: ToolCallFormat?, hasTools: Bool, hasResponseFormat: Bool, expectNonNil: Bool
     ) {
-        let processor = MLXSwiftEngine.makeToolProcessor(format: format, hasTools: hasTools)
+        let processor = MLXSwiftEngine.makeToolProcessor(
+            format: format, hasTools: hasTools, hasResponseFormat: hasResponseFormat)
         #expect((processor != nil) == expectNonNil)
     }
 

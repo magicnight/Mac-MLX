@@ -690,7 +690,15 @@ private func decodeOpenAIMessages(_ messages: [ChatCompletionRequest.Message]) t
         }
         // Assistant turn that issued tool calls: decode them so the template
         // reproduces the tool-call block and the pairing assertion is satisfied.
-        let toolCalls = try msg.tool_calls?.map { try toolCallRequest(fromOpenAI: $0) }
+        // Only the ASSISTANT role carries tool calls (OpenAI semantics). A user
+        // message's `tool_calls` is ignored — decoding it would let a user turn
+        // satisfy the role-blind `validateToolCallPairing` for a following tool
+        // result, while the engine forwards only assistant tool calls to the
+        // template (an opaque 500 / wrong prompt). Ignoring it lets the orphan-
+        // result validation below 400 a mispaired history cleanly.
+        let toolCalls = role == .assistant
+            ? try msg.tool_calls?.map { try toolCallRequest(fromOpenAI: $0) }
+            : nil
         return ChatMessage(
             role: role,
             content: msg.content?.text ?? "",
@@ -1673,6 +1681,42 @@ public actor HummingbirdServer {
             return errorResponse(
                 status: .badRequest,
                 message: error.description,
+                code: "invalid_request_error"
+            )
+        }
+
+        // A vision request (image attachments) combined with `response_format`
+        // (structured output) is rejected here, before generation starts, rather
+        // than silently degraded: the VLM decode path carries no constraint mask,
+        // so it would ignore the schema entirely (project rule: no silent
+        // degradation). Checked at the request boundary — the same 400 the other
+        // unsupported combos on this path return — because an engine-side throw
+        // would surface mid-stream (headers already sent) rather than as a clean 400.
+        if responseFormat != nil, messages.contains(where: { !$0.images.isEmpty }) {
+            return errorResponse(
+                status: .badRequest,
+                message: "`response_format` (structured output) is not supported together "
+                    + "with image inputs (vision) in this version.",
+                code: "invalid_request_error"
+            )
+        }
+
+        // `tools` + `response_format` together is rejected here too, symmetric with
+        // the image/logprobs combo guards on this path. `toolsToSend` (post
+        // `tool_choice:"none"` filtering) is the same signal the engine gates
+        // `hasTools` on, so a request whose tools were suppressed via
+        // `tool_choice:"none"` is unaffected. Without this, the request was
+        // silently ACCEPTED and only degraded deep in the engine — `makeToolProcessor`
+        // (Track E) disables just the tool-call PROCESSOR for this combination
+        // (grammar-constrained output can't contain tool-call syntax anyway), which
+        // is correct as defense-in-depth for the GUI's direct (non-HTTP)
+        // `engine.generate` call, but left the HTTP path as the one unsupported
+        // combo that didn't 400 like every sibling guard here.
+        if responseFormat != nil, toolsToSend?.isEmpty == false {
+            return errorResponse(
+                status: .badRequest,
+                message: "`tools` is not supported together with `response_format` "
+                    + "(structured output) in this version.",
                 code: "invalid_request_error"
             )
         }
@@ -2668,6 +2712,15 @@ public actor HummingbirdServer {
                                 "delta": [String: Any](),
                                 "finish_reason": FinishReason.toolCalls.rawValue,
                             ])
+                            // Track E: the terminal tool-call chunk still carries any
+                            // logprobs accumulated since the last emitted frame. Attach
+                            // them to the FIRST frame emitted on this branch (then clear),
+                            // mirroring the non-streaming path — the plain-frame attach
+                            // below is unreachable here because of the `continue`.
+                            if wantsLogprobs, !pendingStreamLogprobs.isEmpty, !toolFrames.isEmpty {
+                                toolFrames[0]["logprobs"] = openAILogprobs(pendingStreamLogprobs)
+                                pendingStreamLogprobs.removeAll()
+                            }
                             for frameChoice in toolFrames {
                                 let payload: [String: Any] = [
                                     "id": completionID,
