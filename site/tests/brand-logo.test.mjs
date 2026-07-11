@@ -20,13 +20,41 @@ const expectedFavicon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12
   <circle cx="64" cy="77" r="8.5" fill="#7196FF"/>
 </svg>`;
 
-const allowedAttributes = new Map([
-  ["svg", new Set(["xmlns", "viewBox", "role", "aria-labelledby"])],
-  ["title", new Set(["id"])],
-  ["rect", new Set(["x", "y", "width", "height", "rx", "fill"])],
-  ["path", new Set(["d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin"])],
-  ["circle", new Set(["cx", "cy", "r", "fill"])],
+const allowedAttributeValues = new Map([
+  ["svg", new Map([
+    ["xmlns", new Set(["http://www.w3.org/2000/svg"])],
+    ["viewBox", new Set(["0 0 128 128"])],
+    ["role", new Set(["img"])],
+    ["aria-labelledby", new Set(["title"])],
+  ])],
+  ["title", new Map([
+    ["id", new Set(["title"])],
+  ])],
+  ["rect", new Map([
+    ["x", new Set(["4"])],
+    ["y", new Set(["4"])],
+    ["width", new Set(["120"])],
+    ["height", new Set(["120"])],
+    ["rx", new Set(["34"])],
+    ["fill", new Set(["#F3F1EA"])],
+  ])],
+  ["path", new Map([
+    ["d", new Set(["M28 88V39l36 38 36-38v49"])],
+    ["fill", new Set(["none"])],
+    ["stroke", new Set(["#111311"])],
+    ["stroke-width", new Set(["14", "16"])],
+    ["stroke-linecap", new Set(["round"])],
+    ["stroke-linejoin", new Set(["round"])],
+  ])],
+  ["circle", new Map([
+    ["cx", new Set(["64", "100"])],
+    ["cy", new Set(["77", "39"])],
+    ["r", new Set(["8.5", "6"])],
+    ["fill", new Set(["#7196FF", "#89E67A"])],
+  ])],
 ]);
+
+const allowedTitleText = new Set(["macMLX Signal M", "macMLX Signal M favicon"]);
 
 function parseAttributes(element, source) {
   const attributes = new Map();
@@ -38,7 +66,11 @@ function parseAttributes(element, source) {
     const match = attributePattern.exec(source);
     assert.ok(match, `invalid attribute syntax on <${element}>`);
     const [, name, value] = match;
-    assert.ok(allowedAttributes.get(element)?.has(name), `attribute ${name} is not allowed on <${element}>`);
+    const allowedValues = allowedAttributeValues.get(element)?.get(name);
+    assert.ok(allowedValues, `attribute ${name} is not allowed on <${element}>`);
+    assert.doesNotMatch(value, /\\/, `backslashes are not allowed in ${name} on <${element}>`);
+    assert.doesNotMatch(value, /&(?:#\d+|#x[\da-f]+|[a-z][\w.-]*);/i, `character entities are not allowed in ${name} on <${element}>`);
+    assert.ok(allowedValues.has(value), `value ${value} is not allowed for ${name} on <${element}>`);
     assert.ok(!attributes.has(name), `duplicate attribute ${name} on <${element}>`);
     attributes.set(name, value);
     offset = attributePattern.lastIndex;
@@ -68,7 +100,7 @@ function assertSelfContainedSVG(svg) {
   const openingElements = [];
   const tagPattern = /<\s*(\/?)\s*([A-Za-z][\w:-]*)([^>]*)>/g;
   for (const [, closing, element, rawAttributes] of svg.matchAll(tagPattern)) {
-    assert.ok(allowedAttributes.has(element), `element <${element}> is not allowed`);
+    assert.ok(allowedAttributeValues.has(element), `element <${element}> is not allowed`);
     if (closing) {
       assert.equal(rawAttributes.trim(), "", `closing </${element}> cannot have attributes`);
       continue;
@@ -77,6 +109,10 @@ function assertSelfContainedSVG(svg) {
     openingElements.push(element);
     const attributeSource = rawAttributes.trim().replace(/\/$/, "").trim();
     parseAttributes(element, attributeSource);
+  }
+
+  for (const [, titleText] of svg.matchAll(/<title\b[^>]*>([^<]+)<\/title>/g)) {
+    assert.ok(allowedTitleText.has(titleText), `title text ${titleText} is not allowed`);
   }
 
   return openingElements;
@@ -106,6 +142,7 @@ test("SVG safety validation rejects active and externally loaded content", () =>
     ["href", `<svg xmlns="http://www.w3.org/2000/svg"><circle href="asset.svg"/></svg>`],
     ["src", `<svg xmlns="http://www.w3.org/2000/svg"><circle src="asset.svg"/></svg>`],
     ["url", `<svg xmlns="http://www.w3.org/2000/svg"><circle fill="url(#paint)"/></svg>`],
+    ["escaped URL with entities", `<svg xmlns="http://www.w3.org/2000/svg"><circle fill="u\\72l(&#47;&#47;example.com/paint.svg#x)"/></svg>`],
     ["data URL", `<svg xmlns="http://www.w3.org/2000/svg"><title>data:image/svg+xml,unsafe</title></svg>`],
     ["HTTP URL", `<svg xmlns="http://www.w3.org/2000/svg"><title>https://example.com</title></svg>`],
   ];
@@ -113,6 +150,15 @@ test("SVG safety validation rejects active and externally loaded content", () =>
   for (const [entry, svg] of maliciousSVGs) {
     assert.throws(() => assertSelfContainedSVG(svg), undefined, `${entry} must be rejected`);
   }
+
+  assert.throws(
+    () => assertSelfContainedSVG(`<svg xmlns="http://www.w3.org/2000/svg"><circle fill="\\23 7196FF"/></svg>`),
+    /backslashes are not allowed/,
+  );
+  assert.throws(
+    () => assertSelfContainedSVG(`<svg xmlns="http://www.w3.org/2000/svg"><circle fill="&#35;7196FF"/></svg>`),
+    /character entities are not allowed/,
+  );
 });
 
 test("canonical Signal M locks the approved geometry and palette", async () => {
