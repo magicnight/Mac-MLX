@@ -31,8 +31,12 @@ export function renderSocialCardSVG({ project, locale }) {
     <circle cx="1120" cy="150" r="285" fill="none" stroke="#587060" opacity=".72"/>
     <circle cx="1120" cy="150" r="340" fill="none" stroke="#405248" opacity=".62"/>
     <circle cx="1120" cy="150" r="402" fill="none" stroke="#314039" opacity=".55"/>
-    <rect x="78" y="72" width="45" height="45" rx="12" fill="none" stroke="#738177"/>
-    <rect x="86" y="79" width="6" height="31" rx="3" fill="#a9e88b"/><rect x="98" y="79" width="6" height="31" rx="3" fill="#a9e88b"/><rect x="110" y="79" width="6" height="31" rx="3" fill="#a9e88b"/>
+    <g transform="translate(78 72) scale(.3515625)">
+      <rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>
+      <path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="64" cy="77" r="8.5" fill="#7196FF"/>
+      <circle cx="100" cy="39" r="6" fill="#89E67A"/>
+    </g>
     <text x="139" y="105" fill="#f3f1ea" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="31" font-weight="700">macMLX</text>
     <rect x="966" y="75" width="156" height="40" rx="20" fill="#171a17" stroke="#59645b"/>
     <text x="1044" y="101" text-anchor="middle" fill="#c7cec8" font-family="Menlo,monospace" font-size="17" font-weight="600">v${escapeXML(project.currentVersion)}</text>

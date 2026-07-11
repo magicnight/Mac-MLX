@@ -12,6 +12,13 @@ import { renderSocialCards } from "../../scripts/render-social-cards.mjs";
 
 const source = await readFile(new URL("../social-card.html", import.meta.url), "utf8");
 
+const signalMGeometry = Object.freeze([
+  '<rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>',
+  '<path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>',
+  '<circle cx="64" cy="77" r="8.5" fill="#7196FF"/>',
+  '<circle cx="100" cy="39" r="6" fill="#89E67A"/>',
+]);
+
 function crc32(buffer) {
   let crc = 0xffffffff;
   for (const byte of buffer) {
@@ -64,6 +71,14 @@ test("social card source contains reviewed locale copy and uses registry version
   assert.doesNotMatch(source, new RegExp(`v${project.currentVersion.replaceAll(".", "\\.")}`));
 });
 
+test("HTML capture source uses the canonical Signal M at the preserved wordmark position", () => {
+  assert.match(source, /<svg class="mark" viewBox="0 0 128 128" aria-hidden="true">/);
+  for (const geometry of signalMGeometry) assert.ok(source.includes(geometry), `missing canonical geometry: ${geometry}`);
+  assert.match(source, /\.mark\s*\{\s*width:\s*45px;\s*height:\s*45px;\s*\}/);
+  assert.match(source, /<div class="wordmark"><svg class="mark"[\s\S]*?<\/svg><span>macMLX<\/span><\/div>/);
+  assert.doesNotMatch(source, /\.mark i|<i><\/i>/);
+});
+
 test("capture contract names the exact tracked source and public targets", () => {
   assert.deepEqual(socialCardCaptures, [
     { locale: "en", query: "?locale=en", source: "site/assets/social/og-en.png", output: "public/assets/social/og-en.png" },
@@ -86,6 +101,16 @@ test("registry-driven vector cards contain locale copy, dimensions, and no netwo
   }
   assert.match(english, /Native Swift inference/);
   assert.match(chinese, /原生 Swift 推理/);
+});
+
+test("both deterministic vector cards use the canonical scaled Signal M", () => {
+  for (const locale of ["en", "zh-Hans"]) {
+    const svg = renderSocialCardSVG({ project, locale });
+    assert.match(svg, /<g transform="translate\(78 72\) scale\(\.3515625\)">/);
+    for (const geometry of signalMGeometry) assert.ok(svg.includes(geometry), `${locale} missing canonical geometry: ${geometry}`);
+    assert.doesNotMatch(svg, /<rect x="86" y="79" width="6" height="31"|<rect x="98" y="79" width="6" height="31"|<rect x="110" y="79" width="6" height="31"/);
+    assert.match(svg, /<text x="139" y="105"/);
+  }
 });
 
 test("tracked social cards are distinct real 1200 by 630 PNGs", async () => {

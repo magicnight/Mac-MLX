@@ -57,12 +57,13 @@ jobs:
           node scripts/test-public-site.mjs
           node --check scripts/build-public-site.mjs
           node --check scripts/crawl-public-site.mjs
+          node --check scripts/render-brand-icons.mjs
           node --check scripts/render-social-cards.mjs
           node --check scripts/validate-social-cards.mjs
           node --check scripts/verify-cloudflare-deploy.mjs
           node --check public/assets/js/main.js
           if command -v xmllint >/dev/null 2>&1; then
-            xmllint --noout public/assets/og-image.svg public/sitemap.xml
+            xmllint --noout site/assets/brand/macmlx-mark.svg site/assets/brand/favicon.svg public/assets/og-image.svg public/sitemap.xml
           fi
 
   spm:

@@ -4,11 +4,12 @@ The site build is network-free. It validates the checked-in registries and asset
 
 ## Build and verify
 
-The reviewed 1200×630 social cards are tracked build inputs. Their SVG source is registry-driven and network-free. Refresh them only in an environment where Sharp is already available, either through normal Node resolution or an explicit `MACMLX_NODE_MODULES` directory; the normal build and CI do not install or require Sharp.
+The canonical SVG is the source of truth for Signal M. Brand and social PNG files are derived, reviewed, tracked build inputs. Social-card SVG rendering is registry-driven and network-free. Refresh the derived PNGs only in an environment where Sharp is already available, either through normal Node resolution or an explicit `MACMLX_NODE_MODULES` directory; the normal build and CI do not install or require Sharp.
 
 Run the complete local sequence from the repository root:
 
 ```sh
+MACMLX_NODE_MODULES=/path/to/node_modules node scripts/render-brand-icons.mjs
 MACMLX_NODE_MODULES=/path/to/node_modules node scripts/render-social-cards.mjs
 node scripts/validate-social-cards.mjs
 node scripts/build-public-site.mjs
@@ -17,11 +18,12 @@ node scripts/crawl-public-site.mjs
 node scripts/test-public-site.mjs
 node --check scripts/build-public-site.mjs
 node --check scripts/crawl-public-site.mjs
+node --check scripts/render-brand-icons.mjs
 node --check scripts/render-social-cards.mjs
 node --check scripts/validate-social-cards.mjs
 node --check scripts/verify-cloudflare-deploy.mjs
 node --check public/assets/js/main.js
-xmllint --noout public/sitemap.xml public/assets/og-image.svg
+xmllint --noout site/assets/brand/macmlx-mark.svg site/assets/brand/favicon.svg public/assets/og-image.svg public/sitemap.xml
 git diff --check
 ```
 

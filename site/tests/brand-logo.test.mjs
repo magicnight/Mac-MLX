@@ -10,11 +10,14 @@ import { tmpdir } from "node:os";
 import { renderBrandIcons } from "../../scripts/render-brand-icons.mjs";
 import { prepareSite } from "../../scripts/build-public-site.mjs";
 import { assetPaths, brandCopiedAssetPaths, copiedAssetPaths } from "../content/assets.mjs";
+import { project } from "../content/project.mjs";
+import { renderSocialCardSVG } from "../lib/social-card.mjs";
 
 const canonicalURL = new URL("../assets/brand/macmlx-mark.svg", import.meta.url);
 const faviconURL = new URL("../assets/brand/favicon.svg", import.meta.url);
 const manifestURL = new URL("../assets/brand/site.webmanifest", import.meta.url);
 const repositoryRoot = new URL("../../", import.meta.url);
+const socialCardURL = new URL("../social-card.html", import.meta.url);
 
 const brandAssetPaths = Object.freeze([
   "brand/macmlx-mark.svg",
@@ -464,6 +467,28 @@ test("canonical Signal M locks the approved geometry and palette", async () => {
   assert.match(svg, /fill="#89E67A"/);
   assert.deepEqual(assertSelfContainedSVG(svg), ["svg", "title", "rect", "path", "circle", "circle"]);
   assertAccessibleTitle(svg, "macMLX Signal M");
+});
+
+test("canonical brand geometry stays synchronized across both social-card render sources", async () => {
+  const canonical = await readFile(canonicalURL, "utf8");
+  const capture = await readFile(socialCardURL, "utf8");
+  const renderedCards = [
+    renderSocialCardSVG({ project, locale: "en" }),
+    renderSocialCardSVG({ project, locale: "zh-Hans" }),
+  ];
+  const geometry = [
+    '<rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>',
+    '<path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>',
+    '<circle cx="64" cy="77" r="8.5" fill="#7196FF"/>',
+    '<circle cx="100" cy="39" r="6" fill="#89E67A"/>',
+  ];
+
+  for (const sourceSVG of [canonical, capture, ...renderedCards]) {
+    for (const element of geometry) assert.ok(sourceSVG.includes(element), `Signal M drifted at ${element}`);
+    assert.equal((sourceSVG.match(/M28 88V39l36 38 36-38v49/g) ?? []).length, 1);
+    assert.equal((sourceSVG.match(/#7196FF/g) ?? []).length, 1);
+    assert.equal((sourceSVG.match(/#89E67A/g) ?? []).length, 1);
+  }
 });
 
 test("favicon keeps the optical Signal M without the green signal node", async () => {

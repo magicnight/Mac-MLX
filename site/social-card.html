@@ -13,8 +13,7 @@
     .ring { position: absolute; right: -72px; top: -126px; width: 570px; height: 570px; border: 1px solid #587060; border-radius: 50%; box-shadow: 0 0 0 54px #172019, 0 0 0 55px #405248, 0 0 0 116px #131814, 0 0 0 117px #314039; opacity: .72; }
     header { position: relative; display: flex; align-items: center; justify-content: space-between; }
     .wordmark { display: flex; align-items: center; gap: 16px; font-size: 31px; font-weight: 720; letter-spacing: -.035em; }
-    .mark { width: 45px; height: 45px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 7px; border: 1px solid #738177; border-radius: 12px; }
-    .mark i { display: block; border-radius: 4px; background: #a9e88b; }
+    .mark { width: 45px; height: 45px; }
     .version { padding: 10px 17px; border: 1px solid #59645b; border-radius: 999px; color: #c7cec8; font: 600 17px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
     main { position: relative; margin-top: 105px; max-width: 860px; }
     .eyebrow { margin: 0 0 24px; color: #a9e88b; font: 650 18px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .11em; text-transform: uppercase; }
@@ -28,7 +27,12 @@
 <body>
   <article class="card" aria-label="macMLX social card">
     <div class="grid" aria-hidden="true"></div><div class="ring" aria-hidden="true"></div>
-    <header><div class="wordmark"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span><span>macMLX</span></div><span class="version" id="version"></span></header>
+    <header><div class="wordmark"><svg class="mark" viewBox="0 0 128 128" aria-hidden="true">
+      <rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>
+      <path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="64" cy="77" r="8.5" fill="#7196FF"/>
+      <circle cx="100" cy="39" r="6" fill="#89E67A"/>
+    </svg><span>macMLX</span></div><span class="version" id="version"></span></header>
     <main><p class="eyebrow" id="eyebrow"></p><h1 id="headline"></h1><p class="lede" id="lede"></p></main>
     <footer><span>macmlx.app</span><span id="platform"></span></footer>
   </article>
