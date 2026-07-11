@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { deflateSync, inflateSync } from "node:zlib";
 import test from "node:test";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -163,6 +163,8 @@ function inspectPNG(buffer, label) {
   let header;
   let ihdrCount = 0;
   let iendCount = 0;
+  let plteCount = 0;
+  let phase = "beforeIHDR";
   const compressed = [];
   while (offset < buffer.length) {
     assert.ok(buffer.length - offset >= 12, `${label} has a truncated PNG chunk`);
@@ -173,10 +175,12 @@ function inspectPNG(buffer, label) {
     const crcOffset = dataStart + length;
     const end = crcOffset + 4;
     const type = buffer.toString("ascii", typeStart, dataStart);
+    assert.match(type, /^[A-Za-z]{4}$/, `${label} has an invalid PNG chunk type`);
     assert.equal(crc32(buffer.subarray(typeStart, crcOffset)), buffer.readUInt32BE(crcOffset), `${label} has a CRC mismatch in ${type}`);
 
     if (type === "IHDR") {
       ihdrCount += 1;
+      assert.equal(phase, "beforeIHDR", `${label} must contain a unique first IHDR`);
       assert.equal(offset, 8, `${label} IHDR must be the first chunk`);
       assert.equal(length, 13, `${label} IHDR must have the canonical length`);
       header = {
@@ -188,19 +192,34 @@ function inspectPNG(buffer, label) {
         filter: buffer[dataStart + 11],
         interlace: buffer[dataStart + 12],
       };
+      phase = "beforeIDAT";
+    } else if (type === "PLTE") {
+      plteCount += 1;
+      assert.equal(plteCount, 1, `${label} must not repeat PLTE`);
+      assert.equal(phase, "beforeIDAT", `${label} PLTE must appear before IDAT`);
     } else if (type === "IDAT") {
+      assert.notEqual(phase, "beforeIHDR", `${label} IDAT cannot precede IHDR`);
+      assert.notEqual(phase, "afterIDAT", `${label} IDAT chunks must be contiguous`);
       assert.ok(length > 0, `${label} IDAT must not be empty`);
       compressed.push(buffer.subarray(dataStart, crcOffset));
+      phase = "inIDAT";
     } else if (type === "IEND") {
       iendCount += 1;
+      assert.ok(phase === "inIDAT" || phase === "afterIDAT", `${label} IEND must follow IDAT`);
       assert.equal(length, 0, `${label} IEND must be empty`);
       assert.equal(end, buffer.length, `${label} must not have trailing bytes`);
+      phase = "ended";
+    } else {
+      if (/^[A-Z]/.test(type)) assert.fail(`${label} has unknown critical chunk ${type}`);
+      assert.notEqual(phase, "beforeIHDR", `${label} IHDR must be the first chunk`);
+      if (phase === "inIDAT") phase = "afterIDAT";
     }
     offset = end;
   }
 
   assert.equal(ihdrCount, 1, `${label} must contain one IHDR`);
   assert.equal(iendCount, 1, `${label} must contain one terminal IEND`);
+  assert.equal(phase, "ended", `${label} must end after IEND`);
   assert.ok(compressed.length > 0, `${label} must contain IDAT data`);
   assert.deepEqual(
     { bitDepth: header.bitDepth, colorType: header.colorType, compression: header.compression, filter: header.filter, interlace: header.interlace },
@@ -245,6 +264,26 @@ function solidPNG(width, height) {
   ]);
 }
 
+function pngChunks(buffer) {
+  const chunks = [];
+  let offset = 8;
+  while (offset < buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const dataStart = offset + 8;
+    const end = dataStart + length + 4;
+    chunks.push({ type: buffer.toString("ascii", offset + 4, dataStart), data: buffer.subarray(dataStart, dataStart + length) });
+    offset = end;
+  }
+  return chunks;
+}
+
+function assemblePNG(chunks) {
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    ...chunks.map(({ type, data }) => pngChunk(type, data)),
+  ]);
+}
+
 function sharpIsAvailable() {
   const require = createRequire(import.meta.url);
   try {
@@ -259,6 +298,40 @@ function sharpIsAvailable() {
       return false;
     }
   }
+}
+
+function solidSharp() {
+  return {
+    resize(width, height) {
+      return {
+        png() {
+          return { async toBuffer() { return solidPNG(width, height); } };
+        },
+      };
+    },
+  };
+}
+
+function bufferedSharp(buffer) {
+  return {
+    resize() {
+      return {
+        png() {
+          return { async toBuffer() { return buffer; } };
+        },
+      };
+    },
+  };
+}
+
+async function assertOriginalIconState(outputDirectory, originals) {
+  for (const icon of rasterIcons) {
+    const original = originals.get(icon.filename);
+    if (original) assert.deepEqual(await readFile(join(outputDirectory, icon.filename)), original);
+    else await assert.rejects(readFile(join(outputDirectory, icon.filename)), { code: "ENOENT" });
+  }
+  assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
+  assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
 }
 
 test("SVG safety validation rejects active and externally loaded content", () => {
@@ -329,6 +402,34 @@ test("tracked raster icons are strict PNGs at their exact target dimensions", as
   assert.equal(new Set(dimensions).size, rasterIcons.length, "each tracked icon must carry its own dimensions in IHDR");
 });
 
+test("PNG validation rejects invalid critical chunks and noncontiguous image phases", async (t) => {
+  const baseChunks = pngChunks(await readFile(new URL("../assets/brand/apple-touch-icon.png", import.meta.url)));
+  const header = baseChunks.find(({ type }) => type === "IHDR");
+  const imageData = { type: "IDAT", data: Buffer.concat(baseChunks.filter(({ type }) => type === "IDAT").map(({ data }) => data)) };
+  const end = baseChunks.find(({ type }) => type === "IEND");
+  const split = Math.floor(imageData.data.length / 2);
+  const fixtures = [
+    ["unknown critical chunk", assemblePNG([header, { type: "ABCD", data: Buffer.alloc(0) }, imageData, end]), /unknown critical chunk ABCD/],
+    ["PLTE after IDAT", assemblePNG([header, imageData, { type: "PLTE", data: Buffer.from([0, 0, 0]) }, end]), /PLTE.*before IDAT/],
+    ["interrupted IDAT", assemblePNG([
+      header,
+      { type: "IDAT", data: imageData.data.subarray(0, split) },
+      { type: "tEXt", data: Buffer.from("key\0value") },
+      { type: "IDAT", data: imageData.data.subarray(split) },
+      end,
+    ]), /IDAT chunks must be contiguous/],
+  ];
+
+  for (const [name, fixture, expected] of fixtures) {
+    assert.throws(() => inspectPNG(fixture, name), expected);
+    await t.test(`${name} is rejected before publication`, async (t) => {
+      const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-invalid-png-"));
+      t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+      await assert.rejects(renderBrandIcons({ outputDirectory, sharpImpl: () => bufferedSharp(fixture) }), expected);
+    });
+  }
+});
+
 test("web manifest has only the exact macMLX install contract", async () => {
   const manifest = JSON.parse(await readFile(manifestURL, "utf8"));
   assert.deepEqual(manifest, {
@@ -355,7 +456,9 @@ test("Sharp rerenders all brand icons byte-identically", { skip: !sharpIsAvailab
   for (const icon of rasterIcons) {
     const firstHash = createHash("sha256").update(await readFile(join(firstDirectory, icon.filename))).digest("hex");
     const secondHash = createHash("sha256").update(await readFile(join(secondDirectory, icon.filename))).digest("hex");
+    const trackedHash = createHash("sha256").update(await readFile(new URL(`../assets/brand/${icon.filename}`, import.meta.url))).digest("hex");
     assert.equal(firstHash, secondHash, `${icon.filename} must be deterministic`);
+    assert.equal(firstHash, trackedHash, `${icon.filename} fresh render must match the tracked PNG`);
   }
 });
 
@@ -393,4 +496,182 @@ test("brand icon refresh rolls back the complete set when a later render fails",
       assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
     });
   }
+});
+
+test("brand icon publication restores every preexisting-state shape after a staged rename fails", async (t) => {
+  const scenarios = [
+    ["complete", rasterIcons.map((icon) => icon.filename)],
+    ["partial", [rasterIcons[0].filename, rasterIcons[2].filename]],
+    ["missing", []],
+  ];
+  for (const [state, existing] of scenarios) {
+    for (const failureAt of [2, 3]) {
+      await t.test(`${state} set with publish rename ${failureAt} failing`, async (t) => {
+        const outputDirectory = await mkdtemp(join(tmpdir(), `macmlx-brand-publish-${state}-${failureAt}-`));
+        t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+        const originals = new Map(existing.map((filename, index) => [filename, Buffer.from(`${state}-original-${index}`)]));
+        for (const [filename, contents] of originals) await writeFile(join(outputDirectory, filename), contents);
+        await writeFile(join(outputDirectory, "unrelated.svg"), "keep me");
+
+        let publishes = 0;
+        const fsImpl = {
+          async rename(source, destination) {
+            if (source.includes(".brand-icons-stage-")) {
+              publishes += 1;
+              if (publishes === failureAt) throw new Error(`injected publish-${failureAt} failure`);
+            }
+            return rename(source, destination);
+          },
+        };
+
+        await assert.rejects(
+          renderBrandIcons({ outputDirectory, sharpImpl: solidSharp, fsImpl }),
+          new RegExp(`injected publish-${failureAt} failure`),
+        );
+        await assertOriginalIconState(outputDirectory, originals);
+      });
+    }
+  }
+});
+
+test("an incomplete rollback reports both failures and preserves the remaining backup", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-rollback-failure-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const originals = new Map(rasterIcons.map((icon, index) => [icon.filename, Buffer.from(`rollback-original-${index}`)]));
+  for (const [filename, contents] of originals) await writeFile(join(outputDirectory, filename), contents);
+  await writeFile(join(outputDirectory, "unrelated.svg"), "keep me");
+
+  const publishFailure = new Error("injected publish failure");
+  const rollbackFailure = new Error("injected rollback failure");
+  let publishes = 0;
+  const fsImpl = {
+    async rename(source, destination) {
+      if (source.includes(".brand-icons-stage-")) {
+        publishes += 1;
+        if (publishes === 2) throw publishFailure;
+      }
+      if (source.includes(".brand-icons-backup-") && source.endsWith("icon-192.png")) throw rollbackFailure;
+      return rename(source, destination);
+    },
+  };
+
+  await assert.rejects(
+    renderBrandIcons({ outputDirectory, sharpImpl: solidSharp, fsImpl }),
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.cause, publishFailure);
+      assert.ok(error.errors.includes(publishFailure));
+      assert.ok(error.errors.includes(rollbackFailure));
+      assert.match(error.message, /rollback was incomplete/i);
+      assert.match(error.message, /\.brand-icons-backup-/);
+      return true;
+    },
+  );
+
+  const backupNames = (await readdir(outputDirectory)).filter((name) => name.startsWith(".brand-icons-backup-"));
+  assert.equal(backupNames.length, 1);
+  assert.deepEqual(
+    await readFile(join(outputDirectory, backupNames[0], "icon-192.png")),
+    originals.get("icon-192.png"),
+  );
+  assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
+  assert.equal((await readdir(outputDirectory)).some((name) => name.startsWith(".brand-icons-stage-")), false);
+});
+
+test("brand icon writer lock excludes overlap and releases for the next render", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-lock-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  let announceStarted;
+  let unblock;
+  const started = new Promise((resolve) => { announceStarted = resolve; });
+  const gate = new Promise((resolve) => { unblock = resolve; });
+  let blocked = true;
+
+  function blockingSharp() {
+    return {
+      resize(width, height) {
+        return {
+          png() {
+            return {
+              async toBuffer() {
+                if (blocked) {
+                  blocked = false;
+                  announceStarted();
+                  await gate;
+                }
+                return solidPNG(width, height);
+              },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const firstRender = renderBrandIcons({ outputDirectory, sharpImpl: blockingSharp });
+  await started;
+  await assert.rejects(
+    renderBrandIcons({ outputDirectory, sharpImpl: solidSharp }),
+    /Another brand-icon render is already running/,
+  );
+  unblock();
+  await firstRender;
+
+  await renderBrandIcons({ outputDirectory, sharpImpl: solidSharp });
+  assert.equal((await readdir(outputDirectory)).some((name) => name === ".brand-icons.render.lock"), false);
+});
+
+test("brand icon writer lock recovers a terminated owner", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-stale-lock-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const lockDirectory = join(outputDirectory, ".brand-icons.render.lock");
+  await mkdir(lockDirectory);
+  await writeFile(join(lockDirectory, "owner.json"), JSON.stringify({
+    pid: 2_147_483_647,
+    startedAt: new Date().toISOString(),
+    token: "terminated-owner",
+  }));
+
+  await renderBrandIcons({ outputDirectory, sharpImpl: solidSharp });
+  assert.equal((await readdir(outputDirectory)).includes(".brand-icons.render.lock"), false);
+});
+
+test("brand icon writer releases only the lock token it acquired", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-lock-owner-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const lockDirectory = join(outputDirectory, ".brand-icons.render.lock");
+  let announceStarted;
+  let unblock;
+  const started = new Promise((resolve) => { announceStarted = resolve; });
+  const gate = new Promise((resolve) => { unblock = resolve; });
+  let blocked = true;
+  function blockingSharp() {
+    return {
+      resize(width, height) {
+        return {
+          png() {
+            return {
+              async toBuffer() {
+                if (blocked) {
+                  blocked = false;
+                  announceStarted();
+                  await gate;
+                }
+                return solidPNG(width, height);
+              },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const render = renderBrandIcons({ outputDirectory, sharpImpl: blockingSharp });
+  await started;
+  const replacementOwner = { pid: process.pid, startedAt: new Date().toISOString(), token: "replacement-owner" };
+  await writeFile(join(lockDirectory, "owner.json"), JSON.stringify(replacementOwner));
+  unblock();
+  await render;
+
+  assert.deepEqual(JSON.parse(await readFile(join(lockDirectory, "owner.json"), "utf8")), replacementOwner);
 });
