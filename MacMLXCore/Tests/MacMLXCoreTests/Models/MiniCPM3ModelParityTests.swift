@@ -72,7 +72,10 @@ final class MiniCPM3ModelParityTests: XCTestCase {
     }
 
     /// Inverse config — must match the inverse fixture (tied, attention bias ON,
-    /// scale_emb 3, scale_depth 0.7, mscale ≈ 1.1547, dim_model_base 16 unused).
+    /// scale_emb 3, scale_depth 0.7, mscale ≈ 1.1547, dim_model_base 16 unused,
+    /// rms_norm_eps 3e-4 — the LAYER norms move off 1e-5 while the internal q_a/kv_a
+    /// norms stay at the mlx 1e-5 default, pinning the eps-source split; see the
+    /// EPS SOURCE SPLIT note in `capture_minicpm3.py`).
     private func inverseConfig() throws -> MiniCPM3Configuration {
         let json = """
         {
@@ -90,7 +93,7 @@ final class MiniCPM3ModelParityTests: XCTestCase {
           "qk_rope_head_dim": 4,
           "scale_emb": 3,
           "scale_depth": 0.7,
-          "rms_norm_eps": 1e-5,
+          "rms_norm_eps": 3e-4,
           "rope_theta": 10000.0,
           "attention_bias": true,
           "tie_word_embeddings": true,

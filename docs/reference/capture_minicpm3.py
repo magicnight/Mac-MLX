@@ -42,7 +42,8 @@ to load its weights:
                       original_max=64 → mscale = √(1+ln(4)/ln(64)) ≠ 1 (pins the
                       non-trivial mscale formula), dim_model_base=16 (must NOT be
                       consumed on the tied path — a port that divides anyway
-                      diverges).
+                      diverges), rms_norm_eps=3e-4 (the LAYER-level norms move off
+                      the 1e-5 default — see the eps-source design point below).
 
 CRITICAL DESIGN POINTS:
   • The MLA dims are all NON-trivial and distinct: qk_nope 8, qk_rope 4 →
@@ -50,6 +51,14 @@ CRITICAL DESIGN POINTS:
     2. A degenerate (equal) choice could mask a wrong split/scale.
   • rope_theta is set EXPLICITLY to 10000 (NOT the 1_000_000 dataclass default) so
     the fixture also pins that theta is actually read.
+  • EPS SOURCE SPLIT: `ModelArgs(rms_norm_eps=…)` feeds ONLY the layer-level norms
+    (`input_layernorm` / `post_attention_layernorm` / final `norm`, each built as
+    `nn.RMSNorm(hidden, eps=rms_norm_eps)`); the INTERNAL MLA latent norms
+    `q_a_layernorm` / `kv_a_layernorm` are built WITHOUT an eps (`nn.RMSNorm(rank)`),
+    so they keep the mlx library default 1e-5. The inverse fixture DELIBERATELY sets
+    `rms_norm_eps=3e-4` (realistic keeps 1e-5) so the two sources diverge: a port that
+    mis-wires the q_a/kv_a norms to `config.rms_norm_eps` instead of the 1e-5 default
+    now fails parity — a regression that neither all-1e-5 fixture could detect.
 
 Environment (PEP 723, run with `uv run docs/reference/capture_minicpm3.py`):
 mlx-lm 0.31.3 (ships minicpm3.py) + mlx 0.32.0. No Python enters macMLX — this is an
@@ -132,6 +141,7 @@ def make_args(
     long_factor,
     short_factor,
     original_max_position_embeddings: int,
+    rms_norm_eps: float,
 ) -> ModelArgs:
     return ModelArgs(
         model_type="minicpm3",
@@ -140,7 +150,7 @@ def make_args(
         num_hidden_layers=NUM_LAYERS,
         intermediate_size=INTERMEDIATE,
         num_attention_heads=N_HEADS,
-        rms_norm_eps=RMS_EPS,
+        rms_norm_eps=rms_norm_eps,
         vocab_size=VOCAB,
         num_key_value_heads=N_KV_HEADS,
         q_lora_rank=Q_LORA,
@@ -207,6 +217,7 @@ def capture_model(
     long_factor,
     short_factor,
     original_max_position_embeddings: int,
+    rms_norm_eps: float,
 ):
     args = make_args(
         attention_bias=attention_bias,
@@ -218,6 +229,7 @@ def capture_model(
         long_factor=long_factor,
         short_factor=short_factor,
         original_max_position_embeddings=original_max_position_embeddings,
+        rms_norm_eps=rms_norm_eps,
     )
     model = Model(args)
     weights = model_weights(
@@ -248,6 +260,7 @@ if __name__ == "__main__":
         long_factor=[1.2, 1.7],
         short_factor=[9.9, 9.9],
         original_max_position_embeddings=64,
+        rms_norm_eps=RMS_EPS,
     )
 
     # Inverse: tied (NO head division; no lm_head key), attention bias ON
@@ -268,6 +281,7 @@ if __name__ == "__main__":
         long_factor=[1.5, 1.1],
         short_factor=[9.9, 9.9],
         original_max_position_embeddings=64,
+        rms_norm_eps=3e-4,
     )
 
     print("all minicpm3 fixtures captured ->", FIXTURES_DIR)
