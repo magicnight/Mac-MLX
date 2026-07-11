@@ -359,34 +359,38 @@ test("Sharp rerenders all brand icons byte-identically", { skip: !sharpIsAvailab
   }
 });
 
-test("brand icon refresh rolls back the complete set when rendering fails", async (t) => {
-  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-atomic-"));
-  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
-  const originals = new Map(rasterIcons.map((icon, index) => [icon.filename, Buffer.from(`original-${index}`)]));
-  for (const [filename, contents] of originals) await writeFile(join(outputDirectory, filename), contents);
-  await writeFile(join(outputDirectory, "unrelated.svg"), "keep me");
+test("brand icon refresh rolls back the complete set when a later render fails", async (t) => {
+  for (const failureAt of [2, 3]) {
+    await t.test(`render ${failureAt} fails`, async (t) => {
+      const outputDirectory = await mkdtemp(join(tmpdir(), `macmlx-brand-atomic-${failureAt}-`));
+      t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+      const originals = new Map(rasterIcons.map((icon, index) => [icon.filename, Buffer.from(`original-${failureAt}-${index}`)]));
+      for (const [filename, contents] of originals) await writeFile(join(outputDirectory, filename), contents);
+      await writeFile(join(outputDirectory, "unrelated.svg"), "keep me");
 
-  let renders = 0;
-  function failingSharp() {
-    return {
-      resize(width, height) {
+      let renders = 0;
+      function failingSharp() {
         return {
-          png() {
+          resize(width, height) {
             return {
-              async toBuffer() {
-                renders += 1;
-                if (renders === 2) throw new Error("injected second-icon failure");
-                return solidPNG(width, height);
+              png() {
+                return {
+                  async toBuffer() {
+                    renders += 1;
+                    if (renders === failureAt) throw new Error(`injected render-${failureAt} failure`);
+                    return solidPNG(width, height);
+                  },
+                };
               },
             };
           },
         };
-      },
-    };
-  }
+      }
 
-  await assert.rejects(renderBrandIcons({ outputDirectory, sharpImpl: failingSharp }), /injected second-icon failure/);
-  for (const [filename, contents] of originals) assert.deepEqual(await readFile(join(outputDirectory, filename)), contents);
-  assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
-  assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
+      await assert.rejects(renderBrandIcons({ outputDirectory, sharpImpl: failingSharp }), new RegExp(`injected render-${failureAt} failure`));
+      for (const [filename, contents] of originals) assert.deepEqual(await readFile(join(outputDirectory, filename)), contents);
+      assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
+      assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
+    });
+  }
 });
