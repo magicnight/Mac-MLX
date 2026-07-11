@@ -62,6 +62,17 @@ public enum ModelOverlay {
             return Mellum2Model(config)
         }
 
+        // Seed-OSS (ByteDance Seed-OSS-36B) — pure-Swift port (see
+        // `Models/SeedOss.swift`). A dense Llama-family decoder whose only
+        // architecture-specific twists are three bias switches (attention_bias,
+        // the SEPARATE attention_out_bias, and mlp_bias); upstream mlx-swift-lm
+        // has no `seed_oss` type.
+        await LLMTypeRegistry.shared.registerModelType("seed_oss") { data in
+            let config = try JSONDecoder.json5()
+                .decode(SeedOssConfiguration.self, from: data)
+            return SeedOssModel(config)
+        }
+
         // --- Theoretical tier -------------------------------------------------
         // Near-zero-engineering registrations: each maps a new `model_type`
         // onto an existing, parity-tested Swift architecture. They are verified
