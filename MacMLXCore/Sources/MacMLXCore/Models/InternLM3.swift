@@ -273,15 +273,21 @@ final class InternLM3DynamicNTKRoPE: Module, RoPELayer {
             offset: offset)
     }
 
-    /// Per-sequence (batched) offset path — required by `ArrayOffsetLayer`. InternLM3
-    /// is NOT on the batched-decode allowlist, so this path is never exercised in
-    /// practice; the NTK threshold needs a scalar sequence length, so here it uses
-    /// the local chunk length (the sequence axis) only, omitting the array offset's
-    /// contribution. Harmless: the dynamic branch engages only past
-    /// `max_position_embeddings` (32768), which a single-token decode chunk never
-    /// reaches locally.
+    /// Per-sequence (batched) offset path — required by `ArrayOffsetLayer`. The NTK
+    /// threshold needs a scalar sequence length, so the local chunk length (the
+    /// sequence axis) is combined with the batch-max offset (`offset.max()`) to match
+    /// the scalar path's `seqLen = local + offset` semantics. `max` is the correct
+    /// reduction because the dynamic base is a SINGLE value shared across the whole
+    /// batch: driving the threshold off the furthest-advanced sequence guarantees the
+    /// recomputed base is large enough that NO batch member's positions overrun (a
+    /// smaller per-member offset would only under-scale the base, never over-scale it).
+    ///
+    /// InternLM3 is NOT on the batched-decode allowlist, so this path is not exercised
+    /// in practice today (the model runs on a scalar `KVCacheSimple`, whose `ropeOffset`
+    /// is always scalar); when InternLM3 is added to that allowlist, this path must
+    /// gain its own batched parity fixture.
     func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
-        let seqLen = x.dim(x.ndim - 2)
+        let seqLen = x.dim(x.ndim - 2) + offset.max().item(Int.self)
         return MLXFast.RoPE(
             x,
             dimensions: config.headDim,
@@ -465,8 +471,8 @@ final class InternLM3ModelInner: Module {
 final class InternLM3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     let config: InternLM3Configuration
     let vocabularySize: Int
-    var kvHeads: [Int]
-    var model: InternLM3ModelInner
+    let kvHeads: [Int]
+    let model: InternLM3ModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     init(_ config: InternLM3Configuration) {

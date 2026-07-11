@@ -357,8 +357,8 @@ final class HunyuanV1DenseModelInner: Module {
 final class HunyuanV1DenseModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     let config: HunyuanV1DenseConfiguration
     let vocabularySize: Int
-    var kvHeads: [Int]
-    var model: HunyuanV1DenseModelInner
+    let kvHeads: [Int]
+    let model: HunyuanV1DenseModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     init(_ config: HunyuanV1DenseConfiguration) {

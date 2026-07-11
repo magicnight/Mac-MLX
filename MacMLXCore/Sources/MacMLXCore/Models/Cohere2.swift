@@ -360,8 +360,8 @@ final class Cohere2ModelInner: Module {
 final class Cohere2Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     let config: Cohere2Configuration
     let vocabularySize: Int
-    var kvHeads: [Int]
-    var model: Cohere2ModelInner
+    let kvHeads: [Int]
+    let model: Cohere2ModelInner
     let logitScale: Float
 
     init(_ config: Cohere2Configuration) {

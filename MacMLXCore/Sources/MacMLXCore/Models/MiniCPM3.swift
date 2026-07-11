@@ -450,8 +450,8 @@ final class MiniCPM3ModelInner: Module {
 final class MiniCPM3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     let config: MiniCPM3Configuration
     let vocabularySize: Int
-    var kvHeads: [Int]
-    var model: MiniCPM3ModelInner
+    let kvHeads: [Int]
+    let model: MiniCPM3ModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     let headScaleDivisor: Float

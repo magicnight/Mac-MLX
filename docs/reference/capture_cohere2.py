@@ -47,7 +47,10 @@ CRITICAL DESIGN POINT: both fixtures use seq_len (8) > sliding_window (4 / 5), s
 the sliding-window mask genuinely differs from the full-causal mask. A shorter
 sequence would collapse the two masks and leave a mis-read sliding window
 undetected. logit_scale differs across the two fixtures so a port that hard-codes
-or drops it diverges.
+or drops it diverges. The final `model.norm.weight` is NON-unit (0.97 realistic /
+1.03 inverse) rather than all-ones, so a port that drops the final LayerNorm's
+learned scale (applying a bare normalization) now diverges — a blind spot an
+all-ones final-norm weight could not catch.
 
 Environment (PEP 723, run with `uv run docs/reference/capture_cohere2.py`):
 mlx-lm 0.31.3 (ships cohere2.py) + mlx 0.32.0 + transformers 5.0-5.12. No Python
@@ -144,7 +147,7 @@ def make_args(
     )
 
 
-def model_weights(*, attention_bias: bool, layer_norm_bias: bool):
+def model_weights(*, attention_bias: bool, layer_norm_bias: bool, final_norm_scale: float):
     weights = {"model.embed_tokens.weight": det([VOCAB, HIDDEN], 0.02)}
     for layer in range(NUM_LAYERS):
         p = f"model.layers.{layer}"
@@ -166,7 +169,9 @@ def model_weights(*, attention_bias: bool, layer_norm_bias: bool):
         weights[f"{p}.input_layernorm.weight"] = norm_w([HIDDEN], 1.02)
         if layer_norm_bias:
             weights[f"{p}.input_layernorm.bias"] = det([HIDDEN], 0.02)
-    weights["model.norm.weight"] = norm_w([HIDDEN], 1.0)
+    # Final norm weight is NON-unit (0.97 / 1.03) so a port that drops the final
+    # LayerNorm's learned scale diverges — see the CRITICAL DESIGN POINT.
+    weights["model.norm.weight"] = norm_w([HIDDEN], final_norm_scale)
     if layer_norm_bias:
         weights["model.norm.bias"] = det([HIDDEN], 0.015)
     # No lm_head — embeddings are always tied.
@@ -181,6 +186,7 @@ def capture_model(
     logit_scale: float,
     sliding_window: int,
     sliding_window_pattern: int,
+    final_norm_scale: float,
 ):
     args = make_args(
         attention_bias=attention_bias,
@@ -191,7 +197,8 @@ def capture_model(
     )
     model = Model(args)
     weights = model_weights(
-        attention_bias=attention_bias, layer_norm_bias=layer_norm_bias
+        attention_bias=attention_bias, layer_norm_bias=layer_norm_bias,
+        final_norm_scale=final_norm_scale
     )
     model.load_weights(list(weights.items()))
 
@@ -213,6 +220,7 @@ if __name__ == "__main__":
         logit_scale=0.25,
         sliding_window=4,
         sliding_window_pattern=4,
+        final_norm_scale=0.97,
     )
 
     # Inverse: attention bias ON (q/k/v/o), LayerNorm bias ON, logit_scale 0.0625
@@ -225,6 +233,7 @@ if __name__ == "__main__":
         logit_scale=0.0625,
         sliding_window=5,
         sliding_window_pattern=2,
+        final_norm_scale=1.03,
     )
 
     print("all cohere2 fixtures captured ->", FIXTURES_DIR)
