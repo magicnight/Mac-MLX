@@ -61,6 +61,8 @@ jobs:
           node --check scripts/render-social-cards.mjs
           node --check scripts/validate-social-cards.mjs
           node --check scripts/verify-cloudflare-deploy.mjs
+          node --check site/cloudflare/www-redirect.mjs
+          node --check scripts/verify-www-redirect.mjs
           node --check public/assets/js/main.js
           if command -v xmllint >/dev/null 2>&1; then
             xmllint --noout site/assets/brand/macmlx-mark.svg site/assets/brand/favicon.svg public/assets/og-image.svg public/sitemap.xml

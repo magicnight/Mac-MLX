@@ -137,3 +137,27 @@ for (const [name, failingResponse, expectedMessage] of [
     );
   });
 }
+
+test("the runbook documents a reversible www release", async () => {
+  const readme = await readFile(new URL("site/README.md", repositoryRoot), "utf8");
+  const requiredCommands = [
+    'WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler deploy --dry-run --config "$SITE_ROOT/wrangler.www.jsonc"',
+    'WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler deploy --config "$SITE_ROOT/wrangler.www.jsonc"',
+    'node "$SITE_ROOT/scripts/verify-www-redirect.mjs"',
+    'WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler versions list --config "$SITE_ROOT/wrangler.www.jsonc"',
+    'bun wrangler rollback "$PREVIOUS_WWW_VERSION_ID" --config "$SITE_ROOT/wrangler.www.jsonc"',
+  ];
+
+  for (const command of requiredCommands) {
+    assert.ok(readme.includes(command), `README is missing: ${command}`);
+  }
+  assert.match(readme, /www\.macmlx\.app CNAME macmlx\.app/);
+  assert.match(readme, /DNS-only/i);
+});
+
+test("CI syntax-checks the redirect Worker and verifier", async () => {
+  const workflow = await readFile(new URL(".github/workflows/ci.yml", repositoryRoot), "utf8");
+
+  assert.ok(workflow.includes("node --check site/cloudflare/www-redirect.mjs"));
+  assert.ok(workflow.includes("node --check scripts/verify-www-redirect.mjs"));
+});
