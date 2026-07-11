@@ -544,6 +544,23 @@ test("brand PNG validation rejects missing, duplicate, malformed, stale, and cor
   }
 });
 
+test("brand PNG validation caps decompression at the exact scanline budget", async () => {
+  const icon = rasterIcons[0];
+  const png = await readFile(new URL(`../assets/brand/${icon.filename}`, import.meta.url));
+  const chunks = pngChunks(png);
+  const expectedScanlineBytes = (1 + (icon.width * 4)) * icon.height;
+  const bomb = assemblePNG([
+    chunks.find(({ type }) => type === "IHDR"),
+    ...chunks.filter(({ type }) => type === "tEXt"),
+    { type: "IDAT", data: deflateSync(Buffer.alloc(expectedScanlineBytes + 1)) },
+    chunks.find(({ type }) => type === "IEND"),
+  ]);
+  assert.throws(
+    () => validateBrandIconPNG(bomb, icon.width, icon.filename),
+    /decompressed PNG data exceeds the expected scanline size/i,
+  );
+});
+
 test("normal build validation rejects tracked brand PNG drift without Sharp", async (t) => {
   const assetRoot = await mkdtemp(join(tmpdir(), "macmlx-brand-source-drift-"));
   t.after(() => rm(assetRoot, { recursive: true, force: true }));

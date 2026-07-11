@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { deflateSync } from "node:zlib";
 
 import { project } from "../content/project.mjs";
 import { renderSocialCardSVG, socialCaptureInstructions, socialCardCaptures, validateSocialPNG } from "../lib/social-card.mjs";
@@ -194,6 +195,26 @@ test("PNG validation rejects structural, checksum, and compressed-data corruptio
     [Buffer.concat([png, Buffer.from([0])]), /trailing bytes/],
   ];
   for (const [fixture, expected] of fixtures) assert.throws(() => validateSocialPNG(fixture, "fixture"), expected);
+});
+
+test("social PNG validation caps decompression at the exact scanline budget", async () => {
+  const png = await readFile(new URL("../assets/social/og-en.png", import.meta.url));
+  const expectedScanlineBytes = (1 + (1200 * 4)) * 630;
+  let inserted = false;
+  const bombChunks = [];
+  for (const chunk of pngChunks(png)) {
+    if (chunk.type !== "IDAT") {
+      bombChunks.push(png.subarray(chunk.offset, chunk.end));
+    } else if (!inserted) {
+      bombChunks.push(encodeChunk("IDAT", deflateSync(Buffer.alloc(expectedScanlineBytes + 1))));
+      inserted = true;
+    }
+  }
+  const bomb = Buffer.concat([png.subarray(0, 8), ...bombChunks]);
+  assert.throws(
+    () => validateSocialPNG(bomb, "social bomb"),
+    /decompressed PNG data exceeds the expected scanline size/i,
+  );
 });
 
 test("build social copy preserves the exact tracked PNG bytes", async (t) => {

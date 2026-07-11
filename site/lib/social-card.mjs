@@ -128,14 +128,16 @@ export function validateSocialPNG(buffer, label = "social PNG", { expectedSource
   if (idatCount < 1) throw new Error(`${label} must contain at least one nonempty IDAT chunk`);
   if (iendCount !== 1) throw new Error(`${label} must contain exactly one terminal IEND chunk`);
 
+  const rowLength = 1 + (1200 * 4);
+  const expectedScanlineBytes = rowLength * 630;
   let scanlines;
   try {
-    scanlines = inflateSync(Buffer.concat(compressed));
-  } catch {
+    scanlines = inflateSync(Buffer.concat(compressed), { maxOutputLength: expectedScanlineBytes });
+  } catch (error) {
+    if (error.code === "ERR_BUFFER_TOO_LARGE") throw new Error(`${label} decompressed PNG data exceeds the expected scanline size`);
     throw new Error(`${label} has invalid compressed PNG data`);
   }
-  const rowLength = 1 + (1200 * 4);
-  if (scanlines.length !== rowLength * 630) throw new Error(`${label} has an inconsistent decompressed scanline length`);
+  if (scanlines.length !== expectedScanlineBytes) throw new Error(`${label} has an inconsistent decompressed scanline length`);
   for (let row = 0; row < 630; row += 1) {
     if (scanlines[row * rowLength] > 4) throw new Error(`${label} has an invalid PNG row filter`);
   }
