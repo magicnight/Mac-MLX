@@ -361,11 +361,19 @@ function occurrenceCount(source, value) {
 }
 
 test("every localized document carries the Signal M metadata and wordmark contract", async () => {
-  const { documents } = await prepareSite();
+  const { documents, discoveryFiles } = await prepareSite();
   assert.equal(documents.size, 26);
+  const htmlDocuments = new Map([
+    ...documents,
+    ...[...discoveryFiles].filter(([path]) => path.endsWith(".html")),
+  ]);
+  assert.equal(htmlDocuments.size, 28);
+
+  for (const [path, html] of htmlDocuments) {
+    for (const link of brandLinks) assert.equal(occurrenceCount(html, link), 1, `${path} must contain ${link} exactly once`);
+  }
 
   for (const [path, html] of documents) {
-    for (const link of brandLinks) assert.equal(occurrenceCount(html, link), 1, `${path} must contain ${link} exactly once`);
     assert.equal(occurrenceCount(html, brandImage), 2, `${path} needs one header and one footer Signal M`);
     assert.doesNotMatch(html, /<span class="brand-mark"[^>]*><i>/, `${path} must not retain the three-bar mark`);
   }
@@ -375,6 +383,21 @@ test("every localized document carries the Signal M metadata and wordmark contra
     assert.ok(html, `missing representative document ${path}`);
     assert.match(html, new RegExp(`<a class="wordmark"[^>]+aria-label="[^"]+"[^>]*>\\s*${brandImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(html, new RegExp(`<a class="wordmark footer-wordmark"[^>]*>${brandImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  }
+});
+
+test("home wordmark accessibility labels follow the rendered locale", async () => {
+  const { documents } = await prepareSite();
+  assert.match(documents.get("/"), /<a class="wordmark" href="#top" aria-label="macMLX Home">/);
+  assert.match(documents.get("/zh/"), /<a class="wordmark" href="#top" aria-label="macMLX 首页">/);
+});
+
+test("generated home and article documents share the fourth main CSS revision", async () => {
+  const { documents } = await prepareSite();
+  for (const path of ["/", "/zh/", "/architecture/", "/zh/architecture/"]) {
+    const html = documents.get(path);
+    assert.match(html, /<link rel="stylesheet" href="\/assets\/css\/main\.css\?v=4">/, path);
+    assert.doesNotMatch(html, /\/assets\/css\/main\.css\?v=3(?:"|&)/, path);
   }
 });
 

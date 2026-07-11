@@ -76,7 +76,7 @@ const ogImage = await readFile(new URL("public/assets/og-image.svg", root), "utf
 
 assert.match(
   html,
-  /<link rel="stylesheet" href="\/assets\/css\/main\.css\?v=2026071004">\s*<noscript>\s*<link rel="stylesheet" href="\/assets\/css\/no-js\.css\?v=2026071004">\s*<\/noscript>/,
+  /<link rel="stylesheet" href="\/assets\/css\/main\.css\?v=4">\s*<noscript>\s*<link rel="stylesheet" href="\/assets\/css\/no-js\.css\?v=2026071004">\s*<\/noscript>/,
   "the no-JavaScript stylesheet should load after the main stylesheet",
 );
 

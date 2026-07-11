@@ -24,6 +24,7 @@ function homeTemplateValues(project, routes, locale) {
     downloadURL: project.downloadURL,
     englishLanguageClass: locale === "en" ? "active" : "",
     htmlLang: metadata.htmlLang,
+    homeWordmarkLabel: locale === "en" ? "macMLX Home" : "macMLX 首页",
     issuesURL: new URL("issues", repositoryBase).href,
     learnLabel: locale === "en" ? "Learn" : "了解",
     languageHref: routes[counterpartLocale],

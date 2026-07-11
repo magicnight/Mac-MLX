@@ -1,4 +1,5 @@
 import { escapeHTML } from "./localize.mjs";
+import { renderBrandLinks } from "./metadata.mjs";
 import { siteURL, validateProject } from "./project-schema.mjs";
 
 function escapeXML(value) {
@@ -58,6 +59,7 @@ export function renderNotFound({ project, locale }) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  ${renderBrandLinks()}
   <title>${escapeHTML(title)}</title>
   <meta name="robots" content="noindex,follow">
   <meta name="color-scheme" content="light dark">
