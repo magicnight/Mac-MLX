@@ -16,7 +16,21 @@ import ServiceLifecycle
 private struct ChatCompletionRequest: Decodable, Sendable {
     struct Message: Decodable, Sendable {
         let role: String
-        let content: MultimodalContent
+        /// Optional so an assistant tool-call turn (`{"content":null,
+        /// "tool_calls":[…]}`) and any content-less turn still decode — the
+        /// synthesised `decodeIfPresent` maps both an absent key AND JSON `null`
+        /// to nil. A plain text/tool turn keeps its string as before.
+        let content: MultimodalContent?
+        /// Assistant `tool_calls` history: the calls a prior assistant turn
+        /// issued, replayed by an agent client across rounds. Decoded into
+        /// `ChatMessage.toolCalls` so the chat template reproduces the tool-call
+        /// block and its pairing with the following `tool` results is satisfied.
+        /// Optional + `decodeIfPresent` ⇒ every pre-tools client is unchanged.
+        let tool_calls: [OpenAIToolCall]?
+        /// For a `role:"tool"` turn: the id of the assistant call this result
+        /// answers (OpenAI `tool_call_id`). Carried onto the `.tool`
+        /// `ChatMessage` so the chat template pairs result ↔ call.
+        let tool_call_id: String?
     }
 
     let model: String
@@ -49,6 +63,54 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// field, mirrors mlx-lm's `num_draft_tokens`. Clamped to 1...8 by
     /// `GenerateRequest`; meaningless without `draft_model`.
     let num_draft_tokens: Int?
+    /// OpenAI `response_format` (Track C structured output). Decoded as a
+    /// free-form `JSONValue` and validated by `ResponseFormatDecoder`, which
+    /// maps `{"type":"json_object"}` / `{"type":"json_schema",…}` to a
+    /// `ResponseFormat` or rejects unsupported schema features with a 400.
+    /// Absent/`null` (and `{"type":"text"}`) mean no constraint. Optional +
+    /// synthesised `decodeIfPresent` ⇒ every pre-Track-C client is unchanged.
+    let response_format: JSONValue?
+    // MARK: Track E — API-compatibility extensions (all optional / back-compat)
+    /// OpenAI `logit_bias`: STRING token id → additive bias in `[-100, 100]`.
+    let logit_bias: [String: Double]?
+    /// OpenAI `logprobs`: emit per-token logprobs when true.
+    let logprobs: Bool?
+    /// OpenAI `top_logprobs`: alternatives per token, `0...10`.
+    let top_logprobs: Int?
+    /// mlx-lm `xtc_probability` — per-step chance of applying XTC.
+    let xtc_probability: Double?
+    /// mlx-lm `xtc_threshold` — probability above which a token is an XTC candidate.
+    let xtc_threshold: Double?
+    /// mlx-lm `kv_bits` — KV-cache quantization bit width (nil ⇒ off).
+    let kv_bits: Int?
+    /// mlx-lm `kv_group_size` — KV-cache quantization group size.
+    let kv_group_size: Int?
+    /// mlx-lm `quantized_kv_start` — token offset to begin quantizing.
+    let quantized_kv_start: Int?
+    /// mlx-lm `adapters` — LoRA adapter name/path to hot-swap for this request
+    /// (nil/absent ⇒ base model; an explicit change reloads the model with the
+    /// new adapter). See `GenerateRequest.adapters`.
+    let adapters: String?
+}
+
+/// One OpenAI `tool_calls[]` entry on a replayed assistant turn:
+/// `{"id","type":"function","function":{"name","arguments":<JSON string>}}`.
+/// `function.arguments` is a JSON-ENCODED STRING per the OpenAI wire format
+/// (the same shape the server EMITS via `openAIToolCallObject`) — it is parsed
+/// back into an object when building the internal `ToolCallRequest`. `id` is
+/// optional for leniency (synthesised if a client omits it); `type` is decoded
+/// but unused (only `"function"` tools exist today).
+private struct OpenAIToolCall: Decodable, Sendable {
+    let id: String?
+    let type: String?
+    let function: Function
+
+    struct Function: Decodable, Sendable {
+        let name: String
+        /// Optional so a no-argument call (`arguments` absent) decodes; an empty
+        /// or absent string means "no arguments" (`[:]`).
+        let arguments: String?
+    }
 }
 
 /// Legacy OpenAI text-completions body (`/v1/completions`, and the
@@ -70,6 +132,16 @@ private struct LegacyCompletionRequest: Decodable, Sendable {
     let draft_model: String?
     /// See `ChatCompletionRequest.num_draft_tokens`.
     let num_draft_tokens: Int?
+    // Track E — honored on the legacy route too (shares `handleChatCompletions`).
+    let logit_bias: [String: Double]?
+    let logprobs: Bool?
+    let top_logprobs: Int?
+    let xtc_probability: Double?
+    let xtc_threshold: Double?
+    let kv_bits: Int?
+    let kv_group_size: Int?
+    let quantized_kv_start: Int?
+    let adapters: String?
 }
 
 /// OpenAI multimodal content payload. Either a plain string (text-only
@@ -274,6 +346,32 @@ private struct AnthropicMessagesRequest: Decodable, Sendable {
     let temperature: Double?
     let top_p: Double?
     let stream: Bool?
+    /// Anthropic `tools` — `[{name, description?, input_schema}]`. Converted to
+    /// the same internal OpenAI-function-spec `[JSONValue]` the OpenAI path
+    /// forwards (`input_schema` ≙ OpenAI `function.parameters`) so both protocols
+    /// feed the chat template identically. Optional + `decodeIfPresent` ⇒ every
+    /// pre-tools client is unchanged.
+    let tools: [AnthropicTool]?
+    /// Anthropic `tool_choice`. Only `{type:"auto"}` (or an absent field) is
+    /// honoured; `any`/`tool`/`none` are rejected with a 400 rather than
+    /// silently altered (project rule: no silent degradation).
+    let tool_choice: AnthropicToolChoice?
+}
+
+/// One Anthropic `tools[]` entry: `{name, description?, input_schema}`.
+/// `input_schema` is the JSON-Schema object describing the tool's arguments —
+/// Anthropic's analogue of OpenAI's `function.parameters`.
+private struct AnthropicTool: Decodable, Sendable {
+    let name: String
+    let description: String?
+    let input_schema: JSONValue?
+}
+
+/// Anthropic `tool_choice` object: `{type:"auto"|"any"|"tool"|"none", name?}`.
+/// Decoded so the handler can reject the unsupported modes explicitly.
+private struct AnthropicToolChoice: Decodable, Sendable {
+    let type: String
+    let name: String?
 }
 
 /// Anthropic top-level `system` field. Either a plain string or an
@@ -341,6 +439,14 @@ private enum AnthropicContent: Decodable, Sendable {
         }
     }
 
+    /// The typed content blocks, or nil for the bare-string form — so the
+    /// tool-turn decoder can inspect `tool_use` / `tool_result` blocks that the
+    /// text-flattening `text` view discards.
+    var blocks: [AnthropicBlock]? {
+        if case .blocks(let b) = self { return b }
+        return nil
+    }
+
     /// Decode any base64 image blocks into `ImageAttachment` values
     /// backed by tmpfile copies. Caps mirror the OpenAI path:
     /// - 4 images per call (further blocks silently dropped)
@@ -396,12 +502,52 @@ private enum AnthropicContent: Decodable, Sendable {
     }
 }
 
-/// One Anthropic content block. `text` is set for `type:"text"`;
-/// `source` is set for `type:"image"`.
+/// One Anthropic content block. `text` is set for `type:"text"`; `source` for
+/// `type:"image"`; the `tool_use` fields (`id`/`name`/`input`) for an assistant
+/// `type:"tool_use"` block; the `tool_result` fields (`tool_use_id`/`content`/
+/// `is_error`) for a user `type:"tool_result"` block. Every tool field is
+/// optional so the existing text/image decode paths are unaffected.
 private struct AnthropicBlock: Decodable, Sendable {
-    let type: String            // "text" or "image"
+    let type: String            // "text" | "image" | "tool_use" | "tool_result"
     let text: String?
     let source: AnthropicImageSource?
+    // tool_use (assistant turn): the call the model issued.
+    let id: String?
+    let name: String?
+    let input: JSONValue?
+    // tool_result (user turn): the answer to a prior tool_use.
+    let tool_use_id: String?
+    let content: AnthropicToolResultContent?
+    let is_error: Bool?
+}
+
+/// Anthropic `tool_result.content`: either a bare string or an array of content
+/// blocks (only `text` blocks are meaningful to a text model). `text` flattens
+/// both into the single string fed back to the model as the tool result. The
+/// decoder tries the string form first, falling through to `[AnthropicBlock]`.
+private enum AnthropicToolResultContent: Decodable, Sendable {
+    case string(String)
+    case blocks([AnthropicBlock])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .string(s)
+            return
+        }
+        self = .blocks(try container.decode([AnthropicBlock].self))
+    }
+
+    /// Concatenated text of the result's text blocks (or the bare string).
+    var text: String {
+        switch self {
+        case .string(let s):
+            return s
+        case .blocks(let blocks):
+            return blocks.compactMap { $0.type == "text" ? $0.text : nil }
+                .joined(separator: "\n")
+        }
+    }
 }
 
 /// Anthropic image block `source`. Only the base64 form is decoded
@@ -411,6 +557,276 @@ private struct AnthropicImageSource: Decodable, Sendable {
     let type: String            // "base64"
     let media_type: String
     let data: String
+}
+
+// MARK: - Tool-history request decoding (agent-tools wave)
+//
+// Both protocol surfaces replay tool history across rounds: OpenAI as
+// `role:"tool"` turns + assistant `tool_calls`, Anthropic as `tool_result` /
+// `tool_use` content blocks. These free functions decode either wire shape into
+// the SAME internal `[ChatMessage]` the engine already knows how to render
+// (`MLXSwiftEngine.upstreamChatMessage` maps `.tool` → an upstream tool turn and
+// an assistant's `toolCalls` → its tool-call block), mirroring the history that
+// `MCP/ToolCallingSession` builds for the GUI loop. A malformed tool block is
+// surfaced as a `ToolHistoryDecodeError` (→ HTTP 400) — never silently dropped.
+
+/// A tool-history block that could not be decoded into a well-formed internal
+/// message. The handler maps it to an HTTP 400 (project rule: no silent
+/// degradation — a half-formed tool turn would otherwise trip a chat-template
+/// pairing assertion downstream).
+private struct ToolHistoryDecodeError: Error {
+    let message: String
+}
+
+/// Parse an OpenAI `function.arguments` JSON string into the internal arguments
+/// object. An empty or absent string means "no arguments" (`[:]`); a non-empty
+/// string that is not a JSON object is malformed (throws → 400).
+private func decodeToolArgumentsJSON(_ raw: String?, tool: String) throws -> [String: JSONValue] {
+    guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+        return [:]
+    }
+    guard let data = trimmed.data(using: .utf8),
+          let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+          case .object(let object) = value
+    else {
+        throw ToolHistoryDecodeError(
+            message: "Malformed `arguments` for tool '\(tool)': expected a JSON object string."
+        )
+    }
+    return object
+}
+
+/// Convert one decoded OpenAI `tool_calls[]` entry into a `ToolCallRequest`.
+/// A missing `id` is synthesised (mirrors the engine's own `call_<uuid>`
+/// fallback) so downstream pairing still has a stable correlator.
+private func toolCallRequest(fromOpenAI call: OpenAIToolCall) throws -> ToolCallRequest {
+    let name = call.function.name
+    guard !name.isEmpty else {
+        throw ToolHistoryDecodeError(message: "A `tool_calls` entry is missing its function name.")
+    }
+    let arguments = try decodeToolArgumentsJSON(call.function.arguments, tool: name)
+    let id = call.id ?? "call_\(UUID().uuidString)"
+    return ToolCallRequest(id: id, name: name, arguments: arguments)
+}
+
+/// Validate call ↔ result PAIRING across an already-decoded conversation, on
+/// BOTH protocol surfaces (called from `decodeOpenAIMessages` and
+/// `decodeAnthropicMessages`). Field-presence alone (every `.tool` message
+/// carries a non-empty `toolCallID`) is not sufficient — this additionally
+/// rejects, in one linear pass over the decoded `[ChatMessage]`:
+///   - a `.tool` message whose `toolCallID` was never issued by a preceding
+///     assistant `toolCalls` entry (an orphan result), including one whose
+///     id has already been answered by an earlier `.tool` message (a second
+///     result for the same call);
+///   - an assistant `toolCalls` entry whose `id` was already issued earlier
+///     in the SAME history (a duplicate call id, anywhere — not just within
+///     one turn).
+/// Every violation throws `ToolHistoryDecodeError` (→ HTTP 400) rather than
+/// reaching the chat template half-formed.
+private func validateToolCallPairing(_ messages: [ChatMessage]) throws {
+    var everIssuedCallIDs: Set<String> = []
+    var awaitingResultCallIDs: Set<String> = []
+    for message in messages {
+        if let toolCalls = message.toolCalls {
+            for call in toolCalls {
+                guard !everIssuedCallIDs.contains(call.id) else {
+                    throw ToolHistoryDecodeError(
+                        message: "Duplicate tool call id '\(call.id)': an assistant tool_calls "
+                            + "entry must not reuse an id already issued earlier in the conversation."
+                    )
+                }
+                everIssuedCallIDs.insert(call.id)
+                awaitingResultCallIDs.insert(call.id)
+            }
+        }
+        guard message.role == .tool else { continue }
+        // The per-surface decoders (`decodeOpenAIMessages` / `toolResultMessage`)
+        // already reject a missing/empty id before a `.tool` message is ever
+        // constructed, so `toolCallID` is non-nil/non-empty here — but guard
+        // defensively rather than assume.
+        let id = message.toolCallID ?? ""
+        guard awaitingResultCallIDs.contains(id) else {
+            if everIssuedCallIDs.contains(id) {
+                throw ToolHistoryDecodeError(
+                    message: "Tool result for id '\(id)' answers a call that already has a result."
+                )
+            }
+            throw ToolHistoryDecodeError(
+                message: "Tool result references unknown tool_call id '\(id)'."
+            )
+        }
+        awaitingResultCallIDs.remove(id)
+    }
+}
+
+/// Decode OpenAI chat messages into the internal `[ChatMessage]`, fully wiring
+/// and validating tool history. System turns are dropped here (re-prepended
+/// via `GenerateRequest.systemPrompt`); unknown roles are dropped. A
+/// `role:"tool"` turn requires a non-empty `tool_call_id` — a missing/empty
+/// one throws rather than being admitted half-formed (`toolCallID: nil`),
+/// symmetric with the Anthropic `tool_result` guard. An assistant turn's
+/// `tool_calls` → `ChatMessage.toolCalls`. After per-message decode,
+/// `validateToolCallPairing` rejects an orphaned/duplicate-answered tool
+/// result or a duplicate assistant call id anywhere in the history.
+private func decodeOpenAIMessages(_ messages: [ChatCompletionRequest.Message]) throws -> [ChatMessage] {
+    let decoded = try messages.compactMap { msg -> ChatMessage? in
+        guard let role = MessageRole(rawValue: msg.role), role != .system else {
+            return nil
+        }
+        // Tool-result turn: the correlating id is required. Admitting one
+        // without it (`toolCallID: nil`) is exactly the half-formed shape the
+        // original pre-wave-2 guard existed to avoid, so this throws instead.
+        if role == .tool {
+            guard let toolCallID = msg.tool_call_id, !toolCallID.isEmpty else {
+                throw ToolHistoryDecodeError(
+                    message: "A `tool` message is missing its `tool_call_id`."
+                )
+            }
+            return ChatMessage(
+                role: .tool,
+                content: msg.content?.text ?? "",
+                toolCallID: toolCallID
+            )
+        }
+        // Assistant turn that issued tool calls: decode them so the template
+        // reproduces the tool-call block and the pairing assertion is satisfied.
+        // Only the ASSISTANT role carries tool calls (OpenAI semantics). A user
+        // message's `tool_calls` is ignored — decoding it would let a user turn
+        // satisfy the role-blind `validateToolCallPairing` for a following tool
+        // result, while the engine forwards only assistant tool calls to the
+        // template (an opaque 500 / wrong prompt). Ignoring it lets the orphan-
+        // result validation below 400 a mispaired history cleanly.
+        let toolCalls = role == .assistant
+            ? try msg.tool_calls?.map { try toolCallRequest(fromOpenAI: $0) }
+            : nil
+        return ChatMessage(
+            role: role,
+            content: msg.content?.text ?? "",
+            images: msg.content?.extractImages() ?? [],
+            toolCalls: (toolCalls?.isEmpty == false) ? toolCalls : nil
+        )
+    }
+    try validateToolCallPairing(decoded)
+    return decoded
+}
+
+/// The OpenAI function-spec `JSONValue` the chat template consumes
+/// (`GenerateRequest.tools`), built from an Anthropic tool. `input_schema` maps
+/// to OpenAI `function.parameters`. Mirrors `ToolValueBridge.openAIToolSpec`.
+private func openAIToolSpec(fromAnthropic tool: AnthropicTool) -> JSONValue {
+    .object([
+        "type": .string("function"),
+        "function": .object([
+            "name": .string(tool.name),
+            "description": .string(tool.description ?? ""),
+            "parameters": tool.input_schema ?? .object([:]),
+        ]),
+    ])
+}
+
+/// Convert one Anthropic `tool_use` block into a `ToolCallRequest`. Both `id`
+/// and `name` are required (the following `tool_result` pairs on `id`, so a
+/// synthesised id would mispair); `input` is an arbitrary JSON object, absent ⇒
+/// no-arg call, a present non-object value is malformed.
+private func toolCallRequest(fromAnthropicUse block: AnthropicBlock) throws -> ToolCallRequest {
+    guard let name = block.name, !name.isEmpty else {
+        throw ToolHistoryDecodeError(message: "A `tool_use` block is missing its `name`.")
+    }
+    guard let id = block.id, !id.isEmpty else {
+        throw ToolHistoryDecodeError(message: "The `tool_use` block for '\(name)' is missing its `id`.")
+    }
+    let arguments: [String: JSONValue]
+    switch block.input {
+    case .none, .some(.null):
+        arguments = [:]
+    case .some(.object(let object)):
+        arguments = object
+    case .some:
+        throw ToolHistoryDecodeError(
+            message: "The `input` of `tool_use` '\(name)' must be a JSON object."
+        )
+    }
+    return ToolCallRequest(id: id, name: name, arguments: arguments)
+}
+
+/// Assistant turn (block form) → one `.assistant` message whose text is the
+/// joined text blocks and whose `toolCalls` are the decoded `tool_use` blocks.
+private func assistantMessage(
+    fromAnthropic blocks: [AnthropicBlock],
+    images: [ImageAttachment]
+) throws -> ChatMessage {
+    let text = blocks.compactMap { $0.type == "text" ? $0.text : nil }.joined(separator: "\n")
+    let toolCalls = try blocks.compactMap { block -> ToolCallRequest? in
+        guard block.type == "tool_use" else { return nil }
+        return try toolCallRequest(fromAnthropicUse: block)
+    }
+    return ChatMessage(
+        role: .assistant,
+        content: text,
+        images: images,
+        toolCalls: toolCalls.isEmpty ? nil : toolCalls
+    )
+}
+
+/// One Anthropic `tool_result` block → a `.tool` message. `tool_use_id` is
+/// required (it is the correlator the template pairs on). `is_error` is decoded
+/// so the block parses, but a text model has no dedicated error slot — the
+/// result text (which the client already frames as an error when it sets the
+/// flag) is fed back verbatim.
+private func toolResultMessage(fromAnthropic block: AnthropicBlock) throws -> ChatMessage {
+    guard let id = block.tool_use_id, !id.isEmpty else {
+        throw ToolHistoryDecodeError(message: "A `tool_result` block is missing its `tool_use_id`.")
+    }
+    return ChatMessage(role: .tool, content: block.content?.text ?? "", toolCallID: id)
+}
+
+/// User turn (block form) → tool-result messages FIRST (so the result ↔ call
+/// pairing the chat template asserts holds regardless of block order in the
+/// turn), then one `.user` message for any remaining text/image content. A turn
+/// mixing `tool_result` and text loses neither.
+private func userMessages(
+    fromAnthropic blocks: [AnthropicBlock],
+    images: [ImageAttachment]
+) throws -> [ChatMessage] {
+    var out: [ChatMessage] = []
+    for block in blocks where block.type == "tool_result" {
+        out.append(try toolResultMessage(fromAnthropic: block))
+    }
+    let text = blocks.compactMap { $0.type == "text" ? $0.text : nil }.joined(separator: "\n")
+    if !text.isEmpty || !images.isEmpty {
+        out.append(ChatMessage(role: .user, content: text, images: images))
+    }
+    return out
+}
+
+/// Decode Anthropic message turns into internal `[ChatMessage]`, fully wiring
+/// and validating tool blocks. Because one Anthropic turn can carry several
+/// blocks, a turn may expand to multiple internal messages (see
+/// `assistantMessage` / `userMessages`). Bare-string content is a plain text
+/// turn. Unknown roles are dropped; a malformed tool block throws (→ 400).
+/// After per-message decode, `validateToolCallPairing` rejects an
+/// orphaned/duplicate-answered tool result or a duplicate `tool_use` id
+/// anywhere in the history.
+private func decodeAnthropicMessages(_ messages: [AnthropicMessage]) throws -> [ChatMessage] {
+    var out: [ChatMessage] = []
+    for msg in messages {
+        guard let role = MessageRole(rawValue: msg.role), role != .system else {
+            continue
+        }
+        guard let blocks = msg.content.blocks else {
+            // Bare-string content — a plain text turn (never a tool turn).
+            out.append(ChatMessage(role: role, content: msg.content.text))
+            continue
+        }
+        if role == .assistant {
+            out.append(try assistantMessage(fromAnthropic: blocks, images: msg.content.extractImages()))
+        } else {
+            out.append(
+                contentsOf: try userMessages(fromAnthropic: blocks, images: msg.content.extractImages()))
+        }
+    }
+    try validateToolCallPairing(out)
+    return out
 }
 
 // MARK: - HummingbirdServer
@@ -1163,7 +1579,12 @@ public actor HummingbirdServer {
             }
             chatReq = ChatCompletionRequest(
                 model: legacy.model,
-                messages: [ChatCompletionRequest.Message(role: "user", content: .string(legacy.prompt))],
+                messages: [ChatCompletionRequest.Message(
+                    role: "user",
+                    content: .string(legacy.prompt),
+                    tool_calls: nil,
+                    tool_call_id: nil
+                )],
                 stream: legacy.stream,
                 temperature: legacy.temperature,
                 top_p: legacy.top_p,
@@ -1172,7 +1593,19 @@ public actor HummingbirdServer {
                 tools: nil,
                 tool_choice: nil,
                 draft_model: legacy.draft_model,
-                num_draft_tokens: legacy.num_draft_tokens
+                num_draft_tokens: legacy.num_draft_tokens,
+                // Legacy text-completions bodies carry no response_format.
+                response_format: nil,
+                // Track E extensions are honored on the legacy route too.
+                logit_bias: legacy.logit_bias,
+                logprobs: legacy.logprobs,
+                top_logprobs: legacy.top_logprobs,
+                xtc_probability: legacy.xtc_probability,
+                xtc_threshold: legacy.xtc_threshold,
+                kv_bits: legacy.kv_bits,
+                kv_group_size: legacy.kv_group_size,
+                quantized_kv_start: legacy.quantized_kv_start,
+                adapters: legacy.adapters
             )
         }
 
@@ -1182,26 +1615,24 @@ public actor HummingbirdServer {
         // property, so leaving it in both places produces a duplicate
         // system turn, which Qwen3 / Gemma / other strict Jinja chat
         // templates reject with a TemplateException.
-        let systemPrompt = chatReq.messages.first(where: { $0.role == "system" })?.content.text
+        let systemPrompt = chatReq.messages.first(where: { $0.role == "system" })?.content?.text
 
-        // Map the rest (user / assistant), dropping unknown roles and
-        // the now-separated system turns. Multimodal `content` arrays
-        // are split here: text parts → `content`, image_url data URLs
-        // → `images` via `extractImages()`. See MultimodalContent.
-        let messages: [ChatMessage] = chatReq.messages.compactMap { msg in
-            // `.tool` is excluded until wave 2 wires proper tool-turn decode
-            // (tool_call_id + assistant tool_calls pairing) — admitting it
-            // half-formed (toolCallID always nil here, preceding assistant
-            // tool_calls dropped) can make a client replaying OpenAI tool
-            // history hit a chat-template pairing assertion. Preserves the
-            // pre-wave-1 behaviour of silently dropping this role.
-            guard let role = MessageRole(rawValue: msg.role),
-                  role != .system, role != .tool
-            else { return nil }
-            return ChatMessage(
-                role: role,
-                content: msg.content.text,
-                images: msg.content.extractImages()
+        // Map the rest (user / assistant / tool), dropping unknown roles and the
+        // now-separated system turns. Multimodal `content` arrays are split here:
+        // text parts → `content`, image_url data URLs → `images` via
+        // `extractImages()`. Tool history is fully wired (agent-tools wave):
+        // assistant `tool_calls` → `ChatMessage.toolCalls`, and `role:"tool"`
+        // turns → `.tool` messages carrying `tool_call_id`, so a chat template
+        // that asserts call ↔ result pairing is satisfied. A malformed tool
+        // block is a 400 (never a silent drop).
+        let messages: [ChatMessage]
+        do {
+            messages = try decodeOpenAIMessages(chatReq.messages)
+        } catch let error as ToolHistoryDecodeError {
+            return errorResponse(
+                status: .badRequest,
+                message: error.message,
+                code: "invalid_request_error"
             )
         }
 
@@ -1209,7 +1640,18 @@ public actor HummingbirdServer {
             temperature: chatReq.temperature ?? 0.7,
             topP: chatReq.top_p ?? 0.95,
             maxTokens: chatReq.max_tokens ?? 2048,
-            stream: chatReq.stream ?? false
+            stream: chatReq.stream ?? false,
+            // Track E — the `GenerationParameters` initializer clamps every one of
+            // these (see its clamp helpers), so a hostile/malformed value can't
+            // reach the engine unbounded.
+            logitBias: GenerationParameters.logitBias(fromOpenAI: chatReq.logit_bias),
+            xtcProbability: chatReq.xtc_probability.map { Float($0) },
+            xtcThreshold: chatReq.xtc_threshold.map { Float($0) },
+            logprobs: chatReq.logprobs ?? false,
+            topLogprobs: chatReq.top_logprobs,
+            kvBits: chatReq.kv_bits,
+            kvGroupSize: chatReq.kv_group_size,
+            quantizedKVStart: chatReq.quantized_kv_start
         )
 
         // Tool pass-through (v0.5, OpenAI `/v1/chat/completions` only): forward
@@ -1228,6 +1670,88 @@ public actor HummingbirdServer {
         }
         let toolsToSend = toolChoiceIsNone ? nil : chatReq.tools
 
+        // Track C: decode + validate `response_format`. Unsupported schema
+        // features or malformed bodies are rejected here with a 400 (aligned
+        // with every other request-validation 400 on this path) rather than
+        // silently downgraded.
+        let responseFormat: ResponseFormat?
+        do {
+            responseFormat = try ResponseFormatDecoder.decode(chatReq.response_format)
+        } catch let error as ResponseFormatError {
+            return errorResponse(
+                status: .badRequest,
+                message: error.description,
+                code: "invalid_request_error"
+            )
+        }
+
+        // A vision request (image attachments) combined with `response_format`
+        // (structured output) is rejected here, before generation starts, rather
+        // than silently degraded: the VLM decode path carries no constraint mask,
+        // so it would ignore the schema entirely (project rule: no silent
+        // degradation). Checked at the request boundary — the same 400 the other
+        // unsupported combos on this path return — because an engine-side throw
+        // would surface mid-stream (headers already sent) rather than as a clean 400.
+        if responseFormat != nil, messages.contains(where: { !$0.images.isEmpty }) {
+            return errorResponse(
+                status: .badRequest,
+                message: "`response_format` (structured output) is not supported together "
+                    + "with image inputs (vision) in this version.",
+                code: "invalid_request_error"
+            )
+        }
+
+        // `tools` + `response_format` together is rejected here too, symmetric with
+        // the image/logprobs combo guards on this path. `toolsToSend` (post
+        // `tool_choice:"none"` filtering) is the same signal the engine gates
+        // `hasTools` on, so a request whose tools were suppressed via
+        // `tool_choice:"none"` is unaffected. Without this, the request was
+        // silently ACCEPTED and only degraded deep in the engine — `makeToolProcessor`
+        // (Track E) disables just the tool-call PROCESSOR for this combination
+        // (grammar-constrained output can't contain tool-call syntax anyway), which
+        // is correct as defense-in-depth for the GUI's direct (non-HTTP)
+        // `engine.generate` call, but left the HTTP path as the one unsupported
+        // combo that didn't 400 like every sibling guard here.
+        if responseFormat != nil, toolsToSend?.isEmpty == false {
+            return errorResponse(
+                status: .badRequest,
+                message: "`tools` is not supported together with `response_format` "
+                    + "(structured output) in this version.",
+                code: "invalid_request_error"
+            )
+        }
+
+        // Track E combination guards: reject combinations the engine cannot
+        // honor, rather than silently dropping a requested feature. `logprobs`
+        // capture is not composed with the constraint mask (structured output)
+        // and cannot ride the speculative-decoding iterator, so both are 400s.
+        // OpenAI semantics: `top_logprobs` requires `logprobs: true`.
+        if !params.logprobs, let top = chatReq.top_logprobs, top > 0 {
+            return errorResponse(
+                status: .badRequest,
+                message: "`top_logprobs` requires `logprobs` to be true.",
+                code: "invalid_request_error"
+            )
+        }
+        if params.logprobs {
+            if responseFormat != nil {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`logprobs` is not supported together with `response_format` "
+                        + "(structured output) in this version.",
+                    code: "invalid_request_error"
+                )
+            }
+            if chatReq.draft_model != nil {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`logprobs` is not supported together with `draft_model` "
+                        + "(speculative decoding) in this version.",
+                    code: "invalid_request_error"
+                )
+            }
+        }
+
         let genRequest = GenerateRequest(
             model: chatReq.model,
             messages: messages,
@@ -1236,7 +1760,9 @@ public actor HummingbirdServer {
             templateKwargs: await templateKwargs(for: chatReq.model),
             tools: toolsToSend,
             draftModelID: chatReq.draft_model,
-            numDraftTokens: chatReq.num_draft_tokens
+            numDraftTokens: chatReq.num_draft_tokens,
+            responseFormat: responseFormat,
+            adapters: chatReq.adapters
         )
 
         // Cold-swap (v0.3.3) is no longer resolved here. SRV-2: the swap
@@ -1254,9 +1780,20 @@ public actor HummingbirdServer {
         // Only this OpenAI chat path (and its legacy `/v1/completions` alias,
         // which decodes into the same `chatReq`) is ever batched; every other
         // endpoint keeps the existing single-stream path untouched.
+        // Track E: any per-request sampling/adapter feature the batched step
+        // evaluator can't honor forces the single-stream path (see
+        // `BatchRoutingPolicy`).
+        let hasUnbatchableSamplingFeature =
+            params.logitBias != nil
+            || params.logprobs
+            || (params.xtcProbability ?? 0) > 0
+            || params.kvBits != nil
+            || genRequest.adapters != nil
         if BatchRoutingPolicy.shouldAttemptBatch(
             batchingEnabled: batchServing != nil,
-            hasDraftModel: genRequest.draftModelID != nil
+            hasDraftModel: genRequest.draftModelID != nil,
+            hasResponseFormat: genRequest.responseFormat != nil,
+            hasUnbatchableSamplingFeature: hasUnbatchableSamplingFeature
         ) {
             // MEDIUM#3: resolve the in-flight key the same alias-aware way the
             // single-stream path does (mirrors the resolve at ~line 1897) — the
@@ -1381,12 +1918,14 @@ public actor HummingbirdServer {
 
         let systemPrompt = req.messages.first(where: { $0.role == "system" })?.content
         let messages: [ChatMessage] = req.messages.compactMap { msg in
-            // `.tool` is excluded until wave 2 wires proper tool-turn decode
-            // (tool_call_id + assistant tool_calls pairing) — admitting it
-            // half-formed (toolCallID always nil here, preceding assistant
-            // tool_calls dropped) can make a client replaying OpenAI tool
-            // history hit a chat-template pairing assertion. Preserves the
-            // pre-wave-1 behaviour of silently dropping this role.
+            // The agent-tools wave wired full tool history on the OpenAI and
+            // Anthropic surfaces only. Ollama's `/api/chat` tool wire-format
+            // differs (assistant `tool_calls[].function.arguments` is an OBJECT,
+            // not a JSON string; results route by `tool_name`; calls carry no
+            // `id`) AND this endpoint's response side emits no `tool_calls`, so a
+            // working loop would need its own encode half too. Out of scope for
+            // this wave: `.tool` turns are dropped rather than decoded
+            // half-formed (which could trip a chat-template pairing assertion).
             guard let role = MessageRole(rawValue: msg.role),
                   role != .system, role != .tool
             else { return nil }
@@ -1934,6 +2473,10 @@ public actor HummingbirdServer {
         // chunk only when the request actually ran the speculative path AND
         // mlx-swift-lm reported counts for it; nil otherwise (never faked).
         var capturedSpeculativeDecoding: SpeculativeDecodingUsage?
+        // Track E: per-token logprobs accumulated in emission order across all
+        // chunks, flattened into the choice's `logprobs.content[]` below. Only
+        // populated when the request set `logprobs` (the engine attaches them).
+        var capturedLogprobs: [TokenLogprob] = []
 
         do {
             loop: while true {
@@ -1962,6 +2505,9 @@ public actor HummingbirdServer {
                     }
                     if let speculativeDecoding = chunk.speculativeDecoding {
                         capturedSpeculativeDecoding = speculativeDecoding
+                    }
+                    if let logprobs = chunk.logprobs {
+                        capturedLogprobs.append(contentsOf: logprobs)
                     }
                 }
             }
@@ -2016,18 +2562,23 @@ public actor HummingbirdServer {
             ] as [String: Any]
         }
 
+        var choice: [String: Any] = [
+            "index": 0,
+            "message": message,
+            "finish_reason": finishReason,
+        ]
+        // Track E: OpenAI `choices[].logprobs` — present (with a `content` array)
+        // only when the request asked for logprobs.
+        if genRequest.parameters.logprobs {
+            choice["logprobs"] = openAILogprobs(capturedLogprobs)
+        }
+
         let body: [String: Any] = [
             "id": completionID,
             "object": "chat.completion",
             "created": timestamp,
             "model": genRequest.model,
-            "choices": [
-                [
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finishReason,
-                ] as [String: Any]
-            ],
+            "choices": [choice],
             "usage": usage,
         ]
         return try jsonResponseAny(body)
@@ -2053,10 +2604,16 @@ public actor HummingbirdServer {
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
         let model = genRequest.model
+        // Track E: whether to emit `choices[].logprobs` on delta frames.
+        let wantsLogprobs = genRequest.parameters.logprobs
         let server = self
 
         let responseBody = ResponseBody { writer in
             var completionTokens = 0
+            // Track E: per-token logprobs not yet attached to an emitted frame (a
+            // chunk fully buffered as a partial reasoning tag carries its logprobs
+            // forward until the next frame flushes).
+            var pendingStreamLogprobs: [TokenLogprob] = []
 
             let engine: any InferenceEngine
             do {
@@ -2108,6 +2665,13 @@ public actor HummingbirdServer {
                         // count (delivered on the terminal chunk's usage), not
                         // the number of SSE/NDJSON frames.
                         if let usage = chunk.usage { completionTokens = usage.completionTokens }
+                        // Track E: accumulate this chunk's logprobs BEFORE any
+                        // `continue` (a fully-buffered partial-tag chunk still
+                        // carries logprobs for its tokens), attached to the next
+                        // emitted frame below.
+                        if wantsLogprobs, let logprobs = chunk.logprobs {
+                            pendingStreamLogprobs.append(contentsOf: logprobs)
+                        }
                         let (reasoning, answer) = splitter.push(chunk.text)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
@@ -2148,6 +2712,15 @@ public actor HummingbirdServer {
                                 "delta": [String: Any](),
                                 "finish_reason": FinishReason.toolCalls.rawValue,
                             ])
+                            // Track E: the terminal tool-call chunk still carries any
+                            // logprobs accumulated since the last emitted frame. Attach
+                            // them to the FIRST frame emitted on this branch (then clear),
+                            // mirroring the non-streaming path — the plain-frame attach
+                            // below is unreachable here because of the `continue`.
+                            if wantsLogprobs, !pendingStreamLogprobs.isEmpty, !toolFrames.isEmpty {
+                                toolFrames[0]["logprobs"] = openAILogprobs(pendingStreamLogprobs)
+                                pendingStreamLogprobs.removeAll()
+                            }
                             for frameChoice in toolFrames {
                                 let payload: [String: Any] = [
                                     "id": completionID,
@@ -2167,6 +2740,12 @@ public actor HummingbirdServer {
                         var choice: [String: Any] = ["index": 0, "delta": delta]
                         if let reason = chunk.finishReason {
                             choice["finish_reason"] = reason.rawValue
+                        }
+                        // Track E: attach any logprobs accumulated since the last
+                        // emitted frame (OpenAI `choices[].logprobs`), then clear.
+                        if wantsLogprobs, !pendingStreamLogprobs.isEmpty {
+                            choice["logprobs"] = openAILogprobs(pendingStreamLogprobs)
+                            pendingStreamLogprobs.removeAll()
                         }
                         let payload: [String: Any] = [
                             "id": completionID,
@@ -2418,10 +2997,10 @@ public actor HummingbirdServer {
     ) async throws -> Response {
         let buffer = try await request.body.collect(upTo: context.maxUploadSize)
         guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
-            return errorResponse(
+            return anthropicErrorResponse(
                 status: .badRequest,
                 message: "Empty request body",
-                code: "invalid_request_error"
+                type: "invalid_request_error"
             )
         }
 
@@ -2429,10 +3008,22 @@ public actor HummingbirdServer {
         do {
             req = try JSONDecoder().decode(AnthropicMessagesRequest.self, from: data)
         } catch {
-            return errorResponse(
+            return anthropicErrorResponse(
                 status: .badRequest,
                 message: "Invalid JSON: \(error.localizedDescription)",
-                code: "invalid_request_error"
+                type: "invalid_request_error"
+            )
+        }
+
+        // Reject unsupported `tool_choice` modes explicitly — `any`/`tool` force
+        // a call (which we can't guarantee) and `none` suppresses tools; rather
+        // than silently ignore the directive we 400 (no silent degradation).
+        if let choice = req.tool_choice, choice.type != "auto" {
+            return anthropicErrorResponse(
+                status: .badRequest,
+                message: "Unsupported `tool_choice.type` '\(choice.type)': only 'auto' "
+                    + "(or omitting `tool_choice`) is supported.",
+                type: "invalid_request_error"
             )
         }
 
@@ -2441,25 +3032,28 @@ public actor HummingbirdServer {
         // GenerateRequest.allMessages re-prepends this systemPrompt.
         let systemPrompt = req.system?.text
 
-        // Map turns. Anthropic roles are only user / assistant; unknown
-        // roles are dropped. Text blocks → `content`, image blocks →
-        // `images` via `extractImages()`. See AnthropicContent.
-        let messages: [ChatMessage] = req.messages.compactMap { msg in
-            // `.tool` is excluded until wave 2 wires proper tool-turn decode
-            // (tool_call_id + assistant tool_calls pairing) — admitting it
-            // half-formed (toolCallID always nil here, preceding assistant
-            // tool_calls dropped) can make a client replaying OpenAI tool
-            // history hit a chat-template pairing assertion. Preserves the
-            // pre-wave-1 behaviour of silently dropping this role.
-            guard let role = MessageRole(rawValue: msg.role),
-                  role != .system, role != .tool
-            else { return nil }
-            return ChatMessage(
-                role: role,
-                content: msg.content.text,
-                images: msg.content.extractImages()
+        // Map turns. Anthropic roles are only user / assistant; unknown roles are
+        // dropped. Text blocks → `content`, image blocks → `images`. Tool blocks
+        // are fully wired (agent-tools wave): assistant `tool_use` →
+        // `ChatMessage.toolCalls`; each user `tool_result` → a `.tool` message
+        // carrying `tool_use_id` (emitted before any residual user text so the
+        // chat template's call ↔ result pairing holds). A malformed tool block is
+        // a 400 (never a silent drop).
+        let messages: [ChatMessage]
+        do {
+            messages = try decodeAnthropicMessages(req.messages)
+        } catch let error as ToolHistoryDecodeError {
+            return anthropicErrorResponse(
+                status: .badRequest,
+                message: error.message,
+                type: "invalid_request_error"
             )
         }
+
+        // Convert Anthropic tools to the same internal OpenAI-function-spec shape
+        // the OpenAI path forwards, so both protocols feed the chat template
+        // identically. Absent ⇒ nil (byte-for-byte unchanged for no-tools calls).
+        let tools: [JSONValue]? = req.tools.map { $0.map { openAIToolSpec(fromAnthropic: $0) } }
 
         let params = GenerationParameters(
             temperature: req.temperature ?? 0.7,
@@ -2473,7 +3067,8 @@ public actor HummingbirdServer {
             messages: messages,
             systemPrompt: systemPrompt,
             parameters: params,
-            templateKwargs: await templateKwargs(for: req.model)
+            templateKwargs: await templateKwargs(for: req.model),
+            tools: tools
         )
 
         // Cold-swap (SRV-2): resolved inside each responder, atomically with
@@ -2501,7 +3096,8 @@ public actor HummingbirdServer {
         } catch let err as ModelSwapError {
             return openAIStyleSwapErrorResponse(err)
         } catch {
-            return errorResponse(status: .internalServerError, message: error.localizedDescription, code: "load_failed")
+            return anthropicErrorResponse(
+                status: .internalServerError, message: error.localizedDescription, type: "api_error")
         }
         defer { Task { [weak self] in await self?.releaseGenerationLock() } }
 
@@ -2515,6 +3111,9 @@ public actor HummingbirdServer {
         var finishReason: FinishReason?
         var promptTokens = 0
         var completionTokens = 0
+        // Tool calls the model requested this turn. Populated from the terminal
+        // chunk when generation ends in `.toolCalls`; empty otherwise.
+        var capturedToolCalls: [ToolCallRequest] = []
 
         do {
             loop: while true {
@@ -2522,10 +3121,10 @@ public actor HummingbirdServer {
                 case .finished:
                     break loop
                 case .stalled:
-                    return errorResponse(
+                    return anthropicErrorResponse(
                         status: .gatewayTimeout,
                         message: "Generation stalled: no output for over \(Int(stallTimeoutSeconds))s.",
-                        code: "generation_stalled"
+                        type: "api_error"
                     )
                 case .chunk(let chunk):
                     fullText += chunk.text
@@ -2536,13 +3135,16 @@ public actor HummingbirdServer {
                     if let reason = chunk.finishReason {
                         finishReason = reason
                     }
+                    if let calls = chunk.toolCalls, !calls.isEmpty {
+                        capturedToolCalls = calls
+                    }
                 }
             }
         } catch {
-            return errorResponse(
+            return anthropicErrorResponse(
                 status: .internalServerError,
                 message: error.localizedDescription,
-                code: "engine_error"
+                type: "api_error"
             )
         }
 
@@ -2553,13 +3155,27 @@ public actor HummingbirdServer {
         // `<think>…</think>`; non-reasoning models keep their full text.
         let (_, answer) = MessageSegmenter.splitReasoning(fullText)
 
+        // Content: the text block first — UNLESS the assistant only called
+        // tools and produced no text, in which case real Anthropic omits the
+        // empty text block entirely (a tool-only reply is the common case in
+        // an agent loop) — then one `tool_use` block per detected call
+        // (`input` is a decoded JSON object, not a string). With no tool calls
+        // the single text block is always present, byte-for-byte unchanged
+        // from the pre-tools response, and `stop_reason` stays `end_turn`;
+        // `.toolCalls` maps to `tool_use` via `anthropicStopReason`.
+        var content: [[String: Any]] = []
+        if !answer.isEmpty || capturedToolCalls.isEmpty {
+            content.append(["type": "text", "text": answer])
+        }
+        for call in capturedToolCalls {
+            content.append(anthropicToolUseBlock(call))
+        }
+
         let body: [String: Any] = [
             "id": "msg_\(UUID().uuidString)",
             "type": "message",
             "role": "assistant",
-            "content": [
-                ["type": "text", "text": answer] as [String: Any]
-            ],
+            "content": content,
             "model": genRequest.model,
             "stop_reason": anthropicStopReason(finishReason),
             "stop_sequence": NSNull(),
@@ -2574,10 +3190,15 @@ public actor HummingbirdServer {
     /// Streaming Anthropic `/v1/messages` — SSE with *named* events
     /// (`event: <name>\ndata: <json>\n\n`) in Anthropic's fixed order:
     /// message_start → content_block_start → content_block_delta* →
-    /// content_block_stop → message_delta → message_stop. Only the answer
-    /// portion is streamed as `text_delta`; reasoning is dropped for this
-    /// MVP (matching the non-streaming path). The generation lock is held
-    /// for the whole body and released in `defer`.
+    /// content_block_stop → [tool_use content_block_start/delta/stop]* →
+    /// message_delta → message_stop. Only the answer portion is streamed as
+    /// `text_delta`; reasoning is dropped for this MVP (matching the
+    /// non-streaming path). The index-0 text block opens LAZILY on the first
+    /// non-empty answer delta and is entirely omitted for a tool-only reply
+    /// (no free text at all) — matching real Anthropic, which never emits an
+    /// empty text block — in which case the `tool_use` block(s) open at index
+    /// 0 instead of 1; see `textBlockOpened` below. The generation lock is
+    /// held for the whole body and released in `defer`.
     private func anthropicStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
         // A1: cheap pre-flight resolve check (no load, no lock) — reject
         // an unknown model with a real 404 before any streaming headers
@@ -2598,6 +3219,16 @@ public actor HummingbirdServer {
             var completionTokens = 0
             var promptTokens = 0
             var finishReason: FinishReason?
+            // Tool calls the model requested this turn — emitted as `tool_use`
+            // content blocks after the text block closes. Empty unless the
+            // terminal chunk ends in `.toolCalls`.
+            var capturedToolCalls: [ToolCallRequest] = []
+            // Whether the index-0 text content_block has been opened yet. Opening
+            // is LAZY (on the first non-empty answer delta) rather than eager, so
+            // a tool-only reply (no free text at all) never opens one — real
+            // Anthropic omits the empty text block in that case. See the
+            // pre-loop-exit handling below for the "opened at all?" resolution.
+            var textBlockOpened = false
 
             let engine: any InferenceEngine
             do {
@@ -2655,17 +3286,10 @@ public actor HummingbirdServer {
                     ] as [String: Any],
                 ])
 
-                // 2. content_block_start (single text block at index 0)
-                try await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": [
-                        "type": "text",
-                        "text": "",
-                    ] as [String: Any],
-                ])
-
-                // 3. content_block_delta per answer delta.
+                // 2/3. content_block_start for the text block (index 0), opened
+                // LAZILY on the first non-empty answer delta — see
+                // `textBlockOpened`'s doc comment — then a content_block_delta per
+                // subsequent delta.
                 stallLoop: while true {
                     switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
                     case .finished:
@@ -2690,7 +3314,24 @@ public actor HummingbirdServer {
                             let (_, aTail) = splitter.finish()
                             text += aTail
                         }
+                        // Capture tool calls BEFORE the empty-text guard below: a
+                        // tool-only terminal chunk carries no answer text but must
+                        // still surface its `tool_use` blocks.
+                        if let calls = chunk.toolCalls, !calls.isEmpty {
+                            capturedToolCalls = calls
+                        }
                         guard !text.isEmpty else { continue }
+                        if !textBlockOpened {
+                            try await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": [
+                                    "type": "text",
+                                    "text": "",
+                                ] as [String: Any],
+                            ])
+                            textBlockOpened = true
+                        }
                         try await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
                             "type": "content_block_delta",
                             "index": 0,
@@ -2709,11 +3350,60 @@ public actor HummingbirdServer {
                 try? await writer.write(buf)
             }
 
-            // 4. content_block_stop
-            try? await writeAnthropicSSE(&writer, event: "content_block_stop", payload: [
-                "type": "content_block_stop",
-                "index": 0,
-            ])
+            // 4. content_block_stop for the text block. If it was never opened
+            // (no non-empty delta arrived) AND there are no tool calls, still
+            // open+close an empty one here — matching the pre-tools byte-for-byte
+            // invariant for a content-less response. A tool-only reply (no text,
+            // ≥1 tool call) skips the text block entirely; its tool_use block(s)
+            // below open at index 0 instead of 1.
+            if !textBlockOpened && capturedToolCalls.isEmpty {
+                try? await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": ["type": "text", "text": ""] as [String: Any],
+                ])
+                textBlockOpened = true
+            }
+            if textBlockOpened {
+                try? await writeAnthropicSSE(&writer, event: "content_block_stop", payload: [
+                    "type": "content_block_stop",
+                    "index": 0,
+                ])
+            }
+
+            // 4b. Tool-use blocks follow the text block (index 1…N) when one was
+            // opened, or start at index 0 when the reply was tool-only (see
+            // above). Detection is terminal, so each call is emitted whole: a
+            // content_block_start (empty `input`), ONE `input_json_delta` frame
+            // carrying the full arguments JSON, then a content_block_stop. No
+            // tool calls ⇒ this loop is skipped and the event stream is
+            // byte-for-byte unchanged.
+            let toolBlockBaseIndex = textBlockOpened ? 1 : 0
+            for (offset, call) in capturedToolCalls.enumerated() {
+                let index = toolBlockBaseIndex + offset
+                try? await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": [
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": [String: Any](),
+                    ] as [String: Any],
+                ])
+                try? await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": [
+                        "type": "input_json_delta",
+                        "partial_json": openAIToolArgumentsJSON(call.arguments),
+                    ] as [String: Any],
+                ])
+                try? await writeAnthropicSSE(&writer, event: "content_block_stop", payload: [
+                    "type": "content_block_stop",
+                    "index": index,
+                ])
+            }
 
             // 5. message_delta — final stop reason + output token count.
             try? await writeAnthropicSSE(&writer, event: "message_delta", payload: [
@@ -3190,6 +3880,38 @@ public actor HummingbirdServer {
             body: .init(byteBuffer: ByteBuffer(bytes: data))
         )
     }
+
+    /// Anthropic-shaped error envelope for a non-streaming `/v1/messages` HTTP
+    /// error response: `{"type":"error","error":{"type":<type>,"message":<message>}}`.
+    /// Mirrors the shape of the SSE in-band `event: error` frames
+    /// `anthropicStreamingResponse` already emits — NOT the OpenAI
+    /// `{"error":{"message",...}}` envelope `errorResponse` produces. Claude
+    /// Code (the v0.6 benchmark target) speaks Anthropic's protocol natively
+    /// and expects this shape from `/v1/messages`, including its request-level
+    /// 400s. `type` is one of Anthropic's error-type strings
+    /// (`invalid_request_error`, `api_error`, …); callers choose the one
+    /// matching `status`.
+    private func anthropicErrorResponse(
+        status: HTTPResponse.Status,
+        message: String,
+        type: String
+    ) -> Response {
+        let body: [String: Any] = [
+            "type": "error",
+            "error": [
+                "type": type,
+                "message": message,
+            ] as [String: Any],
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json; charset=utf-8"
+        return Response(
+            status: status,
+            headers: headers,
+            body: .init(byteBuffer: ByteBuffer(bytes: data))
+        )
+    }
 }
 
 // MARK: - Stall watchdog (SRV-4)
@@ -3303,6 +4025,46 @@ private func openAIToolCallDelta(index: Int, call: ToolCallRequest) -> [String: 
     var object = openAIToolCallObject(call)
     object["index"] = index
     return object
+}
+
+/// One Anthropic `content[]` `tool_use` block: `{type,id,name,input}`. Unlike
+/// OpenAI's `function.arguments` (a JSON-encoded STRING), Anthropic's `input` is
+/// a DECODED JSON object — `toSendable()` unwraps each `JSONValue` to the
+/// Foundation types `JSONSerialization` accepts. Free function (not
+/// actor-isolated) so it also runs inside the streaming `ResponseBody` closure —
+/// mirrors `openAIToolCallObject`.
+private func anthropicToolUseBlock(_ call: ToolCallRequest) -> [String: Any] {
+    [
+        "type": "tool_use",
+        "id": call.id,
+        "name": call.name,
+        "input": call.arguments.mapValues { $0.toSendable() },
+    ]
+}
+
+// MARK: - OpenAI logprobs serialization (Track E)
+
+/// One OpenAI `choices[].logprobs` object:
+/// `{"content":[{token,logprob,bytes,top_logprobs:[{token,logprob,bytes}]}]}`.
+/// `content` is empty when logprobs were requested but no tokens were generated.
+/// Free function (not actor-isolated) so it also runs inside the streaming
+/// `ResponseBody` closure — mirrors `openAIToolCallObject`.
+private func openAILogprobs(_ tokens: [TokenLogprob]) -> [String: Any] {
+    let content: [[String: Any]] = tokens.map { token in
+        [
+            "token": token.token,
+            "logprob": token.logprob,
+            "bytes": token.bytes ?? [],
+            "top_logprobs": token.topLogprobs.map { alternative -> [String: Any] in
+                [
+                    "token": alternative.token,
+                    "logprob": alternative.logprob,
+                    "bytes": alternative.bytes ?? [],
+                ]
+            },
+        ]
+    }
+    return ["content": content]
 }
 
 // MARK: - Anthropic SSE helpers

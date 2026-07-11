@@ -53,6 +53,12 @@ final class ModelLibraryViewModel {
     /// is deferred per the plan's "Out of scope" section.
     var pinnedModelIDs: Set<String> = []
 
+    /// Model whose detail card (Track F `ModelCardView`) is currently
+    /// presented, `nil` when the sheet is dismissed. `LocalModelRow`'s
+    /// info button sets this; `.sheet(item:)` in `ModelLibraryView` binds
+    /// to it directly.
+    var modelForDetail: LocalModel? = nil
+
     private var lastUpdateCheck: Date?
     private let updateCheckInterval: TimeInterval = 24 * 60 * 60  // 1 day
 
@@ -69,12 +75,23 @@ final class ModelLibraryViewModel {
     /// stored URL) so settings changes are observed live without this
     /// VM having to subscribe to SettingsManager.
     private let modelDirectoryProvider: @MainActor () -> URL
+    /// Read the current Hugging Face cache scan settings (Track F) on
+    /// demand — same "observe live without subscribing" rationale as
+    /// `modelDirectoryProvider`.
+    private let hfCacheSettingsProvider: @MainActor () -> (enabled: Bool, directories: [URL])
     private var searchTask: Task<Void, Never>? = nil
     /// Separately tracked so a follow-up `searchHF()` can cancel a
     /// still-running size enrichment before it races the new results.
     /// Without this, a stale enrichment pass could write a size into a
     /// row that happens to share an `id` with the superseded result set.
     private var enrichTask: Task<Void, Never>? = nil
+    /// Task backing the currently in-flight `loadLocalModels()` scan —
+    /// cancelled by a newer call so a slow/superseded scan can't overwrite
+    /// fresher results, mirroring `searchTask`'s cancel-then-supersede
+    /// pattern. Concurrent triggers are common here: initial `.task` load,
+    /// Settings-driven auto-rescan (model directory / HF cache toggle),
+    /// and the manual Refresh button can all fire close together.
+    private var loadTask: Task<Void, Never>? = nil
 
     // MARK: - Init
 
@@ -83,13 +100,15 @@ final class ModelLibraryViewModel {
         coordinator: EngineCoordinator,
         downloader: HFDownloader,
         sizeCache: HFSizeCache,
-        modelDirectoryProvider: @escaping @MainActor () -> URL
+        modelDirectoryProvider: @escaping @MainActor () -> URL,
+        hfCacheSettingsProvider: @escaping @MainActor () -> (enabled: Bool, directories: [URL])
     ) {
         self.library = library
         self.coordinator = coordinator
         self.downloader = downloader
         self.sizeCache = sizeCache
         self.modelDirectoryProvider = modelDirectoryProvider
+        self.hfCacheSettingsProvider = hfCacheSettingsProvider
     }
 
     // MARK: - Local
@@ -103,41 +122,74 @@ final class ModelLibraryViewModel {
     }
 
     func loadLocalModels() async {
-        isLoadingLocal = true
-        localError = nil
-        let dir = modelDirectoryProvider()
-        await LogManager.shared.info(
-            "Scanning local models at: \(dir.path(percentEncoded: false))",
-            category: .system
-        )
-        do {
-            let found = try await library.scan(dir)
-            localModels = found
+        // Cancel-then-supersede: a newer scan invalidates whatever an
+        // older, still-running one is about to write. Without this, two
+        // overlapping scans (e.g. auto-rescan from a Settings change
+        // firing while the initial `.task` load is still running) can
+        // interleave and let the slower one clobber the faster one's
+        // fresher result with stale data.
+        loadTask?.cancel()
+        let task = Task {
+            isLoadingLocal = true
+            localError = nil
+            let dir = modelDirectoryProvider()
             await LogManager.shared.info(
-                "Scan complete: \(found.count) local model(s) at \(dir.path(percentEncoded: false))",
+                "Scanning local models at: \(dir.path(percentEncoded: false))",
                 category: .system
             )
-            if found.isEmpty {
-                // List the raw subdirs so we can see whether scan is
-                // looking at the right path but finding the wrong kind
-                // of content (wrong format, empty dir, etc.)
-                let raw = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-                await LogManager.shared.warning(
-                    "Zero models found. Subdirs present: \(raw.prefix(20).joined(separator: ", "))",
+            do {
+                var found = try await library.scan(dir)
+
+                // Track F: merge in Hugging Face cache discoveries when the
+                // user has opted in. De-duplicate on the model NAME LEAF — a
+                // model already present via the managed directory scan wins over
+                // its cache twin. The two scans use different id schemes (managed
+                // = bare directory leaf, HF cache = full "org/name"), so comparing
+                // full ids never matched and showed the "same" model twice; the
+                // leaf ("name") is the shared key (mirrors ModelCardView's
+                // adapter reconciliation).
+                let hfCache = hfCacheSettingsProvider()
+                if hfCache.enabled, !hfCache.directories.isEmpty {
+                    let cached = await library.scanHuggingFaceCache(directories: hfCache.directories)
+                    let leaf: (String) -> String = { $0.split(separator: "/").last.map(String.init) ?? $0 }
+                    let existingLeaves = Set(found.map { leaf($0.id) })
+                    let newFromCache = cached.filter { !existingLeaves.contains(leaf($0.id)) }
+                    found = (found + newFromCache)
+                        .sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
+                }
+
+                guard !Task.isCancelled else { return }
+                localModels = found
+                await LogManager.shared.info(
+                    "Scan complete: \(found.count) local model(s) at \(dir.path(percentEncoded: false))",
                     category: .system
                 )
+                if found.isEmpty {
+                    // List the raw subdirs so we can see whether scan is
+                    // looking at the right path but finding the wrong kind
+                    // of content (wrong format, empty dir, etc.)
+                    let raw = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+                    await LogManager.shared.warning(
+                        "Zero models found. Subdirs present: \(raw.prefix(20).joined(separator: ", "))",
+                        category: .system
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await LogManager.shared.error(
+                    "Scan failed at \(dir.path(percentEncoded: false)): \(error.localizedDescription)",
+                    category: .system
+                )
+                localError = error.localizedDescription
             }
-        } catch {
-            await LogManager.shared.error(
-                "Scan failed at \(dir.path(percentEncoded: false)): \(error.localizedDescription)",
-                category: .system
-            )
-            localError = error.localizedDescription
+            guard !Task.isCancelled else { return }
+            isLoadingLocal = false
+            // Fire-and-forget HF update check — throttled to once a day
+            // internally so repeated tab visits don't hammer the Hub.
+            checkForModelUpdates()
         }
-        isLoadingLocal = false
-        // Fire-and-forget HF update check — throttled to once a day
-        // internally so repeated tab visits don't hammer the Hub.
-        checkForModelUpdates()
+        loadTask = task
+        await task.value
     }
 
     /// Fire in the background if it's been more than a day since the
@@ -196,9 +248,17 @@ final class ModelLibraryViewModel {
         }
     }
 
-    func deleteModel(_ model: LocalModel) {
+    func deleteModel(_ model: LocalModel) async {
+        // Track F: HF-cache-referenced entries point straight at the
+        // user's shared Hugging Face cache, not an app-owned copy —
+        // deleting would remove files other tools (transformers,
+        // huggingface-cli) may still rely on. `LocalModelRow` already
+        // hides the delete action for these; this guard is belt-and-braces
+        // against any other call site — `ModelLibraryManager.delete(_:)`
+        // enforces the same guard as its own Core-level guardrail.
+        guard !model.isExternalReference else { return }
         do {
-            try FileManager.default.removeItem(at: model.directory)
+            try await library.delete(model)
             localModels.removeAll { $0.id == model.id }
         } catch {
             localError = "Delete failed: \(error.localizedDescription)"
@@ -378,7 +438,14 @@ final class ModelLibraryViewModel {
     }
 
     func isDownloaded(_ model: HFModel) -> Bool {
-        let modelName = model.id.split(separator: "/").last.map(String.init) ?? model.id
-        return localModels.contains { $0.id == modelName }
+        // Compare on the model NAME LEAF for BOTH sides. `localModels` now carries
+        // two id schemes — managed models keep a bare directory leaf, Track F
+        // HF-cache models keep the full "org/name" — so leafing only the incoming
+        // HF id (as before) missed every cache-discovered model (the user could then
+        // re-download tens of GB). Leafing both sides matches either scheme (mirrors
+        // ModelCardView's adapter reconciliation).
+        let leaf: (String) -> String = { $0.split(separator: "/").last.map(String.init) ?? $0 }
+        let targetLeaf = leaf(model.id)
+        return localModels.contains { leaf($0.id) == targetLeaf }
     }
 }

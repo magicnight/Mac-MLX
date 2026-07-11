@@ -133,6 +133,84 @@ struct ParametersInspector: View {
                 }
             }
 
+            Section("Speculative Decoding") {
+                Picker(
+                    "Draft Model",
+                    selection: Binding<String>(
+                        get: { params.parameters.draftModelID ?? "" },
+                        set: { newValue in
+                            let trimmed = newValue.isEmpty ? nil : newValue
+                            params.parameters.draftModelID = trimmed
+                            // Seed the token count so the persisted value
+                            // matches what the "Draft Tokens" slider below
+                            // already displays (it falls back to 2 when
+                            // nil) — without this, the UI shows "2" but a
+                            // freshly-picked draft model silently sends
+                            // `numDraftTokens: nil` until the user touches
+                            // the slider themselves.
+                            if trimmed != nil, params.parameters.numDraftTokens == nil {
+                                params.parameters.numDraftTokens = 2
+                            }
+                            params.persist()
+                        }
+                    )
+                ) {
+                    Text("None (disabled)").tag("")
+                    ForEach(draftCandidates) { candidate in
+                        Text(candidate.displayName).tag(candidate.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .help("Speculate with a smaller, faster model to accelerate generation. Leave as None to disable.")
+
+                if let staleDraftModelID {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("Draft model '\(staleDraftModelID)' unavailable")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("Reset to None") {
+                            params.parameters.draftModelID = nil
+                            params.persist()
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                    }
+                }
+
+                if params.parameters.draftModelID != nil {
+                    parameterRow(
+                        "Draft Tokens",
+                        help: "How many tokens the draft model proposes per speculative round (1–8). Higher can speed things up more but wastes more work whenever a proposal is rejected.",
+                        value: Double(params.parameters.numDraftTokens ?? 2),
+                        binding: Binding(
+                            get: { Double(params.parameters.numDraftTokens ?? 2) },
+                            set: { newValue in
+                                params.parameters.numDraftTokens = Int(newValue.rounded())
+                                params.persist()
+                            }
+                        ),
+                        range: 1...8,
+                        step: 1,
+                        format: "%.0f"
+                    )
+                }
+
+                if draftCandidates.isEmpty {
+                    Text("No other text models in your library — download or add one to use as a draft model.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Not every model supports speculative decoding — hybrid/linear-attention architectures (e.g. Qwen3.5) silently fall back to plain generation instead of erroring. You'll just see no acceptance rate on that turn.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
             Section {
                 if let modelID = params.currentModelID {
                     Text("Current model: \(modelID)")
@@ -162,6 +240,31 @@ struct ParametersInspector: View {
         .task(id: appState.coordinator.currentModel?.id) {
             await appState.parameters.loadForModel(appState.coordinator.currentModel?.id)
         }
+    }
+
+    // MARK: - Speculative decoding (Track F GUI over the D1 engine plumbing)
+
+    /// Candidate draft models. Filtering logic lives in
+    /// `LocalModel.draftCandidates(from:excluding:)` (Core-side, unit
+    /// tested) — this just supplies the current library + target model id.
+    private var draftCandidates: [LocalModel] {
+        LocalModel.draftCandidates(
+            from: appState.modelLibrary.localModels,
+            excluding: appState.parameters.currentModelID
+        )
+    }
+
+    /// The persisted `draftModelID` when it no longer names a valid
+    /// candidate (deleted from the library, or now the loaded target
+    /// itself) — `nil` otherwise. The Picker's binding falls back to `""`
+    /// in that case (SwiftUI shows no visible selection) while
+    /// `draftModelID` stays set on disk, so generation keeps trying — and
+    /// failing — to load it every round.
+    private var staleDraftModelID: String? {
+        guard let id = appState.parameters.parameters.draftModelID, !id.isEmpty,
+              !draftCandidates.contains(where: { $0.id == id })
+        else { return nil }
+        return id
     }
 
     // MARK: - Slider row helper

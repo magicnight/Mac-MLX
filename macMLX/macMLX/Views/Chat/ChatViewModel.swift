@@ -40,6 +40,13 @@ struct UIChatMessage: Identifiable {
     /// the native tool-card rendering in `ChatMessageView` and marks the row
     /// as ephemeral everywhere else.
     var toolActivity: ToolActivity?
+    /// Speculative decoding acceptance telemetry for this turn (Track F GUI
+    /// over the D1 engine plumbing). Non-nil only when the generation
+    /// actually ran the speculative path and the engine returned
+    /// telemetry — same "never fabricated" contract as
+    /// `GenerateChunk.speculativeDecoding`. UI-ephemeral like
+    /// `isGenerating`/`toolActivity`: not persisted to `StoredMessage`.
+    var speculativeDecoding: SpeculativeDecodingUsage?
 
     init(
         id: UUID = UUID(),
@@ -49,7 +56,8 @@ struct UIChatMessage: Identifiable {
         tokenCount: Int? = nil,
         isGenerating: Bool = false,
         images: [ImageAttachment] = [],
-        toolActivity: ToolActivity? = nil
+        toolActivity: ToolActivity? = nil,
+        speculativeDecoding: SpeculativeDecodingUsage? = nil
     ) {
         self.id = id
         self.role = role
@@ -59,6 +67,7 @@ struct UIChatMessage: Identifiable {
         self.isGenerating = isGenerating
         self.images = images
         self.toolActivity = toolActivity
+        self.speculativeDecoding = speculativeDecoding
     }
 
     /// Restore from persistence. Tool-activity rows are UI-ephemeral and
@@ -429,7 +438,30 @@ final class ChatViewModel {
             model: currentModel.id,
             messages: coreMessages,
             systemPrompt: params.systemPrompt.isEmpty ? nil : params.systemPrompt,
-            parameters: params.asGenerationParameters()
+            parameters: params.asGenerationParameters(),
+            draftModelID: params.draftModelID,
+            numDraftTokens: params.numDraftTokens,
+            // Self-describe the GUI's out-of-band pin (AppState.onModelLoaded ->
+            // engine.applyAdapter, fired once on model load — the Inspector's own
+            // adapter picker only updates this persisted value, it never live-
+            // applies). Without this, every request defaulted `adapters` to nil,
+            // so the FIRST chat turn's `reconcileAdapter` saw `decide(pinned, nil)
+            // == .reloadOnly` and silently reloaded the base model out from under
+            // the pin (regression: multi-second reload + adapter silently shed
+            // while the UI kept showing it as active). Mirroring the pin name here
+            // makes `decide(pinned, pinned) == .keep` — no reload — while the API
+            // `adapters: nil` semantic (explicit shed) is untouched for HTTP
+            // clients that never pin anything here.
+            //
+            // Failed-pin edge: whether `onModelLoaded`'s apply actually succeeded
+            // isn't tracked anywhere ChatViewModel can read, so this always sends
+            // the persisted name. If the adapter is missing/broken, `reconcileAdapter`
+            // now retries applying it on EVERY turn and — should it still fail —
+            // surfaces `EngineError.adapterApplyFailed` as a visible per-request
+            // error in the chat bubble, rather than the previous silent fallback to
+            // base weights. That trade matches this project's "no silent
+            // degradation" rule and self-heals a transient apply failure.
+            adapters: params.adapterName
         )
 
         // Route through the MCP tool loop when a session is available (pool
@@ -465,6 +497,9 @@ final class ChatViewModel {
                     self.messages[assistantIdx].content += chunk.text
                     if let usage = chunk.usage {
                         self.messages[assistantIdx].tokenCount = usage.completionTokens
+                    }
+                    if let speculativeDecoding = chunk.speculativeDecoding {
+                        self.messages[assistantIdx].speculativeDecoding = speculativeDecoding
                     }
                 }
                 await LogManager.shared.info(
@@ -540,6 +575,11 @@ final class ChatViewModel {
                             self.messages[i].content += chunk.text
                             if let usage = chunk.usage {
                                 self.messages[i].tokenCount = usage.completionTokens
+                            }
+                            // Mirror the direct (non-tool) path so speculative-decoding
+                            // telemetry surfaces for MCP tool-loop turns too.
+                            if let speculativeDecoding = chunk.speculativeDecoding {
+                                self.messages[i].speculativeDecoding = speculativeDecoding
                             }
                         }
 

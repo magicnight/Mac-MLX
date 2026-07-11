@@ -218,6 +218,17 @@ actor BatchServingCoordinator {
         if !draining && !queue.isEmpty {
             return true
         }
+        // Tearing down with rows still queued can only be the cohort-failed-during-
+        // drain case: a successful drain empties the queue before finishing (the loop
+        // admits every queued row while it has headroom), and a failure while NOT
+        // draining re-drives above. Those orphaned rows can never be re-driven now
+        // (draining) and the cohort just died — so fail them fast (reusing
+        // `abortAllQueued`'s flush) instead of leaving their continuations open until
+        // the 120s stall watchdog 504s each, one by one.
+        if !queue.isEmpty {
+            abortAllQueued(BatchServingUnavailableError())
+            return false
+        }
         driving = false
         activeIDs = []
         cancelledActive = []

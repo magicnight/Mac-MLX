@@ -129,6 +129,47 @@ func newOptionalFieldsDefaultToNil() async throws {
     #expect(loaded.templateKwargs == nil)
 }
 
+// MARK: - Track F (speculative decoding GUI: draftModelID / numDraftTokens)
+
+@Test
+func draftFieldsRoundTrip() async throws {
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let params = ModelParameters(
+        temperature: 0.5,
+        topP: 0.9,
+        maxTokens: 512,
+        systemPrompt: "s",
+        draftModelID: "mlx-community/Qwen3-0.6B-4bit",
+        numDraftTokens: 4
+    )
+    try await store.save(params, for: "mlx-community/Qwen3-8B-4bit")
+    let loaded = await store.load(for: "mlx-community/Qwen3-8B-4bit")
+    #expect(loaded.draftModelID == "mlx-community/Qwen3-0.6B-4bit")
+    #expect(loaded.numDraftTokens == 4)
+}
+
+@Test
+func draftFieldsDefaultToNilForLegacyFile() async throws {
+    // A pre-Track-F file (no draftModelID/numDraftTokens keys) must still
+    // load, with the new fields defaulting to nil (= speculative decoding
+    // disabled).
+    let (store, dir) = makeTempStore()
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appending(path: "legacy.json", directoryHint: .notDirectory)
+    let legacy = """
+    {"temperature":0.7,"topP":0.95,"maxTokens":2048,"systemPrompt":"hi"}
+    """
+    try Data(legacy.utf8).write(to: url)
+
+    let loaded = await store.load(for: "legacy")
+    #expect(loaded.draftModelID == nil)
+    #expect(loaded.numDraftTokens == nil)
+}
+
 @Test
 func modelIDForAliasFindsMatch() async throws {
     let (store, dir) = makeTempStore()

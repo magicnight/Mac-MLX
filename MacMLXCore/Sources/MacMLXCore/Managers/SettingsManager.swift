@@ -110,6 +110,25 @@ public struct Settings: Codable, Equatable, Sendable {
     /// playback opt-in via the per-bubble speaker button.
     public var ttsAutoSpeak: Bool
 
+    // MARK: - Hugging Face cache discovery (Track F)
+
+    /// Opt-in toggle: when `true`, the Model Library also scans
+    /// `huggingFaceCacheDirectories` for MLX-format models already cached
+    /// by other HF tooling (`transformers`, `huggingface-cli`, …) and
+    /// lists them alongside the app's own managed models — referencing
+    /// the cache in place, never copying. Default `false`: scanning a
+    /// directory the user didn't explicitly point macMLX at is an
+    /// opt-in, not a surprise.
+    public var scanHuggingFaceCache: Bool
+
+    /// Cache root directories to scan when `scanHuggingFaceCache` is on.
+    /// User-editable (Settings → Hugging Face Cache) so a custom
+    /// `HF_HOME`/`HF_HUB_CACHE` location can be added. Seeded with the
+    /// standard `~/.cache/huggingface/hub` path by default; persisted
+    /// independent of the toggle so a customised list survives
+    /// switching the toggle off and back on.
+    public var huggingFaceCacheDirectories: [URL]
+
     // MARK: Factory
 
     /// Sensible out-of-the-box defaults — used when no settings file exists.
@@ -137,8 +156,23 @@ public struct Settings: Codable, Equatable, Sendable {
         sttModel: nil,
         ttsModel: nil,
         ttsVoice: nil,
-        ttsAutoSpeak: false
+        ttsAutoSpeak: false,
+        scanHuggingFaceCache: false,
+        huggingFaceCacheDirectories: [Self.defaultHuggingFaceCacheDirectory]
     )
+
+    /// Standard Hugging Face Hub cache location — `~/.cache/huggingface/hub`
+    /// (`HF_HOME`/hub). Not read from the `HF_HOME` environment variable:
+    /// keeping this a fixed default (rather than following an env var that
+    /// may or may not be set in the GUI app's process environment) keeps
+    /// the seed predictable; a user with a custom `HF_HOME` adds it via the
+    /// Settings directory editor.
+    public static var defaultHuggingFaceCacheDirectory: URL {
+        DataRoot.userHome.appending(
+            path: ".cache/huggingface/hub",
+            directoryHint: .isDirectory
+        )
+    }
 
     // MARK: Init
 
@@ -163,7 +197,9 @@ public struct Settings: Codable, Equatable, Sendable {
         sttModel: String? = nil,
         ttsModel: String? = nil,
         ttsVoice: String? = nil,
-        ttsAutoSpeak: Bool = false
+        ttsAutoSpeak: Bool = false,
+        scanHuggingFaceCache: Bool = false,
+        huggingFaceCacheDirectories: [URL] = [Settings.defaultHuggingFaceCacheDirectory]
     ) {
         self.modelDirectory = modelDirectory
         self.preferredEngine = preferredEngine
@@ -186,6 +222,8 @@ public struct Settings: Codable, Equatable, Sendable {
         self.ttsModel = ttsModel
         self.ttsVoice = ttsVoice
         self.ttsAutoSpeak = ttsAutoSpeak
+        self.scanHuggingFaceCache = scanHuggingFaceCache
+        self.huggingFaceCacheDirectories = huggingFaceCacheDirectories
     }
 
     // MARK: - Codable (backward-compat decode)
@@ -215,6 +253,8 @@ public struct Settings: Codable, Equatable, Sendable {
         case ttsModel
         case ttsVoice
         case ttsAutoSpeak
+        case scanHuggingFaceCache
+        case huggingFaceCacheDirectories
     }
 
     public init(from decoder: Decoder) throws {
@@ -247,6 +287,14 @@ public struct Settings: Codable, Equatable, Sendable {
         self.ttsModel = try c.decodeIfPresent(String.self, forKey: .ttsModel)
         self.ttsVoice = try c.decodeIfPresent(String.self, forKey: .ttsVoice)
         self.ttsAutoSpeak = try c.decodeIfPresent(Bool.self, forKey: .ttsAutoSpeak) ?? false
+        // Track F — pre-existing settings.json files have neither key;
+        // default to "off" with the standard cache path pre-seeded so
+        // flipping the toggle on later has something sensible to scan.
+        self.scanHuggingFaceCache =
+            try c.decodeIfPresent(Bool.self, forKey: .scanHuggingFaceCache) ?? false
+        self.huggingFaceCacheDirectories =
+            try c.decodeIfPresent([URL].self, forKey: .huggingFaceCacheDirectories)
+            ?? [Settings.defaultHuggingFaceCacheDirectory]
     }
 }
 

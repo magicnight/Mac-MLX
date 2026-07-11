@@ -9,6 +9,129 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-11
+
+### Fixed
+Hardening wave from the post-release audit of all external review-bot
+findings across v0.6's PRs — every item independently re-verified against
+the code before fixing. (PR #83)
+
+- **LoRA adapter identity desync** — adapters applied via the GUI's
+  auto-pin were invisible to per-request reconciliation: `adapters:nil`
+  could not shed them, a second adapter could stack on top, and
+  prompt-cache entries were shared between base and adapted weights
+  (cache poisoning). Identity is now recorded at the point of
+  application and the GUI request carries its own pin, keeping both
+  clients coherent.
+- **VLM requests silently ignored `response_format`** — images +
+  `response_format` now return 400 before generation; previously
+  clients expecting constrained JSON got unconstrained text with no
+  warning. `tools` + `response_format` likewise 400s (the tool-call
+  processor could swallow the entire constrained document on
+  JSON-format models).
+- **Speculative decoding was silently disabled for MCP users** — with
+  any MCP server connected, every GUI chat turn routed through the tool
+  loop, whose per-turn requests dropped `draftModelID` /
+  `numDraftTokens`. Per-turn requests now preserve all seed-request
+  fields, and acceptance-rate telemetry displays in tool loops.
+- **`kv_bits: 0` enabled 2-bit quantization** — 0 (and negatives) now
+  disable KV-cache quantization like `nil`.
+- Streaming `logprobs` were dropped on tool-call turns; now attached to
+  the first tool-call frame.
+- OpenAI `tool_calls` on non-assistant messages are ignored (assistant
+  only), so mispaired histories fail with a clean orphan 400 instead of
+  an opaque template error.
+- Model library: duplicate rows and `isDownloaded` false-negatives when
+  the same model exists in both a managed directory and the HF cache
+  (id schemes now leaf-normalized; HF scans dedup across roots).
+- Batched requests still queued when a cohort failed during a model
+  drain hung until the stall watchdog; they now fail fast.
+- Mellum2 weight sanitization no longer discards tensors when a
+  checkpoint has an incomplete per-expert set.
+- `package-cli.sh` no longer masks xcodebuild failures (a failed build
+  could previously package stale products).
+
+## [0.6.0] - 2026-07-11
+
+### Added
+- **Agent tool loops on both protocols** — multi-turn tool calling now
+  works end-to-end for real agent clients. OpenAI
+  `/v1/chat/completions`: assistant `tool_calls` + `role:"tool"` history
+  fully decoded with strict `tool_call_id` pairing validation
+  (orphaned/duplicate/double-answered results are explicit 400s).
+  Anthropic `/v1/messages`: `tools` / `tool_choice` decoding,
+  `tool_use`/`tool_result` content blocks, `tool_use` response blocks
+  (non-streaming + streaming), `stop_reason:"tool_use"`, native
+  Anthropic error envelope, and no empty text block on tool-only
+  replies. Engine-side: `toolCallFormat` backfill for model families
+  upstream's inference misses (plain Qwen3 / Qwen2.x), fixing tool-call
+  detection for the GUI MCP loop too. Verified by a real-world
+  benchmark: Claude Code pointed at `localhost:8000` autonomously fixed
+  a failing test suite in 4m22s over 6 tool-loop rounds
+  (Qwen3.6-27B-4bit). (PR #81)
+- **Continuous batching** — a self-built orchestrator over upstream's batch
+  cache primitives: RoPE-correct batch cache infrastructure, a ragged
+  `BatchKVCache` port, a continuous admission/eviction scheduler, and a
+  server seam with drain-on-swap. 2.5-3.2× aggregate throughput with 4
+  concurrent clients versus the serial path. Batching engages only under
+  real concurrency — a sole in-flight request keeps the proven
+  single-stream path (and its prompt cache). Per-model coverage gate with
+  automatic fallback to the legacy FIFO path. (PRs #65-#67, #69-#71)
+- **Prefix (LCP) prompt cache** — the exact-key prompt cache is now a
+  token-prefix trie: multi-turn agent conversations reuse the longest
+  common prefix, trim, and incrementally prefill only the new suffix
+  instead of a cold prefill each round. Classified-LRU hot tier (RAM) +
+  safetensors cold tier (SSD); `usage.prompt_tokens` keeps OpenAI billing
+  semantics (full prompt length, reused + incremental). (PR #74)
+- **Structured output** — `response_format: {"type": "json_object"}` and a
+  JSON-schema subset, enforced during decoding by a byte-level pushdown
+  automaton masking illegal tokens each step. Zero third-party
+  dependencies; unsupported schema keywords are explicit 400s, never
+  silent. (PR #75)
+- **Speculative decoding** — classic draft-model path wired to upstream's
+  iterator: `draft_model` / `num_draft_tokens` on the API, a per-model GUI
+  toggle with acceptance-rate telemetry. Hybrid/linear-attention targets
+  (non-trimmable caches) are detected and fall back gracefully.
+  (PRs #68, #77)
+- **API compatibility pack** — `logit_bias`, `logprobs` + `top_logprobs`,
+  the XTC sampler, per-request LoRA `adapters`, KV-cache quantization
+  (`kv_bits` / `kv_group_size` / `quantized_kv_start`), and OpenAI `tools`
+  pass-through with `tool_calls` responses (the client runs the loop).
+  Parameter combinations form an explicit matrix — unsupported pairs
+  return 400 instead of silently degrading. (PRs #64, #76)
+- **GUI wave** — discover models already in `~/.cache/huggingface` (zero
+  re-download) with a multi-directory editor; ModelCard upgrade; copy-ID
+  buttons; speculative-decoding controls. (PR #77)
+- **New architectures** (see [docs/model-support.md](docs/model-support.md)):
+  Qwen3.6 weights validated (20.6 tok/s); **Mellum2-12B-A2.5B** ported
+  tested-tier (68.9 tok/s); **Solar-Open-100B** and **GLM-5.1/DSA** ported
+  theoretical-tier (parity-verified, real weights untested); Kimi K2.5
+  blocked on an upstream internal initializer (loud error, contract test
+  in place). (PRs #72, #78, #79)
+
+### Changed
+- **mlx-swift dependency** moved to a controlled minimal fork
+  (`magicnight/mlx-swift@0.31.6-rope3498`) carrying exactly one
+  upstream-merged fix (ml-explore/mlx#3498, batched single-token RoPE
+  dispatch); no API-surface changes, dropped as soon as upstream ships a
+  release containing it. A tripwire test watches for the upstream
+  regression landing. (PR #73)
+
+### Fixed
+- `usage.prompt_tokens` after a prompt-cache hit reported only the
+  incremental tokens; it now reports the full prompt length (reused +
+  incremental), matching OpenAI semantics. (PR #74)
+- Model sizes for HuggingFace-cache discoveries now resolve symlinks, so
+  blob-backed snapshots report true sizes instead of link sizes. (PR #77)
+- **CLI tarball inference was broken since its introduction** — the
+  packaged binary shipped without mlx-swift's Metal library and aborted
+  on the first inference with "Failed to load the default metallib".
+  The tarball now bundles `mlx-swift_Cmlx.bundle` next to the binary
+  (built via the Xcode pipeline, which is the only one that compiles
+  the Metal shaders) and the Homebrew formula installs both into
+  `libexec` behind a `bin` shim. The GUI DMG was never affected.
+  (PR #82)
+
 ## [0.5.3] - 2026-07-08
 
 ### Added

@@ -163,14 +163,13 @@ public struct ToolCallingSession: Sendable {
         while true {
             try Task.checkCancellation()
 
-            let turnRequest = GenerateRequest(
-                model: request.model,
-                messages: workingMessages,
-                systemPrompt: request.systemPrompt,
-                parameters: request.parameters,
-                templateKwargs: request.templateKwargs,
-                tools: request.tools
-            )
+            // Mutate a COPY of the seed request so EVERY field carries over —
+            // only the conversation changes per turn. Re-initialising here would
+            // silently drop any field not re-passed (it historically dropped
+            // draftModelID / numDraftTokens, so speculative decoding was off for
+            // all MCP tool-loop turns; responseFormat and adapters too).
+            var turnRequest = request
+            turnRequest.messages = workingMessages
 
             var assistantText = ""
             var toolCalls: [ToolCallRequest] = []

@@ -21,6 +21,8 @@ struct SettingsView: View {
     @State private var kvCacheHotMB: Int = 512
     @State private var kvCacheColdGB: Int = 20
     @State private var maxResidentMemoryGB: Int = 8
+    @State private var scanHuggingFaceCache: Bool = false
+    @State private var huggingFaceCacheDirectories: [URL] = []
 
     var body: some View {
         Form {
@@ -79,6 +81,17 @@ struct SettingsView: View {
                 }
 
             downloadsSection
+
+            HuggingFaceCacheSection(
+                enabled: $scanHuggingFaceCache,
+                directories: $huggingFaceCacheDirectories
+            )
+            .onChange(of: scanHuggingFaceCache) { _, newValue in
+                Task { await appState.updateSettings { $0.scanHuggingFaceCache = newValue } }
+            }
+            .onChange(of: huggingFaceCacheDirectories) { _, newValue in
+                Task { await appState.updateSettings { $0.huggingFaceCacheDirectories = newValue } }
+            }
 
             rerunSetupSection
         }
@@ -183,6 +196,8 @@ struct SettingsView: View {
         kvCacheHotMB = s.kvCacheHotMB
         kvCacheColdGB = s.kvCacheColdGB
         maxResidentMemoryGB = s.maxResidentMemoryGB
+        scanHuggingFaceCache = s.scanHuggingFaceCache
+        huggingFaceCacheDirectories = s.huggingFaceCacheDirectories
     }
 
     private func showModelDirectoryPicker() {

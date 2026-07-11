@@ -29,6 +29,14 @@ struct ModelLibraryView: View {
             .onChange(of: appState.currentSettings.modelDirectory) { _, _ in
                 Task { await appState.modelLibrary.loadLocalModels() }
             }
+            // Track F: re-scan when the HF cache toggle or its directory
+            // list changes, same auto-rescan rationale as modelDirectory.
+            .onChange(of: appState.currentSettings.scanHuggingFaceCache) { _, _ in
+                Task { await appState.modelLibrary.loadLocalModels() }
+            }
+            .onChange(of: appState.currentSettings.huggingFaceCacheDirectories) { _, _ in
+                Task { await appState.modelLibrary.loadLocalModels() }
+            }
     }
 }
 
@@ -37,6 +45,7 @@ struct ModelLibraryView: View {
 private struct ModelLibraryContent: View {
 
     @Bindable var viewModel: ModelLibraryViewModel
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,6 +54,9 @@ private struct ModelLibraryContent: View {
             tabContent
         }
         .navigationTitle("Model Library")
+        .sheet(item: $viewModel.modelForDetail) { model in
+            ModelCardView(model: model, allAdapters: appState.availableAdapters)
+        }
     }
 
     // MARK: - Toolbar
@@ -172,7 +184,10 @@ private struct ModelLibraryContent: View {
                                 Task { await viewModel.togglePin(model) }
                             },
                             onDelete: {
-                                viewModel.deleteModel(model)
+                                Task { await viewModel.deleteModel(model) }
+                            },
+                            onShowDetails: {
+                                viewModel.modelForDetail = model
                             }
                         )
                     }

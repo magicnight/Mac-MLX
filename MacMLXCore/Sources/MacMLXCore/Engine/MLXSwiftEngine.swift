@@ -93,6 +93,15 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// keep/swap/unload by comparing ids without touching the container.
     private var loadedDraftModelID: String?
 
+    /// Identity of the LoRA adapter currently layered on the resident model
+    /// (Track E per-request adapter hot-swap), or nil when the base model is
+    /// resident with no adapter. `reconcileAdapter` compares this to a request's
+    /// `adapters` to decide keep / apply / reload. Reset to nil by every
+    /// `load(_:)` / `unload()` — a fresh model container carries no adapter, and
+    /// mlx-swift-lm's `LanguageModel.load(adapter:)` is additive-only (no unapply),
+    /// so a base-model reload is the reliable way to shed a resident adapter.
+    private var loadedAdapterID: String?
+
     /// Fast-fail re-entrancy guard for the speculative decoding path (D1)
     /// ONLY — the non-speculative path is unaffected. Swift actors are
     /// reentrant across `await` suspension points, so nothing about being
@@ -110,6 +119,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// by `runGeneration` to reuse KV state across successive turns on
     /// the same LLM. VLM generations bypass it.
     private let promptCacheStore: PromptCacheStore
+
+    /// Per-model token→JSON-classification tables (Track C structured output).
+    /// Built once per resident model on the first constrained request and reused
+    /// thereafter, so the vocabulary-decode cost is amortized. Empty and inert
+    /// for every unconstrained request.
+    private let tokenVocabularyCache = TokenVocabularyCache()
 
     /// Guards the one-time `ModelOverlay.registerAll()` so macMLX-owned
     /// architectures are registered into the shared factory registry
@@ -221,6 +236,20 @@ public actor MLXSwiftEngine: InferenceEngine {
                     from: model.directory,
                     using: HuggingFaceTokenizerLoader()
                 )
+                // Backfill the tool-call format upstream `ToolCallFormat.infer`
+                // leaves nil for some tool-capable families (e.g. plain Qwen3),
+                // so the streaming `ToolCallProcessor` actually fires for them.
+                // Applied via the container's own `update` seam and gated on nil
+                // ⇒ a format upstream already set is never overridden, and every
+                // downstream read (streaming / non-streaming / batch / speculative)
+                // sees the corrected value.
+                if let fallback = Self.inferToolCallFormatFallback(configURL: configURL) {
+                    await container.update { ctx in
+                        if ctx.configuration.toolCallFormat == nil {
+                            ctx.configuration.toolCallFormat = fallback
+                        }
+                    }
+                }
                 support = .llm(container)
 
             case .mlxVLM:
@@ -264,6 +293,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             // mismatched pairing either way).
             draftContainer = nil
             loadedDraftModelID = nil
+            // A freshly-loaded model carries no LoRA adapter (Track E).
+            loadedAdapterID = nil
             status = .ready(model: model.id)
         } catch let engineError as EngineError {
             // Already shaped — preserve the typed error.
@@ -312,6 +343,33 @@ public actor MLXSwiftEngine: InferenceEngine {
         }
     }
 
+    /// macMLX-side backfill for `ModelConfiguration.toolCallFormat` when upstream
+    /// `ToolCallFormat.infer` leaves it nil for a tool-capable family. Upstream
+    /// maps only `qwen3_5` / `qwen3_next` (→ `.xmlFunction`), so plain Qwen3 —
+    /// and Qwen2 / Qwen2.5 — load with NO format and their hermes-style
+    /// `<tool_call>{JSON}</tool_call>` output (the `.json` format) is never
+    /// parsed: the streaming `ToolCallProcessor` doesn't run and the tool call
+    /// leaks into visible content. This returns `.json` for those Qwen LLM
+    /// variants and nil for everything else; the caller applies it ONLY when the
+    /// upstream format is nil, so a format upstream already set is never
+    /// overridden. Read from `config.json`'s `model_type`; any IO/JSON error is
+    /// treated as "no fallback".
+    static func inferToolCallFormatFallback(configURL: URL) -> ToolCallFormat? {
+        guard let data = try? Data(contentsOf: configURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let modelType = root["model_type"] as? String
+        else {
+            return nil
+        }
+        let type = modelType.lowercased()
+        // Upstream already handles these (→ `.xmlFunction`); never shadow them.
+        if type.hasPrefix("qwen3_5") || type.hasPrefix("qwen3_next") { return nil }
+        // Qwen2 / Qwen2.5 / Qwen3 (incl. `_moe`) speak the hermes `<tool_call>` +
+        // JSON body format, which is `ToolCallFormat.json`.
+        if type.hasPrefix("qwen2") || type.hasPrefix("qwen3") { return .json }
+        return nil
+    }
+
     /// Release the loaded model from memory.
     ///
     /// Also releases the D1 draft container (if any) — "the loaded model
@@ -325,6 +383,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         loadedModel = nil
         draftContainer = nil
         loadedDraftModelID = nil
+        // No model resident ⇒ no adapter (Track E).
+        loadedAdapterID = nil
         // A2d-2: no model resident ⇒ nothing is batchable. Any in-flight cohort's
         // drive loop captured its container locally and finishes on its own; new
         // submits decline (coverage now false). The server drains the cohort before
@@ -377,6 +437,20 @@ public actor MLXSwiftEngine: InferenceEngine {
             throw EngineError.adapterApplyFailed(reason: error.localizedDescription)
         }
 
+        // Track E: record the resident adapter's identity. Without this, a GUI /
+        // direct `applyAdapter` (AppState auto-pin, EngineCoordinator) left
+        // `loadedAdapterID` nil even though adapted weights are live — so a later
+        // request's `reconcileAdapter` saw `current: nil` and (a) never shed the
+        // adapter for `adapters: nil` (`.decide(nil, nil) == .keep`), (b) treated a
+        // DIFFERENT adapter as `.applyOnly` (additive → double-stacking), and (c)
+        // left `bypassPromptCache` false so base and adapted caches shared a key.
+        // `applyAdapter` is only ever invoked on an adapter-free base (the GUI
+        // applies right after a fresh load; `reconcileAdapter` reloads the base
+        // before its `.reloadThenApply`), so recording the id here — not merging —
+        // is correct, and a DIFFERENT resident adapter always routes through the
+        // reload-base-then-apply path in `reconcileAdapter`.
+        loadedAdapterID = adapter.name
+
         await LogManager.shared.info(
             "LoRA adapter applied: \(adapter.name) (format=\(adapter.format.rawValue))",
             category: .inference
@@ -407,6 +481,105 @@ public actor MLXSwiftEngine: InferenceEngine {
         }
         return cacheDir
     }
+
+    // MARK: Track E — per-request LoRA adapter hot-swap
+
+    /// The action needed to bring the resident adapter in line with a request's
+    /// `adapters`, given the currently-applied adapter identity. Pure decision
+    /// function (no I/O, no MLX) so the keep/apply/reload state machine is
+    /// unit-testable without loading a model — mirrors `DraftContainerAction`.
+    ///
+    /// mlx-swift-lm's `LanguageModel.load(adapter:)` is additive-only (there is no
+    /// "unapply"), so shedding or swapping a resident adapter requires reloading
+    /// the base model first — matching mlx-lm's server, which reloads on any
+    /// (model, adapter) change and treats an unchanged pairing as a no-op.
+    enum AdapterAction: Equatable {
+        /// Resident adapter already matches (including both nil) — do nothing.
+        case keep
+        /// Base model is adapter-free; just apply the requested adapter.
+        case applyOnly(id: String)
+        /// A resident adapter must be shed with no replacement — reload the base.
+        case reloadOnly
+        /// A DIFFERENT adapter is requested — reload the base, then apply it.
+        case reloadThenApply(id: String)
+
+        static func decide(current: String?, requested: String?) -> Self {
+            if current == requested { return .keep }
+            switch (current, requested) {
+            case (.none, .some(let requested)): return .applyOnly(id: requested)
+            case (.some, .none): return .reloadOnly
+            case (.some, .some(let requested)): return .reloadThenApply(id: requested)
+            case (.none, .none): return .keep  // unreachable (== handled above)
+            }
+        }
+    }
+
+    /// Whether a request must skip the base-`modelID`-keyed prompt cache. Pure so
+    /// the bypass rule is unit-testable without a model. Bypass when quantizing the
+    /// KV cache (a `QuantizedKVCache` snapshot must not leak into a later plain
+    /// request) OR when a LoRA adapter is resident (base and adapted weights share
+    /// the same `modelID` key, so reusing a base-model entry for adapted weights —
+    /// or vice versa — would poison the cache).
+    static func shouldBypassPromptCache(kvBits: Int?, adapterID: String?) -> Bool {
+        kvBits != nil || adapterID != nil
+    }
+
+    /// Reconcile the resident LoRA adapter with a request's `adapters` BEFORE
+    /// generation. A no-op when they already match (the common case: no adapter,
+    /// or the same adapter as the previous request). A change reloads the base
+    /// model (to shed any resident adapter) and applies the new one.
+    ///
+    /// - Important: This can reload the model container, so callers MUST invoke it
+    ///   before capturing `loadedSupport` / the container for generation.
+    /// - Throws: `EngineError.adapterApplyFailed` if the named adapter can't be
+    ///   resolved or applied, or a load error if the base-model reload fails.
+    private func reconcileAdapter(requested: String?, baseModel: LocalModel) async throws {
+        switch AdapterAction.decide(current: loadedAdapterID, requested: requested) {
+        case .keep:
+            return
+        case .applyOnly(let id):
+            let adapter = try await resolveAdapter(named: id)
+            // `applyAdapter` itself now writes `loadedAdapterID = adapter.name`
+            // (== `id`, by `resolveAdapter`'s name lookup) — no separate write needed.
+            try await applyAdapter(adapter)
+        case .reloadOnly:
+            // `load(_:)` resets `loadedAdapterID` to nil.
+            try await load(baseModel)
+        case .reloadThenApply(let id):
+            try await load(baseModel)
+            let adapter = try await resolveAdapter(named: id)
+            // Same as `.applyOnly` above: `applyAdapter` owns the write.
+            try await applyAdapter(adapter)
+        }
+    }
+
+    /// Resolve a request's `adapters` value (a bare name) to a ``LocalAdapter``
+    /// under the adapters root (`~/.mac-mlx/adapters/<name>`). Reuses the
+    /// draft-model id allowlist (`isValidDraftModelID`) so the name is a single,
+    /// traversal-safe path component — v1 accepts a bare NAME only, not an
+    /// absolute path (documented; add path support behind an explicit opt-in).
+    ///
+    /// - Throws: `EngineError.adapterApplyFailed` when the name is invalid or no
+    ///   adapter with that name exists under the adapters directory.
+    private func resolveAdapter(named name: String) async throws -> LocalAdapter {
+        guard Self.isValidDraftModelID(name) else {
+            throw EngineError.adapterApplyFailed(
+                reason: "Invalid adapter id '\(name)' — expected a bare name "
+                    + "([A-Za-z0-9._-], no leading dot) under the adapters directory.")
+        }
+        let root = DataRoot.macMLX("adapters")
+        let scanned = (try? await AdapterStore().scan(root)) ?? []
+        guard let adapter = scanned.first(where: { $0.name == name }) else {
+            throw EngineError.adapterApplyFailed(
+                reason: "Adapter '\(name)' not found under \(root.path).")
+        }
+        return adapter
+    }
+
+    /// Test seam: the adapter identity currently applied to the resident model,
+    /// or nil for the base model. Internal so `@testable import` tests can observe
+    /// reconcile decisions without a real model load (mirrors `hasDraftContainer`).
+    var currentAdapterID: String? { loadedAdapterID }
 
     /// Stream tokens for a generation request.
     ///
@@ -693,12 +866,25 @@ public actor MLXSwiftEngine: InferenceEngine {
         _ request: GenerateRequest,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
-        let support = loadedSupport
-        guard let container = support.container else {
+        guard let loadedModelSnapshot = loadedModel else {
             continuation.finish(throwing: EngineError.modelNotLoaded)
             return
         }
-        guard let loadedModelSnapshot = loadedModel else {
+        // Track E: bring the resident LoRA adapter in line with this request
+        // BEFORE capturing the container — `reconcileAdapter` may reload the base
+        // model (the only reliable way to shed/swap an additive-only adapter), so
+        // a stale `support`/`container` captured earlier would point at the old
+        // container. A no-op in the common case (no adapter, or unchanged).
+        do {
+            try await reconcileAdapter(
+                requested: request.adapters, baseModel: loadedModelSnapshot)
+        } catch {
+            continuation.finish(throwing: error)
+            return
+        }
+
+        let support = loadedSupport
+        guard let container = support.container else {
             continuation.finish(throwing: EngineError.modelNotLoaded)
             return
         }
@@ -708,8 +894,19 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         // Map GenerationParameters to mlx-swift-lm's GenerateParameters.
         // temperature/topP: our values are Double, MLXLLM uses Float.
+        // KV-cache quantization (Track E): nil defers to the upstream defaults
+        // (no quantization; group size 64; start 0). These are honored on the
+        // stock LLM path, the speculative path, and the VLM path — all of which
+        // build their `TokenIterator` from these parameters. They are NOT honored
+        // on the custom-processor path (logit_bias / XTC / logprobs / constrained),
+        // whose `TokenIterator(input:model:cache:processor:sampler:…)` initializer
+        // carries no quantization parameters; that combination is logged and the
+        // KV-quant request silently deferred (see `runLLMGeneration`).
         let generateParams = GenerateParameters(
             maxTokens: params.maxTokens,
+            kvBits: params.kvBits,
+            kvGroupSize: params.kvGroupSize ?? 64,
+            quantizedKVStart: params.quantizedKVStart ?? 0,
             temperature: Float(params.temperature),
             topP: Float(params.topP)
         )
@@ -804,6 +1001,19 @@ public actor MLXSwiftEngine: InferenceEngine {
                     )
                 }
             }
+            // Track E: the VLM path uses the stock parameter-driven decoder, which
+            // has no custom processor/sampler seam — so logit_bias / XTC / logprobs
+            // are inert here. Log rather than silently drop (kv_bits DOES apply on
+            // this path, via generateParams). Documented v1 limitation.
+            if params.logitBias != nil || (params.xtcProbability ?? 0) > 0 || params.logprobs {
+                Task.detached {
+                    await LogManager.shared.debug(
+                        "Ignoring logit_bias / XTC / logprobs on a VLM request — these are "
+                            + "supported on the text-only (LLM) path in this version.",
+                        category: .inference
+                    )
+                }
+            }
             try await runVLMGeneration(
                 lmInput: lmInput,
                 container: container,
@@ -820,12 +1030,127 @@ public actor MLXSwiftEngine: InferenceEngine {
                 lmInput: lmInput,
                 container: container,
                 generateParams: generateParams,
+                sampling: params,
                 modelID: loadedModelSnapshot.id,
                 hasTools: request.tools?.isEmpty == false,
                 numDraftTokens: request.numDraftTokens,
+                responseFormat: request.responseFormat,
                 into: continuation
             )
         }
+    }
+
+    /// Build a raw-token stream with a hand-assembled processor/sampler chain for
+    /// any request that needs one — structured-output constraints (Track C) AND
+    /// the Track E per-request sampling extensions (`logit_bias`, XTC, `logprobs`).
+    /// It installs the composed processor + sampler on a hand-built `TokenIterator`
+    /// then runs it through the same `generateTokenTask` the plain path uses, so
+    /// all downstream streaming and detokenization is byte-for-byte identical.
+    ///
+    /// ## Processor order (mlx-lm–aligned, constraint last)
+    /// `logit_bias` → penalty (`repetition`/`presence`/`frequency`) →
+    /// `JSONConstraintProcessor` mask (if constrained) → `logprobs` capture (if
+    /// requested). The constraint mask is applied AFTER any bias/penalty so a bias
+    /// can never resurrect a grammar-forbidden token; the logprobs capture is the
+    /// outermost observer so it sees the exact distribution the sampler samples.
+    ///
+    /// ## Sampler
+    /// The base sampler from `generateParams.sampler()`, optionally wrapped by
+    /// ``XTCSampler`` when `xtcProbability > 0` and `temperature > 0`.
+    ///
+    /// Runs inside `ModelContainer.perform` (hence `static` + an explicit
+    /// `context`) so the non-`Sendable` MLX state never leaves the actor; the
+    /// captured `vocabCache`, `tokenizer`, and `logprobsSink` are `Sendable`.
+    ///
+    /// - Note: this initializer path carries NO KV-cache quantization parameters
+    ///   (see `TokenIterator.init(input:model:cache:processor:sampler:…)`), so
+    ///   `kv_bits` is inert on any request routed here — the caller logs that.
+    private static func customTokenStream(
+        input: LMInput,
+        cache: [any KVCache],
+        generateParams: GenerateParameters,
+        context: ModelContext,
+        responseFormat: ResponseFormat?,
+        logitBias: [Int: Float]?,
+        xtcProbability: Float?,
+        xtcThreshold: Float?,
+        logprobsSink: LogprobsCaptureProcessor.Sink?,
+        topLogprobs: Int,
+        modelID: String,
+        vocabCache: TokenVocabularyCache
+    ) throws -> AsyncStream<TokenGeneration> {
+        // logit_bias runs FIRST (mlx-lm `make_logits_processors` order), then the
+        // penalty processor. `ChainedLogitProcessor` collapses them into the one
+        // `inner` slot the constraint (and the plain path) expect; nil when neither
+        // is present.
+        let bias = logitBias.flatMap { LogitBiasProcessor(bias: $0) }
+        let innerChain = ChainedLogitProcessor([bias, generateParams.processor()])
+
+        var processor: LogitProcessor?
+        if let responseFormat {
+            // Complete stop-token set, mirroring upstream `buildStopTokenIds`:
+            // config EOS ids ∪ the tokenizer's EOS id ∪ any extra stop tokens. The
+            // constraint masks every one of these until the document is complete,
+            // so the model cannot terminate mid-JSON.
+            var stopTokenIDs = context.configuration.eosTokenIds
+            if let eos = context.tokenizer.eosTokenId { stopTokenIDs.insert(eos) }
+            for token in context.configuration.extraEOSTokens {
+                if let id = context.tokenizer.convertTokenToId(token) { stopTokenIDs.insert(id) }
+            }
+            processor = JSONConstraintProcessor(
+                format: responseFormat,
+                inner: innerChain,
+                cache: vocabCache,
+                modelID: modelID,
+                tokenizer: context.tokenizer,
+                stopTokenIDs: stopTokenIDs,
+                greedy: generateParams.temperature == 0
+            )
+        } else {
+            processor = innerChain
+        }
+
+        // logprobs capture is the OUTERMOST processor so it observes the final
+        // logits. v1 does not combine it with a constraint (the server rejects
+        // `logprobs` + `response_format`), so here it only ever wraps the plain
+        // bias/penalty chain.
+        if let logprobsSink {
+            processor = LogprobsCaptureProcessor(
+                inner: processor, sink: logprobsSink, topN: topLogprobs)
+        }
+
+        // XTC wraps the base sampler when requested; only meaningful at
+        // temperature > 0 (mlx-lm disables it under argmax).
+        var sampler = generateParams.sampler()
+        if let xtcProbability, xtcProbability > 0, generateParams.temperature > 0 {
+            sampler = XTCSampler(
+                base: sampler,
+                probability: xtcProbability,
+                threshold: xtcThreshold ?? 0.1,
+                seed: generateParams.seed
+            )
+        }
+
+        // Caveat: `maxTokens` bounds a constrained stream just like any other —
+        // hitting the cap mid-document yields a valid-but-truncated JSON prefix
+        // surfaced as `finish_reason: length` (not `stop`).
+        let iterator = try TokenIterator(
+            input: input,
+            model: context.model,
+            cache: cache,
+            processor: processor,
+            sampler: sampler,
+            prefillStepSize: generateParams.prefillStepSize,
+            maxTokens: generateParams.maxTokens
+        )
+
+        let (stream, _) = MLXLMCommon.generateTokenTask(
+            promptTokenCount: input.text.tokens.size,
+            modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer,
+            iterator: iterator
+        )
+        return stream
     }
 
     /// Text-only path: tokenise, look up the prompt cache, prefill only
@@ -835,19 +1160,82 @@ public actor MLXSwiftEngine: InferenceEngine {
         lmInput: LMInput,
         container: ModelContainer,
         generateParams: GenerateParameters,
+        sampling: GenerationParameters,
         modelID: String,
         hasTools: Bool,
         numDraftTokens: Int?,
+        responseFormat: ResponseFormat?,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
+        // Track E — per-request sampling extensions. Any of these forces the
+        // hand-assembled `customTokenStream` (constraint / logit_bias / XTC /
+        // logprobs share it), which is mutually exclusive with the stock
+        // parameter-driven path and with speculative decoding.
+        let logitBias = sampling.logitBias
+        let xtcProbability = sampling.xtcProbability
+        let xtcThreshold = sampling.xtcThreshold
+        let wantsLogprobs = sampling.logprobs
+        let topLogprobs = sampling.topLogprobs ?? 0
+        let usesXTC = (xtcProbability ?? 0) > 0 && sampling.temperature > 0
+        let usesCustomPipeline = responseFormat != nil || logitBias != nil || usesXTC || wantsLogprobs
+        // KV-cache quantization rides the stock/speculative/VLM `TokenIterator`
+        // (built from `generateParams`), which the custom pipeline bypasses — so a
+        // request that combines `kv_bits` with a custom feature gets no
+        // quantization. Log it rather than silently drop it (the field docs the
+        // exclusion too), and bypass the prompt cache when quantizing so a
+        // `QuantizedKVCache` snapshot never leaks into a later plain request.
+        if sampling.kvBits != nil, usesCustomPipeline {
+            await LogManager.shared.debug(
+                "kv_bits is ignored when combined with logit_bias / XTC / logprobs / "
+                    + "response_format — the custom decode path carries no KV-cache "
+                    + "quantization parameters.",
+                category: .inference
+            )
+        }
+        // Bypass the prompt cache when quantizing the KV cache (a QuantizedKVCache
+        // snapshot must not leak into a later plain request) OR when a LoRA adapter
+        // is resident: `promptCacheStore` is keyed by the BASE `modelID` only, so a
+        // base-model cache entry would otherwise be wrongly reused for the adapted
+        // model (different weights, same id) — and vice versa. `reconcileAdapter`
+        // above has already settled `loadedAdapterID` for this request.
+        let bypassPromptCache = Self.shouldBypassPromptCache(
+            kvBits: sampling.kvBits, adapterID: loadedAdapterID)
+
+        // Track C: a structured-output request must NOT speculate. A draft
+        // model proposes tokens from its own logits, which the constraint mask
+        // never sees, so accepted drafts could violate the JSON grammar. When a
+        // draft container is resident AND this request is constrained, skip the
+        // speculative branch and fall through to the plain (constrained) path.
+        if responseFormat != nil, draftContainer != nil {
+            await LogManager.shared.debug(
+                "Structured output (response_format) disables speculative decoding "
+                    + "for this request — the draft model cannot honor the constraint.",
+                category: .inference
+            )
+        }
+
         // D1: `ensureDraftContainer` (called just before this, in
         // `runGeneration`) has already reconciled `draftContainer` with the
         // request — a resident draft container IS this request's signal to
         // speculate. Fork out to the dedicated path, which bypasses the
         // prompt cache entirely (see `runSpeculativeLLMGeneration`'s doc
         // comment) rather than threading a third branch through the cache
-        // logic below.
-        if let draftContainer {
+        // logic below. `!usesCustomPipeline` keeps a custom-feature request
+        // (constraint / logit_bias / XTC / logprobs) OFF the speculative path,
+        // whose `SpeculativeTokenIterator` cannot honor any of them.
+        if usesCustomPipeline, draftContainer != nil, responseFormat == nil {
+            // The constraint case logged its own diagnostic above; log the
+            // Track E cases too so a draft_model + logit_bias/XTC/logprobs
+            // request never skips speculation silently.
+            await LogManager.shared.debug(
+                "Custom sampling features (logit_bias/XTC/logprobs) disable "
+                    + "speculative decoding for this request — the speculative "
+                    + "iterator cannot honor them; features are applied on the "
+                    + "plain path.",
+                category: .inference
+            )
+        }
+        if let draftContainer, !usesCustomPipeline {
             // D1 follow-up fix: cache-trimmability precheck BEFORE
             // committing to the speculative branch. mlx-swift-lm's
             // `SpeculativeTokenIterator.init` (invoked inside
@@ -914,7 +1302,15 @@ public actor MLXSwiftEngine: InferenceEngine {
         // the iterator allocate a fresh cache inside `generateTokens`. This is
         // what turns a tool-loop / multi-turn agent's per-turn full cold
         // prefill into an incremental one (only the newly-appended tokens).
-        let hit = await promptCacheStore.fetchNearest(modelID: modelID, tokens: inputTokens)
+        // Skip the prompt cache entirely when quantizing the KV cache: the
+        // iterator mutates a `KVCacheSimple` into a `QuantizedKVCache` mid-stream,
+        // and storing that back would hand a later plain request a quantized
+        // snapshot it never asked for. A `kv_bits` request therefore always cold-
+        // prefills and never persists its cache (mirrors the speculative path's
+        // deliberate prompt-cache bypass).
+        let hit = bypassPromptCache
+            ? nil
+            : await promptCacheStore.fetchNearest(modelID: modelID, tokens: inputTokens)
         let priorCache: [any KVCache]?
         let promptInput: LMInput
         if let hit {
@@ -963,6 +1359,16 @@ public actor MLXSwiftEngine: InferenceEngine {
         let priorCacheBox: PromptCacheSnapshot? = priorCache.map { PromptCacheSnapshot($0) }
         // `promptInput` is the suffix to prefill (full prompt on a miss).
         let inputBox = NonSendableBox(promptInput)
+        // Captured into the perform closure for a constrained / custom-sampling
+        // generation. The cache is Sendable (`@unchecked` behind a lock);
+        // `responseFormat`, `logitBias`, the XTC params and `modelID` are value
+        // types.
+        let vocabCache = tokenVocabularyCache
+        // Track E: allocate the logprobs sink only when requested, and capture it
+        // into the perform closure so the ``LogprobsCaptureProcessor`` fills it
+        // while the engine loop below drains it (one entry per emitted token). The
+        // sink is Sendable (locked internally).
+        let logprobsSink = wantsLogprobs ? LogprobsCaptureProcessor.Sink() : nil
 
         let setup: (
             cache: PromptCacheSnapshot,
@@ -972,12 +1378,37 @@ public actor MLXSwiftEngine: InferenceEngine {
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = priorCacheBox?.caches
                     ?? context.model.newCache(parameters: generateParams)
-                let stream = try MLXLMCommon.generateTokens(
-                    input: inputBox.value,
-                    cache: cache,
-                    parameters: generateParams,
-                    context: context
-                )
+                let stream: AsyncStream<TokenGeneration>
+                if usesCustomPipeline {
+                    // Track C constraint AND the Track E sampling extensions
+                    // (logit_bias / XTC / logprobs) all install a hand-built
+                    // `TokenIterator` via `customTokenStream`, then run it through
+                    // the same raw-token task the plain path uses so all downstream
+                    // streaming/detokenization is byte-for-byte the same.
+                    stream = try Self.customTokenStream(
+                        input: inputBox.value,
+                        cache: cache,
+                        generateParams: generateParams,
+                        context: context,
+                        responseFormat: responseFormat,
+                        logitBias: logitBias,
+                        xtcProbability: xtcProbability,
+                        xtcThreshold: xtcThreshold,
+                        logprobsSink: logprobsSink,
+                        topLogprobs: topLogprobs,
+                        modelID: modelID,
+                        vocabCache: vocabCache
+                    )
+                } else {
+                    // Stock parameter-driven path — the ONLY LLM path that honors
+                    // `kv_bits` (via `generateParams`).
+                    stream = try MLXLMCommon.generateTokens(
+                        input: inputBox.value,
+                        cache: cache,
+                        parameters: generateParams,
+                        context: context
+                    )
+                }
                 // `ToolCallFormat?` is Sendable, so it rides back out of the
                 // actor alongside the cache + stream.
                 return (PromptCacheSnapshot(cache), stream, context.configuration.toolCallFormat)
@@ -991,11 +1422,18 @@ public actor MLXSwiftEngine: InferenceEngine {
         // plain non-tool chat, would have `{...}`-shaped content silently
         // stripped and misreported as `finish_reason: tool_calls`).
         let toolProcessor = Self.makeToolProcessor(
-            format: setup.toolCallFormat, hasTools: hasTools)
+            format: setup.toolCallFormat, hasTools: hasTools,
+            hasResponseFormat: responseFormat != nil)
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         var generatedTokenIDs: [Int] = []
         var completionInfo: GenerateCompletionInfo?
+        // Track E: per-token logprobs accumulated since the last emitted chunk.
+        // Each `.token` pops one capture entry (aligned in emission order); the
+        // batch is attached to whatever chunk next carries text — a token whose
+        // text is still buffered by the detokenizer keeps its logprob pending
+        // until that text flushes.
+        var pendingLogprobs: [TokenLogprob] = []
 
         for await event in stream {
             // POOL-2: stop promptly once the consumer has abandoned/
@@ -1008,18 +1446,28 @@ public actor MLXSwiftEngine: InferenceEngine {
             switch event {
             case .token(let token):
                 generatedTokenIDs.append(token)
+                if wantsLogprobs, let entry = logprobsSink?.popFirst() {
+                    pendingLogprobs.append(Self.tokenLogprob(from: entry, tokenizer: tokenizer))
+                }
                 detokenizer.append(token: token)
                 if let piece = detokenizer.next() {
+                    let lp: [TokenLogprob]? = pendingLogprobs.isEmpty ? nil : pendingLogprobs
                     if let toolProcessor {
                         // Emit only the processor's display text; nil means the
                         // piece is being buffered as (potential) tool-call syntax.
                         if let display = toolProcessor.processChunk(piece), !display.isEmpty {
-                            if case .terminated = continuation.yield(GenerateChunk(text: display)) {
+                            if case .terminated = continuation.yield(
+                                GenerateChunk(text: display, logprobs: lp)) {
                                 return
                             }
+                            pendingLogprobs.removeAll()
                         }
-                    } else if case .terminated = continuation.yield(GenerateChunk(text: piece)) {
-                        return
+                    } else {
+                        if case .terminated = continuation.yield(
+                            GenerateChunk(text: piece, logprobs: lp)) {
+                            return
+                        }
+                        pendingLogprobs.removeAll()
                     }
                 }
             case .info(let info):
@@ -1043,18 +1491,25 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         // Save the post-generation cache under the extended key. The
         // same `workingCache` reference has been mutated in-place by the
-        // iterator, so it now reflects prompt + generated tokens.
-        let finalTokens = inputTokens + generatedTokenIDs
-        await promptCacheStore.insert(
-            modelID: modelID,
-            tokens: finalTokens,
-            snapshot: PromptCacheSnapshot(workingCache)
-        )
+        // iterator, so it now reflects prompt + generated tokens. Skipped when
+        // quantizing the KV cache (see `bypassPromptCache`) so a
+        // `QuantizedKVCache` snapshot is never persisted for later plain reuse.
+        if !bypassPromptCache {
+            let finalTokens = inputTokens + generatedTokenIDs
+            await promptCacheStore.insert(
+                modelID: modelID,
+                tokens: finalTokens,
+                snapshot: PromptCacheSnapshot(workingCache)
+            )
+        }
 
         emitFinalChunk(
             completionInfo: completionInfo,
             toolCalls: drainedToolCalls,
             reusedPromptTokens: reusedPromptTokens,
+            // Any logprobs for tokens whose text never flushed as its own chunk
+            // (e.g. a trailing partial-UTF8 fragment) ride out on the final chunk.
+            logprobs: pendingLogprobs.isEmpty ? nil : pendingLogprobs,
             into: continuation
         )
         continuation.finish()
@@ -1190,8 +1645,11 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         // Same tool-call gating as the non-speculative path — see
         // `makeToolProcessor`: only route through the processor when the
-        // caller actually requested tools this turn.
-        let toolProcessor = Self.makeToolProcessor(format: setup.toolCallFormat, hasTools: hasTools)
+        // caller actually requested tools this turn. The speculative branch is
+        // only ever reached with no response_format (constrained output disables
+        // speculation upstream), so `hasResponseFormat` is always false here.
+        let toolProcessor = Self.makeToolProcessor(
+            format: setup.toolCallFormat, hasTools: hasTools, hasResponseFormat: false)
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: targetTokenizer)
         var completionInfo: GenerateCompletionInfo?
@@ -1324,6 +1782,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         toolCalls: [ToolCallRequest] = [],
         speculativeDecoding: SpeculativeDecodingUsage? = nil,
         reusedPromptTokens: Int = 0,
+        logprobs: [TokenLogprob]? = nil,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) {
         let infoReason: FinishReason
@@ -1358,9 +1817,40 @@ public actor MLXSwiftEngine: InferenceEngine {
             finishReason: finishReason,
             usage: usage,
             toolCalls: toolCalls.isEmpty ? nil : toolCalls,
-            speculativeDecoding: speculativeDecoding
+            speculativeDecoding: speculativeDecoding,
+            logprobs: logprobs
         )
         continuation.yield(finalChunk)
+    }
+
+    // MARK: Logprobs (Track E)
+
+    /// Decode one raw capture entry into the wire ``TokenLogprob`` shape,
+    /// resolving each token id to its display text and UTF-8 bytes via the
+    /// resident tokenizer. `skipSpecialTokens: false` so a sampled special token
+    /// still renders its spelling (OpenAI includes it verbatim).
+    static func tokenLogprob(
+        from entry: LogprobsCaptureProcessor.Sink.Entry,
+        tokenizer: any Tokenizer
+    ) -> TokenLogprob {
+        func decode(_ id: Int) -> String {
+            tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
+        }
+        let text = decode(entry.tokenID)
+        let alternatives = entry.top.map { alternative -> TokenLogprob.Alternative in
+            let altText = decode(alternative.id)
+            return TokenLogprob.Alternative(
+                token: altText,
+                logprob: alternative.logprob,
+                bytes: Array(altText.utf8).map(Int.init)
+            )
+        }
+        return TokenLogprob(
+            token: text,
+            logprob: entry.logprob,
+            bytes: Array(text.utf8).map(Int.init),
+            topLogprobs: alternatives
+        )
     }
 
     // MARK: Tool-call helpers
@@ -1380,8 +1870,16 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// to compensate. Requiring `hasTools` confines that buffering to requests
     /// that actually asked for tools, restoring byte-for-byte passthrough
     /// otherwise (prior, pre-tool-routing behaviour).
-    static func makeToolProcessor(format: ToolCallFormat?, hasTools: Bool) -> ToolCallProcessor? {
+    static func makeToolProcessor(
+        format: ToolCallFormat?, hasTools: Bool, hasResponseFormat: Bool
+    ) -> ToolCallProcessor? {
         guard hasTools else { return nil }
+        // A grammar-constrained (response_format) turn emits a bare JSON document
+        // that cannot contain tool-call syntax anyway; running the processor over
+        // it would, for a `.json`-format model, buffer the whole document and can
+        // mis-drain the constrained JSON as an (empty-content) tool call. Never
+        // route a constrained turn through the tool processor.
+        guard !hasResponseFormat else { return nil }
         return format.map { ToolCallProcessor(format: $0) }
     }
 
