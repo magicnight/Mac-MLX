@@ -176,6 +176,7 @@ function inspectPNG(buffer, label) {
     const end = crcOffset + 4;
     const type = buffer.toString("ascii", typeStart, dataStart);
     assert.match(type, /^[A-Za-z]{4}$/, `${label} has an invalid PNG chunk type`);
+    assert.match(type[2], /[A-Z]/, `${label} PNG chunk ${type} sets the reserved bit`);
     assert.equal(crc32(buffer.subarray(typeStart, crcOffset)), buffer.readUInt32BE(crcOffset), `${label} has a CRC mismatch in ${type}`);
 
     if (type === "IHDR") {
@@ -197,6 +198,7 @@ function inspectPNG(buffer, label) {
       plteCount += 1;
       assert.equal(plteCount, 1, `${label} must not repeat PLTE`);
       assert.equal(phase, "beforeIDAT", `${label} PLTE must appear before IDAT`);
+      assert.ok(length > 0 && length <= 768 && length % 3 === 0, `${label} has an invalid PLTE length`);
     } else if (type === "IDAT") {
       assert.notEqual(phase, "beforeIHDR", `${label} IDAT cannot precede IHDR`);
       assert.notEqual(phase, "afterIDAT", `${label} IDAT chunks must be contiguous`);
@@ -410,6 +412,10 @@ test("PNG validation rejects invalid critical chunks and noncontiguous image pha
   const split = Math.floor(imageData.data.length / 2);
   const fixtures = [
     ["unknown critical chunk", assemblePNG([header, { type: "ABCD", data: Buffer.alloc(0) }, imageData, end]), /unknown critical chunk ABCD/],
+    ["reserved-bit chunk", assemblePNG([header, { type: "abca", data: Buffer.alloc(0) }, imageData, end]), /reserved bit/i],
+    ["empty PLTE", assemblePNG([header, { type: "PLTE", data: Buffer.alloc(0) }, imageData, end]), /PLTE length/],
+    ["mis-sized PLTE", assemblePNG([header, { type: "PLTE", data: Buffer.alloc(4) }, imageData, end]), /PLTE length/],
+    ["oversized PLTE", assemblePNG([header, { type: "PLTE", data: Buffer.alloc(771) }, imageData, end]), /PLTE length/],
     ["PLTE after IDAT", assemblePNG([header, imageData, { type: "PLTE", data: Buffer.from([0, 0, 0]) }, end]), /PLTE.*before IDAT/],
     ["interrupted IDAT", assemblePNG([
       header,
@@ -490,7 +496,16 @@ test("brand icon refresh rolls back the complete set when a later render fails",
         };
       }
 
-      await assert.rejects(renderBrandIcons({ outputDirectory, sharpImpl: failingSharp }), new RegExp(`injected render-${failureAt} failure`));
+      await assert.rejects(
+        renderBrandIcons({ outputDirectory, sharpImpl: failingSharp }),
+        (error) => {
+          assert.ok(error instanceof AggregateError);
+          assert.match(error.message, new RegExp(`injected render-${failureAt} failure`));
+          assert.equal(error.cause?.message, `injected render-${failureAt} failure`);
+          assert.ok(error.errors.includes(error.cause));
+          return true;
+        },
+      );
       for (const [filename, contents] of originals) assert.deepEqual(await readFile(join(outputDirectory, filename)), contents);
       assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
       assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
@@ -578,6 +593,58 @@ test("an incomplete rollback reports both failures and preserves the remaining b
   assert.equal((await readdir(outputDirectory)).some((name) => name.startsWith(".brand-icons-stage-")), false);
 });
 
+test("publish, rollback, staging cleanup, and lock release failures remain jointly actionable", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-cleanup-failure-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const originals = new Map(rasterIcons.map((icon, index) => [icon.filename, Buffer.from(`cleanup-original-${index}`)]));
+  for (const [filename, contents] of originals) await writeFile(join(outputDirectory, filename), contents);
+  await writeFile(join(outputDirectory, "unrelated.svg"), "keep me");
+
+  const publishFailure = new Error("injected compound publish failure");
+  const rollbackFailure = new Error("injected compound rollback failure");
+  const stagingCleanupFailure = new Error("injected staging cleanup failure");
+  const releaseFailure = new Error("injected lock release failure");
+  const cleanupAttempts = [];
+  let publishes = 0;
+  const fsImpl = {
+    async rename(source, destination) {
+      if (source.includes(".brand-icons-stage-")) {
+        publishes += 1;
+        if (publishes === 2) throw publishFailure;
+      }
+      if (source.includes(".brand-icons-backup-") && source.endsWith("icon-192.png")) throw rollbackFailure;
+      return rename(source, destination);
+    },
+    async rm(path, options) {
+      cleanupAttempts.push(path);
+      if (path.includes(".brand-icons-stage-")) throw stagingCleanupFailure;
+      if (path.endsWith(".brand-icons.render.lock")) throw releaseFailure;
+      return rm(path, options);
+    },
+  };
+
+  await assert.rejects(
+    renderBrandIcons({ outputDirectory, sharpImpl: solidSharp, fsImpl }),
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.cause, publishFailure);
+      for (const failure of [publishFailure, rollbackFailure, stagingCleanupFailure, releaseFailure]) {
+        assert.ok(error.errors.includes(failure), `${failure.message} must be retained`);
+      }
+      assert.match(error.message, /rollback was incomplete/i);
+      assert.match(error.message, /\.brand-icons-backup-/);
+      return true;
+    },
+  );
+
+  assert.equal(cleanupAttempts.some((path) => path.includes(".brand-icons-stage-")), true);
+  assert.equal(cleanupAttempts.some((path) => path.endsWith(".brand-icons.render.lock")), true);
+  const backupNames = (await readdir(outputDirectory)).filter((name) => name.startsWith(".brand-icons-backup-"));
+  assert.equal(backupNames.length, 1);
+  assert.deepEqual(await readFile(join(outputDirectory, backupNames[0], "icon-192.png")), originals.get("icon-192.png"));
+  assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
+});
+
 test("brand icon writer lock excludes overlap and releases for the next render", async (t) => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-lock-"));
   t.after(() => rm(outputDirectory, { recursive: true, force: true }));
@@ -612,7 +679,7 @@ test("brand icon writer lock excludes overlap and releases for the next render",
   await started;
   await assert.rejects(
     renderBrandIcons({ outputDirectory, sharpImpl: solidSharp }),
-    /Another brand-icon render is already running/,
+    /Brand-icon render lock exists/,
   );
   unblock();
   await firstRender;
@@ -621,19 +688,28 @@ test("brand icon writer lock excludes overlap and releases for the next render",
   assert.equal((await readdir(outputDirectory)).some((name) => name === ".brand-icons.render.lock"), false);
 });
 
-test("brand icon writer lock recovers a terminated owner", async (t) => {
+test("brand icon writer lock never automatically reclaims an old terminated owner", async (t) => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-stale-lock-"));
   t.after(() => rm(outputDirectory, { recursive: true, force: true }));
   const lockDirectory = join(outputDirectory, ".brand-icons.render.lock");
   await mkdir(lockDirectory);
-  await writeFile(join(lockDirectory, "owner.json"), JSON.stringify({
+  const owner = {
     pid: 2_147_483_647,
-    startedAt: new Date().toISOString(),
+    startedAt: "2000-01-01T00:00:00.000Z",
     token: "terminated-owner",
-  }));
+  };
+  await writeFile(join(lockDirectory, "owner.json"), JSON.stringify(owner));
 
-  await renderBrandIcons({ outputDirectory, sharpImpl: solidSharp });
-  assert.equal((await readdir(outputDirectory)).includes(".brand-icons.render.lock"), false);
+  await assert.rejects(
+    renderBrandIcons({ outputDirectory, sharpImpl: solidSharp }),
+    (error) => {
+      assert.match(error.message, new RegExp(lockDirectory.replaceAll("/", "\\/")));
+      assert.match(error.message, /terminated-owner/);
+      assert.match(error.message, /manually inspect and remove/i);
+      return true;
+    },
+  );
+  assert.deepEqual(JSON.parse(await readFile(join(lockDirectory, "owner.json"), "utf8")), owner);
 });
 
 test("brand icon writer releases only the lock token it acquired", async (t) => {

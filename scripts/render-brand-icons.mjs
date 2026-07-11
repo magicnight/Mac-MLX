@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,73 +16,48 @@ function filesystemPath(value) {
   return value instanceof URL ? fileURLToPath(value) : resolve(value);
 }
 
-function processIsRunning(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code !== "ESRCH";
-  }
-}
-
-async function lockIsStale(lockDirectory, filesystem, { now, maxLockAgeMs }) {
-  try {
-    const owner = JSON.parse(await filesystem.readFile(join(lockDirectory, "owner.json"), "utf8"));
-    const startedAt = Date.parse(owner.startedAt);
-    if (Number.isFinite(startedAt) && now().getTime() - startedAt > maxLockAgeMs) return true;
-    if (!Number.isFinite(startedAt)) {
-      const metadata = await filesystem.stat(lockDirectory);
-      if (now().getTime() - metadata.mtimeMs > maxLockAgeMs) return true;
-    }
-    return !processIsRunning(owner.pid);
-  } catch (error) {
-    if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
-    const metadata = await filesystem.stat(lockDirectory);
-    return now().getTime() - metadata.mtimeMs > maxLockAgeMs;
-  }
-}
-
-async function acquireRenderLock(outputPath, filesystem, { now = () => new Date(), maxLockAgeMs = 15 * 60_000 } = {}) {
+async function acquireRenderLock(outputPath, filesystem) {
   const lockDirectory = join(outputPath, ".brand-icons.render.lock");
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const token = randomUUID();
+  const token = randomUUID();
+  try {
+    await filesystem.mkdir(lockDirectory);
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    let ownerMetadata;
     try {
-      await filesystem.mkdir(lockDirectory);
-      try {
-        await filesystem.writeFile(
-          join(lockDirectory, "owner.json"),
-          JSON.stringify({ pid: process.pid, startedAt: now().toISOString(), token }),
-          "utf8",
-        );
-      } catch (error) {
-        await filesystem.rm(lockDirectory, { recursive: true, force: true });
-        throw error;
-      }
-
-      let released = false;
-      return async function releaseRenderLock() {
-        if (released) return;
-        released = true;
-        let owner;
-        try {
-          owner = JSON.parse(await filesystem.readFile(join(lockDirectory, "owner.json"), "utf8"));
-        } catch (error) {
-          if (error.code === "ENOENT" || error instanceof SyntaxError) return;
-          throw error;
-        }
-        if (owner.token === token) await filesystem.rm(lockDirectory, { recursive: true, force: true });
-      };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (attempt === 0 && await lockIsStale(lockDirectory, filesystem, { now, maxLockAgeMs })) {
-        await filesystem.rm(lockDirectory, { recursive: true, force: true });
-        continue;
-      }
-      throw new Error(`Another brand-icon render is already running for ${outputPath}`, { cause: error });
+      ownerMetadata = await filesystem.readFile(join(lockDirectory, "owner.json"), "utf8");
+    } catch (ownerError) {
+      ownerMetadata = `<unavailable: ${ownerError.code ?? ownerError.message}>`;
     }
+    throw new Error(
+      `Brand-icon render lock exists at ${lockDirectory}. Owner metadata: ${ownerMetadata}. Manually inspect and remove the lock only after confirming no renderer is active.`,
+      { cause: error },
+    );
   }
-  throw new Error(`Unable to acquire brand-icon render lock for ${outputPath}`);
+  try {
+    await filesystem.writeFile(
+      join(lockDirectory, "owner.json"),
+      JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token }),
+      "utf8",
+    );
+  } catch (error) {
+    await filesystem.rm(lockDirectory, { recursive: true, force: true });
+    throw error;
+  }
+
+  let released = false;
+  return async function releaseRenderLock() {
+    if (released) return;
+    released = true;
+    let owner;
+    try {
+      owner = JSON.parse(await filesystem.readFile(join(lockDirectory, "owner.json"), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT" || error instanceof SyntaxError) return;
+      throw error;
+    }
+    if (owner.token === token) await filesystem.rm(lockDirectory, { recursive: true, force: true });
+  };
 }
 
 async function loadSharp() {
@@ -131,6 +106,7 @@ function validatePNG(buffer, size, label) {
     const end = crcOffset + 4;
     const type = buffer.toString("ascii", typeStart, dataStart);
     if (!/^[A-Za-z]{4}$/.test(type)) throw new Error(`${label} has an invalid PNG chunk type`);
+    if (!/[A-Z]/.test(type[2])) throw new Error(`${label} PNG chunk ${type} sets the reserved bit`);
     if (crc32(buffer.subarray(typeStart, crcOffset)) !== buffer.readUInt32BE(crcOffset)) throw new Error(`${label} PNG CRC mismatch in ${type}`);
     if (type === "IHDR") {
       ihdrCount += 1;
@@ -142,6 +118,7 @@ function validatePNG(buffer, size, label) {
     } else if (type === "PLTE") {
       plteCount += 1;
       if (plteCount !== 1 || phase !== "beforeIDAT") throw new Error(`${label} PLTE must appear once before IDAT`);
+      if (length === 0 || length > 768 || length % 3 !== 0) throw new Error(`${label} has an invalid PLTE length`);
     } else if (type === "IDAT") {
       if (phase === "afterIDAT") throw new Error(`${label} IDAT chunks must be contiguous`);
       if (phase !== "beforeIDAT" && phase !== "inIDAT") throw new Error(`${label} IDAT cannot appear in the ${phase} phase`);
@@ -179,76 +156,104 @@ export async function renderBrandIcons({
   sharpImpl,
   fsImpl,
 } = {}) {
-  const filesystem = { mkdir, readFile, rename, rm, stat, writeFile, ...fsImpl };
+  const filesystem = { mkdir, readFile, rename, rm, writeFile, ...fsImpl };
   const outputPath = filesystemPath(outputDirectory);
   const sourcePath = filesystemPath(source);
   const unique = `${process.pid}-${randomUUID()}`;
   const stagingDirectory = join(outputPath, `.brand-icons-stage-${unique}`);
   const backupDirectory = join(outputPath, `.brand-icons-backup-${unique}`);
+  const lockDirectory = join(outputPath, ".brand-icons.render.lock");
   const published = [];
   const backedUp = [];
   let preserveBackup = false;
+  let primaryError;
+  const operationErrors = [];
+  const cleanupErrors = [];
 
   await filesystem.mkdir(outputPath, { recursive: true });
   const releaseLock = await acquireRenderLock(outputPath, filesystem);
   try {
-    try {
-      await filesystem.mkdir(stagingDirectory);
-      await filesystem.mkdir(backupDirectory);
-      const sharp = sharpImpl ?? await loadSharp();
-      const svg = await filesystem.readFile(sourcePath);
-      for (const icon of icons) {
-        const png = await sharp(svg, { density: 384 })
-          .resize(icon.size, icon.size, { fit: "fill" })
-          .png({ adaptiveFiltering: false, compressionLevel: 9, effort: 10, palette: false })
-          .toBuffer();
-        validatePNG(png, icon.size, icon.filename);
-        await filesystem.writeFile(join(stagingDirectory, icon.filename), png);
-      }
-
-      for (const icon of icons) {
-        const destination = join(outputPath, icon.filename);
-        const backup = join(backupDirectory, icon.filename);
-        try {
-          await filesystem.rename(destination, backup);
-          backedUp.push(icon.filename);
-        } catch (error) {
-          if (error.code !== "ENOENT") throw error;
-        }
-        await filesystem.rename(join(stagingDirectory, icon.filename), destination);
-        published.push(icon.filename);
-      }
-    } catch (error) {
-      const rollbackErrors = [];
-      for (const filename of [...published].reverse()) {
-        try {
-          await filesystem.rm(join(outputPath, filename), { force: true });
-        } catch (rollbackError) {
-          rollbackErrors.push(rollbackError);
-        }
-      }
-      for (const filename of [...backedUp].reverse()) {
-        try {
-          await filesystem.rename(join(backupDirectory, filename), join(outputPath, filename));
-        } catch (rollbackError) {
-          rollbackErrors.push(rollbackError);
-        }
-      }
-      if (rollbackErrors.length > 0) {
-        preserveBackup = true;
-        throw new AggregateError(
-          [error, ...rollbackErrors],
-          `Brand icon publication failed and rollback was incomplete. Recover remaining originals from ${backupDirectory}.`,
-          { cause: error },
-        );
-      }
-      throw error;
-    } finally {
-      await filesystem.rm(stagingDirectory, { recursive: true, force: true });
-      if (!preserveBackup) await filesystem.rm(backupDirectory, { recursive: true, force: true });
+    await filesystem.mkdir(stagingDirectory);
+    await filesystem.mkdir(backupDirectory);
+    const sharp = sharpImpl ?? await loadSharp();
+    const svg = await filesystem.readFile(sourcePath);
+    for (const icon of icons) {
+      const png = await sharp(svg, { density: 384 })
+        .resize(icon.size, icon.size, { fit: "fill" })
+        .png({ adaptiveFiltering: false, compressionLevel: 9, effort: 10, palette: false })
+        .toBuffer();
+      validatePNG(png, icon.size, icon.filename);
+      await filesystem.writeFile(join(stagingDirectory, icon.filename), png);
     }
-  } finally {
+
+    for (const icon of icons) {
+      const destination = join(outputPath, icon.filename);
+      const backup = join(backupDirectory, icon.filename);
+      try {
+        await filesystem.rename(destination, backup);
+        backedUp.push(icon.filename);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      await filesystem.rename(join(stagingDirectory, icon.filename), destination);
+      published.push(icon.filename);
+    }
+  } catch (error) {
+    primaryError = error;
+    operationErrors.push(error);
+    const rollbackErrors = [];
+    for (const filename of [...published].reverse()) {
+      try {
+        await filesystem.rm(join(outputPath, filename), { force: true });
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    for (const filename of [...backedUp].reverse()) {
+      try {
+        await filesystem.rename(join(backupDirectory, filename), join(outputPath, filename));
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      preserveBackup = true;
+      operationErrors.push(...rollbackErrors);
+    }
+  }
+
+  try {
+    await filesystem.rm(stagingDirectory, { recursive: true, force: true });
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  if (!preserveBackup) {
+    try {
+      await filesystem.rm(backupDirectory, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  try {
     await releaseLock();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  if (primaryError) {
+    const message = preserveBackup
+      ? `${primaryError.message}. Brand icon publication failed and rollback was incomplete. Recover remaining originals from ${backupDirectory}; inspect cleanup state including ${lockDirectory}.`
+      : cleanupErrors.length > 0
+        ? `${primaryError.message}. Brand icon rendering or publication failed and cleanup was incomplete. Inspect ${backupDirectory} and ${lockDirectory}.`
+        : `Brand icon rendering or publication failed: ${primaryError.message}`;
+    throw new AggregateError([...operationErrors, ...cleanupErrors], message, { cause: primaryError });
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      cleanupErrors,
+      `Brand icons were published but cleanup was incomplete. Inspect ${backupDirectory} and ${lockDirectory}.`,
+      { cause: cleanupErrors[0] },
+    );
   }
 
   console.log(`Rendered ${icons.length} deterministic brand PNGs from ${basename(sourcePath)}`);
