@@ -97,7 +97,10 @@ enum ChatTemplateOverride {
         if fileManager.fileExists(atPath: userFile.path) {
             if let data = try? Data(contentsOf: userFile) {
                 if let text = String(data: data, encoding: .utf8) {
-                    if !text.isEmpty {
+                    // Trimmed emptiness: a whitespace-only file is as unusable
+                    // as a zero-byte one — accepting it would render a blank
+                    // prompt with no diagnostic instead of falling through.
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         return Resolution(
                             resolved: Resolved(
                                 template: text, source: "user file \(userOverrideFilename)"),
