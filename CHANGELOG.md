@@ -9,6 +9,48 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-11
+
+### Fixed
+Hardening wave from the post-release audit of all external review-bot
+findings across v0.6's PRs — every item independently re-verified against
+the code before fixing. (PR #83)
+
+- **LoRA adapter identity desync** — adapters applied via the GUI's
+  auto-pin were invisible to per-request reconciliation: `adapters:nil`
+  could not shed them, a second adapter could stack on top, and
+  prompt-cache entries were shared between base and adapted weights
+  (cache poisoning). Identity is now recorded at the point of
+  application and the GUI request carries its own pin, keeping both
+  clients coherent.
+- **VLM requests silently ignored `response_format`** — images +
+  `response_format` now return 400 before generation; previously
+  clients expecting constrained JSON got unconstrained text with no
+  warning. `tools` + `response_format` likewise 400s (the tool-call
+  processor could swallow the entire constrained document on
+  JSON-format models).
+- **Speculative decoding was silently disabled for MCP users** — with
+  any MCP server connected, every GUI chat turn routed through the tool
+  loop, whose per-turn requests dropped `draftModelID` /
+  `numDraftTokens`. Per-turn requests now preserve all seed-request
+  fields, and acceptance-rate telemetry displays in tool loops.
+- **`kv_bits: 0` enabled 2-bit quantization** — 0 (and negatives) now
+  disable KV-cache quantization like `nil`.
+- Streaming `logprobs` were dropped on tool-call turns; now attached to
+  the first tool-call frame.
+- OpenAI `tool_calls` on non-assistant messages are ignored (assistant
+  only), so mispaired histories fail with a clean orphan 400 instead of
+  an opaque template error.
+- Model library: duplicate rows and `isDownloaded` false-negatives when
+  the same model exists in both a managed directory and the HF cache
+  (id schemes now leaf-normalized; HF scans dedup across roots).
+- Batched requests still queued when a cohort failed during a model
+  drain hung until the stall watchdog; they now fail fast.
+- Mellum2 weight sanitization no longer discards tensors when a
+  checkpoint has an incomplete per-expert set.
+- `package-cli.sh` no longer masks xcodebuild failures (a failed build
+  could previously package stale products).
+
 ## [0.6.0] - 2026-07-11
 
 ### Added
