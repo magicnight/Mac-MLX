@@ -85,20 +85,24 @@ Worker. It returns an HTTP 308 to the fixed `https://macmlx.app` origin while
 preserving the request path and query. Its configuration and release history
 are intentionally independent from the apex static site.
 
-Before the cutover, confirm and record the existing rollback DNS record exactly
-as `www.macmlx.app CNAME macmlx.app`, DNS-only. Do not delete any other DNS
-record. From the Wrangler package directory, validate the Worker and record the
-currently known-good redirect version before changing DNS:
+Before either release path, confirm and record the existing rollback DNS record
+exactly as `www.macmlx.app CNAME macmlx.app`, DNS-only. Do not delete any other
+DNS record.
+
+#### First www release (bootstrap)
+
+There is no previous www version during bootstrap. A failed `versions list`
+probe caused by the Worker not existing must not block the first release, so it
+is not a bootstrap prerequisite. From the Wrangler package directory, dry-run
+the new Worker before changing DNS:
 
 ```sh
 cd "$WRANGLER_PACKAGE_DIR"
 WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler deploy --dry-run --config "$SITE_ROOT/wrangler.www.jsonc"
-WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler versions list --config "$SITE_ROOT/wrangler.www.jsonc"
-PREVIOUS_WWW_VERSION_ID="<recorded-known-good-www-version-id>"
 ```
 
-Delete only the recorded DNS-only CNAME, then deploy and verify without allowing
-the verifier to follow the redirect:
+Delete only the recorded DNS-only CNAME, deploy, and verify without allowing the
+verifier to follow the redirect:
 
 ```sh
 WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler deploy --config "$SITE_ROOT/wrangler.www.jsonc"
@@ -106,18 +110,40 @@ node "$SITE_ROOT/scripts/verify-www-redirect.mjs"
 node "$SITE_ROOT/scripts/verify-cloudflare-deploy.mjs" https://macmlx.app/
 ```
 
-If the new Worker version is unhealthy but its Custom Domain remains active,
-roll back the Worker version and rerun both verifiers:
+If bootstrap deployment or verification fails, remove the `www.macmlx.app` Custom Domain attachment.
+If bootstrap created the new Worker, delete it as well:
+
+```sh
+WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler delete --config "$SITE_ROOT/wrangler.www.jsonc"
+```
+
+Then restore exactly `www.macmlx.app CNAME macmlx.app` as DNS-only. Confirm that
+exact record before attempting another bootstrap. There is no rollback command
+when no previous www version exists.
+
+#### Existing www Worker update
+
+For later releases, list versions and record the previous known-good version
+before the dry run and deployment:
+
+```sh
+cd "$WRANGLER_PACKAGE_DIR"
+WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler versions list --config "$SITE_ROOT/wrangler.www.jsonc"
+PREVIOUS_WWW_VERSION_ID="<recorded-known-good-www-version-id>"
+WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler deploy --dry-run --config "$SITE_ROOT/wrangler.www.jsonc"
+WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler deploy --config "$SITE_ROOT/wrangler.www.jsonc"
+node "$SITE_ROOT/scripts/verify-www-redirect.mjs"
+node "$SITE_ROOT/scripts/verify-cloudflare-deploy.mjs" https://macmlx.app/
+```
+
+Only if a previous known-good version exists, roll back an unhealthy update and
+rerun both verifiers:
 
 ```sh
 WRANGLER_LOG_PATH=/tmp/macmlx-www.log bun wrangler rollback "$PREVIOUS_WWW_VERSION_ID" --config "$SITE_ROOT/wrangler.www.jsonc"
 node "$SITE_ROOT/scripts/verify-www-redirect.mjs"
 node "$SITE_ROOT/scripts/verify-cloudflare-deploy.mjs" https://macmlx.app/
 ```
-
-If the Custom Domain cannot be recovered, remove that redirect Worker domain
-attachment and restore exactly `www.macmlx.app CNAME macmlx.app` as DNS-only.
-Confirm the restored record before attempting another cutover.
 
 The `_redirects` policy canonicalizes only `/index.html` and `/zh/index.html`. Query-string language migration remains in the existing client compatibility code because Static Assets redirects do not match query parameters. CSS and JavaScript use short browser caching, images use at most seven days, and stable filenames are not assigned year-long caching. CSP is intentionally deferred until it is browser-tested against the theme script and JSON-LD on both locales.
 

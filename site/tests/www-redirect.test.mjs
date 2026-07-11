@@ -17,6 +17,7 @@ test("www requests permanently redirect to the equivalent apex URL", async () =>
     response.headers.get("location"),
     "https://macmlx.app/zh/?q=mlx%20swift&lang=zh",
   );
+  assert.equal(response.headers.get("cache-control"), "public, max-age=3600");
   assert.equal(await response.text(), "");
 });
 
@@ -45,6 +46,28 @@ test("encoded Unicode paths stay encoded", () => {
     redirectDestination("https://www.macmlx.app/%E6%A8%A1%E5%9E%8B/%E9%80%89%E6%8B%A9/"),
     "https://macmlx.app/%E6%A8%A1%E5%9E%8B/%E9%80%89%E6%8B%A9/",
   );
+});
+
+test("slash and backslash encodings cannot become a destination authority", () => {
+  assert.equal(
+    redirectDestination("https://www.macmlx.app/%2F%2Fevil.example/%5Ctakeover?q=1"),
+    "https://macmlx.app/%2F%2Fevil.example/%5Ctakeover?q=1",
+  );
+  assert.equal(
+    redirectDestination(String.raw`https://www.macmlx.app/\evil.example/takeover?q=1`),
+    "https://macmlx.app//evil.example/takeover?q=1",
+  );
+});
+
+test("source credentials and fragments are never copied to the destination", () => {
+  assert.equal(
+    redirectDestination("https://user:secret@www.macmlx.app/models/?q=1#private"),
+    "https://macmlx.app/models/?q=1",
+  );
+});
+
+test("invalid request URLs are rejected", () => {
+  assert.throws(() => redirectDestination("not a URL"), TypeError);
 });
 
 test("POST requests receive a method-preserving permanent redirect", async () => {
@@ -153,6 +176,17 @@ test("the runbook documents a reversible www release", async () => {
   }
   assert.match(readme, /www\.macmlx\.app CNAME macmlx\.app/);
   assert.match(readme, /DNS-only/i);
+  assert.match(readme, /First www release \(bootstrap\)/);
+  assert.match(readme, /Existing www Worker update/);
+  assert.match(readme, /no previous www version/i);
+  assert.match(readme, /must not block the first release/i);
+  assert.match(readme, /only if .*previous.*version/i);
+  assert.match(readme, /remove .*www\.macmlx\.app.*Custom Domain/i);
+  assert.match(readme, /bun wrangler delete --config "\$SITE_ROOT\/wrangler\.www\.jsonc"/);
+  assert.match(
+    readme,
+    /restore exactly `www\.macmlx\.app CNAME macmlx\.app` as DNS-only/,
+  );
 });
 
 test("CI syntax-checks the redirect Worker and verifier", async () => {
