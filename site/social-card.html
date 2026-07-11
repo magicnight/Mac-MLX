@@ -27,12 +27,7 @@
 <body>
   <article class="card" aria-label="macMLX social card">
     <div class="grid" aria-hidden="true"></div><div class="ring" aria-hidden="true"></div>
-    <header><div class="wordmark"><svg class="mark" viewBox="0 0 128 128" aria-hidden="true">
-      <rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>
-      <path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle cx="64" cy="77" r="8.5" fill="#7196FF"/>
-      <circle cx="100" cy="39" r="6" fill="#89E67A"/>
-    </svg><span>macMLX</span></div><span class="version" id="version"></span></header>
+    <header><div class="wordmark"><img class="mark" src="./assets/brand/macmlx-mark.svg" alt=""><span>macMLX</span></div><span class="version" id="version"></span></header>
     <main><p class="eyebrow" id="eyebrow"></p><h1 id="headline"></h1><p class="lede" id="lede"></p></main>
     <footer><span>macmlx.app</span><span id="platform"></span></footer>
   </article>
@@ -52,6 +47,7 @@
     document.querySelector("#lede").textContent = selected.lede;
     document.querySelector("#platform").textContent = selected.platform;
     document.querySelector("#version").textContent = `v${project.currentVersion}`;
+    await document.querySelector(".mark").decode();
     document.documentElement.dataset.captureReady = "true";
   </script>
 </body>

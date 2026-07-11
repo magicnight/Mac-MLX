@@ -4,7 +4,7 @@ The site build is network-free. It validates the checked-in registries and asset
 
 ## Build and verify
 
-The canonical SVG is the source of truth for Signal M. Brand and social PNG files are derived, reviewed, tracked build inputs. Social-card SVG rendering is registry-driven and network-free. Refresh the derived PNGs only in an environment where Sharp is already available, either through normal Node resolution or an explicit `MACMLX_NODE_MODULES` directory; the normal build and CI do not install or require Sharp.
+The canonical SVG is the source of truth for Signal M: `site/assets/brand/macmlx-mark.svg`. Brand and social PNG files are derived, reviewed, tracked build inputs. Each social PNG carries an embedded source digest of its locale's complete deterministic SVG. The normal build and CI verify freshness from that digest without Sharp, so canonical geometry, copy, or release data cannot drift from the tracked raster unnoticed. Social-card SVG rendering is registry-driven and network-free. Refresh the derived PNGs only in an environment where Sharp is already available, either through normal Node resolution or an explicit `MACMLX_NODE_MODULES` directory; the normal build and CI do not install or require Sharp.
 
 Run the complete local sequence from the repository root:
 
@@ -13,7 +13,7 @@ MACMLX_NODE_MODULES=/path/to/node_modules node scripts/render-brand-icons.mjs
 MACMLX_NODE_MODULES=/path/to/node_modules node scripts/render-social-cards.mjs
 node scripts/validate-social-cards.mjs
 node scripts/build-public-site.mjs
-node --test site/tests/*.test.mjs
+MACMLX_NODE_MODULES=/path/to/node_modules node --test site/tests/*.test.mjs
 node scripts/crawl-public-site.mjs
 node scripts/test-public-site.mjs
 node --check scripts/build-public-site.mjs

@@ -476,18 +476,13 @@ test("canonical brand geometry stays synchronized across both social-card render
     renderSocialCardSVG({ project, locale: "en" }),
     renderSocialCardSVG({ project, locale: "zh-Hans" }),
   ];
-  const geometry = [
-    '<rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>',
-    '<path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>',
-    '<circle cx="64" cy="77" r="8.5" fill="#7196FF"/>',
-    '<circle cx="100" cy="39" r="6" fill="#89E67A"/>',
-  ];
+  const geometry = canonical.match(/<(?:rect|path|circle)\b[^>]*\/>/g) ?? [];
 
-  for (const sourceSVG of [canonical, capture, ...renderedCards]) {
+  assert.equal(geometry.length, 4);
+  assert.match(capture, /<img class="mark" src="\.\/assets\/brand\/macmlx-mark\.svg" alt="">/);
+  for (const element of geometry) assert.ok(!capture.includes(element), `HTML capture must reference rather than copy ${element}`);
+  for (const sourceSVG of [canonical, ...renderedCards]) {
     for (const element of geometry) assert.ok(sourceSVG.includes(element), `Signal M drifted at ${element}`);
-    assert.equal((sourceSVG.match(/M28 88V39l36 38 36-38v49/g) ?? []).length, 1);
-    assert.equal((sourceSVG.match(/#7196FF/g) ?? []).length, 1);
-    assert.equal((sourceSVG.match(/#89E67A/g) ?? []).length, 1);
   }
 });
 

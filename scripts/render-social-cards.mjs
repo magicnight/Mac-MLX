@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { project } from "../site/content/project.mjs";
-import { renderSocialCardSVG, socialCardCaptures, validateSocialPNG } from "../site/lib/social-card.mjs";
+import { embedSocialSourceDigest, renderSocialCardSVG, socialCardCaptures, socialCardSourceDigest, validateSocialPNG } from "../site/lib/social-card.mjs";
 
 const require = createRequire(import.meta.url);
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -55,8 +55,9 @@ export async function renderSocialCards({ outputDirectory = join(repositoryRoot,
     }
     for (const capture of socialCardCaptures) {
       const svg = Buffer.from(renderSocialCardSVG({ project, locale: capture.locale }));
-      const png = await renderCard({ capture, svg });
-      validateSocialPNG(png, capture.source);
+      const expectedSourceDigest = socialCardSourceDigest({ project, locale: capture.locale });
+      const png = embedSocialSourceDigest(await renderCard({ capture, svg }), expectedSourceDigest);
+      validateSocialPNG(png, capture.source, { expectedSourceDigest });
       await writeFile(join(stagingDirectory, basename(capture.source)), png);
     }
 

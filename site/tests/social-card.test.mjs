@@ -11,13 +11,10 @@ import { copySocialAssets } from "../../scripts/build-public-site.mjs";
 import { renderSocialCards } from "../../scripts/render-social-cards.mjs";
 
 const source = await readFile(new URL("../social-card.html", import.meta.url), "utf8");
-
-const signalMGeometry = Object.freeze([
-  '<rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>',
-  '<path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>',
-  '<circle cx="64" cy="77" r="8.5" fill="#7196FF"/>',
-  '<circle cx="100" cy="39" r="6" fill="#89E67A"/>',
-]);
+const librarySource = await readFile(new URL("../lib/social-card.mjs", import.meta.url), "utf8");
+const canonicalSource = await readFile(new URL("../assets/brand/macmlx-mark.svg", import.meta.url), "utf8");
+const canonicalShapes = canonicalSource.match(/<(?:rect|path|circle)\b[^>]*\/>/g) ?? [];
+const sourceDigestKeyword = "macMLXSourceSHA256";
 
 function crc32(buffer) {
   let crc = 0xffffffff;
@@ -33,10 +30,44 @@ function pngChunks(png) {
   for (let offset = 8; offset < png.length;) {
     const length = png.readUInt32BE(offset);
     const end = offset + 12 + length;
-    chunks.push({ type: png.toString("ascii", offset + 4, offset + 8), offset, end, length });
+    chunks.push({ type: png.toString("ascii", offset + 4, offset + 8), offset, end, length, data: png.subarray(offset + 8, offset + 8 + length) });
     offset = end;
   }
   return chunks;
+}
+
+function encodeChunk(type, data) {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 8 + data.length);
+  return chunk;
+}
+
+function sourceDigestChunk(digest) {
+  return encodeChunk("tEXt", Buffer.from(`${sourceDigestKeyword}\0${digest}`, "latin1"));
+}
+
+function withoutSourceDigest(png) {
+  return Buffer.concat([
+    png.subarray(0, 8),
+    ...pngChunks(png)
+      .filter((chunk) => chunk.type !== "tEXt" || !chunk.data.subarray(0, sourceDigestKeyword.length + 1).equals(Buffer.from(`${sourceDigestKeyword}\0`, "latin1")))
+      .map((chunk) => png.subarray(chunk.offset, chunk.end)),
+  ]);
+}
+
+function withSourceDigest(png, ...digests) {
+  const clean = withoutSourceDigest(png);
+  const [header, ...rest] = pngChunks(clean);
+  return Buffer.concat([
+    clean.subarray(0, 8),
+    clean.subarray(header.offset, header.end),
+    ...digests.map((digest) => sourceDigestChunk(digest)),
+    ...rest.map((chunk) => clean.subarray(chunk.offset, chunk.end)),
+  ]);
 }
 
 function removeChunks(png, type) {
@@ -72,11 +103,11 @@ test("social card source contains reviewed locale copy and uses registry version
 });
 
 test("HTML capture source uses the canonical Signal M at the preserved wordmark position", () => {
-  assert.match(source, /<svg class="mark" viewBox="0 0 128 128" aria-hidden="true">/);
-  for (const geometry of signalMGeometry) assert.ok(source.includes(geometry), `missing canonical geometry: ${geometry}`);
+  assert.match(source, /<img class="mark" src="\.\/assets\/brand\/macmlx-mark\.svg" alt="">/);
   assert.match(source, /\.mark\s*\{\s*width:\s*45px;\s*height:\s*45px;\s*\}/);
-  assert.match(source, /<div class="wordmark"><svg class="mark"[\s\S]*?<\/svg><span>macMLX<\/span><\/div>/);
-  assert.doesNotMatch(source, /\.mark i|<i><\/i>/);
+  assert.match(source, /<div class="wordmark"><img class="mark"[^>]*><span>macMLX<\/span><\/div>/);
+  assert.doesNotMatch(source, /<svg class="mark"|\.mark i|<i><\/i>/);
+  for (const shape of canonicalShapes) assert.ok(!source.includes(shape), `capture source must not copy canonical shape: ${shape}`);
 });
 
 test("capture contract names the exact tracked source and public targets", () => {
@@ -104,23 +135,47 @@ test("registry-driven vector cards contain locale copy, dimensions, and no netwo
 });
 
 test("both deterministic vector cards use the canonical scaled Signal M", () => {
+  assert.equal(canonicalShapes.length, 4);
   for (const locale of ["en", "zh-Hans"]) {
     const svg = renderSocialCardSVG({ project, locale });
     assert.match(svg, /<g transform="translate\(78 72\) scale\(\.3515625\)">/);
-    for (const geometry of signalMGeometry) assert.ok(svg.includes(geometry), `${locale} missing canonical geometry: ${geometry}`);
+    for (const shape of canonicalShapes) assert.ok(svg.includes(shape), `${locale} missing canonical shape: ${shape}`);
     assert.doesNotMatch(svg, /<rect x="86" y="79" width="6" height="31"|<rect x="98" y="79" width="6" height="31"|<rect x="110" y="79" width="6" height="31"/);
     assert.match(svg, /<text x="139" y="105"/);
   }
+  for (const shape of canonicalShapes) assert.ok(!librarySource.includes(shape), `renderer library must derive rather than copy: ${shape}`);
 });
 
 test("tracked social cards are distinct real 1200 by 630 PNGs", async () => {
   const digests = [];
   for (const capture of socialCardCaptures) {
     const png = await readFile(new URL(`../../${capture.source}`, import.meta.url));
-    assert.doesNotThrow(() => validateSocialPNG(png, capture.source));
+    const expectedSourceDigest = createHash("sha256").update(renderSocialCardSVG({ project, locale: capture.locale })).digest("hex");
+    assert.doesNotThrow(() => validateSocialPNG(png, capture.source, { expectedSourceDigest }));
+    const sourceChunks = pngChunks(png).filter((chunk) => chunk.type === "tEXt" && chunk.data.subarray(0, sourceDigestKeyword.length + 1).equals(Buffer.from(`${sourceDigestKeyword}\0`, "latin1")));
+    assert.deepEqual(sourceChunks.map((chunk) => chunk.data.toString("latin1")), [`${sourceDigestKeyword}\0${expectedSourceDigest}`]);
     digests.push(createHash("sha256").update(png).digest("hex"));
   }
   assert.notEqual(digests[0], digests[1]);
+});
+
+test("PNG validation rejects missing, duplicate, malformed, stale, and corrupt source digests", async () => {
+  const png = await readFile(new URL("../assets/social/og-en.png", import.meta.url));
+  const expectedSourceDigest = createHash("sha256").update(renderSocialCardSVG({ project, locale: "en" })).digest("hex");
+  const malformed = withSourceDigest(png, "g".repeat(64));
+  const stale = withSourceDigest(png, "0".repeat(64));
+  const duplicate = withSourceDigest(png, expectedSourceDigest, expectedSourceDigest);
+  const corruptCRC = Buffer.from(withSourceDigest(png, expectedSourceDigest));
+  const digestChunk = pngChunks(corruptCRC).find((chunk) => chunk.type === "tEXt" && chunk.data.toString("latin1").startsWith(`${sourceDigestKeyword}\0`));
+  corruptCRC[digestChunk.end - 1] ^= 1;
+
+  for (const [fixture, expected] of [
+    [withoutSourceDigest(png), /source digest/i],
+    [duplicate, /exactly one source digest/i],
+    [malformed, /64 lowercase hexadecimal/i],
+    [stale, /does not match/i],
+    [corruptCRC, /CRC mismatch/],
+  ]) assert.throws(() => validateSocialPNG(fixture, "fixture", { expectedSourceDigest }), expected);
 });
 
 test("PNG validation rejects structural, checksum, and compressed-data corruption", async () => {
@@ -152,7 +207,7 @@ test("build social copy preserves the exact tracked PNG bytes", async (t) => {
   }
 });
 
-test("Sharp rerenders are byte-identical when an explicit runtime is provided", { skip: !process.env.MACMLX_NODE_MODULES }, async (t) => {
+test("Sharp rerenders are byte-identical to each other and the tracked locale PNGs", { skip: !process.env.MACMLX_NODE_MODULES }, async (t) => {
   const firstDirectory = await mkdtemp(join(tmpdir(), "macmlx-social-first-"));
   const secondDirectory = await mkdtemp(join(tmpdir(), "macmlx-social-second-"));
   t.after(() => Promise.all([firstDirectory, secondDirectory].map((path) => rm(path, { recursive: true, force: true }))));
@@ -160,7 +215,9 @@ test("Sharp rerenders are byte-identical when an explicit runtime is provided", 
   await renderSocialCards({ outputDirectory: secondDirectory });
   for (const capture of socialCardCaptures) {
     const filename = capture.source.split("/").at(-1);
-    assert.deepEqual(await readFile(join(firstDirectory, filename)), await readFile(join(secondDirectory, filename)));
+    const first = await readFile(join(firstDirectory, filename));
+    assert.deepEqual(first, await readFile(join(secondDirectory, filename)));
+    assert.deepEqual(first, await readFile(new URL(`../../${capture.source}`, import.meta.url)));
   }
 });
 

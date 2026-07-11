@@ -37,3 +37,13 @@ test("social asset validation parses both tracked PNGs before publication", asyn
   await writeFile(join(root, "social/og-zh.png"), valid);
   await assert.rejects(validateSocialAssets(root), /og-en\.png is not a PNG/);
 });
+
+test("social asset validation rejects a structurally valid PNG from the wrong locale", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "macmlx-social-stale-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "social"));
+  const chinese = await readFile(new URL("../assets/social/og-zh.png", import.meta.url));
+  await writeFile(join(root, "social/og-en.png"), chinese);
+  await writeFile(join(root, "social/og-zh.png"), chinese);
+  await assert.rejects(validateSocialAssets(root), /og-en\.png source digest does not match/i);
+});

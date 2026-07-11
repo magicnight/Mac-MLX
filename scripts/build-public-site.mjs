@@ -21,7 +21,7 @@ import { siteURL, validateProject } from "../site/lib/project-schema.mjs";
 import { breadcrumbItems } from "../site/lib/breadcrumbs.mjs";
 import { outputFileForPath, validateCanonicalPath } from "../site/lib/routes.mjs";
 import { renderHomeTemplate, renderSocialImage } from "../site/lib/site-rendering.mjs";
-import { socialCardCaptures, socialCaptureInstructions, validateSocialPNG } from "../site/lib/social-card.mjs";
+import { socialCardCaptures, socialCaptureInstructions, socialCardSourceDigest, validateSocialPNG } from "../site/lib/social-card.mjs";
 import { homeRoutes, routes } from "../site/routes.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -176,7 +176,9 @@ export async function validateSocialAssets(assetRoot = sourceAssets) {
     try {
       const source = join(assetRoot, relativePath);
       await access(source);
-      validateSocialPNG(await readFile(source), capture.source);
+      validateSocialPNG(await readFile(source), capture.source, {
+        expectedSourceDigest: socialCardSourceDigest({ project, locale: capture.locale }),
+      });
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
       missing.push(capture.source);

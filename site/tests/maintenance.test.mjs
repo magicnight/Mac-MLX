@@ -9,7 +9,7 @@ test("maintenance guide documents offline verification and governed release refr
     "MACMLX_NODE_MODULES=/path/to/node_modules node scripts/render-brand-icons.mjs",
     "node scripts/render-social-cards.mjs",
     "node scripts/build-public-site.mjs",
-    "node --test site/tests/*.test.mjs",
+    "MACMLX_NODE_MODULES=/path/to/node_modules node --test site/tests/*.test.mjs",
     "node scripts/crawl-public-site.mjs",
     "node scripts/test-public-site.mjs",
   ]) assert.match(readme, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -19,6 +19,8 @@ test("maintenance guide documents offline verification and governed release refr
   );
   assert.match(readme, /canonical SVG[^.]*source of truth/i);
   assert.match(readme, /PNG[^.]*derived/i);
+  assert.match(readme, /PNG[^.]*embedded source digest/i);
+  assert.match(readme, /CI[^.]*freshness[^.]*without Sharp/i);
   assert.match(readme, /no network|network-free/i);
   assert.match(readme, /project and release registries/i);
   assert.match(readme, /reclassify facts/i);

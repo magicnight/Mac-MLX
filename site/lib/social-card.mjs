@@ -1,4 +1,27 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
+
+const sourceDigestKeyword = "macMLXSourceSHA256";
+const sourceDigestPrefix = Buffer.from(`${sourceDigestKeyword}\0`, "latin1");
+const canonicalMarkSource = readFileSync(new URL("../assets/brand/macmlx-mark.svg", import.meta.url), "utf8");
+
+export function extractCanonicalMarkShapes(svg) {
+  const root = String(svg).match(/^<svg\b[^>]*\bviewBox="0 0 128 128"[^>]*>([\s\S]*)<\/svg>\s*$/);
+  if (!root) throw new Error("Canonical Signal M must be an SVG with viewBox 0 0 128 128");
+  const withoutTitle = root[1].replace(/\s*<title\b[^>]*>[^<]*<\/title>\s*/, "");
+  const shapes = withoutTitle.match(/<(?:rect|path|circle)\b(?:\s+[A-Za-z][\w-]*="[^"<>]*")*\s*\/>/g) ?? [];
+  const remainder = shapes.reduce((markup, shape) => markup.replace(shape, ""), withoutTitle).trim();
+  if (remainder || shapes.length !== 4) throw new Error("Canonical Signal M must contain exactly four self-closing shape children");
+  const names = shapes.map((shape) => shape.match(/^<([a-z]+)/)?.[1]);
+  if (names.join(",") !== "rect,path,circle,circle") throw new Error("Canonical Signal M shape order must be rect, path, circle, circle");
+  for (const shape of shapes) {
+    if (/\b(?:href|src|style|on[a-z]+)\s*=|url\(|https?:|data:/i.test(shape)) throw new Error("Canonical Signal M shapes must be self-contained presentation geometry");
+  }
+  return Object.freeze(shapes);
+}
+
+export const canonicalMarkShapes = extractCanonicalMarkShapes(canonicalMarkSource);
 
 export const socialCardCaptures = Object.freeze([
   Object.freeze({ locale: "en", query: "?locale=en", source: "site/assets/social/og-en.png", output: "public/assets/social/og-en.png" }),
@@ -32,10 +55,7 @@ export function renderSocialCardSVG({ project, locale }) {
     <circle cx="1120" cy="150" r="340" fill="none" stroke="#405248" opacity=".62"/>
     <circle cx="1120" cy="150" r="402" fill="none" stroke="#314039" opacity=".55"/>
     <g transform="translate(78 72) scale(.3515625)">
-      <rect x="4" y="4" width="120" height="120" rx="34" fill="#F3F1EA"/>
-      <path d="M28 88V39l36 38 36-38v49" fill="none" stroke="#111311" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle cx="64" cy="77" r="8.5" fill="#7196FF"/>
-      <circle cx="100" cy="39" r="6" fill="#89E67A"/>
+      ${canonicalMarkShapes.join("\n      ")}
     </g>
     <text x="139" y="105" fill="#f3f1ea" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="31" font-weight="700">macMLX</text>
     <rect x="966" y="75" width="156" height="40" rx="20" fill="#171a17" stroke="#59645b"/>
@@ -54,7 +74,45 @@ export function renderSocialCardSVG({ project, locale }) {
 `;
 }
 
-export function validateSocialPNG(buffer, label = "social PNG") {
+export function socialCardSourceDigest({ project, locale }) {
+  return createHash("sha256").update(renderSocialCardSVG({ project, locale })).digest("hex");
+}
+
+function encodePNGChunk(type, data) {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 8 + data.length);
+  return chunk;
+}
+
+function isSourceDigestText(type, data) {
+  return type === "tEXt" && data.subarray(0, sourceDigestPrefix.length).equals(sourceDigestPrefix);
+}
+
+export function embedSocialSourceDigest(buffer, digest) {
+  if (!Buffer.isBuffer(buffer)) throw new Error("social PNG must be a Buffer");
+  if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("social PNG source digest must be 64 lowercase hexadecimal characters");
+  const signature = buffer.subarray(0, 8);
+  const chunks = [];
+  for (let offset = 8; offset < buffer.length;) {
+    if (buffer.length - offset < 12) throw new Error("social PNG has a truncated PNG chunk");
+    const length = buffer.readUInt32BE(offset);
+    const end = offset + 12 + length;
+    if (end > buffer.length) throw new Error("social PNG has a truncated PNG chunk");
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    if (!isSourceDigestText(type, data)) chunks.push(buffer.subarray(offset, end));
+    offset = end;
+  }
+  if (chunks.length === 0 || chunks[0].toString("ascii", 4, 8) !== "IHDR") throw new Error("social PNG must begin with IHDR");
+  const text = encodePNGChunk("tEXt", Buffer.from(`${sourceDigestKeyword}\0${digest}`, "latin1"));
+  return Buffer.concat([signature, chunks[0], text, ...chunks.slice(1)]);
+}
+
+export function validateSocialPNG(buffer, label = "social PNG", { expectedSourceDigest } = {}) {
   const signature = [137, 80, 78, 71, 13, 10, 26, 10];
   if (!Buffer.isBuffer(buffer) || !signature.every((byte, index) => buffer[index] === byte)) throw new Error(`${label} is not a PNG`);
   let offset = 8;
@@ -62,6 +120,7 @@ export function validateSocialPNG(buffer, label = "social PNG") {
   let idatCount = 0;
   let iendCount = 0;
   const compressed = [];
+  const sourceDigests = [];
   while (offset < buffer.length) {
     if (buffer.length - offset < 12) throw new Error(`${label} has a truncated PNG chunk`);
     const length = buffer.readUInt32BE(offset);
@@ -91,6 +150,9 @@ export function validateSocialPNG(buffer, label = "social PNG") {
       if (length !== 0) throw new Error(`${label} has an invalid IEND chunk`);
       if (end !== buffer.length) throw new Error(`${label} has trailing bytes after IEND`);
     }
+    if (isSourceDigestText(type, buffer.subarray(dataStart, crcOffset))) {
+      sourceDigests.push(buffer.toString("latin1", dataStart + sourceDigestPrefix.length, crcOffset));
+    }
     offset = end;
   }
   if (ihdrCount !== 1) throw new Error(`${label} must contain exactly one IHDR chunk`);
@@ -107,6 +169,12 @@ export function validateSocialPNG(buffer, label = "social PNG") {
   if (scanlines.length !== rowLength * 630) throw new Error(`${label} has an inconsistent decompressed scanline length`);
   for (let row = 0; row < 630; row += 1) {
     if (scanlines[row * rowLength] > 4) throw new Error(`${label} has an invalid PNG row filter`);
+  }
+  if (sourceDigests.length !== 1) throw new Error(`${label} must contain exactly one source digest`);
+  if (!/^[0-9a-f]{64}$/.test(sourceDigests[0])) throw new Error(`${label} source digest must be 64 lowercase hexadecimal characters`);
+  if (expectedSourceDigest !== undefined) {
+    if (!/^[0-9a-f]{64}$/.test(expectedSourceDigest)) throw new Error("expected source digest must be 64 lowercase hexadecimal characters");
+    if (sourceDigests[0] !== expectedSourceDigest) throw new Error(`${label} source digest does not match the current social-card source`);
   }
 }
 
