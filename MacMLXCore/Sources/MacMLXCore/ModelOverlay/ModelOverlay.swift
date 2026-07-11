@@ -84,6 +84,19 @@ public enum ModelOverlay {
             return HunyuanV1DenseModel(config)
         }
 
+        // Cohere2 (Cohere Command R7B, `command-r7b-12-2024`) — pure-Swift port
+        // (see `Models/Cohere2.swift`). A Cohere-family decoder (parallel residual
+        // block, LayerNorm, tied embeddings + logit scaling) with interleaved
+        // sliding-window / global attention: RoPE (traditional / GPT-J) applies
+        // only on sliding layers, global layers are NoPE, and the KV cache is
+        // mixed (RotatingKVCache on sliding layers, KVCacheSimple on global).
+        // Upstream mlx-swift-lm ships `Cohere` (v1) but has no `cohere2` type.
+        await LLMTypeRegistry.shared.registerModelType("cohere2") { data in
+            let config = try JSONDecoder.json5()
+                .decode(Cohere2Configuration.self, from: data)
+            return Cohere2Model(config)
+        }
+
         // --- Theoretical tier -------------------------------------------------
         // Near-zero-engineering registrations: each maps a new `model_type`
         // onto an existing, parity-tested Swift architecture. They are verified

@@ -10,7 +10,7 @@ import Foundation
 ///      power-user escape hatch; works for managed model directories and
 ///      HuggingFace-cache snapshots alike.
 ///   2. **Built-in override** registered by `config.json`'s `model_type`
-///      (currently only `seed_oss`, see ``SeedOssChatTemplate``).
+///      (see ``builtIns`` for the current set).
 ///   3. **None** — the checkpoint's own template is used unchanged (status quo).
 ///
 /// A model with no matching override is byte-for-byte unaffected: ``resolve``
@@ -30,7 +30,8 @@ enum ChatTemplateOverride {
     /// header — an override is a maintenance liability that must be removed once
     /// the underlying swift-jinja limitation is lifted.
     static let builtIns: [String: String] = [
-        "seed_oss": SeedOssChatTemplate.template
+        "seed_oss": SeedOssChatTemplate.template,
+        "cohere2": Cohere2ChatTemplate.template,
     ]
 
     /// A resolved override plus a human-readable source description (for logging
