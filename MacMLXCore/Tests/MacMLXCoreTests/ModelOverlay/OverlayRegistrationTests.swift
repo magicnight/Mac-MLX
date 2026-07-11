@@ -169,6 +169,29 @@ struct OverlayRegistrationTests {
             }
             """,
             matches: { $0 is HunyuanV1DenseModel }),
+
+        // Cohere2 (Command R7B) → macMLX `Cohere2Model`.
+        Case(
+            modelType: "cohere2",
+            configJSON: """
+            {
+              "model_type": "cohere2",
+              "vocab_size": 64,
+              "hidden_size": 32,
+              "num_hidden_layers": 4,
+              "intermediate_size": 48,
+              "num_attention_heads": 4,
+              "num_key_value_heads": 2,
+              "head_dim": 8,
+              "attention_bias": false,
+              "layer_norm_bias": false,
+              "logit_scale": 0.25,
+              "rope_theta": 50000.0,
+              "sliding_window": 4,
+              "sliding_window_pattern": 4
+            }
+            """,
+            matches: { $0 is Cohere2Model }),
     ]
 
     /// `registerAll` registers each `model_type` — the exact query the factory
