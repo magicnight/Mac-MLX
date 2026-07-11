@@ -1,0 +1,182 @@
+// Copyright © 2026 macMLX. English comments only.
+
+import Foundation
+import XCTest
+
+@testable import MacMLXCore
+
+/// Gated, real-weights smoke for the pure-Swift InternLM3 (InternLM3-8B-Instruct)
+/// port (Track G).
+///
+/// Unlike the numeric-parity suites (tiny synthetic fixtures), this loads the REAL
+/// 4-bit checkpoint through the full engine path and end-to-end exercises:
+///
+///  a. **overlay resolution** — `MLXSwiftEngine.load` runs
+///     `ModelOverlay.registerAll()`, so `LLMModelFactory` resolves
+///     `config.json`'s `model_type: internlm3` to `InternLM3Model`.
+///  b. **quantized load** — the 4-bit (group-size 64) weights load into the stock
+///     `Linear`/`Embedding`/`RMSNorm` layers. The shipped checkpoint is UNTIED
+///     (`tie_word_embeddings: false`), so it carries an `lm_head`; both bias switches
+///     are false (`bias`, `qkv_bias`), so no projection carries a bias.
+///  c. **corrected DynamicNTK RoPE** — the shipped config is
+///     `{rope_type: dynamic, factor: 6.0}` with `rope_theta` 5e7 and `max_position`
+///     32768; a smoke prompt stays far under 32768, so the corrected RoPE runs as a
+///     plain rotary encoding at scale 1.0 (NOT the buggy upstream 2.0) over the real
+///     48-layer, 16:1-GQA stack.
+///  d. **generation** — greedy decode produces coherent, non-empty text; tok/s is
+///     printed for the record (not asserted — hardware-dependent).
+///
+/// GATED — never runs in CI. Self-skips unless ALL hold:
+///   1. `requireMLXRuntimeOrSkip()` passes (real Metal, i.e. xcodebuild),
+///   2. env `MACMLX_RUN_INTERNLM3_SMOKE=1`, and
+///   3. the checkpoint is found on disk. Discovery order:
+///        • env `MACMLX_INTERNLM3_MODEL_DIR` (a full snapshot-directory path), else
+///        • the HuggingFace cache
+///          `~/.cache/huggingface/hub/models--mlx-community--internlm3-8b-instruct-4bit/snapshots/<hash>/`
+///          (the snapshot subdir containing `config.json`), else
+///        • `~/.mac-mlx/models/<MACMLX_INTERNLM3_MODEL>` (default
+///          `internlm3-8b-instruct-4bit`).
+///
+/// Run (with the ~4.7 GB checkpoint already in the HF cache):
+///   MACMLX_RUN_INTERNLM3_SMOKE=1 TEST_RUNNER_MACMLX_RUN_INTERNLM3_SMOKE=1 \
+///     xcodebuild test -scheme MacMLXCore -destination 'platform=macOS' \
+///     -skipPackagePluginValidation \
+///     -only-testing:MacMLXCoreTests/InternLM3SmokeTests/testInternLM3SmokeGeneratesCoherentText
+final class InternLM3SmokeTests: XCTestCase {
+
+    private static let hfRepo = "mlx-community/internlm3-8b-instruct-4bit"
+
+    /// Resolve the checkpoint directory: explicit env path → HF cache snapshot →
+    /// `~/.mac-mlx/models`. Returns nil when nothing usable (with a `config.json`)
+    /// is present, so the caller can skip.
+    private func resolveModelDirectory() -> URL? {
+        let fm = FileManager.default
+        func hasConfig(_ dir: URL) -> Bool {
+            fm.fileExists(atPath: dir.appending(path: "config.json").path)
+        }
+
+        // 1. Explicit override.
+        if let explicit = ProcessInfo.processInfo.environment["MACMLX_INTERNLM3_MODEL_DIR"] {
+            let dir = URL(fileURLWithPath: explicit, isDirectory: true)
+            return hasConfig(dir) ? dir : nil
+        }
+
+        // 2. HuggingFace cache: pick the snapshot subdir that carries config.json.
+        let cacheName = "models--" + Self.hfRepo.replacingOccurrences(of: "/", with: "--")
+        let snapshots = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appending(path: ".cache/huggingface/hub/\(cacheName)/snapshots", directoryHint: .isDirectory)
+        if let entries = try? fm.contentsOfDirectory(
+            at: snapshots, includingPropertiesForKeys: nil)
+        {
+            if let snapshot = entries.sorted(by: { $0.path < $1.path }).first(where: hasConfig) {
+                return snapshot
+            }
+        }
+
+        // 3. Local models dir fallback.
+        let name = ProcessInfo.processInfo.environment["MACMLX_INTERNLM3_MODEL"]
+            ?? "internlm3-8b-instruct-4bit"
+        let local = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appending(path: ".mac-mlx/models/\(name)", directoryHint: .isDirectory)
+        return hasConfig(local) ? local : nil
+    }
+
+    private func localModel(id: String, directory: URL) -> LocalModel {
+        LocalModel(
+            id: id,
+            displayName: id,
+            directory: directory,
+            sizeBytes: 0,
+            format: .mlx,
+            quantization: nil,
+            parameterCount: nil,
+            architecture: nil
+        )
+    }
+
+    /// Loads the real internlm3-8b-instruct-4bit checkpoint and greedy-decodes a
+    /// fixed-answer continuation, checking the result is coherent (the topic-anchor
+    /// technique the other real-model smokes use).
+    func testInternLM3SmokeGeneratesCoherentText() async throws {
+        try requireMLXRuntimeOrSkip()
+
+        guard ProcessInfo.processInfo.environment["MACMLX_RUN_INTERNLM3_SMOKE"] == "1" else {
+            throw XCTSkip("Set MACMLX_RUN_INTERNLM3_SMOKE=1 to run the InternLM3 real-weights smoke test")
+        }
+
+        guard let directory = resolveModelDirectory() else {
+            throw XCTSkip("InternLM3 checkpoint not found (HF cache / MACMLX_INTERNLM3_MODEL_DIR / ~/.mac-mlx/models)")
+        }
+
+        // KNOWN BLOCKER (not a port defect): every published InternLM3 checkpoint —
+        // `internlm/internlm3-8b-instruct` and the `mlx-community/*` conversions —
+        // ships ONLY a SentencePiece `tokenizer.model` plus a custom Python
+        // tokenizer class (`tokenization_internlm3.py`), and NO `tokenizer.json`.
+        // swift-transformers (the engine's tokenizer loader) requires
+        // `tokenizer.json` and has no SentencePiece fallback, so the load fails at
+        // the tokenizer step even though the safetensors weights load fine and the
+        // architecture is 1e-4 parity-proven (`InternLM3ModelParityTests`). A
+        // trustworthy `tokenizer.json` cannot be produced without executing the
+        // checkpoint's custom remote code (`trust_remote_code`), which we decline.
+        // Skip with a precise diagnostic rather than hard-fail; lift this once a
+        // real InternLM3 checkpoint ships `tokenizer.json` (or the engine grows a
+        // SentencePiece path).
+        let tokenizerJSON = directory.appending(path: "tokenizer.json")
+        guard FileManager.default.fileExists(atPath: tokenizerJSON.path) else {
+            throw XCTSkip(
+                "InternLM3 checkpoint at \(directory.path) ships no tokenizer.json "
+                    + "(SentencePiece tokenizer.model + custom Python only); "
+                    + "swift-transformers requires tokenizer.json, so end-to-end "
+                    + "generation cannot run. Architecture parity is proven separately "
+                    + "by InternLM3ModelParityTests.")
+        }
+        let modelID = "internlm3-8b-instruct-4bit"
+
+        let engine = MLXSwiftEngine()
+
+        // Fixed-answer prompt: InternLM3-8B is an INSTRUCT/chat model, so a direct
+        // instruction (rather than a raw sequence completion) is the robust anchor.
+        // Asking for the ordered planet list greedily yields "Mercury, Venus, Earth,
+        // Mars, …", letting us assert the "Mars" anchor (as in the Seed-OSS /
+        // Mellum2 / Hunyuan / Cohere2 / MiniCPM3 smokes) while generating enough
+        // tokens (~50) for the printed tok/s to reflect real decode throughput, not
+        // one-shot load overhead. Since the port is 1e-4 parity-proven, identical
+        // logits give identical greedy tokens.
+        let prompt = "List all eight planets in order from the Sun, separated by commas."
+        let parameters = GenerationParameters(
+            temperature: 0, topP: 1.0, maxTokens: 128, stream: true)
+        let request = GenerateRequest(
+            model: modelID,
+            messages: [ChatMessage(role: .user, content: prompt)],
+            parameters: parameters
+        )
+
+        var text = ""
+        var completionTokens: Int?
+        let start = Date()
+        try await engine.load(localModel(id: modelID, directory: directory))
+        for try await chunk in engine.generate(request) {
+            text += chunk.text
+            if let usage = chunk.usage { completionTokens = usage.completionTokens }
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertFalse(text.isEmpty, "InternLM3 must produce real output, not an early-exit stub")
+        XCTAssertTrue(
+            text.contains("Mars"),
+            "greedy ordered-planets list must name Mars (the fourth planet) "
+                + "for output to count as coherent — got: \(text)")
+
+        // Echo the generated continuation for the record.
+        print("INTERNLM3_SMOKE_TEXT<<<\(text)>>>")
+
+        if let completionTokens, elapsed > 0 {
+            let tokPerSec = Double(completionTokens) / elapsed
+            print(
+                "INTERNLM3_SMOKE model=\(modelID) dir=\(directory.path) "
+                    + "completionTokens=\(completionTokens) "
+                    + "elapsed=\(String(format: "%.2f", elapsed))s "
+                    + "tokPerSec=\(String(format: "%.1f", tokPerSec))")
+        }
+    }
+}
