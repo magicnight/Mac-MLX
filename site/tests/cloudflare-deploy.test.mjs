@@ -99,7 +99,7 @@ test("documents revalidate while stable CSS, JavaScript, and images use bounded 
   for (const pattern of ["/", "/*/", "/*.html", "/*.md", "/*.txt", "/*.xml", "/*.json"]) {
     assert.equal(rules.get(pattern)?.get("cache-control"), "public, max-age=0, must-revalidate", pattern);
   }
-  for (const pattern of ["/*.css", "/*.js", "/*.mjs"]) {
+  for (const pattern of ["/*.css", "/*.js", "/*.mjs", "/*.webmanifest"]) {
     assert.equal(rules.get(pattern)?.get("cache-control"), "public, max-age=3600, stale-while-revalidate=86400", pattern);
   }
   for (const pattern of ["/*.webp", "/*.png", "/*.svg"]) {
@@ -193,7 +193,7 @@ function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false
     }
     if (canonicalPaths.has(url.pathname)) {
       const assetsHTML = url.pathname === "/"
-        ? '<link rel="stylesheet" href="/assets/css/main.css?v=3"><script src="/assets/js/main.js?v=3"></script><img src="/assets/images/engine/adaptive-runtime.webp" alt=""><img src="/assets/og-image.svg" alt="">'
+        ? '<link rel="stylesheet" href="/assets/css/main.css?v=3"><link rel="manifest" href="/assets/brand/site.webmanifest"><script src="/assets/js/main.js?v=3"></script><img src="/assets/images/engine/adaptive-runtime.webp" alt=""><img src="/assets/og-image.svg" alt="">'
         : "";
       return new Response(`<link rel="canonical" href="https://macmlx.app${url.pathname}">${assetsHTML}`, { status: 200, headers: responseHeaders(url.pathname, documentHeaders) });
     }
@@ -214,6 +214,7 @@ function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false
       const image = /\.(?:webp|png|svg)$/.test(url.pathname);
       const contentType = url.pathname.endsWith(".css") ? "text/css"
         : url.pathname.endsWith(".js") ? "text/javascript"
+          : url.pathname.endsWith(".webmanifest") ? "application/manifest+json"
           : url.pathname.endsWith(".svg") ? "image/svg+xml"
             : "image/webp";
       return new Response(null, { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": contentType, "cache-control": image ? "public, max-age=604800, stale-while-revalidate=86400" : "public, max-age=3600, stale-while-revalidate=86400" }) });
@@ -317,11 +318,13 @@ test("remote verifier rejects wrong-but-present MIME types and cache classes", a
     [{ mimeOverrides: { "/sitemap.xml": "text/plain" } }, /sitemap\.xml.*Content-Type.*xml/is],
     [{ mimeOverrides: { "/assets/css/main.css": "application/octet-stream" } }, /main\.css.*Content-Type.*text\/css/is],
     [{ mimeOverrides: { "/assets/js/main.js": "text/plain" } }, /main\.js.*Content-Type.*javascript/is],
+    [{ mimeOverrides: { "/assets/brand/site.webmanifest": "application/octet-stream" } }, /site\.webmanifest.*Content-Type.*application\/manifest\+json/is],
     [{ mimeOverrides: { "/assets/images/engine/adaptive-runtime.webp": "image/png" } }, /adaptive-runtime\.webp.*Content-Type.*image\/webp/is],
     [{ mimeOverrides: { "/assets/og-image.svg": "image/png" } }, /og-image\.svg.*Content-Type.*image\/svg\+xml/is],
     [{ mimeOverrides: { "/assets/social/og-en.png": "image/webp" } }, /og-en\.png.*image\/png/is],
     [{ cacheOverrides: { "/robots.txt": "public, max-age=60" } }, /robots\.txt.*Cache-Control.*max-age=0.*must-revalidate/is],
     [{ cacheOverrides: { "/assets/js/main.js": "public, max-age=0, must-revalidate" } }, /main\.js.*Cache-Control.*max-age=3600/is],
+    [{ cacheOverrides: { "/assets/brand/site.webmanifest": "public, max-age=0, must-revalidate" } }, /site\.webmanifest.*Cache-Control.*max-age=3600/is],
   ];
   for (const [options, expected] of cases) {
     const { fetchImpl } = mockDeploymentFetch({ workersDevNoindex: false, ...options });

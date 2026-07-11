@@ -303,6 +303,7 @@ export async function verifyCloudflareDeployment(baseURL, {
       const path = new URL(asset, base).pathname;
       const expected = path.endsWith(".css") ? "text/css"
         : path.endsWith(".js") || path.endsWith(".mjs") ? "javascript"
+          : path.endsWith(".webmanifest") ? "application/manifest+json"
           : path.endsWith(".svg") ? "image/svg+xml"
             : path.endsWith(".png") ? "image/png"
               : path.endsWith(".webp") ? "image/webp"

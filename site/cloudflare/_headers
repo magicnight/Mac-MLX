@@ -39,6 +39,9 @@
 /*.mjs
   Cache-Control: public, max-age=3600, stale-while-revalidate=86400
 
+/*.webmanifest
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
 /*.webp
   Cache-Control: public, max-age=604800, stale-while-revalidate=86400
 
