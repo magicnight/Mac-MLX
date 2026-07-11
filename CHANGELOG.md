@@ -9,6 +9,53 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-11
+
+Track G model wave: four new architectures, one promotion, and the
+template-override machinery that unblocked them.
+
+### Added
+- **Per-model chat-template overrides** — three-level template
+  resolution (a user-supplied `<model dir>/macmlx.chat_template.jinja` →
+  a built-in override keyed by `model_type` → the checkpoint's own
+  template) that rescues models whose stock templates swift-jinja cannot
+  parse. Every built-in override is proven byte-for-byte equivalent to
+  the reference rendering on the standard conversation path, ungated, by
+  its parity suite; whitespace-only user files take the empty-file skip
+  path with a diagnostic instead of rendering a blank prompt.
+  (PRs #85, #86)
+- **Seed-OSS-36B** (`seed_oss`) promoted to ✅ Tested — full 1e-4 parity
+  suite plus an 18.2 tok/s real-checkpoint smoke on the 4-bit; its
+  integer-keyed thinking-budget template table ships as a built-in
+  override (upstream parser limitation reported as swift-jinja#62).
+  (PRs #84, #85)
+- **Hunyuan V1 Dense** (`hunyuan_v1_dense`, 0.5B–7B) ✅ Tested —
+  per-head q/k RMSNorm applied *after* RoPE and a DynamicNTK-alpha
+  scaled base; 80.3 tok/s on the 1.8B 4-bit; the checkpoint's own
+  template renders natively. (PR #87)
+- **Cohere Command R7B** (`cohere2`) ✅ Tested — parallel residual block
+  (single LayerNorm feeding attention and MLP), interleaved
+  sliding-window/global attention with NoPE global layers, a mixed
+  rotating/simple KV cache, and a built-in template override (the stock
+  template's tool/RAG branch trips a swift-jinja lexer limitation,
+  reported as swift-jinja#63); 21.7 tok/s on the 7B 4-bit. (PR #88)
+- **MiniCPM3-4B** (`minicpm3`) ✅ Tested — materialized multi-head
+  latent attention, longrope, and muP's three numerical scalings;
+  18.7 tok/s on the 4-bit. (PR #89)
+- **InternLM3-8B** (`internlm3`) at the ⚠️ Theoretical tier — the port
+  corrects four verified rope defects in the upstream mlx-lm reference
+  implementation (reported as mlx-lm#1545) and is fully parity-verified;
+  generation awaits a checkpoint that ships a `tokenizer.json`
+  (requested upstream — every published checkpoint currently carries
+  only a SentencePiece `tokenizer.model`, which the Swift tokenizer
+  stack cannot load). (PR #90)
+
+### Changed
+- The model-support tier legend now covers toolchain-gap blockage (e.g.
+  no `tokenizer.json` in any published checkpoint) alongside
+  hardware-size blockage, so a tier badge can never contradict its row's
+  notes.
+
 ## [0.6.1] - 2026-07-11
 
 ### Fixed
