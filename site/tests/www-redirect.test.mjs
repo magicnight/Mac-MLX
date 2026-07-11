@@ -29,6 +29,13 @@ test("the incoming host can never change the apex destination", () => {
   );
 });
 
+test("a network-path reference in the request path cannot escape the apex", () => {
+  assert.equal(
+    redirectDestination("https://www.macmlx.app//evil.example/takeover?q=1"),
+    "https://macmlx.app//evil.example/takeover?q=1",
+  );
+});
+
 test("root requests redirect to the apex root", () => {
   assert.equal(redirectDestination("https://www.macmlx.app/"), "https://macmlx.app/");
 });

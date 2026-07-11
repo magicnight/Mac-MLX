@@ -2,7 +2,10 @@ const apexOrigin = "https://macmlx.app";
 
 export function redirectDestination(requestURL) {
   const source = new URL(requestURL);
-  return new URL(`${source.pathname}${source.search}`, apexOrigin).toString();
+  const destination = new URL(apexOrigin);
+  destination.pathname = source.pathname;
+  destination.search = source.search;
+  return destination.toString();
 }
 
 export default {
