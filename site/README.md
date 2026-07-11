@@ -4,7 +4,7 @@ The site build is network-free. It validates the checked-in registries and asset
 
 ## Build and verify
 
-The canonical SVG is the source of truth for Signal M: `site/assets/brand/macmlx-mark.svg`. Brand and social PNG files are derived, reviewed, tracked build inputs. Each social PNG carries an embedded source digest of its locale's complete deterministic SVG. The normal build and CI verify freshness from that digest without Sharp, so canonical geometry, copy, or release data cannot drift from the tracked raster unnoticed. Social-card SVG rendering is registry-driven and network-free. Refresh the derived PNGs only in an environment where Sharp is already available, either through normal Node resolution or an explicit `MACMLX_NODE_MODULES` directory; the normal build and CI do not install or require Sharp.
+The canonical SVG is the source of truth for Signal M: `site/assets/brand/macmlx-mark.svg`. Brand and social PNG files are derived, reviewed, tracked build inputs whose embedded source digest records the complete deterministic SVG input. The normal build and CI verify freshness from those digests without Sharp, so canonical geometry, copy, or release data cannot drift from the tracked rasters unnoticed. Social-card SVG rendering is registry-driven and network-free. Refresh the derived PNGs only in an environment where Sharp is already available, either through normal Node resolution or an explicit `MACMLX_NODE_MODULES` directory; the normal build and CI do not install or require Sharp.
 
 Run the complete local sequence from the repository root:
 

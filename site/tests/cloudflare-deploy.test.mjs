@@ -159,7 +159,7 @@ function pngHeader(width = 1200, height = 630) {
   return bytes;
 }
 
-function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false, brokenAsset = false, redirectLocations = {}, mimeOverrides = {}, cacheOverrides = {} } = {}) {
+function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false, brokenAsset = false, redirectLocations = {}, mimeOverrides = {}, cacheOverrides = {}, manifestOverride, iconDimensions = {}, manifestIconBodies = {}, missingIcon } = {}) {
   const calls = [];
   const security = {
     "x-content-type-options": "nosniff",
@@ -209,6 +209,26 @@ function mockDeploymentFetch({ workersDevNoindex = true, omitFrameHeader = false
     if (url.pathname === "/assets/social/og-en.png") {
       return new Response(pngHeader(), { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": "image/png", "cache-control": "public, max-age=604800, stale-while-revalidate=86400" }) });
     }
+    if (url.pathname === "/assets/brand/site.webmanifest" && method === "GET") {
+      const body = manifestOverride ?? JSON.stringify({
+        name: "macMLX",
+        short_name: "macMLX",
+        start_url: "/",
+        display: "standalone",
+        icons: [
+          { src: "/assets/brand/icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "/assets/brand/icon-512.png", sizes: "512x512", type: "image/png" },
+        ],
+      });
+      return new Response(body, { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": "application/manifest+json", "cache-control": "public, max-age=3600, stale-while-revalidate=86400" }) });
+    }
+    if (method === "GET" && ["/assets/brand/icon-192.png", "/assets/brand/icon-512.png"].includes(url.pathname)) {
+      if (url.pathname === missingIcon) return new Response("missing", { status: 404, headers: responseHeaders(url.pathname, { "content-type": "text/plain", "cache-control": "public, max-age=0, must-revalidate" }) });
+      const expected = url.pathname.includes("192") ? 192 : 512;
+      const [width, height] = iconDimensions[url.pathname] ?? [expected, expected];
+      const body = manifestIconBodies[url.pathname] ?? pngHeader(width, height);
+      return new Response(body, { status: 200, headers: responseHeaders(url.pathname, { ...security, "content-type": "image/png", "cache-control": "public, max-age=604800, stale-while-revalidate=86400" }) });
+    }
     if (method === "HEAD" && url.pathname.startsWith("/assets/")) {
       if (brokenAsset && url.pathname.endsWith("main.js")) return new Response(null, { status: 404 });
       const image = /\.(?:webp|png|svg)$/.test(url.pathname);
@@ -234,6 +254,26 @@ test("remote verifier checks production routes, redirects, discovery output, PNG
   assert.ok(calls.every((call) => call.signal instanceof AbortSignal));
   assert.ok(calls.some((call) => call.url.includes("/assets/js/main.js?v=3")));
   assert.ok(calls.some((call) => call.url.endsWith("/index.html") && call.redirect === "manual"));
+  assert.ok(calls.some((call) => call.method === "GET" && call.url.endsWith("/assets/brand/site.webmanifest")));
+  assert.ok(calls.some((call) => call.method === "GET" && call.url.endsWith("/assets/brand/icon-192.png")));
+  assert.ok(calls.some((call) => call.method === "GET" && call.url.endsWith("/assets/brand/icon-512.png")));
+});
+
+test("remote verifier strictly validates the install manifest and its same-origin PNG icons", async () => {
+  const { verifyCloudflareDeployment } = await import("../../scripts/verify-cloudflare-deploy.mjs");
+  const cases = [
+    [{ manifestOverride: "not json" }, /site\.webmanifest.*JSON/i],
+    [{ manifestOverride: JSON.stringify({ name: "macMLX", icons: [] }) }, /site\.webmanifest.*required install structure/i],
+    [{ manifestOverride: JSON.stringify({ name: "macMLX", short_name: "macMLX", start_url: "/", display: "standalone", icons: [{ src: "https://evil.example/icon-192.png", sizes: "192x192", type: "image/png" }, { src: "/assets/brand/icon-512.png", sizes: "512x512", type: "image/png" }] }) }, /same-origin.*icon-192/i],
+    [{ iconDimensions: { "/assets/brand/icon-192.png": [191, 192] } }, /icon-192\.png.*expected 192x192.*191x192/i],
+    [{ mimeOverrides: { "/assets/brand/icon-512.png": "image/webp" } }, /icon-512\.png.*image\/png/i],
+    [{ cacheOverrides: { "/assets/brand/icon-192.png": "public, max-age=0, must-revalidate" } }, /icon-192\.png.*Cache-Control.*max-age=604800/i],
+    [{ missingIcon: "/assets/brand/icon-512.png" }, /icon-512\.png.*expected 200.*404/i],
+  ];
+  for (const [options, expected] of cases) {
+    const { fetchImpl } = mockDeploymentFetch({ workersDevNoindex: false, ...options });
+    await assert.rejects(verifyCloudflareDeployment("https://macmlx.app/", { fetchImpl }), expected);
+  }
 });
 
 test("remote verifier accepts only the exact production origin or macmlx staging host family", async () => {

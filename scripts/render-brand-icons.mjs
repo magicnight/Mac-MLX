@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
+import { crc32, embedPNGSourceDigest, isPNGSourceDigestChunk, pngSourceDigestPrefix } from "../site/lib/png-source-digest.mjs";
 
 const require = createRequire(import.meta.url);
 const icons = Object.freeze([
@@ -78,16 +79,15 @@ async function loadSharp() {
   }
 }
 
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
+export function brandIconSourceDigest(svg) {
+  return createHash("sha256").update(svg).digest("hex");
 }
 
-function validatePNG(buffer, size, label) {
+export function embedBrandIconSourceDigest(buffer, digest) {
+  return embedPNGSourceDigest(buffer, digest, "brand icon PNG");
+}
+
+export function validateBrandIconPNG(buffer, size, label, { expectedSourceDigest } = {}) {
   const signature = [137, 80, 78, 71, 13, 10, 26, 10];
   if (!Buffer.isBuffer(buffer) || !signature.every((byte, index) => buffer[index] === byte)) throw new Error(`${label} is not a PNG`);
   let offset = 8;
@@ -96,6 +96,7 @@ function validatePNG(buffer, size, label) {
   let plteCount = 0;
   let phase = "beforeIHDR";
   const compressed = [];
+  const sourceDigests = [];
   while (offset < buffer.length) {
     if (buffer.length - offset < 12) throw new Error(`${label} has a truncated PNG chunk`);
     const length = buffer.readUInt32BE(offset);
@@ -108,6 +109,8 @@ function validatePNG(buffer, size, label) {
     if (!/^[A-Za-z]{4}$/.test(type)) throw new Error(`${label} has an invalid PNG chunk type`);
     if (!/[A-Z]/.test(type[2])) throw new Error(`${label} PNG chunk ${type} sets the reserved bit`);
     if (crc32(buffer.subarray(typeStart, crcOffset)) !== buffer.readUInt32BE(crcOffset)) throw new Error(`${label} PNG CRC mismatch in ${type}`);
+    const data = buffer.subarray(dataStart, crcOffset);
+    if (isPNGSourceDigestChunk(type, data)) sourceDigests.push(data.toString("latin1", pngSourceDigestPrefix.length));
     if (type === "IHDR") {
       ihdrCount += 1;
       if (phase !== "beforeIHDR" || offset !== 8 || length !== 13) throw new Error(`${label} must contain a unique first IHDR chunk`);
@@ -148,6 +151,12 @@ function validatePNG(buffer, size, label) {
   for (let row = 0; row < size; row += 1) {
     if (scanlines[row * rowLength] > 4) throw new Error(`${label} has an invalid row filter`);
   }
+  if (sourceDigests.length !== 1) throw new Error(`${label} must contain exactly one source digest`);
+  if (!/^[0-9a-f]{64}$/.test(sourceDigests[0])) throw new Error(`${label} source digest must be 64 lowercase hexadecimal characters`);
+  if (expectedSourceDigest !== undefined) {
+    if (!/^[0-9a-f]{64}$/.test(expectedSourceDigest)) throw new Error("expected source digest must be 64 lowercase hexadecimal characters");
+    if (sourceDigests[0] !== expectedSourceDigest) throw new Error(`${label} source digest does not match the current canonical SVG`);
+  }
 }
 
 export async function renderBrandIcons({
@@ -177,12 +186,14 @@ export async function renderBrandIcons({
     await filesystem.mkdir(backupDirectory);
     const sharp = sharpImpl ?? await loadSharp();
     const svg = await filesystem.readFile(sourcePath);
+    const expectedSourceDigest = brandIconSourceDigest(svg);
     for (const icon of icons) {
-      const png = await sharp(svg, { density: 384 })
+      const rendered = await sharp(svg, { density: 384 })
         .resize(icon.size, icon.size, { fit: "fill" })
         .png({ adaptiveFiltering: false, compressionLevel: 9, effort: 10, palette: false })
         .toBuffer();
-      validatePNG(png, icon.size, icon.filename);
+      const png = embedBrandIconSourceDigest(rendered, expectedSourceDigest);
+      validateBrandIconPNG(png, icon.size, icon.filename, { expectedSourceDigest });
       await filesystem.writeFile(join(stagingDirectory, icon.filename), png);
     }
 

@@ -22,6 +22,7 @@ import { breadcrumbItems } from "../site/lib/breadcrumbs.mjs";
 import { outputFileForPath, validateCanonicalPath } from "../site/lib/routes.mjs";
 import { renderHomeTemplate, renderSocialImage } from "../site/lib/site-rendering.mjs";
 import { socialCardCaptures, socialCaptureInstructions, socialCardSourceDigest, validateSocialPNG } from "../site/lib/social-card.mjs";
+import { brandIconSourceDigest, validateBrandIconPNG } from "./render-brand-icons.mjs";
 import { homeRoutes, routes } from "../site/routes.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -157,8 +158,17 @@ async function writeText(root, relativePath, content) {
   await writeFile(destination, content, "utf8");
 }
 
+export async function validateBrandAssets(assetRoot = sourceAssets) {
+  const canonical = await readFile(join(assetRoot, "brand/macmlx-mark.svg"));
+  const expectedSourceDigest = brandIconSourceDigest(canonical);
+  for (const [filename, size] of [["apple-touch-icon.png", 180], ["icon-192.png", 192], ["icon-512.png", 512]]) {
+    validateBrandIconPNG(await readFile(join(assetRoot, "brand", filename)), size, filename, { expectedSourceDigest });
+  }
+}
+
 async function validateAssets() {
   for (const relativePath of copiedAssetPaths) await access(join(sourceAssets, relativePath));
+  await validateBrandAssets();
 }
 
 async function copyAssets(destinationDirectory) {

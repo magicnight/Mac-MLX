@@ -268,6 +268,67 @@ export async function verifyCloudflareDeployment(baseURL, {
     });
   }
 
+  const manifestPath = "/assets/brand/site.webmanifest";
+  const manifestResult = await textResponse(manifestPath, `GET ${manifestPath}`);
+  let manifestIcons = [];
+  if (manifestResult) {
+    check(`GET ${manifestPath}`, () => {
+      if (manifestResult.response.status !== 200) throw new Error(`expected 200, received ${manifestResult.response.status}`);
+    });
+    check(`GET ${manifestPath} Content-Type`, () => {
+      const actual = mediaType(manifestResult.response);
+      if (actual !== "application/manifest+json") throw new Error(`expected application/manifest+json, received ${actual || "none"}`);
+    });
+    check(`GET ${manifestPath} Cache-Control`, () => {
+      const actual = headerValue(manifestResult.response, "cache-control");
+      if (actual !== scriptCache) throw new Error(`expected ${scriptCache}, received ${actual || "none"}`);
+    });
+    let manifest;
+    try {
+      manifest = JSON.parse(manifestResult.body);
+    } catch (error) {
+      failures.push(`GET ${manifestPath} JSON: ${error.message}`);
+    }
+    if (manifest) {
+      const requiredIcons = [[192, "/assets/brand/icon-192.png"], [512, "/assets/brand/icon-512.png"]];
+      check(`GET ${manifestPath} required install structure`, () => {
+        const validRoot = manifest && typeof manifest === "object" && !Array.isArray(manifest)
+          && manifest.name === "macMLX" && manifest.short_name === "macMLX"
+          && manifest.start_url === "/" && manifest.display === "standalone" && Array.isArray(manifest.icons);
+        if (!validRoot) throw new Error("expected macMLX name, short_name, root start_url, standalone display, and icons array");
+        manifestIcons = requiredIcons.map(([size, path]) => {
+          const icon = manifest.icons.find((entry) => entry?.sizes === `${size}x${size}`);
+          if (!icon || icon.type !== "image/png") throw new Error(`expected ${size}x${size} image/png icon`);
+          const resolved = new URL(icon.src, base);
+          const safe = resolved.origin === base.origin && resolved.pathname === path && !resolved.search && !resolved.hash;
+          if (!safe) throw new Error(`expected same-origin ${path}, received ${icon.src ?? "none"}`);
+          return { size, path };
+        });
+      });
+    }
+  }
+
+  for (const { size, path } of manifestIcons) {
+    const response = await request(path, { method: "GET", redirect: "manual" }, `GET ${path}`);
+    if (!response) continue;
+    let body;
+    try {
+      const bounded = await boundedBody(response, maxBodyBytes);
+      body = bounded.buffer.slice(bounded.byteOffset, bounded.byteOffset + bounded.byteLength);
+    } catch (error) {
+      failures.push(`GET ${path}: response body could not be read: ${error.message}`);
+    }
+    check(`GET ${path}`, () => {
+      if (response.status !== 200) throw new Error(`expected 200, received ${response.status}`);
+      if (mediaType(response) !== "image/png") throw new Error(`expected image/png, received ${mediaType(response) || "none"}`);
+      const cache = headerValue(response, "cache-control");
+      if (cache !== imageCache) throw new Error(`expected Cache-Control ${imageCache}, received ${cache || "none"}`);
+      if (!body) throw new Error("PNG body is unavailable");
+      const dimensions = pngDimensions(body);
+      if (dimensions.width !== size || dimensions.height !== size) throw new Error(`expected ${size}x${size}, received ${dimensions.width}x${dimensions.height}`);
+    });
+  }
+
   const socialPath = "/assets/social/og-en.png";
   const socialResponse = await request(socialPath, { method: "GET", redirect: "manual" }, `GET ${socialPath}`);
   if (socialResponse) {

@@ -7,8 +7,8 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { renderBrandIcons } from "../../scripts/render-brand-icons.mjs";
-import { prepareSite } from "../../scripts/build-public-site.mjs";
+import { brandIconSourceDigest, renderBrandIcons, validateBrandIconPNG } from "../../scripts/render-brand-icons.mjs";
+import { prepareSite, validateBrandAssets } from "../../scripts/build-public-site.mjs";
 import { assetPaths, brandCopiedAssetPaths, copiedAssetPaths } from "../content/assets.mjs";
 import { project } from "../content/project.mjs";
 import { renderSocialCardSVG } from "../lib/social-card.mjs";
@@ -41,6 +41,7 @@ const rasterIcons = Object.freeze([
   Object.freeze({ filename: "icon-192.png", width: 192, height: 192 }),
   Object.freeze({ filename: "icon-512.png", width: 512, height: 512 }),
 ]);
+const brandDigestKeyword = "macMLXSourceSHA256";
 
 const expectedCanonical = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
   <title id="title">macMLX Signal M</title>
@@ -501,14 +502,57 @@ test("favicon keeps the optical Signal M without the green signal node", async (
 });
 
 test("tracked raster icons are strict PNGs at their exact target dimensions", async () => {
+  const canonical = await readFile(canonicalURL);
+  const expectedSourceDigest = brandIconSourceDigest(canonical);
   const dimensions = [];
   for (const icon of rasterIcons) {
     const png = await readFile(new URL(`../assets/brand/${icon.filename}`, import.meta.url));
     const header = inspectPNG(png, icon.filename);
+    assert.doesNotThrow(() => validateBrandIconPNG(png, icon.width, icon.filename, { expectedSourceDigest }));
+    const digestChunks = pngChunks(png).filter(({ type, data }) => type === "tEXt" && data.toString("latin1").startsWith(`${brandDigestKeyword}\0`));
+    assert.equal(digestChunks.length, 1, `${icon.filename} must contain exactly one source digest`);
+    assert.equal(digestChunks[0].data.toString("latin1"), `${brandDigestKeyword}\0${expectedSourceDigest}`);
     assert.deepEqual({ width: header.width, height: header.height }, { width: icon.width, height: icon.height });
     dimensions.push(`${header.width}x${header.height}`);
   }
   assert.equal(new Set(dimensions).size, rasterIcons.length, "each tracked icon must carry its own dimensions in IHDR");
+});
+
+test("brand PNG validation rejects missing, duplicate, malformed, stale, and corrupt source digests", async () => {
+  const icon = rasterIcons[0];
+  const png = await readFile(new URL(`../assets/brand/${icon.filename}`, import.meta.url));
+  const expectedSourceDigest = brandIconSourceDigest(await readFile(canonicalURL));
+  const chunks = pngChunks(png);
+  const isDigest = ({ type, data }) => type === "tEXt" && data.toString("latin1").startsWith(`${brandDigestKeyword}\0`);
+  const without = chunks.filter((chunk) => !isDigest(chunk));
+  const digest = chunks.find(isDigest);
+  const fixtures = [
+    [assemblePNG(without), /exactly one source digest/i],
+    [assemblePNG([chunks[0], digest, ...chunks.slice(1)]), /exactly one source digest/i],
+    [assemblePNG([chunks[0], { type: "tEXt", data: Buffer.from(`${brandDigestKeyword}\0NOT-HEX`, "latin1") }, ...without.slice(1)]), /64 lowercase hexadecimal/i],
+    [assemblePNG([chunks[0], { type: "tEXt", data: Buffer.from(`${brandDigestKeyword}\0${"0".repeat(64)}`, "latin1") }, ...without.slice(1)]), /does not match the current canonical SVG/i],
+  ];
+  const corruptCRC = Buffer.from(png);
+  const digestOffset = png.indexOf(Buffer.from(`${brandDigestKeyword}\0`, "latin1"));
+  assert.ok(digestOffset > 0);
+  corruptCRC[digestOffset + brandDigestKeyword.length + 1] ^= 1;
+  fixtures.push([corruptCRC, /CRC mismatch/i]);
+
+  for (const [fixture, expected] of fixtures) {
+    assert.throws(() => validateBrandIconPNG(fixture, icon.width, icon.filename, { expectedSourceDigest }), expected);
+  }
+});
+
+test("normal build validation rejects tracked brand PNG drift without Sharp", async (t) => {
+  const assetRoot = await mkdtemp(join(tmpdir(), "macmlx-brand-source-drift-"));
+  t.after(() => rm(assetRoot, { recursive: true, force: true }));
+  await mkdir(join(assetRoot, "brand"), { recursive: true });
+  for (const name of ["macmlx-mark.svg", ...rasterIcons.map(({ filename }) => filename)]) {
+    await writeFile(join(assetRoot, "brand", name), await readFile(new URL(`../assets/brand/${name}`, import.meta.url)));
+  }
+  await assert.doesNotReject(validateBrandAssets(assetRoot));
+  await writeFile(join(assetRoot, "brand/macmlx-mark.svg"), `${await readFile(canonicalURL, "utf8")}\n<!-- drift -->\n`);
+  await assert.rejects(validateBrandAssets(assetRoot), /source digest does not match the current canonical SVG/i);
 });
 
 test("PNG validation rejects invalid critical chunks and noncontiguous image phases", async (t) => {
