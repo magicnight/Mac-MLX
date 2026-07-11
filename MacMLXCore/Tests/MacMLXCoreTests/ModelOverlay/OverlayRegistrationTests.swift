@@ -147,6 +147,28 @@ struct OverlayRegistrationTests {
             }
             """,
             matches: { $0 is SeedOssModel }),
+
+        // Hunyuan V1 Dense → macMLX `HunyuanV1DenseModel`.
+        Case(
+            modelType: "hunyuan_v1_dense",
+            configJSON: """
+            {
+              "model_type": "hunyuan_v1_dense",
+              "vocab_size": 40,
+              "hidden_size": 32,
+              "num_hidden_layers": 2,
+              "intermediate_size": 48,
+              "num_attention_heads": 4,
+              "num_key_value_heads": 2,
+              "head_dim": 16,
+              "attention_bias": false,
+              "use_qk_norm": true,
+              "tie_word_embeddings": true,
+              "rope_theta": 10000.0,
+              "rope_scaling": {"type": "dynamic", "alpha": 1000.0, "factor": 1.0}
+            }
+            """,
+            matches: { $0 is HunyuanV1DenseModel }),
     ]
 
     /// `registerAll` registers each `model_type` — the exact query the factory
