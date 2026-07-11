@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { deflateSync, inflateSync } from "node:zlib";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+import { renderBrandIcons } from "../../scripts/render-brand-icons.mjs";
 
 const canonicalURL = new URL("../assets/brand/macmlx-mark.svg", import.meta.url);
 const faviconURL = new URL("../assets/brand/favicon.svg", import.meta.url);
+const manifestURL = new URL("../assets/brand/site.webmanifest", import.meta.url);
+
+const rasterIcons = Object.freeze([
+  Object.freeze({ filename: "apple-touch-icon.png", width: 180, height: 180 }),
+  Object.freeze({ filename: "icon-192.png", width: 192, height: 192 }),
+  Object.freeze({ filename: "icon-512.png", width: 512, height: 512 }),
+]);
 
 const expectedCanonical = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
   <title id="title">macMLX Signal M</title>
@@ -131,6 +145,122 @@ function assertAccessibleTitle(svg, expectedTitle) {
   assert.equal(title[2], expectedTitle);
 }
 
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function inspectPNG(buffer, label) {
+  assert.ok(Buffer.isBuffer(buffer), `${label} must be a buffer`);
+  assert.deepEqual([...buffer.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${label} must have the PNG signature`);
+  assert.ok(buffer.length > 1_000, `${label} must contain meaningful raster data`);
+
+  let offset = 8;
+  let header;
+  let ihdrCount = 0;
+  let iendCount = 0;
+  const compressed = [];
+  while (offset < buffer.length) {
+    assert.ok(buffer.length - offset >= 12, `${label} has a truncated PNG chunk`);
+    const length = buffer.readUInt32BE(offset);
+    assert.ok(length <= buffer.length - offset - 12, `${label} has a truncated PNG chunk`);
+    const typeStart = offset + 4;
+    const dataStart = offset + 8;
+    const crcOffset = dataStart + length;
+    const end = crcOffset + 4;
+    const type = buffer.toString("ascii", typeStart, dataStart);
+    assert.equal(crc32(buffer.subarray(typeStart, crcOffset)), buffer.readUInt32BE(crcOffset), `${label} has a CRC mismatch in ${type}`);
+
+    if (type === "IHDR") {
+      ihdrCount += 1;
+      assert.equal(offset, 8, `${label} IHDR must be the first chunk`);
+      assert.equal(length, 13, `${label} IHDR must have the canonical length`);
+      header = {
+        width: buffer.readUInt32BE(dataStart),
+        height: buffer.readUInt32BE(dataStart + 4),
+        bitDepth: buffer[dataStart + 8],
+        colorType: buffer[dataStart + 9],
+        compression: buffer[dataStart + 10],
+        filter: buffer[dataStart + 11],
+        interlace: buffer[dataStart + 12],
+      };
+    } else if (type === "IDAT") {
+      assert.ok(length > 0, `${label} IDAT must not be empty`);
+      compressed.push(buffer.subarray(dataStart, crcOffset));
+    } else if (type === "IEND") {
+      iendCount += 1;
+      assert.equal(length, 0, `${label} IEND must be empty`);
+      assert.equal(end, buffer.length, `${label} must not have trailing bytes`);
+    }
+    offset = end;
+  }
+
+  assert.equal(ihdrCount, 1, `${label} must contain one IHDR`);
+  assert.equal(iendCount, 1, `${label} must contain one terminal IEND`);
+  assert.ok(compressed.length > 0, `${label} must contain IDAT data`);
+  assert.deepEqual(
+    { bitDepth: header.bitDepth, colorType: header.colorType, compression: header.compression, filter: header.filter, interlace: header.interlace },
+    { bitDepth: 8, colorType: 6, compression: 0, filter: 0, interlace: 0 },
+    `${label} must be non-interlaced 8-bit RGBA`,
+  );
+
+  const scanlines = inflateSync(Buffer.concat(compressed));
+  const rowLength = 1 + (header.width * 4);
+  assert.equal(scanlines.length, rowLength * header.height, `${label} has inconsistent decompressed scanlines`);
+  for (let row = 0; row < header.height; row += 1) assert.ok(scanlines[row * rowLength] <= 4, `${label} has an invalid row filter`);
+  assert.ok(scanlines.subarray(1).some((byte) => byte !== 0), `${label} cannot be an empty transparent raster`);
+  return header;
+}
+
+function pngChunk(type, data) {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 8 + data.length);
+  return chunk;
+}
+
+function solidPNG(width, height) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([8, 6, 0, 0, 0], 8);
+  const scanlines = Buffer.alloc((1 + (width * 4)) * height);
+  for (let row = 0; row < height; row += 1) {
+    const start = row * (1 + (width * 4));
+    scanlines[start] = 0;
+    scanlines.fill(0x7f, start + 1, start + 1 + (width * 4));
+  }
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(scanlines)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function sharpIsAvailable() {
+  const require = createRequire(import.meta.url);
+  try {
+    require.resolve("sharp");
+    return true;
+  } catch {
+    if (!process.env.MACMLX_NODE_MODULES) return false;
+    try {
+      require.resolve("sharp", { paths: [process.env.MACMLX_NODE_MODULES] });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 test("SVG safety validation rejects active and externally loaded content", () => {
   const maliciousSVGs = [
     ["script", `<svg xmlns="http://www.w3.org/2000/svg"><script>unsafe()</script></svg>`],
@@ -186,4 +316,77 @@ test("favicon keeps the optical Signal M without the green signal node", async (
   assert.equal((svg.match(/<circle\b/g) ?? []).length, 1);
   assert.deepEqual(assertSelfContainedSVG(svg), ["svg", "title", "rect", "path", "circle"]);
   assertAccessibleTitle(svg, "macMLX Signal M favicon");
+});
+
+test("tracked raster icons are strict PNGs at their exact target dimensions", async () => {
+  const dimensions = [];
+  for (const icon of rasterIcons) {
+    const png = await readFile(new URL(`../assets/brand/${icon.filename}`, import.meta.url));
+    const header = inspectPNG(png, icon.filename);
+    assert.deepEqual({ width: header.width, height: header.height }, { width: icon.width, height: icon.height });
+    dimensions.push(`${header.width}x${header.height}`);
+  }
+  assert.equal(new Set(dimensions).size, rasterIcons.length, "each tracked icon must carry its own dimensions in IHDR");
+});
+
+test("web manifest has only the exact macMLX install contract", async () => {
+  const manifest = JSON.parse(await readFile(manifestURL, "utf8"));
+  assert.deepEqual(manifest, {
+    name: "macMLX",
+    short_name: "macMLX",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#111311",
+    theme_color: "#111311",
+    icons: [
+      { src: "/assets/brand/icon-192.png", sizes: "192x192", type: "image/png" },
+      { src: "/assets/brand/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+  });
+});
+
+test("Sharp rerenders all brand icons byte-identically", { skip: !sharpIsAvailable() }, async (t) => {
+  const firstDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-first-"));
+  const secondDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-second-"));
+  t.after(() => Promise.all([firstDirectory, secondDirectory].map((path) => rm(path, { recursive: true, force: true }))));
+
+  await renderBrandIcons({ outputDirectory: firstDirectory });
+  await renderBrandIcons({ outputDirectory: secondDirectory });
+  for (const icon of rasterIcons) {
+    const firstHash = createHash("sha256").update(await readFile(join(firstDirectory, icon.filename))).digest("hex");
+    const secondHash = createHash("sha256").update(await readFile(join(secondDirectory, icon.filename))).digest("hex");
+    assert.equal(firstHash, secondHash, `${icon.filename} must be deterministic`);
+  }
+});
+
+test("brand icon refresh rolls back the complete set when rendering fails", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "macmlx-brand-atomic-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const originals = new Map(rasterIcons.map((icon, index) => [icon.filename, Buffer.from(`original-${index}`)]));
+  for (const [filename, contents] of originals) await writeFile(join(outputDirectory, filename), contents);
+  await writeFile(join(outputDirectory, "unrelated.svg"), "keep me");
+
+  let renders = 0;
+  function failingSharp() {
+    return {
+      resize(width, height) {
+        return {
+          png() {
+            return {
+              async toBuffer() {
+                renders += 1;
+                if (renders === 2) throw new Error("injected second-icon failure");
+                return solidPNG(width, height);
+              },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  await assert.rejects(renderBrandIcons({ outputDirectory, sharpImpl: failingSharp }), /injected second-icon failure/);
+  for (const [filename, contents] of originals) assert.deepEqual(await readFile(join(outputDirectory, filename)), contents);
+  assert.equal(await readFile(join(outputDirectory, "unrelated.svg"), "utf8"), "keep me");
+  assert.deepEqual((await readdir(outputDirectory)).sort(), [...originals.keys(), "unrelated.svg"].sort());
 });
