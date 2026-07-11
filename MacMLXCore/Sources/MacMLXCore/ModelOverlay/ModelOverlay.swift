@@ -97,6 +97,20 @@ public enum ModelOverlay {
             return Cohere2Model(config)
         }
 
+        // MiniCPM3 (OpenBMB MiniCPM3-4B) — pure-Swift port (see
+        // `Models/MiniCPM3.swift`). A Llama-family decoder with NON-ABSORBED
+        // Multi-head Latent Attention (materialized q/k/v from low-rank latents, a
+        // single-head RoPE key broadcast to all heads, and a distinct value head
+        // dim) plus muP's three numerical scalings (embedding × scale_emb, both
+        // residual branches × scale_depth/√layers, and — when untied — the head
+        // input ÷ hidden/dim_model_base). RoPE is the stock longrope `SuScaledRoPE`.
+        // Upstream mlx-swift-lm has no `minicpm3` type.
+        await LLMTypeRegistry.shared.registerModelType("minicpm3") { data in
+            let config = try JSONDecoder.json5()
+                .decode(MiniCPM3Configuration.self, from: data)
+            return MiniCPM3Model(config)
+        }
+
         // --- Theoretical tier -------------------------------------------------
         // Near-zero-engineering registrations: each maps a new `model_type`
         // onto an existing, parity-tested Swift architecture. They are verified
