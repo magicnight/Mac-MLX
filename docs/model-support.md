@@ -27,6 +27,7 @@ issue-driven.
 | Architecture | `model_type` | Tier | Notes |
 |---|---|---|---|
 | Mellum2-12B-A2.5B | `mellum` | ✅ Tested | Sliding/full attention interleave (21+7 layers) + 64-expert MoE; 68.9 tok/s on the 4-bit checkpoint |
+| Seed-OSS-36B | `seed_oss` | ⚠️ Parity-verified | Dense GQA with independent attention/o-proj/MLP bias switches; full 1e-4 parity suite on real Metal. End-to-end generation is currently blocked upstream: the model's `chat_template.jinja` uses integer dict keys, which swift-jinja's parser does not support yet. Promotes to Tested once template handling lands |
 | DeepSeek V3.2 | `deepseek_v32` | ⚠️ Theoretical | DSA sparse attention + absorbed MLA + noaux_tc MoE; full parity suite; smallest real checkpoint is 671B-class |
 | Solar-Open-100B | `solar_open` | ⚠️ Theoretical | Config re-skin of upstream GLM4-MoE (~100B) |
 | GLM-5.1 (GLM-DSA) | `glm_moe_dsa` | ⚠️ Theoretical | Subclass of our DeepSeek V3.2 port, no IndexShare; smallest quant ~405 GB. GLM-5.2 IndexShare checkpoints are detected and rejected with a clear error (unsupported until the upstream reference lands) |
