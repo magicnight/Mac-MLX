@@ -26,11 +26,11 @@ import XCTest
 ///     decode logic (cache mix, monotonic ropeOffset, mask sourcing) is covered
 ///     by `Cohere2CacheTests` + the parity suite.
 ///  d. **chat template** — the checkpoint's own Command R7B `default` template
-///     cannot be parsed by swift-jinja, so `ChatTemplateOverride` substitutes the
-///     built-in `Cohere2ChatTemplate` (standard-path equivalent, proven on the
-///     render path by `Cohere2ChatTemplateParityTests`) before compilation; a
-///     template failure here would surface as a load/generation error and fail
-///     loudly.
+///     renders natively under swift-jinja 2.4.0 (which fixes the literal `}}`
+///     parse — huggingface/swift-jinja #63, reported by macMLX — that blocked
+///     2.3.6, so no macMLX override is needed), proven on the render path by
+///     `Cohere2ChatTemplateParityTests`; a template failure here would surface as
+///     a load/generation error and fail loudly.
 ///  e. **generation** — greedy decode produces coherent, non-empty text; tok/s is
 ///     printed for the record (not asserted — hardware-dependent).
 ///

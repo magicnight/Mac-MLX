@@ -20,14 +20,14 @@ import XCTest
 ///  c. **generation** — greedy decode produces coherent, non-empty text; tok/s
 ///     is printed for the record (not asserted — hardware-dependent).
 ///
-/// CHAT-TEMPLATE OVERRIDE: Seed-OSS's `chat_template.jinja` builds its
-/// thinking-budget lookup as a Jinja dict literal with INTEGER keys
-/// (`{0: 0, 512: 128, …}`), which swift-jinja's parser rejects. macMLX ships a
-/// built-in override (`SeedOssChatTemplate`, wired via `ChatTemplateOverride`)
-/// that rewrites only that construct, so template compilation inside generate's
-/// lazy input-prep now succeeds and this smoke exercises real end-to-end
-/// generation. The override's semantic equivalence is proven separately and
-/// ungated by `SeedOssChatTemplateParityTests`.
+/// CHAT TEMPLATE: Seed-OSS's `chat_template.jinja` builds its thinking-budget
+/// lookup as a Jinja dict literal with INTEGER keys (`{0: 0, 512: 128, …}`),
+/// which swift-jinja 2.3.6 could not parse. swift-jinja 2.4.0 (fixing
+/// huggingface/swift-jinja #62, reported by macMLX) renders it natively, so no
+/// macMLX override is needed: template compilation inside generate's lazy
+/// input-prep succeeds on the checkpoint's own template and this smoke exercises
+/// real end-to-end generation. Native rendering is proven separately and ungated
+/// by `SeedOssChatTemplateParityTests`.
 ///
 /// GATED — never runs in CI (~19 GB on disk). Self-skips unless ALL hold:
 ///   1. `requireMLXRuntimeOrSkip()` passes (real Metal, i.e. xcodebuild),
@@ -135,11 +135,10 @@ final class SeedOssSmokeTests: XCTestCase {
         var completionTokens: Int?
         let start = Date()
         try await engine.load(localModel(id: modelID, directory: directory))
-        // The chat template is compiled lazily during generate's input-prep. The
-        // built-in `seed_oss` override (SeedOssChatTemplate, resolved by
-        // ChatTemplateOverride at load) replaces the checkpoint's unparseable
-        // integer-keyed dict template, so this compiles cleanly and generates —
-        // any load OR generation error now fails the test loudly.
+        // The chat template is compiled lazily during generate's input-prep.
+        // swift-jinja 2.4.0 parses the checkpoint's own integer-keyed dict
+        // template natively (no macMLX override), so this compiles cleanly and
+        // generates — any load OR generation error now fails the test loudly.
         for try await chunk in engine.generate(request) {
             text += chunk.text
             if let usage = chunk.usage { completionTokens = usage.completionTokens }

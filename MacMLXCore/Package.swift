@@ -30,13 +30,17 @@ let package = Package(
         // v0.4.0 server-side MCP feature, but Core needs its own
         // declaration so GUI / HummingbirdServer can speak MCP too.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.0"),
-        // swift-jinja is already resolved transitively (swift-transformers pins
-        // `from: "2.0.0"`, currently 2.3.6). Declared directly with the SAME
-        // requirement — so no new version is introduced — purely so the
-        // chat-template render-parity TEST target can render the Seed-OSS
-        // override through the exact engine production uses. Not linked into the
-        // MacMLXCore library itself.
-        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0"),
+        // swift-jinja is resolved transitively (swift-transformers pins
+        // `from: "2.0.0"`). Declared directly with a RAISED floor of 2.4.0 to
+        // lock in the parser/filter fixes we upstreamed and that these tests
+        // depend on — huggingface/swift-jinja #62 (integer-keyed object
+        // literals, Seed-OSS), #63 (literal `}}`, Command R7B), and #64
+        // (`strip(arg)` argument handling, Hunyuan `<answer>`) — so every
+        // checkpoint chat template renders natively with no built-in override.
+        // Also linked into the render-parity TEST target so it can render the
+        // checkpoint templates through the exact engine production uses. Not
+        // linked into the MacMLXCore library itself.
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.4.0"),
     ],
     targets: [
         .target(
@@ -56,10 +60,10 @@ let package = Package(
             name: "MacMLXCoreTests",
             dependencies: [
                 "MacMLXCore",
-                // Render the Seed-OSS chat-template override through swift-jinja
-                // (the same engine swift-transformers uses) to prove, ungated,
-                // that it matches the Python reference render of the ORIGINAL
-                // template. See SeedOssChatTemplateParityTests.
+                // Render checkpoint chat templates through swift-jinja (the same
+                // engine swift-transformers uses) to prove, ungated, that they
+                // match the Python reference render. See the
+                // *ChatTemplateParityTests.
                 .product(name: "Jinja", package: "swift-jinja"),
             ],
             resources: [

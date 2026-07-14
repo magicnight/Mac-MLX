@@ -1,5 +1,5 @@
 {
-  "originHash" : "a6ee71527f6d9f3c7bda5d62e5b9f65acd8e30b5bfcc57f07984706b8e47091e",
+  "originHash" : "3ef2cb24b2ad05463229c572d6d7ee62ca9c959b64c9107de8954df934a64e3a",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -176,8 +176,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/huggingface/swift-jinja.git",
       "state" : {
-        "revision" : "0b67ecb79139f6addef8699eff3622808aa6c7dc",
-        "version" : "2.3.6"
+        "revision" : "7103f805a3a98a374e1c1b7fea969ab13aab2e8d",
+        "version" : "2.4.0"
       }
     },
     {

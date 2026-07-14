@@ -6,39 +6,48 @@ import XCTest
 
 @testable import MacMLXCore
 
-/// Render-parity gate for the built-in Seed-OSS chat-template override
-/// (`SeedOssChatTemplate.template`).
+/// Render-parity gate proving Seed-OSS needs NO built-in chat-template override as
+/// of swift-jinja 2.4.0: the checkpoint's OWN `chat_template.jinja` renders
+/// byte-for-byte under swift-jinja on every path these cases exercise.
 ///
-/// The override rewrites exactly ONE construct of the checkpoint's
-/// `chat_template.jinja` — the integer-keyed thinking-budget dict swift-jinja
-/// cannot parse — as an equivalent if/elif ladder. This test proves the rewrite
-/// is semantically identical by rendering the SAME message sets through the
-/// OVERRIDE via swift-jinja (the exact engine swift-transformers drives in
-/// production, configured identically with `lstripBlocks: true, trimBlocks:
-/// true`) and asserting byte-for-byte equality against a fixture captured from
-/// the ORIGINAL template by `docs/reference/capture_seed_oss_chat_template.py`
+/// The checkpoint builds its thinking-budget reflection-interval table as a Jinja
+/// object literal with INTEGER keys (`{0: 0, 512: 128, ...}`) consumed by a
+/// `dictsort` threshold search. swift-jinja 2.3.6 could not parse numeric object
+/// keys (huggingface/swift-jinja #62, reported by macMLX), which forced a built-in
+/// override; 2.4.0 fixes #62, so the stock template parses and renders natively —
+/// this test is the standing proof, matching the Hunyuan V1 Dense / MiniCPM3
+/// native-render precedent rather than the former override-parity shape.
+///
+/// It renders the UNMODIFIED template (loaded from the fixture, exactly as it
+/// ships) via swift-jinja — the same engine swift-transformers drives in
+/// production, configured identically with `lstripBlocks: true, trimBlocks: true`
+/// — and asserts byte-for-byte equality against a fixture captured from that
+/// ORIGINAL template by `docs/reference/capture_seed_oss_chat_template.py`
 /// (jinja2, cross-checked == transformers `apply_chat_template`).
 ///
 /// UNGATED — needs no model weights and no Metal, so it runs under both bare
-/// `swift test` and xcodebuild. This is the standing correctness proof for the
-/// override; the real-weights `SeedOssSmokeTests` proves the end-to-end path.
+/// `swift test` and xcodebuild. The real-weights `SeedOssSmokeTests` proves the
+/// end-to-end tokenizer path.
 ///
-/// FIDELITY CAVEAT: these tests render via a BARE `Jinja.Template`/`Value`
-/// context built directly from the fixture (messages, `add_generation_prompt`,
+/// FIDELITY CAVEAT: these tests render via a BARE `Jinja.Template`/`Value` context
+/// built directly from the fixture (messages, `add_generation_prompt`,
 /// `thinking_budget`) — not through the swift-transformers `Tokenizer.
 /// applyChatTemplate` wrapper that production uses (see
-/// `HuggingFaceTokenizerLoader`). That is faithful here ONLY because the
-/// Seed-OSS template is fully self-contained: it `{%- set -%}`s all its own
-/// special tokens (`bos_token`, `eos_token`, …) and never reads a
-/// tokenizer-injected global. A future override that relies on
-/// swift-transformers-injected context (e.g. tokenizer special-token
-/// attributes merged into the render context — see `Tokenizer.
-/// applyChatTemplate`'s `tokenizerConfig.dictionary(or:)` loop) would need its
-/// parity test to go through that wrapper instead, or this bare-environment
-/// render would silently diverge from what the tokenizer actually produces.
+/// `HuggingFaceTokenizerLoader`). That is faithful here because the Seed-OSS
+/// template is fully self-contained: it `{%- set -%}`s all its own special tokens
+/// (`bos_token`, `eos_token`, …) and never reads a tokenizer-injected global. A
+/// future template that relies on swift-transformers-injected context (e.g.
+/// tokenizer special-token attributes merged into the render context — see
+/// `Tokenizer.applyChatTemplate`'s `tokenizerConfig.dictionary(or:)` loop) would
+/// need its parity test to go through that wrapper instead, or this
+/// bare-environment render would silently diverge from what the tokenizer actually
+/// produces.
 final class SeedOssChatTemplateParityTests: XCTestCase {
 
     private struct Fixture: Decodable {
+        /// The checkpoint's OWN `chat_template.jinja`, rendered directly by
+        /// swift-jinja (no macMLX override) — the exact string the tokenizer sees.
+        let template: String
         let cases: [Case]
         let boundaryCases: [Case]
         struct Case: Decodable {
@@ -56,7 +65,7 @@ final class SeedOssChatTemplateParityTests: XCTestCase {
         }
 
         enum CodingKeys: String, CodingKey {
-            case cases
+            case template, cases
             case boundaryCases = "boundary_cases"
         }
     }
@@ -91,14 +100,14 @@ final class SeedOssChatTemplateParityTests: XCTestCase {
         return context
     }
 
-    func testOverrideRendersIdenticallyToOriginal() throws {
+    func testCheckpointTemplateRendersNativelyUnderSwiftJinja() throws {
         let fixture = try loadFixture()
         XCTAssertFalse(fixture.cases.isEmpty, "fixture must carry at least one case")
 
         // Same options swift-transformers uses (Tokenizer.compiledTemplate):
         // `Template(_, with: .init(lstripBlocks: true, trimBlocks: true))`.
         let template = try Jinja.Template(
-            SeedOssChatTemplate.template,
+            fixture.template,
             with: .init(lstripBlocks: true, trimBlocks: true))
 
         for testCase in fixture.cases {
@@ -106,29 +115,28 @@ final class SeedOssChatTemplateParityTests: XCTestCase {
             let rendered = try template.render(context)
             XCTAssertEqual(
                 rendered, testCase.expected,
-                "override render diverged from the original template for case "
-                    + "'\(testCase.name)'")
+                "swift-jinja render of the checkpoint template diverged from the "
+                    + "transformers reference for case '\(testCase.name)'")
         }
     }
 
-    /// PRIMARY parity proof for the thinking-budget reflection-interval ladder:
-    /// renders the OVERRIDE via swift-jinja for every tier boundary (±1) — plus
+    /// PRIMARY proof for the thinking-budget reflection-interval lookup: renders
+    /// the checkpoint template via swift-jinja for every tier boundary (±1) — plus
     /// 0, a negative budget, and one past-top value — and asserts FULL-STRING
-    /// equality against `boundary_cases` in the fixture. Those fixture strings
-    /// are the ORIGINAL template's own render (its integer-keyed dict +
-    /// `dictsort` search) for the identical budgets, captured by
-    /// `docs/reference/capture_seed_oss_chat_template.py` and cross-checked
-    /// there against `transformers.apply_chat_template`. This closes the parity
-    /// loop against the real reference implementation rather than a
-    /// hand-transcribed interval table, which could be wrong in a way that
-    /// coincidentally matches an independently-wrong override.
-    func testThinkingBudgetBoundariesMatchOriginalTemplate() throws {
+    /// equality against `boundary_cases` in the fixture. Those fixture strings are
+    /// the ORIGINAL template's own render (its integer-keyed dict + `dictsort`
+    /// search) for the identical budgets, captured by
+    /// `docs/reference/capture_seed_oss_chat_template.py` and cross-checked there
+    /// against `transformers.apply_chat_template`. This proves swift-jinja 2.4.0
+    /// renders the integer-keyed dict + `dictsort` lookup (huggingface/swift-jinja
+    /// #62) natively and identically for every budget.
+    func testThinkingBudgetBoundariesMatchCheckpointTemplate() throws {
         let fixture = try loadFixture()
         XCTAssertFalse(
             fixture.boundaryCases.isEmpty, "fixture must carry boundary_cases")
 
         let template = try Jinja.Template(
-            SeedOssChatTemplate.template,
+            fixture.template,
             with: .init(lstripBlocks: true, trimBlocks: true))
 
         for testCase in fixture.boundaryCases {
@@ -136,22 +144,23 @@ final class SeedOssChatTemplateParityTests: XCTestCase {
             let rendered = try template.render(context)
             XCTAssertEqual(
                 rendered, testCase.expected,
-                "override render diverged from the original template at "
-                    + "thinking_budget=\(testCase.thinkingBudget.map(String.init) ?? "nil") "
+                "swift-jinja render of the checkpoint template diverged from the "
+                    + "reference at thinking_budget="
+                    + "\(testCase.thinkingBudget.map(String.init) ?? "nil") "
                     + "(case '\(testCase.name)')")
         }
     }
 
-    /// SECONDARY sanity, redundant with
-    /// `testThinkingBudgetBoundariesMatchOriginalTemplate` above (which is the
-    /// real proof, against the ORIGINAL template's own render via the fixture).
-    /// This checks the rendered reflection interval against a hand-maintained
-    /// ladder transcribed separately from both the override and the fixture
-    /// generator, so it does not share a mistranscription with either — an
+    /// SECONDARY sanity, redundant with `testThinkingBudgetBoundariesMatchCheckpointTemplate`
+    /// above (which is the real proof, against the checkpoint template's own render
+    /// via the fixture). This checks the rendered reflection interval against a
+    /// hand-maintained ladder transcribed separately from both the template and the
+    /// fixture generator, so it does not share a mistranscription with either — an
     /// independent trip-wire, not the parity proof itself.
     func testThinkingBudgetIntervalLadderBoundaries() throws {
+        let fixture = try loadFixture()
         let template = try Jinja.Template(
-            SeedOssChatTemplate.template,
+            fixture.template,
             with: .init(lstripBlocks: true, trimBlocks: true))
 
         // (thinking_budget, expected reflection interval) — mirrors the upstream

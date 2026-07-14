@@ -10,7 +10,7 @@ import Foundation
 ///      power-user escape hatch; works for managed model directories and
 ///      HuggingFace-cache snapshots alike.
 ///   2. **Built-in override** registered by `config.json`'s `model_type`
-///      (see ``builtIns`` for the current set).
+///      (see ``builtIns`` — currently empty; retained for future bad templates).
 ///   3. **None** — the checkpoint's own template is used unchanged (status quo).
 ///
 /// A model with no matching override is byte-for-byte unaffected: ``resolve``
@@ -26,13 +26,18 @@ enum ChatTemplateOverride {
 
     /// Built-in template overrides keyed by lowercased `model_type`.
     ///
+    /// Currently EMPTY. swift-jinja 2.4.0 — which fixes huggingface/swift-jinja
+    /// #62 (integer-keyed object literals), #63 (literal `}}`), and #64
+    /// (`strip(arg)` argument handling), all reported by macMLX — renders the
+    /// Seed-OSS and Command R7B (Cohere2) checkpoint templates natively, so both
+    /// former built-ins were removed. The mechanism is retained for a future
+    /// model whose own `chat_template` swift-jinja still cannot handle, and the
+    /// user-file layer (see ``resolve``) stays available regardless.
+    ///
     /// Keep this list SHORT and each entry justified in its template file's
     /// header — an override is a maintenance liability that must be removed once
     /// the underlying swift-jinja limitation is lifted.
-    static let builtIns: [String: String] = [
-        "seed_oss": SeedOssChatTemplate.template,
-        "cohere2": Cohere2ChatTemplate.template,
-    ]
+    static let builtIns: [String: String] = [:]
 
     /// A resolved override plus a human-readable source description (for logging
     /// — no silent behavior).
@@ -60,7 +65,7 @@ enum ChatTemplateOverride {
     /// Resolve the chat-template override for a model directory, or `nil` when
     /// the checkpoint's own template should be used (the common case).
     ///
-    /// Thin convenience wrapper around ``resolveDetailed(modelDirectory:fileManager:modelType:)``
+    /// Thin convenience wrapper around ``resolveDetailed(modelDirectory:fileManager:modelType:builtIns:)``
     /// for callers that only need the override itself, not the skip diagnostics.
     ///
     /// - Parameters:
@@ -70,24 +75,30 @@ enum ChatTemplateOverride {
     ///   - fileManager: injectable for tests.
     ///   - modelType: injectable lowercased `model_type`; when `nil` it is read
     ///     from `<modelDirectory>/config.json` via ``ModelConfigInfo``.
+    ///   - builtIns: injectable for tests; defaults to the (currently empty)
+    ///     shipping ``builtIns`` map. Tests pass a synthetic map to exercise the
+    ///     built-in resolution branch, which ships with no live entries.
     static func resolve(
         modelDirectory: URL,
         fileManager: FileManager = .default,
-        modelType: String? = nil
+        modelType: String? = nil,
+        builtIns: [String: String] = Self.builtIns
     ) -> Resolved? {
         resolveDetailed(
-            modelDirectory: modelDirectory, fileManager: fileManager, modelType: modelType
+            modelDirectory: modelDirectory, fileManager: fileManager,
+            modelType: modelType, builtIns: builtIns
         ).resolved
     }
 
-    /// Same resolution as ``resolve(modelDirectory:fileManager:modelType:)``, plus
+    /// Same resolution as ``resolve(modelDirectory:fileManager:modelType:builtIns:)``, plus
     /// the reason a PRESENT user override file was skipped, if any. The loader
     /// (`HuggingFaceTokenizerLoader`) uses this richer form so it can warn about a
     /// broken user file instead of silently falling through.
     static func resolveDetailed(
         modelDirectory: URL,
         fileManager: FileManager = .default,
-        modelType: String? = nil
+        modelType: String? = nil,
+        builtIns: [String: String] = Self.builtIns
     ) -> Resolution {
         // 1. User file override — highest precedence, when usable. Distinguish
         // "absent" (silent — the common case) from "present but unusable" (must

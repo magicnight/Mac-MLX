@@ -13,18 +13,17 @@ verifies that the checkpoint's own `chat_template.jinja` renders correctly under
 swift-jinja (the engine swift-transformers drives), so NO built-in chat-template
 override is needed — unlike Seed-OSS, whose integer-keyed dict forced one.
 
-The Hunyuan template only uses constructs swift-jinja 2.3.6 supports on the
-STANDARD conversation path (namespace, the message loop, string concatenation,
-`in`, `loop.last`/`loop.index0`, and tokenizer-injected `bos_token`/`eos_token`).
-The one construct swift-jinja renders differently — `content.split('<answer>')[-1]
-.strip('</answer>').strip()` (swift-jinja's `.strip()` ignores its argument and
-trims whitespace only) — sits behind `'<answer>' in content and not loop.last`,
-i.e. a HISTORICAL assistant turn that embeds `<answer>` tags. That branch is off
-the generation path and none of the representative cases here exercise it, so the
-standard path is byte-for-byte identical. (If a future need arises to reproduce
-the `<answer>`-stripping historical branch exactly, a built-in override would be
-required; today it is intentionally out of scope — see HunyuanV1DenseChatTemplate
-notes in the Swift parity test.)
+The Hunyuan template uses only constructs swift-jinja supports (namespace, the
+message loop, string concatenation, `in`, `loop.last`/`loop.index0`, and
+tokenizer-injected `bos_token`/`eos_token`). Historically the one construct
+swift-jinja rendered differently was
+`content.split('<answer>')[-1].strip('</answer>').strip()` (swift-jinja 2.3.6's
+`.strip()` ignored its argument and trimmed whitespace only), which sits behind
+`'<answer>' in content and not loop.last` — a HISTORICAL assistant turn that
+embeds `<answer>` tags. swift-jinja 2.4.0 fixes `strip(arg)` argument handling
+(huggingface/swift-jinja #64, reported by macMLX), so that branch now renders
+byte-for-byte too; the `answer_history` case below exercises it and the Swift
+parity test asserts it.
 
 This script renders the checkpoint's ORIGINAL template for representative message
 sets and stores the rendered prompt strings (plus the template and the tokenizer's
@@ -70,8 +69,7 @@ def snapshot_dir() -> str:
     )
 
 
-# Representative STANDARD-path message sets (no tools, no <answer> history — those
-# branches are off the generation path). Each exercises a distinct template path:
+# Representative message sets. Each exercises a distinct template path:
 #   • single_user            — bos + a single user turn + generation prompt.
 #   • single_user_no_gen      — the same without add_generation_prompt.
 #   • system_user            — the leading system_prompt assembly branch.
@@ -80,6 +78,10 @@ def snapshot_dir() -> str:
 #                              content + eos_token) then a trailing user.
 #   • end_assistant_no_gen    — a conversation ending on assistant, add_gen False
 #                              (is_last_user false, no trailing assistant prompt).
+#   • answer_history         — a NON-LAST assistant turn embedding <answer></answer>
+#                              tags, exercising the off-generation-path
+#                              `content.split('<answer>')[-1].strip('</answer>').strip()`
+#                              branch that swift-jinja 2.4.0 renders natively (#64).
 CASES = [
     {
         "name": "single_user",
@@ -128,6 +130,24 @@ CASES = [
             {"role": "assistant", "content": "Hello! How can I help?"},
         ],
         "add_generation_prompt": False,
+    },
+    {
+        # NON-LAST assistant turn embedding <answer></answer>: triggers the
+        # `'<answer>' in content and not loop.last` branch, whose
+        # `content.split('<answer>')[-1].strip('</answer>').strip()` keeps only the
+        # post-<answer> text with the closing tag's characters stripped. Result for
+        # this turn: "The capital of France is Paris." swift-jinja 2.4.0 renders
+        # strip(arg) with Python semantics (huggingface/swift-jinja #64).
+        "name": "answer_history",
+        "messages": [
+            {"role": "user", "content": "What is the capital of France?"},
+            {
+                "role": "assistant",
+                "content": "Let me think about this.<answer>The capital of France is Paris.</answer>",
+            },
+            {"role": "user", "content": "And what about Germany?"},
+        ],
+        "add_generation_prompt": True,
     },
 ]
 
@@ -203,10 +223,12 @@ def main() -> None:
             "apply_chat_template). HunyuanV1DenseChatTemplateParityTests renders "
             "`template` through swift-jinja with the same bos_token/eos_token and "
             "asserts equality with each case's `expected`, proving swift-jinja "
-            "renders the checkpoint template natively on the standard conversation "
-            "path. The `<answer>`-stripping historical-assistant branch is off the "
-            "generation path and intentionally not covered (swift-jinja's .strip() "
-            "trims whitespace only, ignoring its argument)."
+            "renders the checkpoint template natively. Covers the standard "
+            "conversation path plus the `answer_history` case — a non-last "
+            "`<answer>`-tagged assistant turn exercising "
+            "content.split('<answer>')[-1].strip('</answer>').strip(), which "
+            "swift-jinja 2.4.0 renders with Python strip(arg) semantics "
+            "(huggingface/swift-jinja #64)."
         ),
         "source_repo": "mlx-community/Hunyuan-1.8B-Instruct-4bit",
         "template": original,
