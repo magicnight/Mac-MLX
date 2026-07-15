@@ -15,6 +15,12 @@ function countClassToken(source, token) {
   ).length;
 }
 
+function elementWithClass(source, element, className) {
+  const match = source.match(new RegExp(`<${element} class="[^"]*\\b${className}\\b[^"]*">([\\s\\S]*?)<\\/${element}>`));
+  assert.ok(match, `missing ${element}.${className}`);
+  return match[1];
+}
+
 function extractMediaBlock(source, query) {
   const opening = new RegExp(`@media\\s+${escapeRegExp(query)}\\s*\\{`, "g");
   const match = opening.exec(source);
@@ -265,14 +271,16 @@ assert.match(zhHTML, /Swift 原生进程内引擎/);
 assert.doesNotMatch(zhHTML, /Swift-native in-process engine/);
 assert.match(html, /Current release[\s\S]*?<strong>v0\.6\.2<\/strong>/);
 assert.match(zhHTML, /当前版本[\s\S]*?<strong>v0\.6\.2<\/strong>/);
-assert.match(html, /Agent and API tool loops with structured output controls/);
+assert.match(html, /Agent and API tool loops with structured output, XTC, and KV-cache quantization controls/);
 assert.match(html, /Continuous batching, LCP reuse, and speculative decoding runtime/);
 assert.match(html, /Track G distinguishes tested results from theoretical estimates/);
 assert.match(html, /v0\.6\.1 hardening and model-family templates/);
-assert.match(zhHTML, /智能体与 API 工具循环以及结构化输出控制/);
+assert.match(zhHTML, /智能体与 API 工具循环以及结构化输出、XTC 与 KV 缓存量化控制/);
 assert.match(zhHTML, /连续批处理、LCP 复用与投机解码运行时/);
 assert.match(zhHTML, /Track G 明确区分实测结果与理论估算/);
 assert.match(zhHTML, /v0\.6\.1 加固与模型家族模板/);
+assert.equal(elementWithClass(html, "article", "release-current").match(/<li\b/g)?.length, 4);
+assert.equal(elementWithClass(zhHTML, "article", "release-current").match(/<li\b/g)?.length, 4);
 assert.match(llms, /Latest release: v0\.6\.2/);
 assert.match(ogImage, /v0\.6\.2/);
 

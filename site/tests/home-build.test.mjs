@@ -51,6 +51,12 @@ function contrastRatio(foreground, background) {
     / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
 }
 
+function elementWithClass(source, element, className) {
+  const match = source.match(new RegExp(`<${element} class="[^"]*\\b${className}\\b[^"]*">([\\s\\S]*?)<\\/${element}>`));
+  assert.ok(match, `missing ${element}.${className}`);
+  return match[1];
+}
+
 async function relativeFiles(directory, prefix = "") {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
@@ -179,18 +185,21 @@ test("rendered home presents v0.6.2 as the current shipped release", () => {
   assert.match(chinese, /当前版本[\s\S]*?<strong>v0\.6\.2<\/strong>/);
 
   for (const capability of [
-    /agent and API tool loops[^<]*structured output controls/i,
+    /agent and API tool loops[^<]*structured output[^<]*XTC[^<]*KV-cache quantization controls/i,
     /continuous batching[^<]*LCP reuse[^<]*speculative decoding/i,
     /Track G[^<]*tested[^<]*theoretical/i,
     /v0\.6\.1[^<]*hardening[^<]*templates/i,
   ]) assert.match(english, capability);
 
   for (const capability of [
-    /智能体与 API 工具循环[^<]*结构化输出控制/,
+    /智能体与 API 工具循环[^<]*结构化输出[^<]*XTC[^<]*KV 缓存量化控制/,
     /连续批处理[^<]*LCP 复用[^<]*投机解码/,
     /Track G[^<]*实测[^<]*理论/,
     /v0\.6\.1[^<]*加固[^<]*模板/,
   ]) assert.match(chinese, capability);
+
+  assert.equal(elementWithClass(english, "article", "release-current").match(/<li\b/g)?.length, 4);
+  assert.equal(elementWithClass(chinese, "article", "release-current").match(/<li\b/g)?.length, 4);
 });
 
 test("rendered engine story keeps planned work visibly separate", () => {
