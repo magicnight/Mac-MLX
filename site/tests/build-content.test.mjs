@@ -14,7 +14,7 @@ before(async () => {
   ({ documents: generatedDocuments } = await prepareSite());
 });
 
-test("the build emits all 26 localized HTML documents", async () => {
+test("the build emits all 28 localized HTML documents", async () => {
   documents = new Map();
   for (const route of routes) {
     for (const [locale, path] of Object.entries(route.paths)) {
@@ -22,7 +22,7 @@ test("the build emits all 26 localized HTML documents", async () => {
       documents.set(`${route.id}:${locale}`, generatedDocuments.get(path));
     }
   }
-  assert.equal(documents.size, 26);
+  assert.equal(documents.size, 28);
 });
 
 test("every article is localized, answer-first, semantic, source-linked, and cross-locale", () => {
@@ -36,7 +36,7 @@ test("every article is localized, answer-first, semantic, source-linked, and cro
       assert.match(html, /class="article-body"/);
       assert.match(html, /class="content-section sources"/);
       assert.match(html, /class="related-pages"/);
-      assert.match(html, /<time datetime="2026-07-10">2026-07-10<\/time>/);
+      assert.match(html, /<time datetime="2026-07-15">2026-07-15<\/time>/);
       assert.match(html, /class="site-header"/);
       assert.match(html, /class="site-footer"/);
       assert.match(html, new RegExp(`<link rel="canonical" href="https:\/\/macmlx\\.app${path.replaceAll("/", "\\/")}">`));
@@ -50,23 +50,34 @@ test("every article is localized, answer-first, semantic, source-linked, and cro
 test("generated content exposes the audited facts and exact visible structures", () => {
   const architecture = documents.get("architecture:en");
   const api = documents.get("api-compatibility:en");
+  const models = documents.get("models:en");
   const vlm = documents.get("vision-language-models:en");
   const faq = documents.get("faq:en");
   const compare = documents.get("compare:en");
-  const release = documents.get("release-v0-5-3:en");
+  const release = documents.get("release-v0-6-2:en");
   assert.match(architecture, /separate processes keep separate in-memory engine instances/);
   assert.match(architecture, /data-status="released"/);
-  assert.match(architecture, /data-status="development"/);
   assert.match(architecture, /data-status="planned"/);
+  assert.match(architecture, /eligibility-gated continuous batching/i);
+  assert.match(architecture, /2\.5(?:&ndash;|–|&#x2013;|-)3\.2×/);
+  assert.match(architecture, /Paged KV, block sharing, and CoW/);
+  assert.match(architecture, /adaptive memory (?:controller|guard)/i);
   assert.match(api, /\/x\/models/);
+  assert.match(api, /Structured output/);
+  assert.match(api, /KV-cache quantization/);
   assert.match(api, /Messages API only/);
   assert.match(api, /\/api\/version, \/api\/tags, \/api\/show, \/api\/chat, \/api\/generate/);
+  assert.match(models, /Seed-OSS-36B/);
+  assert.match(models, /InternLM3-8B/);
+  assert.match(models, /tokenizer\.json/);
+  assert.match(models, /checkpoint-specific, not family-wide performance guarantees/);
+  assert.match(models, /theoretical only/i);
   assert.match(vlm, /14 VLM model_type families/);
   assert.equal(faq.match(/<details>/g)?.length, 8);
   for (const name of ["Ollama", "LM Studio", "oMLX", "Swama", "SwiftLM"]) assert.match(compare, new RegExp(name));
   assert.match(compare, /Dated factual comparison/);
   assert.match(compare, /comparison-limitations/);
-  assert.match(release, /Development after the tag/);
+  assert.match(release, /current audited baseline/i);
   assert.match(release, /Paged KV, block sharing, and CoW/);
   assert.match(release, /Compatibility and upgrade notes/);
 });
@@ -102,7 +113,7 @@ test("repeated content builds are byte-identical", async () => {
 });
 
 test("build validation uses an injectable actual UTC date without changing rendered dates", async () => {
-  await assert.doesNotReject(prepareSite({ today: "2026-07-10" }));
+  await assert.doesNotReject(prepareSite({ today: "2026-07-15" }));
   await assert.rejects(prepareSite({ today: "2026-08-25" }), /stale fact/);
-  assert.match(generatedDocuments.get("/architecture/"), /2026-07-10/);
+  assert.match(generatedDocuments.get("/architecture/"), /2026-07-15/);
 });
