@@ -71,25 +71,32 @@ test("FAQ source aggregation exactly covers every indirectly cited fact", () => 
 });
 
 test("comparison source aggregation covers every macMLX profile citation", () => {
-  const expected = new Set(Object.values(macmlxComparisonProfile.en).flatMap((cell) => cell.sourceFactIds));
+  const expected = new Set(Object.values(macmlxComparisonProfile).flatMap((profile) => Object.values(profile).flatMap((cell) => cell.sourceFactIds)));
   for (const page of pages.filter((item) => item.blocks.some((block) => block.type === "comparison"))) {
     const sourceBlock = page.blocks.find((block) => block.type === "sources");
     for (const factId of expected) assert.ok(sourceBlock.factIds.includes(factId), `${page.id} omits comparison source fact ${factId}`);
   }
 });
 
-test("release pages close over every release fact source and official release source", () => {
+test("release pages keep current fact closure and historical evidence version-scoped", () => {
   const releaseFacts = (release) => new Set([
     ...release.shippedFactIds,
     ...release.limitationFactIds,
     ...release.developmentFactIds,
     ...release.plannedFactIds,
   ]);
-  for (const release of releases) {
-    const id = `release-${release.id}`;
-    const sourceBlock = pages.find((page) => page.id === id).blocks.find((block) => block.type === "sources");
-    assert.deepEqual(new Set(sourceBlock.factIds), releaseFacts(release), `${id} fact source closure`);
-    assert.deepEqual(sourceBlock.releaseIds, [release.id], `${id} official release source closure`);
+  const currentRelease = releases.find((release) => release.id === "v0-6-2");
+  const currentSources = pages.find((page) => page.id === "release-v0-6-2").blocks.find((block) => block.type === "sources");
+  assert.deepEqual(new Set(currentSources.factIds), releaseFacts(currentRelease), "release-v0-6-2 fact source closure");
+  assert.deepEqual(currentSources.releaseIds, ["v0-6-2"], "release-v0-6-2 official release source closure");
+
+  const historicalRelease = releases.find((release) => release.id === "v0-5-3");
+  const historicalSources = pages.find((page) => page.id === "release-v0-5-3").blocks.find((block) => block.type === "sources");
+  assert.deepEqual(historicalSources.factIds, [], "release-v0-5-3 must not expose current fact sources");
+  assert.deepEqual(historicalSources.releaseIds, ["v0-5-3"], "release-v0-5-3 official release source closure");
+  for (const url of historicalRelease.officialSources) {
+    assert.match(url, /\/(?:releases\/tag|blob)\/v0\.5\.3(?:\/|$)/, `historical source must be v0.5.3-tagged: ${url}`);
+    assert.doesNotMatch(url, /v0\.6\.2|\/main\//, `historical source must not use current or mutable evidence: ${url}`);
   }
 
   const hubSources = pages.find((page) => page.id === "releases").blocks.find((block) => block.type === "sources");
