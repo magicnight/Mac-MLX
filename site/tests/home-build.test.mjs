@@ -52,9 +52,9 @@ function contrastRatio(foreground, background) {
 }
 
 function elementWithClass(source, element, className) {
-  const match = source.match(new RegExp(`<${element} class="[^"]*\\b${className}\\b[^"]*">([\\s\\S]*?)<\\/${element}>`));
+  const match = source.match(new RegExp(`<${element} class="([^"]*\\b${className}\\b[^"]*)">([\\s\\S]*?)<\\/${element}>`));
   assert.ok(match, `missing ${element}.${className}`);
-  return match[1];
+  return { classes: match[1], content: match[2] };
 }
 
 async function relativeFiles(directory, prefix = "") {
@@ -181,25 +181,31 @@ test("build emits independent locale documents without runtime bilingual attribu
 });
 
 test("rendered home presents v0.6.2 as the current shipped release", () => {
-  assert.match(english, /Current release[\s\S]*?<strong>v0\.6\.2<\/strong>/);
-  assert.match(chinese, /当前版本[\s\S]*?<strong>v0\.6\.2<\/strong>/);
+  const englishRelease = elementWithClass(english, "article", "release-current");
+  const chineseRelease = elementWithClass(chinese, "article", "release-current");
+
+  assert.doesNotMatch(englishRelease.classes, /\bbuilding\b/);
+  assert.doesNotMatch(chineseRelease.classes, /\bbuilding\b/);
+  assert.equal(englishRelease.content.match(/<li\b/g)?.length, 4);
+  assert.equal(chineseRelease.content.match(/<li\b/g)?.length, 4);
+  assert.match(englishRelease.content, /<strong>v0\.6\.2 · Jul 11, 2026<\/strong>/);
+  assert.match(chineseRelease.content, /<strong>v0\.6\.2 · 2026年7月11日<\/strong>/);
+  assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.6\.2"[^>]*>View v0\.6\.2 release ↗<\/a>/);
+  assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.6\.2"[^>]*>查看 v0\.6\.2 版本 ↗<\/a>/);
 
   for (const capability of [
     /agent and API tool loops[^<]*structured output[^<]*XTC[^<]*KV-cache quantization controls/i,
     /continuous batching[^<]*LCP reuse[^<]*speculative decoding/i,
-    /Track G[^<]*tested[^<]*theoretical/i,
-    /v0\.6\.1[^<]*hardening[^<]*templates/i,
-  ]) assert.match(english, capability);
+    /Track G distinguishes four tested models from theoretical InternLM3/,
+    /v0\.6\.1 hardening and v0\.6\.2 per-model chat-template overrides/,
+  ]) assert.match(englishRelease.content, capability);
 
   for (const capability of [
     /智能体与 API 工具循环[^<]*结构化输出[^<]*XTC[^<]*KV 缓存量化控制/,
     /连续批处理[^<]*LCP 复用[^<]*投机解码/,
-    /Track G[^<]*实测[^<]*理论/,
-    /v0\.6\.1[^<]*加固[^<]*模板/,
-  ]) assert.match(chinese, capability);
-
-  assert.equal(elementWithClass(english, "article", "release-current").match(/<li\b/g)?.length, 4);
-  assert.equal(elementWithClass(chinese, "article", "release-current").match(/<li\b/g)?.length, 4);
+    /Track G 区分四个实测模型与理论支持的 InternLM3/,
+    /v0\.6\.1 加固与 v0\.6\.2 逐模型聊天模板覆盖/,
+  ]) assert.match(chineseRelease.content, capability);
 });
 
 test("rendered engine story keeps planned work visibly separate", () => {
