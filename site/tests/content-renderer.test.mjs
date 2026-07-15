@@ -102,3 +102,23 @@ test("release rendering includes localized compatibility and upgrade notes", asy
   assert.match(html, /Compatibility note/);
   assert.match(html, /Upgrade note/);
 });
+
+test("release rendering omits empty lifecycle groups", async () => {
+  const { renderContentBlocks } = await import("../lib/content-renderer.mjs");
+  const releaseContext = structuredClone(context);
+  releaseContext.releasesById.release = {
+    releaseDate: "2026-07-08",
+    shippedFactIds: ["core"], limitationFactIds: ["core"], developmentFactIds: ["core"], plannedFactIds: ["core"],
+    en: { title: "Release", summary: "Summary", compatibilityNotes: "Compatibility note", upgradeNotes: "Upgrade note" },
+  };
+  releaseContext.releasesById.release = {
+    ...releaseContext.releasesById.release,
+    developmentFactIds: [],
+  };
+  const releaseHTML = renderContentBlocks([
+    { type: "release", heading: { en: "Release", "zh-Hans": "版本" }, releaseIds: ["release"] },
+  ], releaseContext);
+  assert.match(releaseHTML, />Shipped</);
+  assert.match(releaseHTML, />Planned</);
+  assert.doesNotMatch(releaseHTML, /Development after the tag/);
+});

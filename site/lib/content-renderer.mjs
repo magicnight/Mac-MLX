@@ -112,7 +112,10 @@ function renderRelease(block, context) {
       [context.locale === "en" ? "Development after the tag" : "标签后的开发工作", item.developmentFactIds],
       [context.locale === "en" ? "Planned" : "规划中", item.plannedFactIds],
     ];
-    const groups = categories.map(([label, ids]) => `<section class="release-status-group"><h3>${escapeHTML(label)}</h3><div class="fact-cards">${ids.map((factId) => factCard(requireItem(context.factsById, factId, "fact"), context)).join("")}</div></section>`).join("");
+    const groups = categories
+      .filter(([, ids]) => ids.length > 0)
+      .map(([label, ids]) => `<section class="release-status-group"><h3>${escapeHTML(label)}</h3><div class="fact-cards">${ids.map((factId) => factCard(requireItem(context.factsById, factId, "fact"), context)).join("")}</div></section>`)
+      .join("");
     const notesHeading = context.locale === "en" ? "Compatibility and upgrade notes" : "兼容性与升级说明";
     const compatibilityLabel = context.locale === "en" ? "Compatibility" : "兼容性";
     const upgradeLabel = context.locale === "en" ? "Upgrade" : "升级";

@@ -86,6 +86,29 @@ test("release status lists reject facts from the wrong lifecycle", async () => {
   }
 });
 
+test("release records require shipped facts but may omit empty lifecycle groups", async () => {
+  const { validateReleases } = await import("../lib/content.mjs");
+  const factIds = new Set(facts.map((fact) => fact.id));
+  const factsById = new Map(facts.map((fact) => [fact.id, fact]));
+  const candidate = {
+    ...releases[0],
+    developmentFactIds: [],
+  };
+  assert.doesNotThrow(() => validateReleases([candidate], factIds, {
+    today: "2026-07-15",
+    maxAgeDays: 45,
+    factsById,
+  }));
+  assert.throws(
+    () => validateReleases([{ ...candidate, shippedFactIds: [] }], factIds, {
+      today: "2026-07-15",
+      maxAgeDays: 45,
+      factsById,
+    }),
+    /shippedFactIds must not be empty/,
+  );
+});
+
 test("validation rejects future dates and sources outside official ownership", async () => {
   const { validateCompetitors, validateFacts, validateReleases } = await import("../lib/content.mjs");
   assert.throws(() => validateFacts([{ ...facts[0], lastVerified: "2026-07-11" }], { today: "2026-07-10", maxAgeDays: 45 }), /future fact/);

@@ -151,8 +151,16 @@ export function validateReleases(releases, factIds, options) {
     if (!hasImmutableReleaseSource(item.officialSources)) throw new Error(`immutable release source required: ${item.id}`);
     requireLocaleRecord(item, `release.${item.id}`, ["title", "summary", "compatibilityNotes", "upgradeNotes"]);
     for (const field of ["shippedFactIds", "limitationFactIds", "developmentFactIds", "plannedFactIds"]) {
-      if (!Array.isArray(item[field]) || item[field].length === 0) throw new Error(`release.${item.id}.${field} must not be empty`);
-      for (const factId of item[field]) if (!factIds.has(factId)) throw new Error(`unknown fact in release ${item.id}: ${factId}`);
+      if (!Array.isArray(item[field])) throw new Error(`release.${item.id}.${field} must be an array`);
+      if (field === "shippedFactIds" && item[field].length === 0) {
+        throw new Error(`release.${item.id}.shippedFactIds must not be empty`);
+      }
+      if (new Set(item[field]).size !== item[field].length) {
+        throw new Error(`release.${item.id}.${field} must not contain duplicates`);
+      }
+      for (const factId of item[field]) {
+        if (!factIds.has(factId)) throw new Error(`unknown fact in release ${item.id}: ${factId}`);
+      }
     }
     const factsById = options.factsById;
     if (!(factsById instanceof Map)) throw new Error("release validation requires factsById");
