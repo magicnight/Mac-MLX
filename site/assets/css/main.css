@@ -372,7 +372,7 @@ html.reveal-ready .reveal.is-visible { opacity: 1; transform: none; }
 .fact-card__meta { display: flex; justify-content: space-between; gap: 16px; color: var(--ink-faint); font-family: var(--mono); font-size: 9px; line-height: 1.4; letter-spacing: .04em; text-transform: uppercase; }
 .fact-card .status-label { width: max-content; padding: 4px 7px; color: var(--success-text); border: 1px solid color-mix(in srgb, var(--success) 38%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--success) 7%, transparent); }
 .fact-card[data-status="development"] .status-label { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 38%, transparent); background: color-mix(in srgb, var(--blue) 7%, transparent); }
-.fact-card[data-status="planned"] .status-label { color: var(--ink-soft); border-color: var(--line-strong); background: var(--paper); }
+.fact-card[data-status="planned"] .status-label, .fact-card[data-status="limited"] .status-label, .fact-card[data-status="theoretical"] .status-label { color: var(--ink-soft); border-color: var(--line-strong); background: var(--paper); }
 .fact-card h3 { margin: 25px 0 12px; font-size: 23px; line-height: 1.12; letter-spacing: -.035em; }
 .fact-card p { margin: 0; color: var(--ink-soft); font-size: 14px; line-height: 1.65; }
 .fact-card .fact-detail { margin-top: 10px; }

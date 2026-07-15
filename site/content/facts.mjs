@@ -4,7 +4,7 @@ const tagged = (path) => `${repository}/blob/v0.6.2/${path}`;
 const main = (path) => `${repository}/blob/main/${path}`;
 const verified = "2026-07-15";
 
-function fact(id, status, sinceVersion, pageIds, sources, en, zh) {
+function fact(id, status, sinceVersion, pageIds, sources, en, zh, attributes = {}) {
   return Object.freeze({
     id,
     status,
@@ -12,6 +12,7 @@ function fact(id, status, sinceVersion, pageIds, sources, en, zh) {
     lastVerified: verified,
     pageIds: Object.freeze(pageIds),
     sourceUrls: Object.freeze(sources),
+    ...attributes,
     en: Object.freeze(en),
     "zh-Hans": Object.freeze(zh),
   });
@@ -109,7 +110,8 @@ export const facts = Object.freeze([
     { title: "Track G 已测试模型", summary: "v0.6.2 新增四个通过检查点实测的原生模型家族。", detail: "真实检查点生成实测：Seed-OSS-36B 4-bit 为 18.2 tok/s；Hunyuan V1 Dense 1.8B 4-bit 为 80.3 tok/s；Cohere Command R7B 7B 4-bit 为 21.7 tok/s；MiniCPM3-4B 4-bit 为 18.7 tok/s。结果仅适用于对应检查点，不构成整个家族的性能保证。" }),
   fact("internlm3-theoretical", "released", "0.6.2", ["models"], [release, changelog, tagged("docs/model-support.md"), tagged("MacMLXCore/Sources/MacMLXCore/Models/InternLM3.swift")],
     { title: "InternLM3 theoretical support", summary: "v0.6.2 ships parity-verified InternLM3 code at the theoretical support tier.", detail: "Real generation has not been demonstrated. Public checkpoints ship tokenizer.model but no tokenizer.json, while the Swift tokenizer stack requires tokenizer.json; support remains theoretical until that load-path boundary changes." },
-    { title: "InternLM3 理论支持", summary: "v0.6.2 交付通过等价性验证的 InternLM3 代码，支持等级为理论级。", detail: "真实生成尚未得到演示。公开检查点提供 tokenizer.model，但没有 tokenizer.json，而 Swift 分词器栈需要 tokenizer.json；在该加载路径边界改变前，支持仍为理论级。" }),
+    { title: "InternLM3 理论支持", summary: "v0.6.2 交付通过等价性验证的 InternLM3 代码，支持等级为理论级。", detail: "真实生成尚未得到演示。公开检查点提供 tokenizer.model，但没有 tokenizer.json，而 Swift 分词器栈需要 tokenizer.json；在该加载路径边界改变前，支持仍为理论级。" },
+    { supportTier: "theoretical" }),
   fact("paged-kv", "planned", "future", ["architecture"], [roadmap],
     { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released in v0.6.2." },
     { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未在 v0.6.2 发布。" }),

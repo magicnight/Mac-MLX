@@ -67,6 +67,14 @@ test("validation rejects stale dates, mutable release sources, and broken refere
   assert.throws(() => validateFAQs(brokenFAQs, new Set(facts.map((fact) => fact.id))), /unknown fact/);
 });
 
+test("fact support tiers are governed separately from release lifecycle", async () => {
+  const { validateFacts } = await import("../lib/content.mjs");
+  assert.throws(
+    () => validateFacts([{ ...facts[0], supportTier: "released" }], { today: "2026-07-15", maxAgeDays: 45 }),
+    /invalid fact support tier/,
+  );
+});
+
 test("release status lists reject facts from the wrong lifecycle", async () => {
   const { validateReleases } = await import("../lib/content.mjs");
   const factIds = new Set(facts.map((fact) => fact.id));

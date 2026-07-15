@@ -5,8 +5,8 @@ export const supportedContentBlocks = Object.freeze([
 ]);
 
 const statusLabels = Object.freeze({
-  en: Object.freeze({ released: "Released", development: "In development", planned: "Planned" }),
-  "zh-Hans": Object.freeze({ released: "已发布", development: "开发中", planned: "规划中" }),
+  en: Object.freeze({ released: "Released", limited: "Limited", theoretical: "Theoretical", development: "In development", planned: "Planned" }),
+  "zh-Hans": Object.freeze({ released: "已发布", limited: "有限支持", theoretical: "理论支持", development: "开发中", planned: "规划中" }),
 });
 
 function localized(value, locale, label) {
@@ -41,9 +41,10 @@ function renderIllustration(block, context) {
 function factCard(fact, context) {
   const copy = fact[context.locale];
   if (copy === undefined) throw new Error(`missing locale content for fact: ${fact.id}/${context.locale}`);
-  const status = statusLabels[context.locale]?.[fact.status];
-  if (status === undefined) throw new Error(`unknown fact status: ${fact.status}`);
-  return `<article class="fact-card" data-status="${escapeHTML(fact.status)}"><div class="fact-card__meta"><span class="status-label">${escapeHTML(status)}</span><span>${escapeHTML(fact.sinceVersion)}</span></div><h3>${escapeHTML(copy.title)}</h3><p>${escapeHTML(copy.summary)}</p><p class="fact-detail">${escapeHTML(copy.detail)}</p><p class="fact-verified"><span>${context.locale === "en" ? "Verified" : "核验"}</span> <time datetime="${escapeHTML(fact.lastVerified)}">${escapeHTML(fact.lastVerified)}</time></p></article>`;
+  const displayStatus = fact.supportTier ?? fact.status;
+  const status = statusLabels[context.locale]?.[displayStatus];
+  if (status === undefined) throw new Error(`unknown fact status: ${displayStatus}`);
+  return `<article class="fact-card" data-status="${escapeHTML(displayStatus)}"><div class="fact-card__meta"><span class="status-label">${escapeHTML(status)}</span><span>${escapeHTML(fact.sinceVersion)}</span></div><h3>${escapeHTML(copy.title)}</h3><p>${escapeHTML(copy.summary)}</p><p class="fact-detail">${escapeHTML(copy.detail)}</p><p class="fact-verified"><span>${context.locale === "en" ? "Verified" : "核验"}</span> <time datetime="${escapeHTML(fact.lastVerified)}">${escapeHTML(fact.lastVerified)}</time></p></article>`;
 }
 
 function renderFacts(block, context) {

@@ -102,7 +102,7 @@ test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current
   }
 });
 
-test("the v0.6.2 release page keeps localized canonical article and breadcrumb metadata", async () => {
+test("the v0.6.2 release page exposes immutable release identity with localized canonical metadata", async () => {
   const { documents } = await prepareSite({ today: "2026-07-15" });
   const releasePage = pages.find((page) => page.id === "release-v0-6-2");
   assert.ok(releasePage);
@@ -115,9 +115,16 @@ test("the v0.6.2 release page keeps localized canonical article and breadcrumb m
 
     const graph = jsonLD(html)["@graph"];
     const article = graph.find((node) => node["@type"] === "TechArticle");
+    const softwareRelease = graph.find((node) => node["@type"] === "SoftwareApplication");
     const breadcrumbs = graph.find((node) => node["@type"] === "BreadcrumbList");
     assert.equal(article.dateModified, "2026-07-15");
     assert.equal(new URL(article.mainEntityOfPage).pathname, path);
+    assert.equal(softwareRelease["@id"], "https://github.com/magicnight/mac-mlx/releases/tag/v0.6.2#software-release");
+    assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.6.2");
+    assert.equal(softwareRelease.softwareVersion, "0.6.2");
+    assert.equal(softwareRelease.datePublished, "2026-07-11");
+    assert.equal(softwareRelease.dateModified, "2026-07-15");
+    assert.equal(new URL(softwareRelease.mainEntityOfPage).pathname, path);
     assert.deepEqual(
       breadcrumbs.itemListElement.map((item) => new URL(item.item).pathname),
       locale === "en" ? ["/", "/releases/", path] : ["/zh/", "/zh/releases/", path],

@@ -2,6 +2,7 @@ export const contentStatuses = Object.freeze(["released", "development", "planne
 
 const locales = Object.freeze(["en", "zh-Hans"]);
 const statuses = new Set(contentStatuses);
+const supportTiers = new Set(["limited", "theoretical"]);
 const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 const idPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -83,6 +84,7 @@ export function validateFacts(facts, options) {
   for (const item of facts) {
     requireUniqueId(item, ids, "fact");
     if (!statuses.has(item.status)) throw new Error(`invalid fact status: ${item.id}`);
+    if (item.supportTier !== undefined && !supportTiers.has(item.supportTier)) throw new Error(`invalid fact support tier: ${item.id}`);
     requireNonEmptyString(item.sinceVersion, `fact.${item.id}.sinceVersion`);
     requireFreshDate(item, "fact", options);
     requireHTTPSUrls(item.sourceUrls, `fact.${item.id}`);

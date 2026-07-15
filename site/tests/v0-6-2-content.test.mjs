@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { facts, macmlxComparisonProfile } from "../content/facts.mjs";
+import { pages } from "../content/pages.mjs";
 import { project } from "../content/project.mjs";
 import { releases } from "../content/releases.mjs";
 
@@ -59,10 +60,27 @@ test("model support facts preserve measured and theoretical boundaries", () => {
   }
 
   const internLM3 = factsById.get("internlm3-theoretical");
+  assert.equal(internLM3.status, "released", "shipped code must stay in the released lifecycle");
+  assert.equal(internLM3.supportTier, "theoretical", "displayed model support must stay theoretical");
   assert.match(internLM3.en.detail, /tokenizer\.json/);
   assert.match(internLM3.en.detail, /tokenizer\.model/);
   assert.match(internLM3["zh-Hans"].detail, /tokenizer\.json/);
   assert.match(internLM3["zh-Hans"].detail, /tokenizer\.model/);
+});
+
+test("API tool-loop row uses product-facing language without changing route coverage", () => {
+  const apiPage = pages.find((page) => page.id === "api-compatibility");
+  const matrix = apiPage.blocks.find((block) => block.type === "table");
+  assert.deepEqual(matrix.rows.en.find((row) => row[0] === "Tool loops"), [
+    "Tool loops",
+    "OpenAI, Anthropic, and GUI MCP routes",
+    "Multi-turn tool routing released in v0.6.0",
+  ]);
+  assert.deepEqual(matrix.rows["zh-Hans"].find((row) => row[0] === "工具循环"), [
+    "工具循环",
+    "OpenAI、Anthropic 与 GUI MCP 路由",
+    "多轮工具路由于 v0.6.0 发布",
+  ]);
 });
 
 test("planned work stays separate from released KV-cache quantization", () => {

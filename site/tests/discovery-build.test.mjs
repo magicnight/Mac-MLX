@@ -7,7 +7,7 @@ import test from "node:test";
 import { prepareSite, validateSocialAssets } from "../../scripts/build-public-site.mjs";
 
 test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404 outputs", async () => {
-  const { markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-07-15" });
+  const { documents, markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-07-15" });
   assert.equal(markdownDocuments.size, 28);
   assert.deepEqual([...discoveryFiles.keys()], [
     "llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt",
@@ -22,6 +22,23 @@ test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404
   assert.match(llms, /Latest release: v0\.6\.2/);
   assert.match(llmsFull, /### continuous-batching[\s\S]*?- Status: released[\s\S]*?- Title: Eligibility-gated continuous batching/);
   assert.match(llmsFull, /### paged-kv[\s\S]*?- Status: planned[\s\S]*?- Title: Paged KV, block sharing, and CoW/);
+  const internLMEnglish = llmsFull.match(/### internlm3-theoretical\n([\s\S]*?)(?=\n### |\n## Canonical)/)?.[1];
+  const internLMChinese = discoveryFiles.get("zh/llms-full.txt").match(/### internlm3-theoretical\n([\s\S]*?)(?=\n### |\n## 规范)/)?.[1];
+  assert.match(internLMEnglish, /- Status: theoretical/);
+  assert.doesNotMatch(internLMEnglish, /Status: released/);
+  assert.match(internLMChinese, /- 状态：theoretical/);
+  assert.doesNotMatch(internLMChinese, /已发布|状态：released/);
+  for (const [path, title, label] of [
+    ["/models/", "InternLM3 theoretical support", "Theoretical"],
+    ["/zh/models/", "InternLM3 理论支持", "理论支持"],
+  ]) {
+    const card = [...documents.get(path).matchAll(/<article class="fact-card"[^>]*>[\s\S]*?<\/article>/g)]
+      .map((match) => match[0])
+      .find((candidate) => candidate.includes(`<h3>${title}</h3>`));
+    assert.ok(card, `missing InternLM3 card on ${path}`);
+    assert.match(card, new RegExp(`data-status="theoretical"[\\s\\S]*?>${label}<`));
+    assert.doesNotMatch(card, />Released<|>已发布</);
+  }
   assert.ok(markdownDocuments.has("content/en/release-v0-6-2.md"));
   assert.ok(markdownDocuments.has("content/zh/release-v0-6-2.md"));
   assert.match(discoveryFiles.get("404.html"), /noindex,follow/);

@@ -142,7 +142,7 @@ function renderArticle(template, page, locale) {
   const counterpartLocale = locale === "en" ? "zh-Hans" : "en";
   const content = renderContentBlocks(page.blocks, { locale, factsById, competitorsById, faqsById, releasesById, pagesById, macmlxComparisonProfile });
   const trusted = template
-    .replace("<!--article-head-->", renderMetadata({ project, route: page, page, locale, faqs }))
+    .replace("<!--article-head-->", renderMetadata({ project, route: page, page, locale, faqs, releases }))
     .replace("<!--site-header-->", renderHeader(locale, page.paths[counterpartLocale]))
     .replace("<!--breadcrumbs-->", renderBreadcrumbs(page, locale))
     .replace("<!--article-content-->", content)

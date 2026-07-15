@@ -53,7 +53,7 @@ function homeGraph(project, locale, canonical, description) {
   ];
 }
 
-function articleGraph(project, page, locale, canonical, description, faqs) {
+function articleGraph(project, page, locale, canonical, description, faqs, releases) {
   const graph = [
     {
       "@type": "TechArticle",
@@ -83,6 +83,28 @@ function articleGraph(project, page, locale, canonical, description, faqs) {
       })),
     });
   }
+  const releaseId = page.blocks?.find((block) => block.type === "release")?.releaseIds?.[0];
+  const release = releases.find((item) => item.id === releaseId);
+  if (release !== undefined) {
+    const releaseURL = release.officialSources[0];
+    graph.push({
+      "@type": "SoftwareApplication",
+      "@id": `${releaseURL}#software-release`,
+      name: release[locale].title,
+      url: releaseURL,
+      description: release[locale].summary,
+      inLanguage: locale,
+      softwareVersion: release.version,
+      datePublished: release.releaseDate,
+      dateModified: release.lastVerified,
+      mainEntityOfPage: canonical,
+      isPartOf: { "@id": siteURL(project, "/#software") },
+      operatingSystem: project.operatingSystem,
+      applicationCategory: "DeveloperApplication",
+      codeRepository: project.repositoryURL,
+      downloadUrl: project.downloadURL,
+    });
+  }
   return graph;
 }
 
@@ -100,7 +122,7 @@ export function renderBrandLinks() {
   <link rel="manifest" href="/assets/brand/site.webmanifest">`;
 }
 
-export function renderMetadata({ project, route, locale, page = route, faqs = [] }) {
+export function renderMetadata({ project, route, locale, page = route, faqs = [], releases = [] }) {
   validateProject(project);
   if (!route?.paths?.[locale]) throw new Error(`Missing route path for ${route?.id ?? "unknown"}/${locale}`);
   const title = localizedTitle(project, route, page, locale);
@@ -112,7 +134,7 @@ export function renderMetadata({ project, route, locale, page = route, faqs = []
   const imageAlt = locale === "en" ? "macMLX native Swift inference for Apple Silicon" : "macMLX 在 Apple 芯片上的原生 Swift 推理";
   const graph = route.kind === "home"
     ? homeGraph(project, locale, canonical, description)
-    : articleGraph(project, page, locale, canonical, description, faqs);
+    : articleGraph(project, page, locale, canonical, description, faqs, releases);
 
   return `${renderBrandLinks()}
   <title>${escapeHTML(title)}</title>

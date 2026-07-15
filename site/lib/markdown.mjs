@@ -11,6 +11,8 @@ const labels = Object.freeze({
     sources: "Sources",
     related: "Related pages",
     released: "Released",
+    limited: "Limited",
+    theoretical: "Theoretical",
     development: "In development",
     planned: "Planned",
   }),
@@ -22,6 +24,8 @@ const labels = Object.freeze({
     sources: "来源",
     related: "相关页面",
     released: "已发布",
+    limited: "有限支持",
+    theoretical: "理论支持",
     development: "开发中",
     planned: "规划中",
   }),
@@ -90,7 +94,7 @@ function renderPageMarkdown({ route, locale, project, routes, facts, competitors
   const separator = locale === "en" ? ": " : "：";
   const factLines = factItems.length === 0
     ? [`- ${locale === "en" ? "No separate governed facts are assigned to this index page." : "此索引页未单独分配受治理事实。"}`]
-    : factItems.map((fact) => `- **${fact[locale].title}** — ${text[fact.status]}; ${locale === "en" ? "since" : "始于"} ${fact.sinceVersion}; ${text.verified.toLowerCase?.() ?? text.verified} ${fact.lastVerified}. ${fact[locale].summary} ${fact[locale].detail}`);
+    : factItems.map((fact) => `- **${fact[locale].title}** — ${text[fact.supportTier ?? fact.status]}; ${locale === "en" ? "since" : "始于"} ${fact.sinceVersion}; ${text.verified.toLowerCase?.() ?? text.verified} ${fact.lastVerified}. ${fact[locale].summary} ${fact[locale].detail}`);
   const sourceLines = sources.length === 0
     ? [`- ${project.repositoryURL}`]
     : sources.map((url) => `- ${url}`);
@@ -166,7 +170,7 @@ function fullIndex(context, locale) {
   const separator = zh ? "：" : ": ";
   const facts = context.facts.map((fact) => `### ${fact.id}
 
-- ${zh ? "状态" : "Status"}${separator}${fact.status}
+- ${zh ? "状态" : "Status"}${separator}${fact.supportTier ?? fact.status}
 - ${zh ? "始于版本" : "Since version"}${separator}${fact.sinceVersion}
 - ${zh ? "最后核验" : "Last verified"}${separator}${fact.lastVerified}
 - ${zh ? "标题" : "Title"}${separator}${fact[locale].title}
