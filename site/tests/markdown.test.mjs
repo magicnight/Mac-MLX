@@ -14,7 +14,7 @@ const context = { project, routes, pages, facts, competitors, faqs, releases };
 
 test("every route has a registry-derived Markdown counterpart in both locales", () => {
   const documents = renderMarkdownDocuments(context);
-  assert.equal(documents.size, 26);
+  assert.equal(documents.size, 28);
   for (const route of routes) {
     for (const [locale, directory] of [["en", "en"], ["zh-Hans", "zh"]]) {
       const path = `content/${directory}/${route.id}.md`;
@@ -27,7 +27,7 @@ test("every route has a registry-derived Markdown counterpart in both locales", 
       assert.match(markdown, /## (Related pages|相关页面)/);
       const canonicalLabel = locale === "en" ? "Canonical: " : "规范网址：";
       assert.match(markdown, new RegExp(`${canonicalLabel}${project.origin}${route.paths[locale].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(markdown, /Last verified: 2026-07-10|最后核验：2026-07-10/);
+      assert.match(markdown, /Last verified: 2026-07-15|最后核验：2026-07-15/);
       assert.doesNotMatch(markdown, /undefined|\{\{|\}\}/);
     }
   }
@@ -36,8 +36,8 @@ test("every route has a registry-derived Markdown counterpart in both locales", 
 test("short llms files are navigational and full files preserve fact/status/source parity", () => {
   const indexes = renderLLMSIndexes(context);
   assert.deepEqual([...indexes.keys()], ["llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt"]);
-  assert.match(indexes.get("llms.txt"), /Latest release: v0\.5\.3/);
-  assert.match(indexes.get("zh/llms.txt"), /最新版本：v0\.5\.3/);
+  assert.match(indexes.get("llms.txt"), /Latest release: v0\.6\.2/);
+  assert.match(indexes.get("zh/llms.txt"), /最新版本：v0\.6\.2/);
   assert.doesNotMatch(indexes.get("llms.txt"), /## Governed facts/);
   assert.doesNotMatch(indexes.get("zh/llms.txt"), /## 受治理事实/);
 

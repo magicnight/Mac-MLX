@@ -23,6 +23,6 @@ test("outputFileForPath maps canonical routes to deterministic HTML files", () =
 test("home routes declare exact English and Simplified Chinese counterparts", () => {
   assert.deepEqual(homeRoutes, { en: "/", "zh-Hans": "/zh/" });
   assert.deepEqual(routes[0], { id: "home", kind: "home", paths: homeRoutes });
-  assert.equal(routes.length, 13);
-  assert.equal(routes.filter((route) => route.kind === "article").length, 12);
+  assert.equal(routes.length, 14);
+  assert.equal(routes.filter((route) => route.kind === "article").length, 13);
 });

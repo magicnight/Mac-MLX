@@ -34,7 +34,10 @@ test("home metadata is localized, reciprocal, Markdown-addressable, and uses sta
     const software = graph.find((node) => node["@type"] === "SoftwareApplication");
     assert.equal(website["@id"], "https://macmlx.app/#website");
     assert.equal(software["@id"], "https://macmlx.app/#software");
-    assert.equal(software.softwareVersion, project.currentVersion);
+    assert.equal(project.currentVersion, "0.6.2");
+    assert.equal(project.lastVerified, "2026-07-15");
+    assert.equal(software.softwareVersion, "0.6.2");
+    assert.equal(software.dateModified, "2026-07-15");
     assert.equal(software.codeRepository, project.repositoryURL);
     assert.equal(software.downloadUrl, project.downloadURL);
     assert.equal(software.offers.price, "0");
@@ -64,8 +67,8 @@ test("article metadata emits TechArticle and breadcrumbs, with visible FAQ data 
 });
 
 test("the site builder uses centralized metadata exactly once in every HTML document", async () => {
-  const { documents } = await prepareSite({ today: "2026-07-10" });
-  assert.equal(documents.size, 26);
+  const { documents } = await prepareSite({ today: "2026-07-15" });
+  assert.equal(documents.size, 28);
   for (const [path, html] of documents) {
     const socialLocale = path.startsWith("/zh/") ? "zh" : "en";
     assert.equal(html.match(/<title>/g)?.length, 1, path);
@@ -78,7 +81,7 @@ test("the site builder uses centralized metadata exactly once in every HTML docu
 });
 
 test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current hierarchy", async () => {
-  const { documents } = await prepareSite({ today: "2026-07-10" });
+  const { documents } = await prepareSite({ today: "2026-07-15" });
   const nested = pages.filter((page) => page.paths.en.split("/").filter(Boolean).length > 1);
   for (const page of nested) {
     for (const locale of ["en", "zh-Hans"]) {
@@ -96,5 +99,28 @@ test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current
       assert.deepEqual(structured.map((item) => item.name), visible.map((item) => item.name));
       assert.deepEqual(structured.map((item) => new URL(item.item).pathname), visible.map((item) => item.href));
     }
+  }
+});
+
+test("the v0.6.2 release page keeps localized canonical article and breadcrumb metadata", async () => {
+  const { documents } = await prepareSite({ today: "2026-07-15" });
+  const releasePage = pages.find((page) => page.id === "release-v0-6-2");
+  assert.ok(releasePage);
+
+  for (const locale of ["en", "zh-Hans"]) {
+    const path = releasePage.paths[locale];
+    const html = documents.get(path);
+    assert.ok(html, `missing ${path}`);
+    assert.match(html, new RegExp(`<link rel="canonical" href="${project.origin}${path}">`));
+
+    const graph = jsonLD(html)["@graph"];
+    const article = graph.find((node) => node["@type"] === "TechArticle");
+    const breadcrumbs = graph.find((node) => node["@type"] === "BreadcrumbList");
+    assert.equal(article.dateModified, "2026-07-15");
+    assert.equal(new URL(article.mainEntityOfPage).pathname, path);
+    assert.deepEqual(
+      breadcrumbs.itemListElement.map((item) => new URL(item.item).pathname),
+      locale === "en" ? ["/", "/releases/", path] : ["/zh/", "/zh/releases/", path],
+    );
   }
 });

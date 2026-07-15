@@ -7,12 +7,12 @@ import { routes } from "../routes.mjs";
 
 test("sitemap lists every canonical once with lastmod and reciprocal locale alternates", () => {
   const xml = renderSitemap({ project, routes });
-  assert.equal(xml.match(/<url>/g)?.length, 26);
-  assert.equal(xml.match(/<loc>/g)?.length, 26);
-  assert.equal(xml.match(/hreflang="en"/g)?.length, 26);
-  assert.equal(xml.match(/hreflang="zh-Hans"/g)?.length, 26);
-  assert.equal(xml.match(/hreflang="x-default"/g)?.length, 26);
-  assert.equal(xml.match(/<lastmod>2026-07-10<\/lastmod>/g)?.length, 26);
+  assert.equal(xml.match(/<url>/g)?.length, 28);
+  assert.equal(xml.match(/<loc>/g)?.length, 28);
+  assert.equal(xml.match(/hreflang="en"/g)?.length, 28);
+  assert.equal(xml.match(/hreflang="zh-Hans"/g)?.length, 28);
+  assert.equal(xml.match(/hreflang="x-default"/g)?.length, 28);
+  assert.equal(xml.match(/<lastmod>2026-07-15<\/lastmod>/g)?.length, 28);
   for (const route of routes) for (const path of Object.values(route.paths)) {
     const escaped = `${project.origin}${path}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     assert.equal(xml.match(new RegExp(`<loc>${escaped}<\\/loc>`, "g"))?.length, 1);

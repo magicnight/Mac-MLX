@@ -135,7 +135,7 @@ test("redirect policy contains only the two canonical index migrations", async (
 });
 
 test("build preparation carries deployment policies into deterministic output", async () => {
-  const prepared = await prepareSite({ today: "2026-07-10" });
+  const prepared = await prepareSite({ today: "2026-07-15" });
   assert.deepEqual([...prepared.deploymentFiles.keys()], ["_headers", "_redirects"]);
   const changed = {
     ...prepared,

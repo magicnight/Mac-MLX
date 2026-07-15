@@ -7,14 +7,23 @@ import test from "node:test";
 import { prepareSite, validateSocialAssets } from "../../scripts/build-public-site.mjs";
 
 test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404 outputs", async () => {
-  const { markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-07-10" });
-  assert.equal(markdownDocuments.size, 26);
+  const { markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-07-15" });
+  assert.equal(markdownDocuments.size, 28);
   assert.deepEqual([...discoveryFiles.keys()], [
     "llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt",
     "robots.txt", "sitemap.xml", "404.html", "zh/404.html",
   ]);
-  assert.equal(discoveryFiles.get("sitemap.xml").match(/<url>/g)?.length, 26);
-  assert.doesNotMatch(discoveryFiles.get("sitemap.xml"), /404/);
+  const sitemap = discoveryFiles.get("sitemap.xml");
+  const llms = discoveryFiles.get("llms.txt");
+  const llmsFull = discoveryFiles.get("llms-full.txt");
+  assert.equal(sitemap.match(/<url>/g)?.length, 28);
+  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-6-2\/<\/loc>[\s\S]*?<lastmod>2026-07-15<\/lastmod>/);
+  assert.doesNotMatch(sitemap, /404/);
+  assert.match(llms, /Latest release: v0\.6\.2/);
+  assert.match(llmsFull, /### continuous-batching[\s\S]*?- Status: released[\s\S]*?- Title: Eligibility-gated continuous batching/);
+  assert.match(llmsFull, /### paged-kv[\s\S]*?- Status: planned[\s\S]*?- Title: Paged KV, block sharing, and CoW/);
+  assert.ok(markdownDocuments.has("content/en/release-v0-6-2.md"));
+  assert.ok(markdownDocuments.has("content/zh/release-v0-6-2.md"));
   assert.match(discoveryFiles.get("404.html"), /noindex,follow/);
   assert.match(discoveryFiles.get("zh\/404.html") ?? discoveryFiles.get("zh/404.html"), /noindex,follow/);
 });

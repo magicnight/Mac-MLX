@@ -8,7 +8,7 @@ import { prepareSite } from "../../scripts/build-public-site.mjs";
 import { inspectPublicTree } from "../../scripts/crawl-public-site.mjs";
 
 async function validTree() {
-  const prepared = await prepareSite({ today: "2026-07-10" });
+  const prepared = await prepareSite({ today: "2026-07-15" });
   const textByPath = new Map();
   for (const [path, html] of prepared.documents) textByPath.set(outputFileForPath(path), html);
   for (const pair of [...prepared.markdownDocuments, ...prepared.discoveryFiles, ...prepared.deploymentFiles]) textByPath.set(...pair);
