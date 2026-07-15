@@ -78,7 +78,7 @@ test("project registry keeps supported facts and locale metadata together", () =
   assert.equal(project.origin, "https://macmlx.app");
   assert.equal(project.repositoryURL, "https://github.com/magicnight/mac-mlx");
   assert.equal(project.downloadURL, "https://github.com/magicnight/mac-mlx/releases/latest");
-  assert.equal(project.currentVersion, "0.5.3");
+  assert.equal(project.currentVersion, "0.6.2");
   assert.deepEqual(Object.keys(project.locales), ["en", "zh-Hans"]);
   for (const locale of Object.values(project.locales)) {
     assert.ok(locale.title);
@@ -172,6 +172,38 @@ test("build emits independent locale documents without runtime bilingual attribu
     assert.doesNotMatch(html, /{{|}}/);
     assert.doesNotMatch(html, /\bundefined\b/);
   }
+});
+
+test("rendered home presents v0.6.2 as the current shipped release", () => {
+  assert.match(english, /Current release[\s\S]*?<strong>v0\.6\.2<\/strong>/);
+  assert.match(chinese, /当前版本[\s\S]*?<strong>v0\.6\.2<\/strong>/);
+
+  for (const capability of [
+    /agent and API tool loops[^<]*structured output controls/i,
+    /continuous batching[^<]*LCP reuse[^<]*speculative decoding/i,
+    /Track G[^<]*tested[^<]*theoretical/i,
+    /v0\.6\.1[^<]*hardening[^<]*templates/i,
+  ]) assert.match(english, capability);
+
+  for (const capability of [
+    /智能体与 API 工具循环[^<]*结构化输出控制/,
+    /连续批处理[^<]*LCP 复用[^<]*投机解码/,
+    /Track G[^<]*实测[^<]*理论/,
+    /v0\.6\.1[^<]*加固[^<]*模板/,
+  ]) assert.match(chinese, capability);
+});
+
+test("rendered engine story keeps planned work visibly separate", () => {
+  assert.match(english, /Released \+ evolving/);
+  assert.match(chinese, /已发布 \+ 持续演进/);
+  assert.match(english, /Paged allocation, block sharing, and copy-on-write remain planned/);
+  assert.match(chinese, /分页分配、块共享与写时复制仍在规划中/);
+  assert.match(english, /fixed prefill admission is released[^<]*adaptive guard remains future work/i);
+  assert.match(chinese, /固定 prefill 准入已经发布[^<]*自适应守卫仍属未来工作/);
+  assert.match(english, /Temperature, top-p, XTC, and KV-cache quantization are available today/);
+  assert.match(chinese, /temperature、top-p、XTC 与 KV 缓存量化均已提供/);
+  assert.match(english, /Top-k, min-p, presence, frequency, and repetition penalties, and per-request seed remain planned/);
+  assert.match(chinese, /top-k、min-p、presence、frequency 与 repetition 惩罚项，以及逐请求 seed 仍在规划中/);
 });
 
 test("locale pages use self canonicals and reciprocal alternates", () => {

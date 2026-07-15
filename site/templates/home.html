@@ -117,7 +117,7 @@
             <span class="why-number">C</span>
             <div>
               <h3 data-en="Engine work you can inspect" data-zh="看得见的引擎能力">Engine work you can inspect</h3>
-              <p data-en="macMLX ships prompt caching, model pooling, LoRA, VLM support, and a pure-Swift DeepSeek V3.2 port. The project improves the engine instead of hiding another runtime behind the UI." data-zh="macMLX 已提供提示缓存、模型池、LoRA、VLM 支持，以及纯 Swift 的 DeepSeek V3.2 移植。项目直接改进引擎，而不是在界面背后隐藏另一套运行时。">macMLX ships prompt caching, model pooling, LoRA, VLM support, and a pure-Swift DeepSeek V3.2 port. The project improves the engine instead of hiding another runtime behind the UI.</p>
+              <p data-en="macMLX ships prompt caching, model pooling, LoRA, VLM support, and a pure-Swift DeepSeek V3.2 port. Track G keeps tested results distinct from theoretical estimates so engine progress stays inspectable." data-zh="macMLX 已提供提示缓存、模型池、LoRA、VLM 支持，以及纯 Swift 的 DeepSeek V3.2 移植。Track G 将实测结果与理论估算明确区分，让引擎进展可供检验。">macMLX ships prompt caching, model pooling, LoRA, VLM support, and a pure-Swift DeepSeek V3.2 port. Track G keeps tested results distinct from theoretical estimates so engine progress stays inspectable.</p>
             </div>
             <span class="why-tag">Apache 2.0</span>
           </article>
@@ -153,14 +153,14 @@
             <div class="feature-top"><span>02</span><span>API</span></div>
             <div class="terminal-lines" aria-hidden="true"><code>POST /v1/chat/completions</code><code>POST /v1/messages</code><code>POST /v1/embeddings</code><code>macmlx mcp serve</code></div>
             <h3 data-en="Fits existing workflows" data-zh="融入现有工作流">Fits existing workflows</h3>
-            <p data-en="OpenAI, Anthropic, Ollama, embeddings, rerank, and MCP integration surfaces let local models work with the tools you already use." data-zh="兼容 OpenAI、Anthropic、Ollama、嵌入、重排并提供 MCP 集成入口，让本地模型接入你已有的工具。">OpenAI, Anthropic, Ollama, embeddings, rerank, and MCP integration surfaces let local models work with the tools you already use.</p>
+            <p data-en="Compatible OpenAI, Anthropic, Ollama, MCP, embeddings, and rerank surfaces support agent and API tool loops plus structured output controls for supported workflows." data-zh="兼容的 OpenAI、Anthropic、Ollama、MCP、嵌入与重排入口，为受支持的工作流提供智能体与 API 工具循环以及结构化输出控制。">Compatible OpenAI, Anthropic, Ollama, MCP, embeddings, and rerank surfaces support agent and API tool loops plus structured output controls for supported workflows.</p>
           </article>
 
           <article class="feature-card reveal">
             <div class="feature-top"><span>03</span><span data-en="ENGINE" data-zh="引擎">ENGINE</span></div>
             <div class="cache-viz" aria-hidden="true"><span style="--w:92%"></span><span style="--w:72%"></span><span style="--w:48%"></span><span style="--w:30%"></span></div>
             <h3 data-en="Built for repeated work" data-zh="为重复工作而优化">Built for repeated work</h3>
-            <p data-en="Hot and cold KV caches, a memory-aware multi-model pool, cold swap, LoRA adapters, and stall-safe serving keep long sessions practical." data-zh="冷热 KV 缓存、内存感知的多模型池、冷切换、LoRA 适配器与防停滞服务，让长会话保持实用。">Hot and cold KV caches, a memory-aware multi-model pool, cold swap, LoRA adapters, and stall-safe serving keep long sessions practical.</p>
+            <p data-en="Continuous batching, longest-common-prefix reuse, speculative decoding, and hot RAM / cold SSD cache tiers keep repeated and concurrent work practical." data-zh="连续批处理、最长公共前缀复用、投机解码，以及热 RAM / 冷 SSD 缓存分层，让重复与并发工作保持实用。">Continuous batching, longest-common-prefix reuse, speculative decoding, and hot RAM / cold SSD cache tiers keep repeated and concurrent work practical.</p>
           </article>
 
           <article class="feature-card feature-card-wide feature-card-horizontal reveal">
@@ -185,7 +185,7 @@
             <div class="feature-top"><span>06</span><span data-en="OBSERVE" data-zh="观测">OBSERVE</span></div>
             <div class="metric-viz" aria-hidden="true"><div><b>42.8</b><span>tok/s</span></div><div><b>0.31</b><span>TTFT</span></div></div>
             <h3 data-en="Measure the machine you own" data-zh="测量你手里的机器">Measure the machine you own</h3>
-            <p data-en="Benchmark throughput, time to first token, and memory locally, then inspect engine and server events in the built-in Logs view." data-zh="在本地测量吞吐、首字延迟与内存，并在内置日志视图中检查引擎和服务事件。">Benchmark throughput, time to first token, and memory locally, then inspect engine and server events in the built-in Logs view.</p>
+            <p data-en="Benchmark throughput and first-token latency locally, then inspect XTC and KV-cache quantization behavior. Track G keeps tested measurements separate from theoretical estimates, with engine events available in Logs." data-zh="在本地测量吞吐与首字延迟，并检查 XTC 与 KV 缓存量化行为。Track G 将实测数据与理论估算分开，还可在日志中检查引擎事件。">Benchmark throughput and first-token latency locally, then inspect XTC and KV-cache quantization behavior. Track G keeps tested measurements separate from theoretical estimates, with engine events available in Logs.</p>
           </article>
         </div>
       </div>
@@ -221,27 +221,27 @@
             </li>
             <li class="engine-step" data-engine-index="2">
               <article>
-                <div class="engine-meta"><span>03</span><span class="engine-status" data-en="Current + next" data-zh="当前 + 下一步">Current + next</span></div>
+                <div class="engine-meta"><span>03</span><span class="engine-status" data-en="Released + planned" data-zh="已发布 + 规划中">Released + planned</span></div>
                 <h3 data-en="Reuse the prompt. Branch only when needed." data-zh="复用提示，只在必要时分支。">Reuse the prompt. Branch only when needed.</h3>
-                <p data-en="Today, hot RAM entries can demote to a content-addressed SSD cold tier and return later. Paged allocation, block sharing, and copy-on-write are the next steps toward sharing prefixes across more concurrent work." data-zh="当前，热 RAM 条目可以降级到内容寻址的 SSD 冷层，并在需要时重新提升。分页分配、块共享与写时复制，是让更多并发请求共享前缀的下一步。">Today, hot RAM entries can demote to a content-addressed SSD cold tier and return later. Paged allocation, block sharing, and copy-on-write are the next steps toward sharing prefixes across more concurrent work.</p>
+                <p data-en="Longest-common-prefix (LCP) reuse is available today across hot RAM and content-addressed SSD cold tiers. Paged allocation, block sharing, and copy-on-write remain planned for sharing prefixes across more concurrent work." data-zh="最长公共前缀（LCP）复用现已支持热 RAM 与内容寻址的 SSD 冷层。分页分配、块共享与写时复制仍在规划中，目标是在更多并发工作间共享前缀。">Longest-common-prefix (LCP) reuse is available today across hot RAM and content-addressed SSD cold tiers. Paged allocation, block sharing, and copy-on-write remain planned for sharing prefixes across more concurrent work.</p>
                 <div class="engine-tags"><span>Paged KV</span><span>Block Sharing</span><span>CoW</span><span>SSD Cold Tier</span></div>
                 <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/paged-kv-memory.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
               </article>
             </li>
             <li class="engine-step" data-engine-index="3">
               <article>
-                <div class="engine-meta"><span>04</span><span class="engine-status" data-en="On main + evolving" data-zh="主线已有 + 持续演进">On main + evolving</span></div>
+                <div class="engine-meta"><span>04</span><span class="engine-status" data-en="Released + evolving" data-zh="已发布 + 持续演进">Released + evolving</span></div>
                 <h3 data-en="Admit work at the speed memory can sustain." data-zh="按照内存承受的速度接纳工作。">Admit work at the speed memory can sustain.</h3>
-                <p data-en="Bounded prefill admission prevents a prompt wave from consuming every batch slot at once. Memory probes, pool limits, and eviction already shape admission; a unified adaptive guard is the next feedback layer." data-zh="有限的 prefill 准入避免一波长提示同时占满批处理槽位。内存探针、模型池上限与淘汰机制已经参与调节；统一的自适应守卫将成为下一层反馈控制。">Bounded prefill admission prevents a prompt wave from consuming every batch slot at once. Memory probes, pool limits, and eviction already shape admission; a unified adaptive guard is the next feedback layer.</p>
+                <p data-en="The fixed prefill admission is released and prevents a prompt wave from consuming every batch slot at once. Memory probes, pool limits, and eviction already shape admission; the unified adaptive guard remains future work." data-zh="固定 prefill 准入已经发布，可避免一波长提示同时占满批处理槽位。内存探针、模型池上限与淘汰机制已经参与调节；统一的自适应守卫仍属未来工作。">The fixed prefill admission is released and prevents a prompt wave from consuming every batch slot at once. Memory probes, pool limits, and eviction already shape admission; the unified adaptive guard remains future work.</p>
                 <div class="engine-tags"><span>Prefill Throttle</span><span>Memory Probe</span><span>Admission</span><span>Eviction</span></div>
                 <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/adaptive-runtime.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
               </article>
             </li>
             <li class="engine-step" data-engine-index="4">
               <article>
-                <div class="engine-meta"><span>05</span><span class="engine-status" data-en="Core controls + planned" data-zh="核心参数 + 规划中">Core controls + planned</span></div>
+                <div class="engine-meta"><span>05</span><span class="engine-status" data-en="Released + planned" data-zh="已发布 + 规划中">Released + planned</span></div>
                 <h3 data-en="Shape probability. Preserve reproducibility." data-zh="塑造概率，也保留可复现性。">Shape probability. Preserve reproducibility.</h3>
-                <p data-en="Temperature and top-p are available today. Top-k, min-p, penalties, per-request seed, and exposed KV-quantization controls belong to the next control surface—not the current release." data-zh="当前已提供 temperature 与 top-p。top-k、min-p、惩罚项、逐请求 seed 与开放的 KV 量化控制属于下一阶段控制面，而不是当前版本能力。">Temperature and top-p are available today. Top-k, min-p, penalties, per-request seed, and exposed KV-quantization controls belong to the next control surface—not the current release.</p>
+                <p data-en="Temperature, top-p, XTC, and KV-cache quantization are available today. Top-k, min-p, presence, frequency, and repetition penalties, and per-request seed remain planned for a future control surface." data-zh="temperature、top-p、XTC 与 KV 缓存量化均已提供。top-k、min-p、presence、frequency 与 repetition 惩罚项，以及逐请求 seed 仍在规划中，将归入未来的控制面。">Temperature, top-p, XTC, and KV-cache quantization are available today. Top-k, min-p, presence, frequency, and repetition penalties, and per-request seed remain planned for a future control surface.</p>
                 <div class="engine-tags"><span>top-k</span><span>min-p</span><span>Penalties</span><span>Seed</span><span>KV Quant</span></div>
                 <figure class="engine-mobile-figure"><img class="engine-image" src="/assets/images/engine/generation-controls.webp" width="1600" height="900" loading="lazy" decoding="async" alt=""></figure>
               </article>
@@ -286,14 +286,14 @@
           </article>
 
           <article class="release-column building reveal">
-            <div class="release-head"><span data-en="In development" data-zh="开发中">In development</span><strong>v0.6</strong></div>
-            <h3 data-en="A faster agent backend" data-zh="更快的智能体后端">A faster agent backend</h3>
+            <div class="release-head"><span data-en="Current release" data-zh="当前版本">Current release</span><strong>v{{currentVersion}}</strong></div>
+            <h3 data-en="The v0.6 engine is shipping" data-zh="v0.6 引擎已正式交付">The v0.6 engine is shipping</h3>
             <ul>
-              <li data-en="Continuous-batching scheduler and server routing foundations merged" data-zh="连续批处理调度器与服务路由基础已合并">Continuous-batching scheduler and server routing foundations merged</li>
-              <li data-en="Classic draft-model speculative decoding merged" data-zh="经典草稿模型投机解码已合并">Classic draft-model speculative decoding merged</li>
-              <li data-en="Chat-side MCP tool routing and OpenAI tools pass-through merged" data-zh="聊天侧 MCP 工具路由与 OpenAI tools 透传已合并">Chat-side MCP tool routing and OpenAI tools pass-through merged</li>
-              <li data-en="Longest-prefix prompt reuse is the next cache milestone" data-zh="最长前缀复用是下一项缓存里程碑">Longest-prefix prompt reuse is the next cache milestone</li>
-              <li data-en="Schema-constrained JSON output follows" data-zh="随后推进 Schema 约束的 JSON 输出">Schema-constrained JSON output follows</li>
+              <li data-en="Agent and API tool loops with structured output controls" data-zh="智能体与 API 工具循环以及结构化输出控制">Agent and API tool loops with structured output controls</li>
+              <li data-en="Continuous batching, LCP reuse, and speculative decoding runtime" data-zh="连续批处理、LCP 复用与投机解码运行时">Continuous batching, LCP reuse, and speculative decoding runtime</li>
+              <li data-en="Track G distinguishes tested results from theoretical estimates" data-zh="Track G 明确区分实测结果与理论估算">Track G distinguishes tested results from theoretical estimates</li>
+              <li data-en="v0.6.1 hardening and model-family templates" data-zh="v0.6.1 加固与模型家族模板">v0.6.1 hardening and model-family templates</li>
+              <li data-en="XTC and KV-cache quantization controls available today" data-zh="XTC 与 KV 缓存量化控制现已提供">XTC and KV-cache quantization controls available today</li>
             </ul>
             <a href="{{repositoryURL}}" data-en="Follow development ↗" data-zh="关注开发进展 ↗">Follow development ↗</a>
           </article>
