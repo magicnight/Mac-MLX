@@ -96,13 +96,11 @@ function articleGraph(project, page, locale, canonical, description, faqs, relea
       inLanguage: locale,
       softwareVersion: release.version,
       datePublished: release.releaseDate,
-      dateModified: release.lastVerified,
       mainEntityOfPage: canonical,
       isPartOf: { "@id": siteURL(project, "/#software") },
       operatingSystem: project.operatingSystem,
       applicationCategory: "DeveloperApplication",
       codeRepository: project.repositoryURL,
-      downloadUrl: project.downloadURL,
     });
   }
   return graph;

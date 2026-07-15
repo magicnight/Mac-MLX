@@ -123,11 +123,33 @@ test("the v0.6.2 release page exposes immutable release identity with localized 
     assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.6.2");
     assert.equal(softwareRelease.softwareVersion, "0.6.2");
     assert.equal(softwareRelease.datePublished, "2026-07-11");
-    assert.equal(softwareRelease.dateModified, "2026-07-15");
+    assert.equal(softwareRelease.dateModified, undefined);
+    assert.equal(softwareRelease.downloadUrl, undefined);
     assert.equal(new URL(softwareRelease.mainEntityOfPage).pathname, path);
     assert.deepEqual(
       breadcrumbs.itemListElement.map((item) => new URL(item.item).pathname),
       locale === "en" ? ["/", "/releases/", path] : ["/zh/", "/zh/releases/", path],
     );
+  }
+});
+
+test("the historical v0.5.3 release entity keeps version-specific immutable metadata", async () => {
+  const { documents } = await prepareSite({ today: "2026-07-15" });
+  const releasePage = pages.find((page) => page.id === "release-v0-5-3");
+  assert.ok(releasePage);
+
+  for (const locale of ["en", "zh-Hans"]) {
+    const path = releasePage.paths[locale];
+    const graph = jsonLD(documents.get(path))["@graph"];
+    const article = graph.find((node) => node["@type"] === "TechArticle");
+    const softwareRelease = graph.find((node) => node["@type"] === "SoftwareApplication");
+    assert.equal(article.dateModified, "2026-07-15");
+    assert.equal(softwareRelease["@id"], "https://github.com/magicnight/mac-mlx/releases/tag/v0.5.3#software-release");
+    assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.5.3");
+    assert.equal(softwareRelease.softwareVersion, "0.5.3");
+    assert.equal(softwareRelease.datePublished, "2026-07-08");
+    assert.equal(softwareRelease.dateModified, undefined);
+    assert.equal(softwareRelease.downloadUrl, undefined);
+    assert.equal(new URL(softwareRelease.mainEntityOfPage).pathname, path);
   }
 });
