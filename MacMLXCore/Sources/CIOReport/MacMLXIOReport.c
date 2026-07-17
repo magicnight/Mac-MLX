@@ -276,28 +276,41 @@ CFArrayRef MacMLXIOReportCopySampleDelta(
     }
     uint64_t currentTimeNs = ktopMonotonicNs();
 
-    CFArrayRef channels = NULL;
-    if (session->previousSample != NULL) {
-        CFDictionaryRef delta =
-            gIOReport.createSamplesDelta(session->previousSample, current, NULL);
-        if (delta != NULL) {
-            CFArrayRef inner = CFDictionaryGetValue(delta, kMacMLXIOReportChannelsKey);
-            if (inner != NULL) {
-                channels = (CFArrayRef)CFRetain(inner);  // outlive the delta dict
-            }
-            CFRelease(delta);
-        }
-        if (outIntervalSeconds != NULL) {
-            *outIntervalSeconds =
-                (double)(currentTimeNs - session->previousTimeNs) / 1.0e9;
-        }
+    // No baseline yet — either the baseline sample failed in `MacMLXIOReportOpen`, or
+    // a prior poll declined to advance (see below). A delta needs two samples, so
+    // adopt this one as the baseline and report no delta; the next poll produces one.
+    if (session->previousSample == NULL) {
+        session->previousSample = current;  // takes ownership of the +1
+        session->previousTimeNs = currentTimeNs;
+        return NULL;
     }
 
-    // Advance the rolling baseline to the sample we just took.
-    if (session->previousSample != NULL) {
-        CFRelease(session->previousSample);
+    CFArrayRef channels = NULL;
+    CFDictionaryRef delta =
+        gIOReport.createSamplesDelta(session->previousSample, current, NULL);
+    if (delta != NULL) {
+        CFArrayRef inner = CFDictionaryGetValue(delta, kMacMLXIOReportChannelsKey);
+        if (inner != NULL) {
+            channels = (CFArrayRef)CFRetain(inner);  // outlive the delta dict
+        }
+        CFRelease(delta);
     }
+
+    if (channels == NULL) {
+        // The delta failed or carried no channels. Do NOT advance the baseline: the
+        // counters are cumulative, so keeping the previous sample lets the next
+        // successful poll span this interval instead of dropping its deltas. Discard
+        // the sample just taken and leave `*outIntervalSeconds` at 0.
+        CFRelease(current);
+        return NULL;
+    }
+
+    // Success — advance the rolling baseline to the sample we just took.
+    CFRelease(session->previousSample);
     session->previousSample = current;  // takes ownership of the +1 from createSamples
+    if (outIntervalSeconds != NULL) {
+        *outIntervalSeconds = (double)(currentTimeNs - session->previousTimeNs) / 1.0e9;
+    }
     session->previousTimeNs = currentTimeNs;
 
     return channels;
