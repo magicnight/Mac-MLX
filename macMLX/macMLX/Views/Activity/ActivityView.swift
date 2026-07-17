@@ -119,6 +119,20 @@ private struct ActivityContent: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
+                } else if monitor.isGenerating {
+                    // Generating, but the verdict is deliberately withheld until the
+                    // classifier's rolling window sheds the previous run's tail (so a
+                    // stale, possibly alarming verdict never flashes at the start of a
+                    // run). Show that it is measuring — NOT "no active generation",
+                    // which would contradict the "Generating" status header.
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Measuring — establishing a baseline for this generation…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 } else {
                     // Idle: honest placeholder rather than a stale verdict.
                     HStack(spacing: 8) {
