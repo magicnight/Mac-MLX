@@ -39,9 +39,17 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0"),
     ],
     targets: [
+        // Runtime bridge to Apple's private IOReport framework (silicon metrics,
+        // v0.7 W1). Pure C, no link-time dependency on the private framework — it
+        // dlopen/dlsym-resolves the symbols so consumers need no linker flags and the
+        // app degrades gracefully if IOReport ever disappears. See the target header.
+        .target(
+            name: "CIOReport"
+        ),
         .target(
             name: "MacMLXCore",
             dependencies: [
+                "CIOReport",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXVLM", package: "mlx-swift-lm"),
                 .product(name: "MLXEmbedders", package: "mlx-swift-lm"),
