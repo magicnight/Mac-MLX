@@ -115,6 +115,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// duration of `runSpeculativeLLMGeneration`, reset via `defer`.
     private var speculativeGenerationInFlight = false
 
+    /// Optional bottleneck-classifier seam (v0.7 silicon track, W2). When an
+    /// observer is attached the generation paths report their prefill → decode →
+    /// complete phase timeline to it; when nil — the default — every phase call
+    /// site is a no-op, so generation is byte-for-byte the pre-W2 path.
+    private let siliconObserver: SiliconEngineObserver?
+
     /// Two-tier prompt cache (hot dict + cold safetensors sidecar). Used
     /// by `runGeneration` to reuse KV state across successive turns on
     /// the same LLM. VLM generations bypass it.
@@ -187,9 +193,52 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     // MARK: Initialiser
 
-    public init() {
+    /// - Parameter siliconObserver: optional W2 bottleneck-classifier seam.
+    ///   Defaults to nil, keeping the generation path unchanged; pass one to
+    ///   receive per-generation phase-transition notifications.
+    public init(siliconObserver: SiliconEngineObserver? = nil) {
+        self.siliconObserver = siliconObserver
         self.promptCacheStore = PromptCacheStore(
             root: DataRoot.macMLX("kv-cache")
+        )
+    }
+
+    /// Build the phase-context config the observer receives from the applied
+    /// MLX generation parameters. `kvGroupSize` / `quantizedKVStart` are surfaced
+    /// only when the KV cache is actually being quantized (they are inert
+    /// otherwise). `batchSize` is 1 for every single-stream generation path.
+    private static func generationConfig(
+        from params: GenerateParameters,
+        batchSize: Int
+    ) -> EngineGenerationConfig {
+        let quantizing = params.kvBits != nil
+        return EngineGenerationConfig(
+            kvBits: params.kvBits,
+            kvGroupSize: quantizing ? params.kvGroupSize : nil,
+            quantizedKVStart: quantizing ? params.quantizedKVStart : nil,
+            batchSize: batchSize
+        )
+    }
+
+    /// Assemble the terminal `GenerationPhaseSummary` from an engine completion
+    /// record. Token counts default to 0 and timings to nil when the stream
+    /// ended without a completion record, so the summary never fabricates a rate.
+    ///
+    /// NOTE: `promptTokenCount` is the count actually processed during prefill —
+    /// on a prompt-cache HIT that is the incremental suffix, NOT the full prompt
+    /// (the wire `usage.promptTokens` adds `reusedPromptTokens` back). This is the
+    /// right denominator for prefill tok/s (suffix tokens ÷ suffix time), but a
+    /// consumer comparing it to `usage.promptTokens` will see them differ on hits.
+    private static func phaseSummary(
+        config: EngineGenerationConfig,
+        completionInfo: GenerateCompletionInfo?
+    ) -> GenerationPhaseSummary {
+        GenerationPhaseSummary(
+            config: config,
+            promptTokenCount: completionInfo?.promptTokenCount ?? 0,
+            generationTokenCount: completionInfo?.generationTokenCount ?? 0,
+            promptSeconds: completionInfo?.promptTime,
+            generateSeconds: completionInfo?.generateTime
         )
     }
 
@@ -1435,6 +1484,18 @@ public actor MLXSwiftEngine: InferenceEngine {
         // until that text flushes.
         var pendingLogprobs: [TokenLogprob] = []
 
+        // W2 phase seam: nil unless an observer is attached, so the loop below
+        // is unchanged for every ordinary generation (the config is built only
+        // when observed). `begin()` marks the prefill boundary — prefill runs as
+        // the stream is first pulled — and the `defer` guarantees exactly one
+        // terminal event even on the cancel/abandon early returns below.
+        var phaseReporter = siliconObserver.map {
+            GenerationPhaseReporter(
+                observer: $0, config: Self.generationConfig(from: generateParams, batchSize: 1))
+        }
+        phaseReporter?.begin()
+        defer { phaseReporter?.abortIfUnfinished() }
+
         for await event in stream {
             // POOL-2: stop promptly once the consumer has abandoned/
             // cancelled this stream (see `generate`'s `onTermination`
@@ -1445,6 +1506,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
             switch event {
             case .token(let token):
+                phaseReporter?.noteTokenGenerated()
                 generatedTokenIDs.append(token)
                 if wantsLogprobs, let entry = logprobsSink?.popFirst() {
                     pendingLogprobs.append(Self.tokenLogprob(from: entry, tokenizer: tokenizer))
@@ -1501,6 +1563,11 @@ public actor MLXSwiftEngine: InferenceEngine {
                 tokens: finalTokens,
                 snapshot: PromptCacheSnapshot(workingCache)
             )
+        }
+
+        if let reporter = phaseReporter {
+            phaseReporter?.complete(
+                summary: Self.phaseSummary(config: reporter.config, completionInfo: completionInfo))
         }
 
         emitFinalChunk(
@@ -1654,6 +1721,15 @@ public actor MLXSwiftEngine: InferenceEngine {
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: targetTokenizer)
         var completionInfo: GenerateCompletionInfo?
 
+        // W2 phase seam (see runLLMGeneration) — no-op unless an observer is set;
+        // the `defer` guarantees exactly one terminal event on the early returns.
+        var phaseReporter = siliconObserver.map {
+            GenerationPhaseReporter(
+                observer: $0, config: Self.generationConfig(from: generateParams, batchSize: 1))
+        }
+        phaseReporter?.begin()
+        defer { phaseReporter?.abortIfUnfinished() }
+
         for await event in stream {
             // POOL-2: stop promptly once the consumer has abandoned/
             // cancelled this stream, mirroring the non-speculative path.
@@ -1663,6 +1739,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
             switch event {
             case .token(let token):
+                phaseReporter?.noteTokenGenerated()
                 detokenizer.append(token: token)
                 if let piece = detokenizer.next() {
                     if let toolProcessor {
@@ -1700,6 +1777,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             )
         }
 
+        if let reporter = phaseReporter {
+            phaseReporter?.complete(
+                summary: Self.phaseSummary(config: reporter.config, completionInfo: completionInfo))
+        }
+
         emitFinalChunk(
             completionInfo: completionInfo,
             toolCalls: drainedToolCalls,
@@ -1735,6 +1817,15 @@ public actor MLXSwiftEngine: InferenceEngine {
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         var completionInfo: GenerateCompletionInfo?
 
+        // W2 phase seam (see runLLMGeneration) — no-op unless an observer is set;
+        // the `defer` guarantees exactly one terminal event on the early returns.
+        var phaseReporter = siliconObserver.map {
+            GenerationPhaseReporter(
+                observer: $0, config: Self.generationConfig(from: generateParams, batchSize: 1))
+        }
+        phaseReporter?.begin()
+        defer { phaseReporter?.abortIfUnfinished() }
+
         for await event in stream {
             // POOL-2: stop promptly once the consumer has abandoned/
             // cancelled this stream (see `generate`'s `onTermination`
@@ -1745,6 +1836,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
             switch event {
             case .token(let token):
+                phaseReporter?.noteTokenGenerated()
                 detokenizer.append(token: token)
                 if let piece = detokenizer.next() {
                     let chunk = GenerateChunk(text: piece)
@@ -1755,6 +1847,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             case .info(let info):
                 completionInfo = info
             }
+        }
+
+        if let reporter = phaseReporter {
+            phaseReporter?.complete(
+                summary: Self.phaseSummary(config: reporter.config, completionInfo: completionInfo))
         }
 
         emitFinalChunk(completionInfo: completionInfo, into: continuation)
