@@ -23,6 +23,13 @@ public final class AppState {
     public let conversations: ConversationStore
     public let parametersStore: ModelParametersStore
 
+    /// Silicon-metrics observation bridge (v0.7 W3). Drives the Activity panel:
+    /// samples the hardware while that panel is visible, receives the engine's
+    /// prefill/decode phase timeline (it is wired in as the pool's engine observer
+    /// below), and publishes the current bottleneck verdict. App-internal like the
+    /// other view models.
+    let siliconMonitor: SiliconMonitor
+
     /// LoRA adapter directory scan (v0.5+). Backs the parameters-
     /// inspector adapter picker and the engine's per-load adapter
     /// resolution.
@@ -112,7 +119,13 @@ public final class AppState {
         let settings = SettingsManager()
         let logs = LogManager()
         let library = ModelLibraryManager()
-        let coordinator = EngineCoordinator(logs: logs)
+        // Create the silicon monitor BEFORE the coordinator so its (Sendable)
+        // engine observer can be captured by the pool factory. Constructing it
+        // opens no IOReport subscription — sampling starts only when the Activity
+        // panel appears.
+        let siliconMonitor = SiliconMonitor()
+        let coordinator = EngineCoordinator(
+            logs: logs, siliconObserver: siliconMonitor.observer)
         let conversations = ConversationStore()  // ~/.mac-mlx/conversations
         let parametersStore = ModelParametersStore()  // ~/.mac-mlx/model-params
         let benchmarks = BenchmarkStore()            // ~/.mac-mlx/benchmarks
@@ -125,6 +138,7 @@ public final class AppState {
         self.hfSizeCache = HFSizeCache()
         self.logs = logs
         self.coordinator = coordinator
+        self.siliconMonitor = siliconMonitor
         self.conversations = conversations
         self.parametersStore = parametersStore
         self.benchmarks = benchmarks
@@ -221,6 +235,11 @@ public final class AppState {
         currentSettings = loaded
         coordinator.switchTo(loaded.preferredEngine)
         await applyHFEndpoint(loaded.hfEndpoint)
+        // Start draining the engine's phase-timeline events for the whole app
+        // lifetime (independent of whether the Activity panel is open), so
+        // generation state stays accurate. Hardware sampling is gated separately
+        // on the panel's visibility.
+        siliconMonitor.startObserving()
         await logs.log("App bootstrapped", level: .info, category: .system)
         await refreshAdapters()
 
