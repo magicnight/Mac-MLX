@@ -42,6 +42,20 @@ public struct BenchmarkResult: Codable, Hashable, Identifiable, Sendable {
     /// Free-form notes the user can add before sharing.
     public let notes: String
 
+    // Silicon attribution (v0.7)
+    /// What limited this run's decode steady state, fused from the engine's phase
+    /// timeline and the silicon samples taken while it ran. `nil` when the run was
+    /// too short to attribute or sampling produced no usable decode frames — and
+    /// `nil` for every result persisted before v0.7, which is why it decodes as an
+    /// absent key (see the note below). The signal an external monitor cannot
+    /// produce, since it needs the in-process engine's own phase context.
+    public let bottleneck: BenchmarkBottleneck?
+
+    /// - Note: `bottleneck` is declared last with a default of `nil` so that (a)
+    ///   every pre-v0.7 call site stays source-compatible, and (b) the synthesized
+    ///   `Decodable` uses `decodeIfPresent` for the optional — a stored JSON from
+    ///   before this field existed simply has no `bottleneck` key and decodes to
+    ///   `nil`, so old benchmark history still loads.
     public init(
         id: UUID = UUID(),
         modelID: String,
@@ -58,7 +72,8 @@ public struct BenchmarkResult: Codable, Hashable, Identifiable, Sendable {
         system: SystemInfo,
         macMLXVersion: String = "",
         engineVersion: String = "",
-        notes: String = ""
+        notes: String = "",
+        bottleneck: BenchmarkBottleneck? = nil
     ) {
         self.id = id
         self.modelID = modelID
@@ -76,6 +91,33 @@ public struct BenchmarkResult: Codable, Hashable, Identifiable, Sendable {
         self.macMLXVersion = macMLXVersion
         self.engineVersion = engineVersion
         self.notes = notes
+        self.bottleneck = bottleneck
+    }
+
+    /// A copy of this result with its bottleneck attribution set. The benchmark
+    /// runner builds the result (throughput, memory, provenance) with no silicon
+    /// knowledge; the app layer attaches the attribution it collected during the
+    /// run just before persisting.
+    public func withBottleneck(_ bottleneck: BenchmarkBottleneck?) -> BenchmarkResult {
+        BenchmarkResult(
+            id: id,
+            modelID: modelID,
+            engineID: engineID,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            runs: runs,
+            promptTPS: promptTPS,
+            generationTPS: generationTPS,
+            ttftMs: ttftMs,
+            memoryUsedGB: memoryUsedGB,
+            modelLoadTimeS: modelLoadTimeS,
+            timestamp: timestamp,
+            system: system,
+            macMLXVersion: macMLXVersion,
+            engineVersion: engineVersion,
+            notes: notes,
+            bottleneck: bottleneck
+        )
     }
 }
 

@@ -45,6 +45,13 @@ private struct ActivityContent: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// Guards this view's own activate/deactivate so a duplicated `.onAppear` (a known
+    /// SwiftUI lifecycle quirk in some tab/split setups) cannot leak an extra
+    /// activation and pin sampling on — restoring the idempotency the pre-refcount
+    /// start/stop had. The monitor's reference count still lets a concurrent benchmark
+    /// keep sampling alive independently of this panel.
+    @State private var isSamplingActive = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -61,10 +68,20 @@ private struct ActivityContent: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Activity")
-        // Sampling is gated on visibility: poll IOReport only while the user is
-        // watching this tab (the phase-event stream keeps running elsewhere).
-        .onAppear { monitor.startSampling() }
-        .onDisappear { monitor.stopSampling() }
+        // Sampling is reference-counted: activate it while the user is watching this
+        // tab (the phase-event stream keeps running elsewhere), and release it on
+        // disappear. A benchmark run activates independently, so closing this tab
+        // mid-benchmark does not stop the run's own sampling.
+        .onAppear {
+            guard !isSamplingActive else { return }
+            isSamplingActive = true
+            monitor.activateSampling()
+        }
+        .onDisappear {
+            guard isSamplingActive else { return }
+            isSamplingActive = false
+            monitor.deactivateSampling()
+        }
     }
 
     // MARK: - Status header ("Active Now")
