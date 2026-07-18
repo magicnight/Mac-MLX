@@ -174,8 +174,10 @@ final class PromptCacheColdPruneTests: XCTestCase {
         let store = PromptCacheStore(root: root, coldEnabled: false)
         // `coldEnabled == false` returns before any filesystem or serialisation
         // work, so an empty (MLX-free) cache array is all that's needed to prove
-        // nothing is written.
-        await store.demoteToCold(modelID: "M", tokens: [1, 2, 3], caches: [])
+        // nothing is written. A non-nil fingerprint isolates the `coldEnabled`
+        // guard from the separate nil-fingerprint spill skip.
+        await store.demoteToCold(
+            modelID: "M", tokens: [1, 2, 3], caches: [], fingerprint: "test-fp")
 
         let file = PromptCacheKey(modelID: "M", tokens: [1, 2, 3]).shardedFileURL(under: root)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))

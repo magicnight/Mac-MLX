@@ -31,6 +31,12 @@ public actor PromptCacheStore {
         let caches: [any KVCache]
         let nbytes: Int
         let cacheType: PromptCacheType
+        /// Weight-identity fingerprint (``ModelFingerprint``) of the model this
+        /// snapshot was built against, carried on the hot entry so that when it
+        /// is evicted, ``demoteToCold`` stamps the cold file with the right
+        /// value. `nil` for an entry whose model had no readable `config.json`
+        /// — such an entry is never spilled to the cold tier.
+        let fingerprint: String?
     }
 
     private let root: URL
@@ -97,9 +103,12 @@ public actor PromptCacheStore {
         modelID: String,
         tokens: [Int],
         snapshot: PromptCacheSnapshot,
-        cacheType: PromptCacheType = .assistant
+        cacheType: PromptCacheType = .assistant,
+        modelFingerprint: String? = nil
     ) {
-        store(modelID: modelID, tokens: tokens, caches: snapshot.caches, cacheType: cacheType)
+        store(
+            modelID: modelID, tokens: tokens, caches: snapshot.caches,
+            cacheType: cacheType, fingerprint: modelFingerprint)
     }
 
     /// Hot-tier insertion shared by the public ``insert`` entry point and
@@ -109,12 +118,14 @@ public actor PromptCacheStore {
     /// that also hand the same state out to a generator must pass an
     /// independent copy.
     private func store(
-        modelID: String, tokens: [Int], caches: [any KVCache], cacheType: PromptCacheType
+        modelID: String, tokens: [Int], caches: [any KVCache], cacheType: PromptCacheType,
+        fingerprint: String?
     ) {
         let entry = CacheEntry(
             caches: caches,
             nbytes: Self.cacheBytes(caches),
-            cacheType: cacheType
+            cacheType: cacheType,
+            fingerprint: fingerprint
         )
         let key = PromptCacheEntryKey(modelID: modelID, tokens: tokens)
 
@@ -148,12 +159,25 @@ public actor PromptCacheStore {
     /// trimmed to `reusedTokenCount`; feed `tokens[reusedTokenCount...]` to the
     /// generator. `reusedTokenCount ≤ tokens.count - 1` always holds, so the
     /// suffix is never empty.
-    public func fetchNearest(modelID: String, tokens: [Int]) -> PromptCacheHit? {
+    public func fetchNearest(
+        modelID: String, tokens: [Int], modelFingerprint: String? = nil
+    ) -> PromptCacheHit? {
         guard !tokens.isEmpty else { return nil }
         let result = trie.search(model: modelID, tokens: tokens)
 
+        // A hot entry is reused only when its stamped weight fingerprint matches
+        // the model on disk now — the same weight-identity guard the cold tier
+        // applies, made uniform across both tiers. Without it, an `unload()` →
+        // swap-weights-at-same-path → reload that keeps this store alive would
+        // serve KV state built from the OLD weights (silently wrong output — the
+        // exact hazard this feature prevents). A stale entry simply misses here and
+        // is re-evicted by the LRU as fresh entries arrive. `nil == nil` holds, so a
+        // model with no config.json still gets hot LCP within its process lifetime.
+
         // Exact hit: reuse the whole prefix but leave the last token to feed.
-        if let exact = result.exact, let entry = trie.get(model: modelID, tokens: exact) {
+        if let exact = result.exact, let entry = trie.get(model: modelID, tokens: exact),
+            entry.fingerprint == modelFingerprint
+        {
             return makeHit(
                 caches: entry.caches, heldCount: tokens.count,
                 targetReuse: tokens.count - 1, tokenCount: tokens.count)
@@ -165,6 +189,7 @@ public actor PromptCacheStore {
         // Preferred over a shorter prefix when it shares strictly more tokens.
         if let longer = result.longer, result.commonPrefix > shortLength,
             let entry = trie.get(model: modelID, tokens: longer),
+            entry.fingerprint == modelFingerprint,
             MLXLMCommon.canTrimPromptCache(entry.caches)
         {
             let prefix = min(tokens.count - 1, result.commonPrefix)
@@ -175,15 +200,18 @@ public actor PromptCacheStore {
 
         // Shorter strict prefix: reuse it wholesale (no trim needed).
         if let shorter = result.shorter, shortLength > 0,
-            let entry = trie.get(model: modelID, tokens: shorter)
+            let entry = trie.get(model: modelID, tokens: shorter),
+            entry.fingerprint == modelFingerprint
         {
             return makeHit(
                 caches: entry.caches, heldCount: shortLength,
                 targetReuse: shortLength, tokenCount: tokens.count)
         }
 
-        // Hot miss → exact-key cold fallback.
-        return fetchFromCold(modelID: modelID, tokens: tokens)
+        // Hot miss → exact-key cold fallback. The fingerprint gates the restore:
+        // a cold entry is only reused when its stamped weight identity matches
+        // the model currently on disk.
+        return fetchFromCold(modelID: modelID, tokens: tokens, fingerprint: modelFingerprint)
     }
 
     // MARK: - Clear
@@ -248,7 +276,9 @@ public actor PromptCacheStore {
             let entry = trie.pop(model: key.modelID, tokens: key.tokens)
         else { return false }
         nBytes -= entry.nbytes
-        demoteToCold(modelID: key.modelID, tokens: key.tokens, caches: entry.caches)
+        demoteToCold(
+            modelID: key.modelID, tokens: key.tokens, caches: entry.caches,
+            fingerprint: entry.fingerprint)
         return true
     }
 
@@ -263,7 +293,9 @@ public actor PromptCacheStore {
     /// blocking IO onto a detached task (and reconciling the resulting
     /// ordering/ownership with concurrent `insert`/`fetchNearest` calls) is a
     /// deliberate follow-up rather than part of this pass.
-    func demoteToCold(modelID: String, tokens: [Int], caches: [any KVCache]) {
+    func demoteToCold(
+        modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?
+    ) {
         // Master opt-in: a disabled cold tier makes this a pure hot cache.
         // Check first, before any filesystem or serialisation work, so the
         // no-op is cheap and observable (no shard directory is even created).
@@ -272,6 +304,12 @@ public actor PromptCacheStore {
         // all, rather than write a file the prune must then keep as the protected
         // just-written entry — which would leave one file over a 0-byte cap.
         guard coldCapBytes > 0 else { return }
+        // No fingerprint ⇒ the model had no readable `config.json`, so a restore
+        // could never be safely validated later (``fetchFromCold`` rejects a
+        // nil current fingerprint anyway). Don't write an entry that is
+        // guaranteed to be rejected-and-deleted on the next fetch — skip the
+        // spill entirely so the cold tier only ever holds restorable entries.
+        guard let fingerprint else { return }
         let key = PromptCacheKey(modelID: modelID, tokens: tokens)
         let url = key.shardedFileURL(under: root)
         let parent = url.deletingLastPathComponent()
@@ -282,6 +320,7 @@ public actor PromptCacheStore {
         let metadata: [String: String] = [
             "modelID": key.modelID,
             "tokenCount": String(key.tokenCount),
+            "modelFingerprint": fingerprint,
         ]
         try? savePromptCache(url: url, cache: caches, metadata: metadata)
         // Enforce the cold-tier disk budget by mtime-LRU. `protecting: url`
@@ -309,7 +348,9 @@ public actor PromptCacheStore {
     /// v1 accepted tradeoff: `loadPromptCache` reads synchronously on the
     /// actor's executor — the same hundreds-of-ms stall surface documented on
     /// `demoteToCold`; detached IO is the same deferred follow-up.
-    private func fetchFromCold(modelID: String, tokens: [Int]) -> PromptCacheHit? {
+    private func fetchFromCold(
+        modelID: String, tokens: [Int], fingerprint: String?
+    ) -> PromptCacheHit? {
         // Master opt-in: a disabled cold tier has nothing on disk to restore.
         // Short-circuit before any filesystem work so a hot miss stays a pure
         // in-memory miss.
@@ -318,9 +359,25 @@ public actor PromptCacheStore {
         let url = key.shardedFileURL(under: root)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let restored: [any KVCache]
+        let meta: [String: String]
         do {
-            (restored, _) = try loadPromptCache(url: url)
+            (restored, meta) = try loadPromptCache(url: url)
         } catch {
+            return nil
+        }
+        // Weight-identity guard (Wave 2a): the cold file names a directory + token
+        // prefix, NOT the weights those tokens were prefilled against. Only reuse
+        // it when the stamped fingerprint matches the model currently on disk.
+        // Reject-AND-DELETE on any of: a differing fingerprint (weights changed
+        // under the same path), a missing stamp (a Wave-1 file predating this key
+        // — auto-migrated away), or a nil current fingerprint (a model with no
+        // readable `config.json` can never safely reuse cold). Deleting reclaims
+        // the now-unusable file instead of re-rejecting it on every future fetch.
+        guard let stored = meta["modelFingerprint"],
+            let current = fingerprint,
+            stored == current
+        else {
+            try? FileManager.default.removeItem(at: url)
             return nil
         }
         // Cold entries are content-addressed by the full token hash, so the
@@ -330,7 +387,11 @@ public actor PromptCacheStore {
                 caches: restored, heldCount: tokens.count,
                 targetReuse: tokens.count - 1, tokenCount: tokens.count)
         else { return nil }
-        store(modelID: modelID, tokens: tokens, caches: restored, cacheType: .assistant)
+        // Promote back into the hot tier under the SAME (validated) fingerprint,
+        // so a later re-eviction demotes it with the correct stamp.
+        store(
+            modelID: modelID, tokens: tokens, caches: restored, cacheType: .assistant,
+            fingerprint: current)
         return hit
     }
 

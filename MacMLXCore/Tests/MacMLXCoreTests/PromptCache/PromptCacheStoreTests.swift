@@ -16,6 +16,14 @@ final class PromptCacheStoreTests: XCTestCase {
 
     private let model = "M"
 
+    /// Consistent non-nil weight fingerprints for the cold-tier tests. Wave 2a
+    /// makes ``PromptCacheStore`` reject a restore whose stamped fingerprint
+    /// doesn't match the current one (and reject a nil current fingerprint
+    /// outright), so every demote+restore test threads a stable value; the
+    /// mismatch case uses the second.
+    private let fpA = "fingerprint-A"
+    private let fpB = "fingerprint-B"
+
     /// A `KVCacheSimple` whose offset equals `tokenCount`, mimicking a cache
     /// that has prefilled exactly that many tokens. Head dim 4, one layer.
     private func makeSnapshot(tokenCount: Int) -> PromptCacheSnapshot {
@@ -241,15 +249,20 @@ final class PromptCacheStoreTests: XCTestCase {
         let root = tmpRoot()
         let store = PromptCacheStore(root: root, maxEntries: 1)
 
-        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
-        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
 
         // [1,2] evicted from hot → safetensors on disk.
         let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
         XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
 
-        // And an exact cold lookup restores it.
-        let restored = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        // And an exact cold lookup with the matching fingerprint restores it.
+        let restored = await store.fetchNearest(
+            modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNotNil(restored)
     }
 
@@ -263,19 +276,24 @@ final class PromptCacheStoreTests: XCTestCase {
         let store = PromptCacheStore(root: root, maxEntries: 1)
 
         // Push [1,2] out to cold by inserting a second entry over the budget.
-        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
-        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
         let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
         XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
 
-        // First fetch: cold hit, which promotes [1,2] back into the hot tier.
-        let first = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        // First fetch: cold hit (matching fingerprint), which promotes [1,2] back
+        // into the hot tier.
+        let first = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNotNil(first)
 
         // Remove the cold file. A second [1,2] hit now proves memory residency —
         // the cold path would find nothing and return nil.
         try FileManager.default.removeItem(at: coldFile)
-        let second = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        let second = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNotNil(second)
         XCTAssertEqual(second?.reusedTokenCount, 1)
     }
@@ -291,8 +309,12 @@ final class PromptCacheStoreTests: XCTestCase {
         // Learn one cold file's on-disk footprint by demoting a single entry.
         let probeRoot = tmpRoot()
         let probe = PromptCacheStore(root: probeRoot, maxEntries: 1)
-        await probe.insert(modelID: model, tokens: [100, 101], snapshot: makeSnapshot(tokenCount: 2))
-        await probe.insert(modelID: model, tokens: [200, 201], snapshot: makeSnapshot(tokenCount: 2))
+        await probe.insert(
+            modelID: model, tokens: [100, 101], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await probe.insert(
+            modelID: model, tokens: [200, 201], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
         let oneColdFile = coldDirBytes(probeRoot)
         XCTAssertGreaterThan(oneColdFile, 0)
 
@@ -303,7 +325,8 @@ final class PromptCacheStoreTests: XCTestCase {
         for i in 0..<6 {
             await store.insert(
                 modelID: model, tokens: [i * 2, i * 2 + 1],
-                snapshot: makeSnapshot(tokenCount: 2))
+                snapshot: makeSnapshot(tokenCount: 2),
+                modelFingerprint: fpA)
         }
 
         // Invariant: the cold directory never exceeds its byte cap.
@@ -337,8 +360,12 @@ final class PromptCacheStoreTests: XCTestCase {
         let store = PromptCacheStore(
             root: root, maxEntries: config.maxEntries, maxBytes: config.hotBytes,
             coldCapBytes: config.coldCapBytes, coldEnabled: config.coldEnabled)
-        await store.insert(modelID: model, tokens: [1, 2, 3], snapshot: makeSnapshot(tokenCount: 3))
-        await store.insert(modelID: model, tokens: [4, 5, 6], snapshot: makeSnapshot(tokenCount: 3))
+        await store.insert(
+            modelID: model, tokens: [1, 2, 3], snapshot: makeSnapshot(tokenCount: 3),
+            modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [4, 5, 6], snapshot: makeSnapshot(tokenCount: 3),
+            modelFingerprint: fpA)
 
         let count = await store.residentCount
         let bytes = await store.residentBytes
@@ -354,15 +381,21 @@ final class PromptCacheStoreTests: XCTestCase {
         try requireMLXRuntimeOrSkip()
         let root = tmpRoot()
         let store = PromptCacheStore(root: root, maxEntries: 1, coldEnabled: false)
-        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
-        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+        // Valid fingerprints throughout, so this isolates the `coldEnabled` guard
+        // rather than the nil-fingerprint spill skip.
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
 
         let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
         XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
         // Evicted entry is gone for good (no cold fallback); the resident one serves.
-        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNil(miss)
-        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4])
+        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4], modelFingerprint: fpA)
         XCTAssertNotNil(hot)
     }
 
@@ -373,14 +406,20 @@ final class PromptCacheStoreTests: XCTestCase {
         try requireMLXRuntimeOrSkip()
         let root = tmpRoot()
         let store = PromptCacheStore(root: root, maxEntries: 1, coldCapBytes: 0)
-        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
-        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+        // Valid fingerprints throughout, so this isolates the zero-cap guard
+        // rather than the nil-fingerprint spill skip.
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
 
         let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
         XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
-        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNil(miss)
-        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4])
+        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4], modelFingerprint: fpA)
         XCTAssertNotNil(hot)
     }
 
@@ -388,17 +427,138 @@ final class PromptCacheStoreTests: XCTestCase {
         try requireMLXRuntimeOrSkip()
         let root = tmpRoot()
         let store = PromptCacheStore(root: root, maxEntries: 1)
-        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
-        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+        // Valid fingerprints so [1,2] is genuinely written to cold — otherwise the
+        // "clearAll wiped the cold file" assertion below would be vacuous.
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        // Precondition: [1,2] really did spill to cold before clearAll runs.
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
 
         await store.clearAll()
 
         let count = await store.residentCount
         XCTAssertEqual(count, 0)
         // [3,4] (was hot) is gone, and [1,2]'s cold file was wiped.
-        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4])
+        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4], modelFingerprint: fpA)
         XCTAssertNil(hot)
-        let cold = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        let cold = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNil(cold)
+    }
+
+    // MARK: - cold-tier fingerprint guard (Wave 2a)
+
+    /// Demote a `PromptCacheStore` local helper: push `tokens` out to cold under
+    /// `fingerprint` by inserting it then a disjoint second entry over a
+    /// `maxEntries: 1` budget. Returns the store's root and the cold-file URL.
+    private func demoteToCold(
+        tokens: [Int], fingerprint: String
+    ) async -> (root: URL, coldFile: URL, store: PromptCacheStore) {
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1)
+        await store.insert(
+            modelID: model, tokens: tokens, snapshot: makeSnapshot(tokenCount: tokens.count),
+            modelFingerprint: fingerprint)
+        // A disjoint second entry evicts `tokens` to the cold tier.
+        await store.insert(
+            modelID: model, tokens: [900, 901], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fingerprint)
+        let coldFile = PromptCacheKey(modelID: model, tokens: tokens).shardedFileURL(under: root)
+        return (root, coldFile, store)
+    }
+
+    /// (a) A cold entry stamped with fingerprint "A" is restored when fetched
+    /// with the SAME fingerprint.
+    func testColdRestoresOnMatchingFingerprint() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (_, coldFile, store) = await demoteToCold(tokens: [1, 2], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        let restored = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNotNil(restored)
+        XCTAssertEqual(restored?.reusedTokenCount, 1)
+        // A matching fingerprint restores AND keeps the cold file (it is not deleted).
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+    }
+
+    /// (b) A cold entry stamped with "A" is REJECTED and its file DELETED when
+    /// fetched with a different fingerprint "B" — the weights-changed-under-the-
+    /// same-path case that this whole feature exists to catch.
+    func testColdRejectsAndDeletesOnFingerprintMismatch() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (_, coldFile, store) = await demoteToCold(tokens: [1, 2], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        let rejected = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpB)
+        XCTAssertNil(rejected)
+        // Reject-AND-delete: the stale file is reclaimed, not left to be re-rejected.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+    }
+
+    /// (c) A cold entry stamped with "A" is rejected (and deleted) when fetched
+    /// with a NIL current fingerprint — a model with no readable `config.json`
+    /// can never safely reuse cold, so nil is never a wildcard match.
+    func testColdRejectsOnNilFingerprint() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (_, coldFile, store) = await demoteToCold(tokens: [1, 2], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        let rejected = await store.fetchNearest(
+            modelID: model, tokens: [1, 2], modelFingerprint: nil)
+        XCTAssertNil(rejected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+    }
+
+    /// (d) A HOT entry stamped with fingerprint "A" is NOT served when the request
+    /// carries a different fingerprint "B" — the same weight-safety guard the cold
+    /// tier applies, made uniform across both tiers so an `unload()` →
+    /// swap-weights-at-same-path → reload that keeps this store alive can't serve KV
+    /// built from the old weights (the exact silent-wrong-output this feature prevents).
+    func testHotHitRejectedOnFingerprintMismatch() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 8)
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+
+        // Matching fingerprint → hot hit.
+        let hit = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNotNil(hit)
+        // Different fingerprint (weights swapped under the same path) → miss, even
+        // though (modelID, tokens) match.
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpB)
+        XCTAssertNil(miss)
+    }
+
+    /// (e) A cold file written BEFORE fingerprints existed (Wave-1 metadata, no
+    /// `modelFingerprint` key) is rejected AND deleted on the next fetch — the
+    /// stampless legacy entry auto-migrates away rather than being trusted.
+    func testColdRejectsAndDeletesLegacyStamplessEntry() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 8)
+
+        // Write a cold file the Wave-1 way: `{modelID, tokenCount}` only, NO
+        // "modelFingerprint" key, at the exact-key sharded path fetchFromCold probes.
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        try FileManager.default.createDirectory(
+            at: coldFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try savePromptCache(
+            url: coldFile,
+            cache: makeSnapshot(tokenCount: 2).caches,
+            metadata: ["modelID": model, "tokenCount": "2"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        // A fetch with a valid fingerprint finds the stampless file, cannot validate
+        // it (no stored fingerprint), rejects, and reclaims the file.
+        let rejected = await store.fetchNearest(
+            modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNil(rejected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
     }
 }
