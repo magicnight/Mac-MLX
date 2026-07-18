@@ -234,6 +234,12 @@ public final class AppState {
     public func bootstrap() async {
         let loaded = await settings.load()
         currentSettings = loaded
+        // Thread the persisted prompt-cache budget into the coordinator's pool
+        // factory before any model loads, so the very first engine honours the
+        // user's hot/cold budgets instead of the construction-time defaults.
+        // Read the settings actor's live `current` (not the `loaded` snapshot) so a
+        // write that raced this bootstrap can't push a stale budget.
+        coordinator.updatePromptCacheConfig(PromptCacheConfig(from: await settings.current))
         coordinator.switchTo(loaded.preferredEngine)
         await applyHFEndpoint(loaded.hfEndpoint)
         // Start draining the engine's phase-timeline events for the whole app

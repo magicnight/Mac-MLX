@@ -51,6 +51,35 @@ final class PromptCacheStoreTests: XCTestCase {
         hit?.snapshot.caches.first?.offset
     }
 
+    /// Total bytes of every regular file under `root` — the cold tier's on-disk
+    /// footprint, for asserting the byte-cap invariant.
+    private func coldDirBytes(_ root: URL) -> Int {
+        guard
+            let en = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+        else { return 0 }
+        var total = 0
+        for case let url as URL in en {
+            let v = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            if v?.isRegularFile == true, let s = v?.fileSize { total += s }
+        }
+        return total
+    }
+
+    /// Count of regular files under `root` (cold-tier file count).
+    private func coldFileCount(_ root: URL) -> Int {
+        guard
+            let en = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: [.isRegularFileKey])
+        else { return 0 }
+        var count = 0
+        for case let url as URL in en {
+            let v = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            if v?.isRegularFile == true { count += 1 }
+        }
+        return count
+    }
+
     // MARK: - nearest fetch
 
     func testExactHitReusesAllButLastToken() async throws {
@@ -249,6 +278,110 @@ final class PromptCacheStoreTests: XCTestCase {
         let second = await store.fetchNearest(modelID: model, tokens: [1, 2])
         XCTAssertNotNil(second)
         XCTAssertEqual(second?.reusedTokenCount, 1)
+    }
+
+    // MARK: - cold-tier byte budget
+
+    /// The core Wave 1 fix: with a byte cap set, the cold directory stays within
+    /// it as entries keep spilling over. `maxEntries: 1` demotes the prior entry
+    /// on every insert, so six inserts try to write five cold files; pruning
+    /// (mtime-LRU) keeps only what fits.
+    func testColdCapBudgetPrunesOldestColdFiles() async throws {
+        try requireMLXRuntimeOrSkip()
+        // Learn one cold file's on-disk footprint by demoting a single entry.
+        let probeRoot = tmpRoot()
+        let probe = PromptCacheStore(root: probeRoot, maxEntries: 1)
+        await probe.insert(modelID: model, tokens: [100, 101], snapshot: makeSnapshot(tokenCount: 2))
+        await probe.insert(modelID: model, tokens: [200, 201], snapshot: makeSnapshot(tokenCount: 2))
+        let oneColdFile = coldDirBytes(probeRoot)
+        XCTAssertGreaterThan(oneColdFile, 0)
+
+        // Cap at ~2.5 files and force five demotions.
+        let root = tmpRoot()
+        let cap = oneColdFile * 2 + oneColdFile / 2
+        let store = PromptCacheStore(root: root, maxEntries: 1, coldCapBytes: cap)
+        for i in 0..<6 {
+            await store.insert(
+                modelID: model, tokens: [i * 2, i * 2 + 1],
+                snapshot: makeSnapshot(tokenCount: 2))
+        }
+
+        // Invariant: the cold directory never exceeds its byte cap.
+        XCTAssertLessThanOrEqual(coldDirBytes(root), cap)
+        // Pruning actually happened (five entries demoted, but the ~2.5-file cap
+        // holds only two) — proof this isn't merely a small working set. Asserted
+        // by count, not by naming a specific victim, so equal-mtime write ticks
+        // can't make it flaky (oldest-first ordering is locked down separately in
+        // the pure-function tests).
+        XCTAssertLessThanOrEqual(coldFileCount(root), 2)
+        XCTAssertGreaterThanOrEqual(coldFileCount(root), 1)
+        // The most-recently demoted entry ([8,9], protected as the last write)
+        // survives its own prune — protection is by identity, not mtime.
+        let newest = PromptCacheKey(modelID: model, tokens: [8, 9]).shardedFileURL(under: root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newest.path))
+    }
+
+    /// Wired the way `MLXSwiftEngine` builds the store from a `PromptCacheConfig`:
+    /// a tight hot BYTE budget with a generous entry ceiling. The byte budget —
+    /// not the 1024-entry cap — must drive eviction, and the victim demotes to
+    /// the cold tier.
+    func testWiredHotByteBudgetEvictsToCold() async throws {
+        try requireMLXRuntimeOrSkip()
+        let probe = PromptCacheStore(root: tmpRoot())
+        await probe.insert(modelID: model, tokens: [1, 2, 3], snapshot: makeSnapshot(tokenCount: 3))
+        let oneEntryBytes = await probe.residentBytes
+
+        let root = tmpRoot()
+        let config = PromptCacheConfig(
+            hotBytes: oneEntryBytes, maxEntries: 1024, coldCapBytes: .max, coldEnabled: true)
+        let store = PromptCacheStore(
+            root: root, maxEntries: config.maxEntries, maxBytes: config.hotBytes,
+            coldCapBytes: config.coldCapBytes, coldEnabled: config.coldEnabled)
+        await store.insert(modelID: model, tokens: [1, 2, 3], snapshot: makeSnapshot(tokenCount: 3))
+        await store.insert(modelID: model, tokens: [4, 5, 6], snapshot: makeSnapshot(tokenCount: 3))
+
+        let count = await store.residentCount
+        let bytes = await store.residentBytes
+        XCTAssertEqual(count, 1)
+        XCTAssertLessThanOrEqual(bytes, oneEntryBytes)
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2, 3]).shardedFileURL(under: root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+    }
+
+    /// With the master toggle off, eviction drops entries without ever touching
+    /// disk — a pure hot cache. The evicted prefix becomes a clean miss.
+    func testDisabledColdTierNeverDemotesOnEviction() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1, coldEnabled: false)
+        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
+        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+        // Evicted entry is gone for good (no cold fallback); the resident one serves.
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        XCTAssertNil(miss)
+        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4])
+        XCTAssertNotNil(hot)
+    }
+
+    /// A zero cold budget means "no cold tier": an eviction must leave NO cold file
+    /// behind. Guards the fix for the zero-cap loophole where a spill would write a
+    /// file the prune then keeps as the just-written protected entry.
+    func testZeroColdCapNeverSpills() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1, coldCapBytes: 0)
+        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
+        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        XCTAssertNil(miss)
+        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4])
+        XCTAssertNotNil(hot)
     }
 
     func testClearAllDropsBothTiers() async throws {

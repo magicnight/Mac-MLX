@@ -193,13 +193,25 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     // MARK: Initialiser
 
-    /// - Parameter siliconObserver: optional W2 bottleneck-classifier seam.
-    ///   Defaults to nil, keeping the generation path unchanged; pass one to
-    ///   receive per-generation phase-transition notifications.
-    public init(siliconObserver: SiliconEngineObserver? = nil) {
+    /// - Parameters:
+    ///   - siliconObserver: optional W2 bottleneck-classifier seam. Defaults to
+    ///     nil, keeping the generation path unchanged; pass one to receive
+    ///     per-generation phase-transition notifications.
+    ///   - promptCache: prompt-cache budget for the two-tier store. Defaults to
+    ///     ``PromptCacheConfig``'s safe production defaults (bounded hot bytes,
+    ///     bounded cold disk, cold tier on); the GUI + CLI construction sites
+    ///     override it with the user's persisted `Settings` values.
+    public init(
+        siliconObserver: SiliconEngineObserver? = nil,
+        promptCache: PromptCacheConfig = PromptCacheConfig()
+    ) {
         self.siliconObserver = siliconObserver
         self.promptCacheStore = PromptCacheStore(
-            root: DataRoot.macMLX("kv-cache")
+            root: DataRoot.macMLX("kv-cache"),
+            maxEntries: promptCache.maxEntries,
+            maxBytes: promptCache.hotBytes,
+            coldCapBytes: promptCache.coldCapBytes,
+            coldEnabled: promptCache.coldEnabled
         )
     }
 

@@ -1,15 +1,14 @@
 // KVCacheSection.swift
 // macMLX
 //
-// Settings section exposing the v0.4 KV-cache-tiering knobs: hot (RAM)
+// Settings section exposing the KV-cache-tiering knobs: hot (RAM)
 // and cold (SSD) budget sliders plus a "Clear All KV Caches" button
 // that drops both tiers.
 //
-// MVP note: the sliders persist to `Settings.kvCacheHotMB` /
-// `Settings.kvCacheColdGB` but are not yet wired into the engine's
-// eviction logic. `PromptCacheStore` uses an 8-entry LRU today; a
-// byte-accurate budget and automatic cold-tier pruning land in
-// v0.4.0.1. See the `.help` strings below for the user-facing note.
+// The sliders persist to `Settings.kvCacheHotMB` / `Settings.kvCacheColdGB`
+// and are wired into the engine's `PromptCacheStore` via `PromptCacheConfig`:
+// the hot slider is the primary in-RAM byte budget; the cold slider caps the
+// on-disk directory, enforced automatically by `pruneCold` (mtime-LRU).
 
 import SwiftUI
 import MacMLXCore
@@ -17,6 +16,7 @@ import MacMLXCore
 struct KVCacheSection: View {
     @Binding var hotMB: Int
     @Binding var coldGB: Int
+    @Binding var coldEnabled: Bool
     var onClearCache: () -> Void
 
     var body: some View {
@@ -33,7 +33,7 @@ struct KVCacheSection: View {
                         .font(.system(.body, design: .monospaced))
                         .frame(minWidth: 80, alignment: .trailing)
                 }
-                .help("Takes effect in v0.4.0.1 — currently capped at 8 cache entries regardless of this slider.")
+                .help("Primary in-RAM budget for reusable prompt-cache KV state. Evicted entries spill to the cold (SSD) tier. Applies to models loaded after the change.")
             }
 
             HStack {
@@ -48,8 +48,12 @@ struct KVCacheSection: View {
                         .font(.system(.body, design: .monospaced))
                         .frame(minWidth: 80, alignment: .trailing)
                 }
-                .help("Cold-tier cap is not enforced automatically in this MVP — use the Clear All button below to reclaim space. Automatic pruning lands in v0.4.0.1.")
+                .help("On-disk cap for the cold KV-cache tier, pruned automatically (oldest first) once exceeded. Applies to models loaded after the change; use Clear All below to reclaim everything now.")
             }
+            .disabled(!coldEnabled)
+
+            Toggle("Spill to cold (SSD) tier", isOn: $coldEnabled)
+                .help("When off, the KV cache stays in RAM only and nothing spills to disk. Existing cold files remain on disk until you Clear All.")
 
             HStack {
                 Spacer()
