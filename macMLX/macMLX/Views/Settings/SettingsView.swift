@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var hfEndpoint: String = "https://huggingface.co"
     @State private var kvCacheHotMB: Int = 512
     @State private var kvCacheColdGB: Int = 20
+    @State private var kvCacheColdEnabled: Bool = true
     @State private var maxResidentMemoryGB: Int = 8
     @State private var scanHuggingFaceCache: Bool = false
     @State private var huggingFaceCacheDirectories: [URL] = []
@@ -57,17 +58,37 @@ struct SettingsView: View {
             KVCacheSection(
                 hotMB: $kvCacheHotMB,
                 coldGB: $kvCacheColdGB,
+                coldEnabled: $kvCacheColdEnabled,
                 onClearCache: {
                     Task {
                         await appState.coordinator.clearPromptCache()
                     }
                 }
             )
+            // Persist AND push the new budget to the coordinator so the next
+            // engine minted (incl. a mid-session model swap) honors it. Already
+            // resident engines keep their construction-time budget until reload —
+            // a live re-push to resident stores is a Wave 2 follow-up.
             .onChange(of: kvCacheHotMB) { _, newValue in
-                Task { await appState.updateSettings { $0.kvCacheHotMB = newValue } }
+                Task {
+                    await appState.updateSettings { $0.kvCacheHotMB = newValue }
+                    appState.coordinator.updatePromptCacheConfig(
+                        PromptCacheConfig(from: appState.currentSettings))
+                }
             }
             .onChange(of: kvCacheColdGB) { _, newValue in
-                Task { await appState.updateSettings { $0.kvCacheColdGB = newValue } }
+                Task {
+                    await appState.updateSettings { $0.kvCacheColdGB = newValue }
+                    appState.coordinator.updatePromptCacheConfig(
+                        PromptCacheConfig(from: appState.currentSettings))
+                }
+            }
+            .onChange(of: kvCacheColdEnabled) { _, newValue in
+                Task {
+                    await appState.updateSettings { $0.kvCacheColdEnabled = newValue }
+                    appState.coordinator.updatePromptCacheConfig(
+                        PromptCacheConfig(from: appState.currentSettings))
+                }
             }
 
             ModelPoolSection(maxResidentGB: $maxResidentMemoryGB)
@@ -195,6 +216,7 @@ struct SettingsView: View {
         hfEndpoint = s.hfEndpoint
         kvCacheHotMB = s.kvCacheHotMB
         kvCacheColdGB = s.kvCacheColdGB
+        kvCacheColdEnabled = s.kvCacheColdEnabled
         maxResidentMemoryGB = s.maxResidentMemoryGB
         scanHuggingFaceCache = s.scanHuggingFaceCache
         huggingFaceCacheDirectories = s.huggingFaceCacheDirectories

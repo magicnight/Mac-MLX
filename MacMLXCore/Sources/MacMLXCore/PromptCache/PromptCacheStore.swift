@@ -36,6 +36,8 @@ public actor PromptCacheStore {
     private let root: URL
     private let maxEntries: Int
     private let maxBytes: Int
+    private let coldCapBytes: Int
+    private let coldEnabled: Bool
 
     private var trie = PromptTrie<CacheEntry>()
     private var lru = PromptCacheClassifiedLRU<PromptCacheEntryKey>()
@@ -47,14 +49,36 @@ public actor PromptCacheStore {
     ///   - maxBytes: hot-tier resident byte ceiling. Defaults to effectively
     ///     unbounded, so count is the only active budget unless a caller opts
     ///     into a byte cap.
-    public init(root: URL, maxEntries: Int = 8, maxBytes: Int = .max) {
+    ///   - coldCapBytes: cold-tier on-disk byte cap, enforced by ``pruneCold``
+    ///     (mtime-LRU). Defaults to effectively unbounded — the production
+    ///     budget is supplied via ``PromptCacheConfig`` at the engine/app
+    ///     construction sites, keeping this low-level default permissive so
+    ///     direct callers (and existing tests) see the pre-budget behaviour.
+    ///   - coldEnabled: master opt-in for the cold (safetensors) tier. When
+    ///     `false` the store is a pure hot cache: ``demoteToCold`` and
+    ///     ``fetchFromCold`` short-circuit to no-ops before any file work.
+    public init(
+        root: URL,
+        maxEntries: Int = 8,
+        maxBytes: Int = .max,
+        coldCapBytes: Int = PromptCacheConfig.defaultColdCapBytes,
+        coldEnabled: Bool = true
+    ) {
         self.root = root
         self.maxEntries = maxEntries
         self.maxBytes = maxBytes
+        self.coldCapBytes = coldCapBytes
+        self.coldEnabled = coldEnabled
         try? FileManager.default.createDirectory(
             at: root,
             withIntermediateDirectories: true
         )
+        // Enforce the cold budget once at startup: a directory that grew past
+        // the cap in an earlier run (or before budgets were wired at all) gets
+        // trimmed on load rather than only after the next eviction.
+        if coldEnabled {
+            Self.pruneColdDirectory(root: root, capBytes: coldCapBytes, protecting: nil)
+        }
     }
 
     /// Current resident hot-tier size in bytes (sum of entry KV `state`).
@@ -230,13 +254,20 @@ public actor PromptCacheStore {
 
     /// Persist an evicted entry to disk under its exact-token hash.
     ///
+    /// `internal` (not `private`) purely so the disabled-tier no-op is unit
+    /// testable without MLX — see `PromptCacheColdPruneTests`.
+    ///
     /// v1 accepted tradeoff: `savePromptCache` serialises synchronously on the
     /// actor's executor, so an eviction can stall this actor for the hundreds of
     /// milliseconds a multi-hundred-MB KV snapshot takes to write. Moving the
     /// blocking IO onto a detached task (and reconciling the resulting
     /// ordering/ownership with concurrent `insert`/`fetchNearest` calls) is a
     /// deliberate follow-up rather than part of this pass.
-    private func demoteToCold(modelID: String, tokens: [Int], caches: [any KVCache]) {
+    func demoteToCold(modelID: String, tokens: [Int], caches: [any KVCache]) {
+        // Master opt-in: a disabled cold tier makes this a pure hot cache.
+        // Check first, before any filesystem or serialisation work, so the
+        // no-op is cheap and observable (no shard directory is even created).
+        guard coldEnabled else { return }
         let key = PromptCacheKey(modelID: modelID, tokens: tokens)
         let url = key.shardedFileURL(under: root)
         let parent = url.deletingLastPathComponent()
@@ -249,6 +280,10 @@ public actor PromptCacheStore {
             "tokenCount": String(key.tokenCount),
         ]
         try? savePromptCache(url: url, cache: caches, metadata: metadata)
+        // Enforce the cold-tier disk budget by mtime-LRU. `protecting: url`
+        // guarantees the entry we just wrote is never the one pruned, even if a
+        // clock skew made it look older than a peer.
+        pruneCold(protecting: url)
     }
 
     /// Exact-key cold lookup. Restores the on-disk snapshot for `tokens`,
@@ -271,6 +306,10 @@ public actor PromptCacheStore {
     /// actor's executor — the same hundreds-of-ms stall surface documented on
     /// `demoteToCold`; detached IO is the same deferred follow-up.
     private func fetchFromCold(modelID: String, tokens: [Int]) -> PromptCacheHit? {
+        // Master opt-in: a disabled cold tier has nothing on disk to restore.
+        // Short-circuit before any filesystem work so a hot miss stays a pure
+        // in-memory miss.
+        guard coldEnabled else { return nil }
         let key = PromptCacheKey(modelID: modelID, tokens: tokens)
         let url = key.shardedFileURL(under: root)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
@@ -289,6 +328,99 @@ public actor PromptCacheStore {
         else { return nil }
         store(modelID: modelID, tokens: tokens, caches: restored, cacheType: .assistant)
         return hit
+    }
+
+    // MARK: - Cold-tier pruning
+
+    /// Enforce ``coldCapBytes`` over the cold directory by mtime-LRU. Thin
+    /// actor-isolated wrapper over the nonisolated ``pruneColdDirectory`` so the
+    /// same scan/select/delete runs from both `init` and `demoteToCold`.
+    private func pruneCold(protecting: URL?) {
+        Self.pruneColdDirectory(root: root, capBytes: coldCapBytes, protecting: protecting)
+    }
+
+    /// One cold-tier file's pruning-relevant facts. `internal` so the pure
+    /// victim selection is unit-testable without touching the filesystem.
+    struct ColdFileRecord {
+        let url: URL
+        let size: Int
+        let mtime: Date
+    }
+
+    /// Pure selection: given the current cold files, the byte cap, and the file
+    /// to protect, return the URLs to delete — oldest (mtime) first — until the
+    /// remaining total is within `capBytes`. The `protecting` URL (the entry a
+    /// caller just wrote) is never selected. MLX-free, so it is exhaustively
+    /// unit-testable on its own.
+    ///
+    /// The protection check compares symlink-resolved paths, not raw `URL`
+    /// values: on a symlinked cache root (macOS maps `/var` → `/private/var`,
+    /// and temp dirs live under it) the directory enumerator hands back the
+    /// resolved form while `demoteToCold` protects the unresolved one, so a raw
+    /// `==` would fail to recognise the just-written entry and prune it.
+    static func coldPruneVictims(
+        records: [ColdFileRecord],
+        capBytes: Int,
+        protecting: URL?
+    ) -> [URL] {
+        var total = records.reduce(0) { $0 + $1.size }
+        guard total > capBytes else { return [] }
+        // Oldest first; the protected entry is off the table entirely. Only pay
+        // the per-record path canonicalisation when something is protected.
+        let candidates: [ColdFileRecord]
+        if let protectedPath = protecting?.resolvingSymlinksInPath().standardizedFileURL.path {
+            candidates =
+                records
+                .filter { $0.url.resolvingSymlinksInPath().standardizedFileURL.path != protectedPath }
+                .sorted { $0.mtime < $1.mtime }
+        } else {
+            candidates = records.sorted { $0.mtime < $1.mtime }
+        }
+        var victims: [URL] = []
+        for record in candidates {
+            if total <= capBytes { break }
+            victims.append(record.url)
+            total -= record.size
+        }
+        return victims
+    }
+
+    /// Scan `root`, then delete the mtime-LRU victims chosen by
+    /// ``coldPruneVictims`` until the directory is within `capBytes`. Mirrors
+    /// the store's existing leniency: an unreadable file is skipped (never
+    /// counted, never fatal) and a failed delete is skipped (best-effort — the
+    /// next prune re-scans and retries). `nonisolated`/`static` so `init` can
+    /// call it before the actor is fully initialised.
+    static func pruneColdDirectory(root: URL, capBytes: Int, protecting: URL?) {
+        // An unbounded cap can never be exceeded — skip the scan entirely.
+        guard capBytes != .max else { return }
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey, .fileSizeKey, .contentModificationDateKey,
+        ]
+        let fm = FileManager.default
+        guard
+            let enumerator = fm.enumerator(
+                at: root,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles],
+                errorHandler: { _, _ in true }  // skip unreadable subtrees, keep going
+            )
+        else { return }
+
+        var records: [ColdFileRecord] = []
+        for case let url as URL in enumerator {
+            guard
+                let values = try? url.resourceValues(forKeys: keys),
+                values.isRegularFile == true,
+                let size = values.fileSize,
+                let mtime = values.contentModificationDate
+            else { continue }  // unreadable / not a regular file → leniently skip
+            records.append(ColdFileRecord(url: url, size: size, mtime: mtime))
+        }
+
+        for victim in coldPruneVictims(records: records, capBytes: capBytes, protecting: protecting) {
+            try? fm.removeItem(at: victim)  // a failed delete is skipped, never fatal
+        }
     }
 
     /// Byte footprint of a KV snapshot: sum of its serialised `state` arrays,
