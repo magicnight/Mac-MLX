@@ -71,7 +71,16 @@ public final class EngineCoordinator {
 
     // MARK: - Init
 
-    public init(logs: LogManager) {
+    /// - Parameter siliconObserver: optional W3 silicon-metrics seam. When
+    ///   provided, every `MLXSwiftEngine` the pool mints reports its prefill →
+    ///   decode → complete phase timeline to this observer (the `SiliconMonitor`),
+    ///   feeding the observation panel's bottleneck classifier. `nil` (the default)
+    ///   keeps the pre-W3 behaviour byte-for-byte: no observer attached, generation
+    ///   path unchanged.
+    public init(
+        logs: LogManager,
+        siliconObserver: (any SiliconEngineObserver)? = nil
+    ) {
         self.logs = logs
         self.engineID = .mlxSwift
         // Default budget: 50% of total RAM (10^9 GB — Apple convention).
@@ -80,8 +89,11 @@ public final class EngineCoordinator {
         let totalGB = MemoryProbe.totalMemoryGB()
         let budgetGB = max(4.0, totalGB * 0.5)
         let budgetBytes = Int64(budgetGB * 1_000_000_000)
+        // Capture the Sendable observer into the @Sendable pool factory so each
+        // freshly-minted engine reports its phase timeline. Passing nil resolves to
+        // MLXSwiftEngine's own default (observer-free).
         self.pool = ModelPool(maxBytes: budgetBytes) { _ in
-            MLXSwiftEngine()
+            MLXSwiftEngine(siliconObserver: siliconObserver)
         }
     }
 

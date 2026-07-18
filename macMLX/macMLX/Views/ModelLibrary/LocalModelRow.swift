@@ -18,9 +18,12 @@ struct LocalModelRow: View {
     /// Opens the Track F model card (Overview / Parameters / Files).
     let onShowDetails: () -> Void
 
-    /// Short capsule label for the model's format: "Vision" for VLMs,
-    /// "Embed" for text embedders, "MLX" for plain text models.
+    /// Short capsule label for the model's format: "OCR" for dedicated OCR models,
+    /// "Vision" for other VLMs, "Embed" for text embedders, "MLX" for plain text.
+    /// OCR wins over Vision — an OCR model is still a `.mlxVLM`, but the more specific
+    /// label tells the user what it is for.
     private var formatLabel: String {
+        if model.isOCR { return "OCR" }
         switch model.format {
         case .mlxVLM: return "Vision"
         case .embedder: return "Embed"

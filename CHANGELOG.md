@@ -9,6 +9,58 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-18
+
+Silicon-metrics observability: a live view of what's actually limiting
+inference on your Mac, fusing hardware counters with the engine's own
+in-process phase state — the signal external monitors can't reach. Plus
+per-run benchmark bottleneck attribution and OCR-model recognition.
+
+### Added
+- **Activity panel** (new main-window tab) — live Apple Silicon readouts
+  (GPU occupancy, memory bandwidth, thermal and memory pressure, per-rail
+  power), a prefill/decode throughput split, and the current inference
+  **bottleneck** with actionable advice ("decode is memory-bandwidth-bound
+  → try a lower-bit quantization"; "prefill is compute-bound → expected").
+  All sudoless — no admin rights, no separate helper. (PR #95)
+- **Bottleneck classifier** — fuses the hardware samples with the engine's
+  live prefill/decode phase (the differentiator: an external process only
+  sees the GPU, not which inference phase is running) to attribute the
+  limit. Priority memory > thermal > compute/bandwidth, hysteresis to stop
+  the verdict flapping, a self-calibrating bandwidth ceiling, and 3-frame
+  smoothing. (PR #94)
+- **Silicon sampling layer** — a runtime IOReport bridge (resolved via
+  `dlopen`, so a future macOS that renames or removes the private
+  framework degrades to "unavailable" rather than failing to launch)
+  plus samplers for GPU occupancy, memory bandwidth, thermal/memory
+  pressure, and ANE power. (PRs #92, #93)
+- **Benchmark bottleneck attribution** — a benchmark run samples the
+  silicon while it generates and attaches what limited its decode steady
+  state (memory / thermal / bandwidth / compute) to the saved result, with
+  a confidence and the representative hardware behind it — the same
+  in-process fusion an external monitor can't produce. (PR #96)
+- **OCR model recognition** — dedicated OCR models are labeled with an
+  "OCR" badge distinct from the generic "Vision" one. GLM-OCR is verified
+  end-to-end: it loads through the stock VLM path with no new model code
+  and reads image text back. (PR #97)
+
+### Honesty
+- Estimated values are never dressed up as measured: bandwidth is tagged
+  "estimated", ANE shows a power proxy with no fabricated utilization
+  percentage, the Media Engine (no duty-cycle signal) is omitted, an
+  unavailable IOReport renders "—" with the reason rather than zeros, and
+  an idle engine shows "no active generation" instead of a stale verdict.
+- Benchmark attribution flags low-confidence and estimate-based calls, and
+  reports a run too short to attribute as "unavailable" rather than
+  inventing one; the "OCR" badge only appears on models that actually load.
+
+### Changed
+- Model-port quality tail from the Track G wave: the MiniCPM3 parity
+  fixture hardens the RMSNorm eps-source split, the four newest ports
+  adopt `let` conformance, the InternLM3 batched-rope path carries the
+  array offset, and the Cohere2 fixtures give the final norm a non-unit
+  weight. (PR #91)
+
 ## [0.6.2] - 2026-07-11
 
 Track G model wave: four new architectures, one promotion, and the

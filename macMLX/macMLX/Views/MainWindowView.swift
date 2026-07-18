@@ -18,6 +18,7 @@ struct MainWindowView: View {
         case library   = "Models"
         case chat      = "Chat"
         case benchmark = "Benchmark"
+        case activity  = "Activity"
         case logs      = "Logs"
         case settings  = "Settings"
 
@@ -28,6 +29,7 @@ struct MainWindowView: View {
             case .library:   "tray.full"
             case .chat:      "bubble.left.and.bubble.right"
             case .benchmark: "stopwatch"
+            case .activity:  "gauge.medium"
             case .logs:      "list.bullet.rectangle"
             case .settings:  "gear"
             }
@@ -107,6 +109,7 @@ struct MainWindowView: View {
         case .library:   ModelLibraryView()
         case .chat:      ChatView()
         case .benchmark: BenchmarkView()
+        case .activity:  ActivityView()
         case .logs:      LogsView()
         case .settings:  SettingsView()
         }
