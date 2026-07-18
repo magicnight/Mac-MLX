@@ -37,6 +37,7 @@ private struct BenchmarkContent: View {
             }
             if let result = viewModel.lastResult {
                 resultSection(result)
+                bottleneckSection(result)
             }
             historySection
         }
@@ -177,6 +178,102 @@ private struct BenchmarkContent: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(json, forType: .string)
+    }
+
+    // MARK: - Bottleneck attribution (v0.7)
+
+    /// Confidence at or below which the attribution is rendered as uncertain.
+    private static let lowConfidenceThreshold = 0.6
+
+    @ViewBuilder
+    private func bottleneckSection(_ result: BenchmarkResult) -> some View {
+        Section("Bottleneck") {
+            if let bottleneck = result.bottleneck {
+                bottleneckContent(bottleneck)
+            } else {
+                // Honest: no attribution was produced (a run too short to clear the
+                // classifier's warm-up, or no usable decode samples). Never fabricate.
+                Label(
+                    "Bottleneck attribution unavailable for this run.",
+                    systemImage: "questionmark.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func bottleneckContent(_ bottleneck: BenchmarkBottleneck) -> some View {
+        let lowConfidence = bottleneck.confidence <= Self.lowConfidenceThreshold
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                bottleneckBadge(bottleneck.category)
+                Text(bottleneck.phase == .prefill ? "prefill" : "decode")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(percent(bottleneck.confidence)) of decode frames")
+                    .font(.system(.caption, design: .rounded))
+                    .monospacedDigit()
+                    // Muted-to-warning so low confidence reads as uncertain, not asserted.
+                    .foregroundStyle(lowConfidence ? Color.orange : .secondary)
+            }
+
+            Text(bottleneck.advice)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Honesty cues: flag an estimate-based attribution and a shaky call.
+            if bottleneck.restsOnEstimatedBandwidth || lowConfidence {
+                HStack(spacing: 6) {
+                    if bottleneck.restsOnEstimatedBandwidth {
+                        honestyTag("estimated bandwidth", tint: .secondary)
+                    }
+                    if lowConfidence {
+                        honestyTag("low confidence", tint: .orange)
+                    }
+                }
+            }
+
+            Text("\(bottleneck.decodeFrameCount) decode sample(s)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Compact category badge, matching the Activity panel's vocabulary. Memory /
+    /// thermal are actionable-trouble states (warm accent); compute / bandwidth are
+    /// the expected healthy regimes (neutral accent); balanced is green.
+    private func bottleneckBadge(_ category: BottleneckVerdict.Category) -> some View {
+        let (title, symbol, tint): (String, String, Color) = {
+            switch category {
+            case .normal: return ("Balanced", "checkmark.seal", .green)
+            case .memoryBound: return ("Memory-bound", "memorychip", .red)
+            case .thermalThrottled: return ("Thermal-throttled", "thermometer.high", .orange)
+            case .computeBound: return ("Compute-bound", "cpu", .accentColor)
+            case .bandwidthBound: return ("Bandwidth-bound", "arrow.left.arrow.right", .accentColor)
+            }
+        }()
+        return Label(title, systemImage: symbol)
+            .font(.callout.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.15), in: Capsule())
+            .foregroundStyle(tint)
+    }
+
+    private func honestyTag(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.12), in: Capsule())
+            .foregroundStyle(tint)
+    }
+
+    private func percent(_ fraction: Double) -> String {
+        "\(Int((fraction * 100).rounded()))%"
     }
 
     // MARK: - History

@@ -58,8 +58,8 @@ final class SiliconMonitor {
     /// field change re-renders the panel (fine at 1 Hz).
     private(set) var model = SiliconMonitorModel()
 
-    /// True while the sampling loop is active (panel visible). Drives the panel's
-    /// "live / paused" affordance.
+    /// True while the sampling loop is active (at least one consumer needs it).
+    /// Drives the panel's "live / paused" affordance.
     private(set) var isSampling = false
 
     // MARK: - Flat forwarders (so the View reads `monitor.latestSample`, etc.)
@@ -94,6 +94,11 @@ final class SiliconMonitor {
     // MARK: - Task handles
 
     private var samplingTask: Task<Void, Never>?
+    /// Reference count of consumers that currently need sampling. The sampling loop
+    /// runs while this is positive, so the Activity panel (visible) and a benchmark
+    /// run (measuring) can each turn it on independently without one stopping it for
+    /// the other. The counting semantics live in `MacMLXCore` so they are unit-tested.
+    private var samplingActivation = SamplingActivation()
     /// The phase-event consumer. Deliberately has no cancellation path: this monitor
     /// is an app-lifetime `AppState` property, so the loop runs until process exit
     /// (the `weak self` in `startObserving` releases it cleanly at teardown). Only
@@ -137,13 +142,16 @@ final class SiliconMonitor {
         }
     }
 
-    // MARK: - Sampling lifecycle (panel-visibility-gated)
+    // MARK: - Sampling lifecycle (reference-counted)
 
-    /// Begin the ~1 Hz hardware sampling loop. Idempotent. Call from the panel's
-    /// `.onAppear`. Takes an immediate first sample so the panel isn't blank for a
-    /// second, then polls on the interval.
-    func startSampling() {
-        guard samplingTask == nil else { return }
+    /// Register a consumer that needs the ~1 Hz hardware sampling loop, starting it
+    /// if it was not already running. Reference-counted so more than one surface can
+    /// need sampling at once — the Activity panel calls this from `.onAppear`, and a
+    /// benchmark run calls it while it measures its bottleneck. Each call must be
+    /// balanced by exactly one `deactivateSampling()`. Takes an immediate first
+    /// sample so the panel isn't blank for a second, then polls on the interval.
+    func activateSampling() {
+        guard samplingActivation.activate() else { return }  // already running
         isSampling = true
         samplingTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -156,10 +164,13 @@ final class SiliconMonitor {
         }
     }
 
-    /// Stop the sampling loop (panel hidden) so IOReport is no longer polled.
-    /// Idempotent. Leaves the last snapshot in place so re-opening the panel shows
-    /// the most recent reading until the next sample lands.
-    func stopSampling() {
+    /// Release a consumer of sampling. Stops the loop — so IOReport is no longer
+    /// polled — only when the LAST consumer deactivates, so the panel closing while
+    /// a benchmark still runs (or vice versa) does not cut sampling short. Leaves the
+    /// last snapshot in place so re-opening the panel shows the most recent reading
+    /// until the next sample lands.
+    func deactivateSampling() {
+        guard samplingActivation.deactivate() else { return }  // others still need it
         samplingTask?.cancel()
         samplingTask = nil
         isSampling = false

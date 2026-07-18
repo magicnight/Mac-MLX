@@ -153,7 +153,8 @@ public final class AppState {
             coordinator: coordinator,
             library: library,
             store: benchmarks,
-            logs: logs
+            logs: logs,
+            siliconMonitor: siliconMonitor
         )
 
         // Rehydrate per-model state after any model load, regardless of

@@ -12,7 +12,11 @@ import Foundation
 /// occupancy alone would not.
 ///
 /// Ordered so comparisons work: `.nominal < .fair < .serious < .critical`.
-public enum ThermalPressure: Int, Sendable, Equatable, Comparable, CaseIterable {
+///
+/// `Codable` is additive (the `Int` raw value already gives a stable encoded
+/// form) so a benchmark's bottleneck attribution can persist a representative
+/// thermal reading — see `BenchmarkBottleneck`.
+public enum ThermalPressure: Int, Sendable, Equatable, Comparable, CaseIterable, Codable {
     /// No thermal pressure.
     case nominal = 0
     /// Mild pressure; fans ramping, no throttling yet.

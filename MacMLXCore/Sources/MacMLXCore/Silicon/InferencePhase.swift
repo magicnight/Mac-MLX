@@ -21,9 +21,14 @@
 /// phase lets the classifier phrase its advice honestly ("decode is bandwidth-
 /// bound → expected; a lower-bit quantization can help" vs. "prefill is
 /// compute-bound → this is expected").
-public enum InferencePhase: Sendable, Equatable, CaseIterable {
+/// The `String` raw values are pinned explicitly (not derived from the case names)
+/// because this is a persisted form — a benchmark's bottleneck attribution stores a
+/// phase (see `BenchmarkBottleneck`). Pinning them means a future case rename cannot
+/// silently change the on-disk value and orphan old history. Keep them stable;
+/// nothing switches on the raw value.
+public enum InferencePhase: String, Sendable, Equatable, CaseIterable, Codable {
     /// Processing the input prompt, before the first output token.
-    case prefill
+    case prefill = "prefill"
     /// Producing output tokens one at a time, after the first token.
-    case decode
+    case decode = "decode"
 }

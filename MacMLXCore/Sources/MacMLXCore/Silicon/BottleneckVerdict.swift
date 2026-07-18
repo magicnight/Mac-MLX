@@ -11,22 +11,28 @@
 public struct BottleneckVerdict: Sendable, Equatable {
 
     /// What is limiting throughput.
-    public enum Category: Sendable, Equatable, CaseIterable {
+    ///
+    /// The `String` raw values are pinned explicitly (not left to derive from the
+    /// case names) precisely because this is a persisted form — a benchmark's
+    /// bottleneck attribution stores a category (see `BenchmarkBottleneck`). Pinning
+    /// them means a future case rename cannot silently change the on-disk value and
+    /// orphan old history. Keep these strings stable; nothing switches on them.
+    public enum Category: String, Sendable, Equatable, CaseIterable, Codable {
         /// No single resource is pinned; nothing to act on.
-        case normal
+        case normal = "normal"
         /// Unified memory is under pressure — the highest-priority category,
         /// because it precedes an out-of-memory or a compression/swap stall that
         /// dwarfs any compute/bandwidth nuance.
-        case memoryBound
+        case memoryBound = "memoryBound"
         /// The OS is capping clocks to shed heat, so throughput is limited by
         /// thermals rather than by the workload's own resource mix.
-        case thermalThrottled
+        case thermalThrottled = "thermalThrottled"
         /// GPU math is the limiter: the GPU is pinned and the memory bus has
         /// headroom. The healthy, expected state for prefill.
-        case computeBound
+        case computeBound = "computeBound"
         /// Memory bandwidth is the limiter: the GPU is pinned AND the memory bus
         /// is near its achievable ceiling. The healthy, expected state for decode.
-        case bandwidthBound
+        case bandwidthBound = "bandwidthBound"
     }
 
     /// The limiting resource.
