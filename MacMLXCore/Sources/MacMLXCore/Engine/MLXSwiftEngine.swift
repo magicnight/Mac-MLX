@@ -345,19 +345,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             // tier can reject a restored KV snapshot whose weights changed under
             // the same directory path (a re-download / re-quantize / swap).
             let newFingerprint = ModelFingerprint.compute(directory: model.directory)
-            // Belt-and-suspenders for the HOT tier, which is keyed by
-            // (modelID, tokens) with no weight stamp: a SAME-id reload with
-            // DIFFERENT weights leaves every resident hot entry for that id stale.
-            // Clear both tiers while the actor still reflects the OLD model, then
-            // publish the new identity synchronously below — so a task that
-            // re-enters during the clear sees either the fully-old or fully-new
-            // model, never a mix.
-            if let previousFingerprint = loadedModelFingerprint,
-                loadedModel?.id == model.id,
-                previousFingerprint != newFingerprint
-            {
-                await promptCacheStore.clearAll()
-            }
+            // No clear-on-reload here for the HOT tier: `PromptCacheStore.fetchNearest`
+            // now gates every hot hit on this fingerprint, so a stale entry left by a
+            // swap-weights-at-same-path reload misses at the point of reuse — safe
+            // regardless of the load/unload/switch sequence, which a same-id-only
+            // clear here could not cover.
             loadedSupport = support
             loadedModel = model
             loadedModelFingerprint = newFingerprint

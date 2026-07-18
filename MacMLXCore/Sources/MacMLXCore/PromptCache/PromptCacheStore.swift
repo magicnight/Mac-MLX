@@ -165,8 +165,19 @@ public actor PromptCacheStore {
         guard !tokens.isEmpty else { return nil }
         let result = trie.search(model: modelID, tokens: tokens)
 
+        // A hot entry is reused only when its stamped weight fingerprint matches
+        // the model on disk now — the same weight-identity guard the cold tier
+        // applies, made uniform across both tiers. Without it, an `unload()` →
+        // swap-weights-at-same-path → reload that keeps this store alive would
+        // serve KV state built from the OLD weights (silently wrong output — the
+        // exact hazard this feature prevents). A stale entry simply misses here and
+        // is re-evicted by the LRU as fresh entries arrive. `nil == nil` holds, so a
+        // model with no config.json still gets hot LCP within its process lifetime.
+
         // Exact hit: reuse the whole prefix but leave the last token to feed.
-        if let exact = result.exact, let entry = trie.get(model: modelID, tokens: exact) {
+        if let exact = result.exact, let entry = trie.get(model: modelID, tokens: exact),
+            entry.fingerprint == modelFingerprint
+        {
             return makeHit(
                 caches: entry.caches, heldCount: tokens.count,
                 targetReuse: tokens.count - 1, tokenCount: tokens.count)
@@ -178,6 +189,7 @@ public actor PromptCacheStore {
         // Preferred over a shorter prefix when it shares strictly more tokens.
         if let longer = result.longer, result.commonPrefix > shortLength,
             let entry = trie.get(model: modelID, tokens: longer),
+            entry.fingerprint == modelFingerprint,
             MLXLMCommon.canTrimPromptCache(entry.caches)
         {
             let prefix = min(tokens.count - 1, result.commonPrefix)
@@ -188,7 +200,8 @@ public actor PromptCacheStore {
 
         // Shorter strict prefix: reuse it wholesale (no trim needed).
         if let shorter = result.shorter, shortLength > 0,
-            let entry = trie.get(model: modelID, tokens: shorter)
+            let entry = trie.get(model: modelID, tokens: shorter),
+            entry.fingerprint == modelFingerprint
         {
             return makeHit(
                 caches: entry.caches, heldCount: shortLength,

@@ -512,4 +512,53 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertNil(rejected)
         XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
     }
+
+    /// (d) A HOT entry stamped with fingerprint "A" is NOT served when the request
+    /// carries a different fingerprint "B" — the same weight-safety guard the cold
+    /// tier applies, made uniform across both tiers so an `unload()` →
+    /// swap-weights-at-same-path → reload that keeps this store alive can't serve KV
+    /// built from the old weights (the exact silent-wrong-output this feature prevents).
+    func testHotHitRejectedOnFingerprintMismatch() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 8)
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+
+        // Matching fingerprint → hot hit.
+        let hit = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNotNil(hit)
+        // Different fingerprint (weights swapped under the same path) → miss, even
+        // though (modelID, tokens) match.
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpB)
+        XCTAssertNil(miss)
+    }
+
+    /// (e) A cold file written BEFORE fingerprints existed (Wave-1 metadata, no
+    /// `modelFingerprint` key) is rejected AND deleted on the next fetch — the
+    /// stampless legacy entry auto-migrates away rather than being trusted.
+    func testColdRejectsAndDeletesLegacyStamplessEntry() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 8)
+
+        // Write a cold file the Wave-1 way: `{modelID, tokenCount}` only, NO
+        // "modelFingerprint" key, at the exact-key sharded path fetchFromCold probes.
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        try FileManager.default.createDirectory(
+            at: coldFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try savePromptCache(
+            url: coldFile,
+            cache: makeSnapshot(tokenCount: 2).caches,
+            metadata: ["modelID": model, "tokenCount": "2"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        // A fetch with a valid fingerprint finds the stampless file, cannot validate
+        // it (no stored fingerprint), rejects, and reclaims the file.
+        let rejected = await store.fetchNearest(
+            modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNil(rejected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+    }
 }
