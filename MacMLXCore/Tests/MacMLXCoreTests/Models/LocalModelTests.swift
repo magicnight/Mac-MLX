@@ -92,3 +92,48 @@ func draftCandidatesExcludesNonMLXFormats() {
     let candidates = LocalModel.draftCandidates(from: models, excluding: nil)
     #expect(candidates.map(\.id) == ["Qwen3-8B-4bit"])
 }
+
+// MARK: - isOCR (OCR badge signal, derived from the config model_type)
+
+private func ocrModel(architecture: String?, format: ModelFormat = .mlxVLM) -> LocalModel {
+    LocalModel(
+        id: "m", displayName: "m",
+        directory: URL(filePath: "/tmp/m"),
+        sizeBytes: 0, format: format,
+        quantization: nil, parameterCount: nil,
+        architecture: architecture
+    )
+}
+
+@Test
+func isOCRDetectsGlmOcr() {
+    // glm_ocr is verified end-to-end through the stock VLM path (GLMOCRSmokeTests).
+    #expect(ocrModel(architecture: "glm_ocr").isOCR)
+}
+
+@Test
+func isOCRFollowsVLMRoutability() {
+    // A dots_ocr checkpoint is unambiguously OCR, but only earns the badge once it is
+    // actually vision-routable. Before its VLM port lands it scans as plain .mlx text,
+    // so it must NOT show the OCR badge yet; once it is a .mlxVLM, it does.
+    #expect(!ocrModel(architecture: "dots_ocr", format: .mlx).isOCR)
+    #expect(ocrModel(architecture: "dots_ocr", format: .mlxVLM).isOCR)
+}
+
+@Test
+func isOCRIsCaseInsensitiveOnModelType() {
+    #expect(ocrModel(architecture: "GLM_OCR").isOCR)
+}
+
+@Test
+func isOCRExcludesGeneralVLMs() {
+    #expect(!ocrModel(architecture: "qwen2_5_vl").isOCR)
+    // Ambiguous DeepSeek-VL family: also ships non-OCR, so deliberately not OCR.
+    #expect(!ocrModel(architecture: "deepseek_vl_v2").isOCR)
+}
+
+@Test
+func isOCRIsFalseForTextAndUnknownArchitecture() {
+    #expect(!ocrModel(architecture: "qwen3", format: .mlx).isOCR)
+    #expect(!ocrModel(architecture: nil).isOCR)
+}

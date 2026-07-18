@@ -91,6 +91,30 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
+    /// `model_type` values that denote a dedicated OCR model (as opposed to a
+    /// general-purpose vision-language model). Deliberately narrow — only
+    /// architectures whose whole purpose is text recognition — so the "OCR" badge
+    /// stays meaningful rather than tagging every VLM that can incidentally read text.
+    /// `glm_ocr` is verified end-to-end (GLM-OCR runs through the stock VLM path, see
+    /// `GLMOCRSmokeTests`); `dots_ocr` is unambiguously OCR and pre-listed so it earns
+    /// the badge automatically once its VLM port lands — until then the `.mlxVLM` gate
+    /// in `isOCR` withholds it, so the badge never appears on a model that can't load.
+    /// Ambiguous general VLMs (e.g. `deepseek_vl_v2`, which also ships as a plain
+    /// DeepSeek-VL) are excluded. Lowercased — compared case-insensitively.
+    private static let ocrModelTypes: Set<String> = ["glm_ocr", "dots_ocr"]
+
+    /// Whether this is a dedicated OCR model, driving the "OCR" badge (distinct from
+    /// the generic "Vision" badge other VLMs get). Two conditions: the config
+    /// `model_type` (carried in `architecture` by the scan) is a known OCR family, AND
+    /// the model is actually vision-routable (`.mlxVLM`). The format gate keeps the
+    /// badge truthful — an OCR family upstream can't yet load scans as plain `.mlx`
+    /// text and shows no OCR badge until its port makes it a real VLM. Badge-only:
+    /// loading is unaffected (an OCR model loads through `VLMModelFactory` like any VLM).
+    public var isOCR: Bool {
+        guard format == .mlxVLM, let architecture else { return false }
+        return Self.ocrModelTypes.contains(architecture.lowercased())
+    }
+
     /// Human-readable size, e.g. "4.50 GB" or "950 MB".
     ///
     /// Uses base-10 units (Apple convention for advertised RAM/disk).
