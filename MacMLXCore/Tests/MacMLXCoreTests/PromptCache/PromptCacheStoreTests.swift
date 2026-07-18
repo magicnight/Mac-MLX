@@ -366,6 +366,24 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertNotNil(hot)
     }
 
+    /// A zero cold budget means "no cold tier": an eviction must leave NO cold file
+    /// behind. Guards the fix for the zero-cap loophole where a spill would write a
+    /// file the prune then keeps as the just-written protected entry.
+    func testZeroColdCapNeverSpills() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1, coldCapBytes: 0)
+        await store.insert(modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2))
+        await store.insert(modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2))
+
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+        let miss = await store.fetchNearest(modelID: model, tokens: [1, 2])
+        XCTAssertNil(miss)
+        let hot = await store.fetchNearest(modelID: model, tokens: [3, 4])
+        XCTAssertNotNil(hot)
+    }
+
     func testClearAllDropsBothTiers() async throws {
         try requireMLXRuntimeOrSkip()
         let root = tmpRoot()

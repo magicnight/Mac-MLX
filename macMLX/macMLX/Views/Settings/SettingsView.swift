@@ -65,30 +65,21 @@ struct SettingsView: View {
                     }
                 }
             )
-            // Persist AND push the new budget to the coordinator so the next
-            // engine minted (incl. a mid-session model swap) honors it. Already
-            // resident engines keep their construction-time budget until reload —
-            // a live re-push to resident stores is a Wave 2 follow-up.
+            // Persist each KV control. The coordinator push happens in exactly ONE
+            // place — the `currentSettings` onChange below — so the budget the pool
+            // factory sees is always rebuilt from the full, consistent settings.
+            // (Two KV controls changed in quick succession can't push a
+            // half-updated budget, e.g. cold spill still on while the toggle is off.)
+            // The push reaches the NEXT engine minted; resident engines take a
+            // reload — a live re-push to resident stores is a Wave 2 follow-up.
             .onChange(of: kvCacheHotMB) { _, newValue in
-                Task {
-                    await appState.updateSettings { $0.kvCacheHotMB = newValue }
-                    appState.coordinator.updatePromptCacheConfig(
-                        PromptCacheConfig(from: appState.currentSettings))
-                }
+                Task { await appState.updateSettings { $0.kvCacheHotMB = newValue } }
             }
             .onChange(of: kvCacheColdGB) { _, newValue in
-                Task {
-                    await appState.updateSettings { $0.kvCacheColdGB = newValue }
-                    appState.coordinator.updatePromptCacheConfig(
-                        PromptCacheConfig(from: appState.currentSettings))
-                }
+                Task { await appState.updateSettings { $0.kvCacheColdGB = newValue } }
             }
             .onChange(of: kvCacheColdEnabled) { _, newValue in
-                Task {
-                    await appState.updateSettings { $0.kvCacheColdEnabled = newValue }
-                    appState.coordinator.updatePromptCacheConfig(
-                        PromptCacheConfig(from: appState.currentSettings))
-                }
+                Task { await appState.updateSettings { $0.kvCacheColdEnabled = newValue } }
             }
 
             ModelPoolSection(maxResidentGB: $maxResidentMemoryGB)
@@ -119,7 +110,14 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .navigationTitle("Settings")
         .onAppear { syncFromSettings() }
-        .onChange(of: appState.currentSettings) { _, _ in syncFromSettings() }
+        .onChange(of: appState.currentSettings) { _, newSettings in
+            syncFromSettings()
+            // Single consistent push point: rebuild the whole prompt-cache budget
+            // from the FULL current settings on any change, so the pool factory
+            // never receives a partial combination of KV fields.
+            appState.coordinator.updatePromptCacheConfig(
+                PromptCacheConfig(from: newSettings))
+        }
         .sheet(isPresented: $showOnboarding) {
             OnboardingWindow {
                 showOnboarding = false

@@ -268,6 +268,10 @@ public actor PromptCacheStore {
         // Check first, before any filesystem or serialisation work, so the
         // no-op is cheap and observable (no shard directory is even created).
         guard coldEnabled else { return }
+        // A zero (or negative) cold budget means "no cold tier": don't spill at
+        // all, rather than write a file the prune must then keep as the protected
+        // just-written entry — which would leave one file over a 0-byte cap.
+        guard coldCapBytes > 0 else { return }
         let key = PromptCacheKey(modelID: modelID, tokens: tokens)
         let url = key.shardedFileURL(under: root)
         let parent = url.deletingLastPathComponent()
@@ -391,9 +395,18 @@ public actor PromptCacheStore {
     /// counted, never fatal) and a failed delete is skipped (best-effort — the
     /// next prune re-scans and retries). `nonisolated`/`static` so `init` can
     /// call it before the actor is fully initialised.
+    /// Serialises cold-directory pruning across ALL `PromptCacheStore` instances.
+    /// Every store shares the one `~/.mac-mlx/kv-cache` root, so without this two
+    /// pool engines pruning concurrently could scan-and-delete the same files; the
+    /// lock makes each prune's scan+delete atomic with respect to the others.
+    private static let pruneLock = NSLock()
+
     static func pruneColdDirectory(root: URL, capBytes: Int, protecting: URL?) {
         // An unbounded cap can never be exceeded — skip the scan entirely.
         guard capBytes != .max else { return }
+        // One prune at a time across every store sharing this cold root.
+        pruneLock.lock()
+        defer { pruneLock.unlock() }
         let keys: Set<URLResourceKey> = [
             .isRegularFileKey, .fileSizeKey, .contentModificationDateKey,
         ]
