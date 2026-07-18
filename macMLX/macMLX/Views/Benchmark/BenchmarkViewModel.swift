@@ -80,13 +80,6 @@ final class BenchmarkViewModel {
     /// on the sample timestamp folds each sample's verdict in exactly once.
     private static let bottleneckPollInterval: Duration = .milliseconds(200)
 
-    /// Accumulates the run's decode-phase verdicts. Reset at the start of each run.
-    @ObservationIgnored private var bottleneckAggregator = BenchmarkBottleneckAggregator()
-
-    /// Timestamp of the last sample folded into the aggregator, so repeated polls of
-    /// the same ~1 Hz sample are not double-counted.
-    @ObservationIgnored private var lastCollectedSampleTimestamp: Date?
-
     // MARK: - Init
 
     init(
@@ -209,17 +202,22 @@ final class BenchmarkViewModel {
         let notesCopy = notes
 
         // Silicon attribution: for the duration of the run, sample the hardware and
-        // fold the classifier's live decode verdicts into the aggregator, so the
-        // result can report what limited it. Reference-counted, so this is
+        // fold the classifier's live decode verdicts into a PER-RUN collector, so the
+        // result can report what limited it. Reference-counted sampling, so this is
         // independent of whether the Activity panel is open. The `defer` releases
         // sampling exactly once on every exit path (completion, early cancel, or
         // error), so it never double-decrements the shared count.
-        bottleneckAggregator = BenchmarkBottleneckAggregator()
-        lastCollectedSampleTimestamp = nil
+        //
+        // The collector is a fresh object owned by this run and captured by this run's
+        // task alone. If the user cancels and immediately restarts, the cancelled run
+        // is still winding down with its own collector, so its tail decode frames can
+        // never fold into the restarted run's attribution — the two never share state.
+        let collector = BottleneckCollector()
+        let monitor = siliconMonitor
         siliconMonitor.activateSampling()
-        let collectorTask = Task { [weak self] in
+        let collectorTask = Task { @MainActor in
             while !Task.isCancelled {
-                self?.collectBottleneckFrame()
+                collector.collect(from: monitor)
                 try? await Task.sleep(for: Self.bottleneckPollInterval)
             }
         }
@@ -244,7 +242,7 @@ final class BenchmarkViewModel {
             // Attach the collected attribution. `result()` is nil when the run was
             // too short to produce any decode verdict — then no attribution is
             // claimed and the UI honestly reports it as unavailable.
-            let attributed = result.withBottleneck(bottleneckAggregator.result())
+            let attributed = result.withBottleneck(collector.result())
             lastResult = attributed
             try await store.save(attributed)
             await logs.log(
@@ -283,19 +281,6 @@ final class BenchmarkViewModel {
         return Date().timeIntervalSince(start)
     }
 
-    /// Fold the monitor's current bottleneck verdict into the aggregator, if it is a
-    /// fresh decode-phase reading. Prefill frames and the classifier's per-generation
-    /// warm-up publish no usable decode verdict, so they are naturally skipped; only
-    /// the decode steady state — what tokens/second actually measures — is attributed.
-    private func collectBottleneckFrame() {
-        guard let verdict = siliconMonitor.verdict, verdict.phase == .decode,
-              let sample = siliconMonitor.latestSample,
-              sample.timestamp != lastCollectedSampleTimestamp
-        else { return }
-        lastCollectedSampleTimestamp = sample.timestamp
-        bottleneckAggregator.add(verdict: verdict, sample: sample)
-    }
-
     // MARK: - History management
 
     func delete(id: UUID) async {
@@ -308,4 +293,35 @@ final class BenchmarkViewModel {
         lastResult = nil
         await reloadHistory()
     }
+}
+
+// MARK: - Per-run bottleneck collector
+
+/// The per-run silicon-attribution state: the decode-verdict aggregator plus the
+/// last-folded sample timestamp, owned by a single benchmark run.
+///
+/// A reference type so the run's polling task can mutate it directly, and — the whole
+/// point of it being per-run rather than a view-model property — so two overlapping
+/// runs (a cancelled one still winding down while a restart begins) fold into DIFFERENT
+/// collectors and cannot contaminate each other's saved attribution.
+@MainActor
+private final class BottleneckCollector {
+    private var aggregator = BenchmarkBottleneckAggregator()
+    private var lastSampleTimestamp: Date?
+
+    /// Fold the monitor's current verdict if it is a fresh decode-phase reading.
+    /// Prefill frames and the classifier's per-generation warm-up publish no usable
+    /// decode verdict, so they are naturally skipped; the ~1 Hz sample is de-duped on
+    /// its timestamp so a faster poll folds each sample exactly once.
+    func collect(from monitor: SiliconMonitor) {
+        guard let verdict = monitor.verdict, verdict.phase == .decode,
+              let sample = monitor.latestSample,
+              sample.timestamp != lastSampleTimestamp
+        else { return }
+        lastSampleTimestamp = sample.timestamp
+        aggregator.add(verdict: verdict, sample: sample)
+    }
+
+    /// The run's attribution, or nil when no decode frame was folded.
+    func result() -> BenchmarkBottleneck? { aggregator.result() }
 }
