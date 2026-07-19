@@ -1,19 +1,35 @@
 // Copyright © 2026 macMLX. English comments only.
 
 import Foundation
+import MLX
 import MLXLMCommon
 
-/// Off-actor serializer for the cold tier's safetensors writes (Wave 3 Stage 3a).
+/// Off-actor serializer for the cold tier's safetensors writes (Wave 3 Stage 3a;
+/// Stage 3b split the write's `evalLock` hold — see below).
 ///
-/// `savePromptCache` serialises a KV snapshot synchronously — measured ~43 ms for
-/// a 300 MiB snapshot, scaling with cache size. Run on ``PromptCacheStore``'s own
-/// executor (as Stage 2b did) that call stalls EVERY concurrent
-/// `fetchNearest`/`insert` for the whole write. This actor moves the blocking IO
-/// onto ITS executor instead: a `PromptCacheStore` demote spawns a task that
-/// `await`s ``write(snapshot:to:metadata:)``, so the store's executor is free the
-/// instant it suspends at that await. Serial by actor isolation — one write runs
-/// at a time — which bounds peak IO and, combined with the store's
-/// `maxInFlightWrites` gate, peak retained-snapshot memory.
+/// A KV snapshot write serialises synchronously — measured ~43 ms for a 300 MiB
+/// snapshot, scaling with cache size. Run on ``PromptCacheStore``'s own executor
+/// (as Stage 2b did) that call stalls EVERY concurrent `fetchNearest`/`insert`
+/// for the whole write. This actor moves the blocking IO onto ITS executor
+/// instead: a `PromptCacheStore` demote spawns a task that `await`s
+/// ``write(snapshot:to:metadata:)``, so the store's executor is free the instant
+/// it suspends at that await. Serial by actor isolation — one write runs at a
+/// time — which bounds peak IO and, combined with the store's `maxInFlightWrites`
+/// gate, peak retained-snapshot memory.
+///
+/// **The process-global `evalLock` (Stage 3b).** Moving IO off the store's
+/// executor does NOT free the process: `save(arrays:metadata:url:)` — what
+/// `savePromptCache` calls — holds MLX's process-global `evalLock` around the
+/// ENTIRE `mlx_save_safetensors(path,…)` (eval + serialise + the ~20 ms disk
+/// write), and every inference `eval()` also takes `evalLock`, so each spill
+/// stalls concurrent decode the full ~43 ms. Stage 3b splits that: writes now go
+/// through ``serializePromptCache(_:metadata:)``, which ends at `saveToData` —
+/// `evalLock` covers only eval+serialise into an in-memory `Data` (~16 ms) — then
+/// the ~20 ms `Data.write(to:)` to disk and the rename run lock-free. So a spill
+/// now stalls decode ~16 ms, not ~43 ms. The file is EQUIVALENT to
+/// `savePromptCache`'s (same flatten, same safetensors writer, same logical
+/// content — safetensors is name-keyed, so physical tensor order is irrelevant),
+/// pinned by an equivalence test, so the cold format is unchanged.
 ///
 /// **Atomicity.** `savePromptCache` writes in place (`O_TRUNC`, non-atomic), so a
 /// crash or concurrent read mid-write could observe a torn file. Content-address
@@ -39,18 +55,28 @@ import MLXLMCommon
 /// it as `sending`. The snapshot carrier is the one honest handoff.)
 actor ColdTierWriter {
 
-    /// Serialise `snapshot` to a temp sibling of `finalURL`, then atomically
-    /// rename it into place. Serial by actor isolation — `savePromptCache` blocks
-    /// THIS actor's executor (intended), never the store's. Cancellation is
+    /// Serialise `snapshot`, write the bytes to a temp sibling of `finalURL`, then
+    /// atomically rename it into place. Serial by actor isolation — the work
+    /// blocks THIS actor's executor (intended), never the store's. Cancellation is
     /// checked right before the rename so a `clearAll`-cancelled write aborts
     /// before any file lands, its temp cleaned up.
+    ///
+    /// The serialise and the disk write are DELIBERATELY separate calls (Stage
+    /// 3b): ``serializePromptCache(_:metadata:)`` holds MLX's `evalLock` for the
+    /// eval+serialise alone, and the subsequent `Data.write(to:)` — plain, no
+    /// `.atomic` needed because `tmp` is a fresh unique path no reader knows —
+    /// touches disk lock-free. `savePromptCache` instead held `evalLock` across
+    /// the whole disk write, stalling concurrent decode for its full duration.
     func write(
         snapshot: PromptCacheSnapshot, to finalURL: URL, metadata: [String: String]
     ) async throws {
         Self.ensureParentDirectory(of: finalURL)
         let tmp = Self.temporaryURL(for: finalURL)
         do {
-            try savePromptCache(url: tmp, cache: snapshot.caches, metadata: metadata)
+            // `evalLock` is held only across serialise; the disk write below is
+            // lock-free, so a spill no longer stalls concurrent `eval()` for it.
+            let data = try Self.serializePromptCache(snapshot.caches, metadata: metadata)
+            try data.write(to: tmp)
             // Abort a `clearAll`-cancelled write before it can land at the
             // canonical path (I4). Done AFTER the temp write so the expensive
             // serialisation isn't wasted needlessly, and BEFORE the rename so a
@@ -71,18 +97,99 @@ actor ColdTierWriter {
     /// inline on its own executor (bounded memory beats unbounded background
     /// writers). Same temp-then-rename atomicity as ``write(snapshot:to:metadata:)``
     /// minus the cancellation check — the caller is a foreground `demoteToCold`
-    /// waiting on the result, not a cancellable background task.
+    /// waiting on the result, not a cancellable background task. Uses the same
+    /// Stage 3b serialise/write split so even this inline fallback holds `evalLock`
+    /// only for the serialise, not the disk write.
     nonisolated static func writeSynchronously(
         snapshot: PromptCacheSnapshot, to finalURL: URL, metadata: [String: String]
     ) throws {
         ensureParentDirectory(of: finalURL)
         let tmp = temporaryURL(for: finalURL)
         do {
-            try savePromptCache(url: tmp, cache: snapshot.caches, metadata: metadata)
+            let data = try serializePromptCache(snapshot.caches, metadata: metadata)
+            try data.write(to: tmp)
             try atomicallyReplace(finalURL, with: tmp)
         } catch {
             try? FileManager.default.removeItem(at: tmp)
             throw error
+        }
+    }
+
+    // MARK: - Serialisation (nonisolated: the `evalLock`-bounded half of the write)
+
+    /// Serialise `cache` to safetensors bytes IN MEMORY, without touching disk —
+    /// the lock-relevant half of `savePromptCache` split out (Stage 3b).
+    ///
+    /// It replicates `savePromptCache`'s flatten verbatim (verified against
+    /// mlx-swift-lm `KVCache.swift`: `state` → `"i.j"`; `metaState` → `"0.i.j"`;
+    /// user metadata → `"1.key"`; ``cacheClassName(_:)`` → `"2.i"`) and ends at
+    /// `saveToData`, whose `evalLock` hold covers ONLY eval+serialise into an
+    /// in-memory buffer (~16 ms for a 300 MiB snapshot). The caller then writes the
+    /// returned `Data` to disk (~20 ms) with a lock-free `Data.write(to:)`. So the
+    /// process-global `evalLock` — which every inference `eval()` also contends —
+    /// is held for the serialise ALONE, not the disk write: `savePromptCache`, by
+    /// contrast, calls `save(arrays:metadata:url:)` which holds `evalLock` across
+    /// the whole `mlx_save_safetensors(path,…)`, disk write included.
+    ///
+    /// The output is EQUIVALENT to `savePromptCache`'s (same flatten, same
+    /// safetensors writer): identical named arrays and an identical flattened
+    /// metadata dict, so `loadPromptCache` cannot tell the two paths apart. It is
+    /// NOT necessarily byte-identical — `save_safetensors` emits tensor blocks in
+    /// `std::unordered_map` order, which is unstable across calls, and safetensors
+    /// keys tensors by NAME so that reordering is a no-op. The equivalence test in
+    /// `PromptCacheStoreTests` compares logical content against the LIVE
+    /// `savePromptCache`, so a future upstream flatten/format change FAILS the test
+    /// rather than silently corrupting the tier. The on-disk FORMAT is unchanged,
+    /// so no ``ColdIndex`` format bump.
+    nonisolated static func serializePromptCache(
+        _ cache: [any KVCache], metadata: [String: String]
+    ) throws -> Data {
+        let cacheData = cache.map { $0.state }
+        let cacheInfo = cache.map { $0.metaState }
+        let cacheClasses = cache.map { cacheClassName($0) }
+
+        var flatData: [String: MLXArray] = [:]
+        for (i, arrays) in cacheData.enumerated() {
+            for (j, array) in arrays.enumerated() {
+                flatData["\(i).\(j)"] = array
+            }
+        }
+
+        var flatMeta: [String: String] = [:]
+        for (i, info) in cacheInfo.enumerated() {
+            for (j, metaValue) in info.enumerated() {
+                flatMeta["0.\(i).\(j)"] = metaValue
+            }
+        }
+        for (key, value) in metadata {
+            flatMeta["1.\(key)"] = value
+        }
+        for (i, className) in cacheClasses.enumerated() {
+            flatMeta["2.\(i)"] = className
+        }
+
+        // The ONLY step that takes `evalLock`: eval + serialise into a `Data`.
+        return try saveToData(arrays: flatData, metadata: flatMeta)
+    }
+
+    /// Verbatim replica of mlx-swift-lm's PRIVATE `cacheClassName` (KVCache.swift)
+    /// — the class-name tag `savePromptCache` writes as `flatMeta["2.\(i)"]` and
+    /// `loadPromptCache` switches on to reconstruct each cache's concrete type.
+    /// Replicated (not called) because it is `private` upstream; the subclass
+    /// order matters (`ChunkedKVCache` before `KVCacheSimple`, `MambaCache` before
+    /// `ArraysCache`) and is kept identical to upstream — the equivalence test
+    /// fails loudly if this switch ever drifts from it (the `"2.i"` class tags in
+    /// the serialised metadata would no longer match the LIVE `savePromptCache`).
+    nonisolated static func cacheClassName(_ c: any KVCache) -> String {
+        switch c {
+        case is ChunkedKVCache: return "ChunkedKVCache"
+        case is MambaCache: return "MambaCache"
+        case is ArraysCache: return "ArraysCache"
+        case is RotatingKVCache: return "RotatingKVCache"
+        case is QuantizedKVCache: return "QuantizedKVCache"
+        case is KVCacheSimple: return "KVCache"
+        case is CacheList: return "CacheList"
+        default: return "KVCache"
         }
     }
 
@@ -113,7 +220,7 @@ actor ColdTierWriter {
     }
 
     /// Best-effort startup cleanup for write temporaries orphaned by a hard kill
-    /// between ``write(snapshot:to:metadata:)``'s temp `savePromptCache` and its
+    /// between ``write(snapshot:to:metadata:)``'s temp `data.write(to:)` and its
     /// atomic rename (Wave 3 Stage 3a).
     ///
     /// A crash in that window leaves a hidden `.tmp-<uuid>.safetensors` sibling
