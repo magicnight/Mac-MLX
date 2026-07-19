@@ -299,6 +299,38 @@ final class PromptCacheColdPruneTests: XCTestCase {
         XCTAssertEqual(ColdIndex.load(from: indexURL), foreign)
     }
 
+    // MARK: - Wave 3 Stage 3a: startup sweep of orphaned write temporaries
+
+    /// A hard kill between a detached write's temp `savePromptCache` and its
+    /// atomic rename leaves a hidden `.tmp-<uuid>.safetensors` sibling behind.
+    /// `PromptCacheStore.init` sweeps these on startup — MLX-free, since
+    /// constructing a store performs no MLX work (see the Wave 2b rebuild tests
+    /// above). A legitimate landed cold file (no `.tmp-` prefix) in the same
+    /// shard must survive the sweep untouched — proof the match is precise, not
+    /// "any hidden file" or "any file in the shard".
+    func testStartupSweepRemovesOrphanedWriteTemporaryButKeepsLandedFiles() throws {
+        let root = tmpRoot()
+        let shard = root.appending(path: "a", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: shard, withIntermediateDirectories: true)
+
+        let orphan = shard.appending(
+            path: ".tmp-deadbeef-1234.safetensors", directoryHint: .notDirectory)
+        try Data("orphaned write temp".utf8).write(to: orphan)
+        let landed = shard.appending(path: "aaaa.safetensors", directoryHint: .notDirectory)
+        try Data("a real, landed cold file".utf8).write(to: landed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: landed.path))
+
+        _ = PromptCacheStore(root: root)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: orphan.path),
+            "a hidden write temp must be swept at startup")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: landed.path),
+            "a normal landed cold file must NOT be touched by the sweep")
+    }
+
     // MARK: - Disabled cold tier is a no-op (MLX-free)
 
     func testDemoteToColdIsNoOpWhenColdDisabled() async {
