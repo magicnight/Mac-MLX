@@ -47,17 +47,22 @@ public actor PromptCacheStore {
 
     /// The cold trie's payload: everything a cold-trie fetch needs WITHOUT
     /// reading the safetensors file. `hashString` locates the file (and keys
-    /// ``coldEntries``); `fingerprint` is the Wave 2a weight stamp; `isTrimmable`
-    /// lets a cold *longer* hit pre-gate a trim before paying for a load.
+    /// ``coldEntries``); `isTrimmable` lets a cold *longer* hit pre-gate a trim
+    /// before paying for a load.
     ///
-    /// It deliberately carries NO token count. The restored cache's true logical
-    /// length is the matched trie key's length — `candidate.heldCount`, anchored
-    /// to the same hash that locates the file — so ``fetchFromColdTrie`` feeds
-    /// that to ``makeHit`` exactly as the hot path does, never a parallel scalar
-    /// a corrupt manifest could diverge from the real length.
+    /// It deliberately carries NO weight fingerprint: the cold-fetch
+    /// weight-identity guard validates against the safetensors FILE's own embedded
+    /// `meta["modelFingerprint"]` (see ``fetchFromCold``), never a pointer-side
+    /// copy — so a copy here would be write-only, and its absence cannot weaken
+    /// the gate.
+    ///
+    /// It also deliberately carries NO token count. The restored cache's true
+    /// logical length is the matched trie key's length — `candidate.heldCount`,
+    /// anchored to the same hash that locates the file — so ``fetchFromColdTrie``
+    /// feeds that to ``makeHit`` exactly as the hot path does, never a parallel
+    /// scalar a corrupt manifest could diverge from the real length.
     private struct ColdPointer {
         let hashString: String
-        let fingerprint: String
         let isTrimmable: Bool
     }
 
@@ -602,8 +607,7 @@ public actor PromptCacheStore {
         coldEntries[hash] = entry
         coldTrie.add(
             model: modelID, tokens: tokens,
-            value: ColdPointer(
-                hashString: hash, fingerprint: fingerprint, isTrimmable: isTrimmable))
+            value: ColdPointer(hashString: hash, isTrimmable: isTrimmable))
 
         // Enforce the cold-tier disk budget by mtime-LRU, then persist the index.
         // ORDERING NUANCE (Stage 3a): the write below hasn't landed yet, so this
@@ -978,8 +982,7 @@ public actor PromptCacheStore {
             trie.add(
                 model: entry.modelID, tokens: entry.tokens,
                 value: ColdPointer(
-                    hashString: entry.hashString,
-                    fingerprint: entry.modelFingerprint, isTrimmable: entry.isTrimmable))
+                    hashString: entry.hashString, isTrimmable: entry.isTrimmable))
         }
         return (entries, trie, changed)
     }

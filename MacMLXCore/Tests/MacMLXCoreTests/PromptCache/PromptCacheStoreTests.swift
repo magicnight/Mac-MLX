@@ -48,6 +48,32 @@ final class PromptCacheStoreTests: XCTestCase {
         return PromptCacheSnapshot([CacheList(recurrent, attention)])
     }
 
+    /// A `RotatingKVCache` (sliding-window) snapshot — the Mellum2 / Cohere2
+    /// layer shape. `maxSize` comfortably exceeds `tokenCount` so `update`
+    /// takes the plain append path (`updateConcat`, since `tokenCount > 1`)
+    /// with no trim/rotation edge case to reason about.
+    private func makeRotatingSnapshot(tokenCount: Int) -> PromptCacheSnapshot {
+        let keys = MLXArray.zeros([1, 1, tokenCount, 4])
+        let values = MLXArray.ones([1, 1, tokenCount, 4])
+        let layer = RotatingKVCache(maxSize: 8, keep: 1, step: 256)
+        _ = layer.update(keys: keys, values: values)
+        return PromptCacheSnapshot([layer])
+    }
+
+    /// A `QuantizedKVCache` snapshot with real quantized state. Its
+    /// `update(keys:values:)` intentionally `fatalError`s (the production API is
+    /// `updateQuantized`), and quantization requires the head dim to be a
+    /// multiple of 32/64/128 (``resolvedKVQuantizationGroupSize`` in
+    /// mlx-swift-lm) — head dim 32 satisfies the smallest compatible group size,
+    /// unlike this file's other snapshots' head dim of 4.
+    private func makeQuantizedSnapshot(tokenCount: Int) -> PromptCacheSnapshot {
+        let keys = MLXArray.zeros([1, 1, tokenCount, 32])
+        let values = MLXArray.ones([1, 1, tokenCount, 32])
+        let layer = QuantizedKVCache(groupSize: 32, bits: 8)
+        _ = layer.updateQuantized(keys: keys, values: values)
+        return PromptCacheSnapshot([layer])
+    }
+
     private func tmpRoot() -> URL {
         let url = FileManager.default.temporaryDirectory
             .appending(path: "mlxkv-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -796,8 +822,10 @@ final class PromptCacheStoreTests: XCTestCase {
         try requireMLXRuntimeOrSkip()
         let root = tmpRoot()
         // Sabotage the write target: a regular FILE where [1,2]'s shard directory
-        // must go, so the write's `savePromptCache` (into a temp under that shard)
-        // cannot create its file and throws — driving the `finishWrite` failure path.
+        // must go, so the write's `data.write(to: tmp)` (into a temp under that
+        // shard) hits ENOTDIR and throws — driving the `finishWrite` failure path.
+        // (Stage 3b: the preceding `serializePromptCache` is in-memory only and
+        // can't fail on a missing directory — the disk write is where this bites.)
         let shard = String(PromptCacheKey(modelID: model, tokens: [1, 2]).hashString.prefix(1))
         try Data("blocker".utf8).write(
             to: root.appending(path: shard, directoryHint: .notDirectory))
@@ -971,7 +999,8 @@ final class PromptCacheStoreTests: XCTestCase {
 
         // Sabotage the shard path for the key that will take the backpressure
         // path: a regular FILE where its shard directory must go, so
-        // `savePromptCache`'s temp write underneath it cannot create its file.
+        // `writeSynchronously`'s temp `data.write(to:)` underneath it cannot
+        // create its file.
         let sabotaged = [5, 6]
         let sabotagedShard = String(
             PromptCacheKey(modelID: model, tokens: sabotaged).hashString.prefix(1))
@@ -1226,6 +1255,155 @@ final class PromptCacheStoreTests: XCTestCase {
         // Clean up: release everything parked on the shared gate.
         await gate.open()
         await store.drainInFlight()
+    }
+
+    // MARK: - Stage 3b: serialize/write split (equivalence to savePromptCache + round-trip)
+
+    /// LOAD-BEARING PROOF for Stage 3b. The cold write was split into a
+    /// lock-bounded serialise (``ColdTierWriter/serializePromptCache(_:metadata:)``,
+    /// which holds MLX's `evalLock` for eval+serialise ALONE) followed by a
+    /// lock-free `Data.write(to:)`. This proves that split is behaviour-preserving:
+    /// the file it produces is EQUIVALENT to the LIVE mlx-swift-lm `savePromptCache`
+    /// — across the production cache shapes: a plain `KVCacheSimple`, a hybrid
+    /// `CacheList(MambaCache, KVCacheSimple)` (Falcon-H1 / GatedDeltaNet),
+    /// `RotatingKVCache` (Mellum2 / Cohere2 sliding window), and `QuantizedKVCache`.
+    ///
+    /// NOT raw byte-equality, deliberately. MLX's `save_safetensors` emits the
+    /// tensor blobs (and their `data_offsets` in the header) in `std::unordered_map`
+    /// iteration order, which is NOT stable across serialiser invocations — a Swift
+    /// `Dictionary`'s per-instance hash seed feeds different orders in — so even
+    /// `savePromptCache` vs itself is not byte-identical (observed here: identical
+    /// total size, reordered tensor blocks). safetensors keys tensors by NAME, so
+    /// that reordering is a semantic no-op `loadPromptCache` is wholly immune to; a
+    /// raw `Data == Data` assertion would be flaky, not a correctness signal.
+    ///
+    /// The proof instead compares LOGICAL content via `loadArraysAndMetadata` (the
+    /// exact low-level loader `loadPromptCache` builds on): identical array key set
+    /// with matching shape+values, and an EXACTLY-equal flattened metadata dict.
+    /// That dict carries the full replicated flatten ("0.i.j" metaState / "1.key"
+    /// user metadata / "2.i" class tags from ``ColdTierWriter/cacheClassName(_:)``),
+    /// so comparing it to the LIVE `savePromptCache` couples the replica to
+    /// upstream: a future mlx-swift-lm flatten/format change FAILS this test rather
+    /// than silently corrupting the cold tier. Equal logical content ⇒
+    /// `loadPromptCache` reconstructs identically ⇒ the split is correct; the
+    /// on-disk FORMAT is unchanged, so no ``ColdIndex`` version bump is needed.
+    func testStage3bSerializeMatchesSavePromptCacheSemantically() async throws {
+        try requireMLXRuntimeOrSkip()
+
+        // The SAME metadata dict for both writers (the demote path's real shape).
+        let metadata = ["modelID": model, "tokenCount": "2", "modelFingerprint": fpA]
+
+        for (label, caches) in [
+            ("KVCacheSimple", makeSnapshot(tokenCount: 2).caches),
+            ("hybrid CacheList", makeHybridSnapshot(tokenCount: 2).caches),
+            ("RotatingKVCache", makeRotatingSnapshot(tokenCount: 2).caches),
+            ("QuantizedKVCache", makeQuantizedSnapshot(tokenCount: 2).caches),
+        ] {
+            let dir = tmpRoot()
+            let fileA = dir.appending(path: "a.safetensors", directoryHint: .notDirectory)
+            let fileB = dir.appending(path: "b.safetensors", directoryHint: .notDirectory)
+
+            // A: the live upstream path (evalLock held across the whole disk write).
+            // B: the Stage 3b split (evalLock held for serialise only, then a
+            // lock-free write) — the exact substitution the two write paths use.
+            try savePromptCache(url: fileA, cache: caches, metadata: metadata)
+            let data = try ColdTierWriter.serializePromptCache(caches, metadata: metadata)
+            try data.write(to: fileB)
+
+            // Logical content is IDENTICAL even when the physical tensor order isn't.
+            let (arraysA, metaA) = try loadArraysAndMetadata(url: fileA)
+            let (arraysB, metaB) = try loadArraysAndMetadata(url: fileB)
+
+            // The flattened metadata dict pins the replicated flatten + class tags
+            // to the LIVE savePromptCache (the upstream-drift coupling guard).
+            XCTAssertEqual(
+                metaA, metaB,
+                "\(label): flattened metadata must match savePromptCache exactly")
+            XCTAssertEqual(
+                Set(arraysA.keys), Set(arraysB.keys),
+                "\(label): serialised array key set must match savePromptCache")
+            for key in arraysA.keys {
+                guard let a = arraysA[key], let b = arraysB[key] else {
+                    XCTFail("\(label): array \(key) missing from one of the writers")
+                    continue
+                }
+                XCTAssertEqual(a.shape, b.shape, "\(label): shape of array \(key)")
+                XCTAssertTrue(
+                    allClose(a, b, rtol: 1e-4, atol: 1e-4).item(Bool.self),
+                    "\(label): values of array \(key) must match savePromptCache")
+            }
+        }
+    }
+
+    /// All-types drift guard: for one CHEAPLY CONSTRUCTED instance of every
+    /// production `KVCache` type — including `ChunkedKVCache` and a bare
+    /// `ArraysCache`, which the semantic-equivalence test above never exercises
+    /// at the top level — assert ``ColdTierWriter/cacheClassName(_:)`` (the
+    /// replica) returns the SAME `"2.0"` tag the LIVE `savePromptCache` writes.
+    /// Instances are never `update`-d (no real KV state), so this pins only the
+    /// class TAG, not the state/metaState shape; every type here is verified
+    /// safe to serialise with empty state (`BaseKVCache`'s default `state`/
+    /// `metaState` — `[]`/`[""]` — has no force-unwrap on nil that a fresh
+    /// instance would trip). A tag mismatch here means a future upstream
+    /// `cacheClassName` switch drifts for a type none of the other Stage 3b
+    /// tests would otherwise catch.
+    func testCacheClassNameMatchesSavePromptCacheForEveryType() async throws {
+        try requireMLXRuntimeOrSkip()
+
+        let allTypes: [(String, any KVCache)] = [
+            ("KVCacheSimple", KVCacheSimple()),
+            ("ChunkedKVCache", ChunkedKVCache()),
+            ("ArraysCache", ArraysCache(size: 2)),
+            ("MambaCache", MambaCache()),
+            ("RotatingKVCache", RotatingKVCache(maxSize: 8)),
+            ("QuantizedKVCache", QuantizedKVCache()),
+            ("CacheList", CacheList(KVCacheSimple())),
+        ]
+        for (label, cache) in allTypes {
+            let dir = tmpRoot()
+            let fileA = dir.appending(path: "a.safetensors", directoryHint: .notDirectory)
+            try savePromptCache(url: fileA, cache: [cache], metadata: [:])
+            let (_, metaA) = try loadArraysAndMetadata(url: fileA)
+            XCTAssertEqual(
+                metaA["2.0"], ColdTierWriter.cacheClassName(cache),
+                "\(label): cacheClassName replica must match the LIVE savePromptCache's tag")
+        }
+    }
+
+    /// The bytes ``ColdTierWriter/serializePromptCache(_:metadata:)`` writes
+    /// round-trip through `loadPromptCache`: the reconstructed caches recover the
+    /// original `offset`, per-array `state` (keys then values), and user metadata.
+    /// The semantic-equivalence test above already implies this (identical
+    /// logical content ⇒ identical restore), but asserting the observable
+    /// restore directly pins the shape the cold tier actually depends on.
+    func testStage3bSerializedBytesRoundTripThroughLoadPromptCache() async throws {
+        try requireMLXRuntimeOrSkip()
+
+        let original = makeSnapshot(tokenCount: 3).caches
+        let metadata = ["modelID": model, "tokenCount": "3", "modelFingerprint": fpA]
+
+        let dir = tmpRoot()
+        let fileB = dir.appending(path: "b.safetensors", directoryHint: .notDirectory)
+        let data = try ColdTierWriter.serializePromptCache(original, metadata: metadata)
+        try data.write(to: fileB)
+
+        let (restored, restoredMeta) = try loadPromptCache(url: fileB)
+        XCTAssertEqual(restored.count, original.count)
+        XCTAssertEqual(restored.first?.offset, original.first?.offset)
+        XCTAssertEqual(restored.first?.offset, 3)  // prefilled exactly tokenCount tokens
+        XCTAssertEqual(restoredMeta["modelFingerprint"], fpA)
+
+        // State arrays recover element-for-element (keys, then values).
+        let originalState = original.first?.state ?? []
+        let restoredState = restored.first?.state ?? []
+        XCTAssertEqual(restoredState.count, originalState.count)
+        XCTAssertFalse(restoredState.isEmpty, "expected a non-empty KV state to compare")
+        for (o, r) in zip(originalState, restoredState) {
+            XCTAssertEqual(o.shape, r.shape)
+            XCTAssertTrue(
+                allClose(o, r, rtol: 1e-4, atol: 1e-4).item(Bool.self),
+                "restored state array must equal the original")
+        }
     }
 }
 
