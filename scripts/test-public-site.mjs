@@ -275,24 +275,24 @@ assert.doesNotMatch(englishRelease.classes, /\bbuilding\b/);
 assert.doesNotMatch(chineseRelease.classes, /\bbuilding\b/);
 assert.equal(englishRelease.content.match(/<li\b/g)?.length, 4);
 assert.equal(chineseRelease.content.match(/<li\b/g)?.length, 4);
-assert.match(englishRelease.content, /<strong>v0\.6\.2 · Jul 11, 2026<\/strong>/);
-assert.match(chineseRelease.content, /<strong>v0\.6\.2 · 2026年7月11日<\/strong>/);
-assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.6\.2"[^>]*>View v0\.6\.2 release ↗<\/a>/);
-assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.6\.2"[^>]*>查看 v0\.6\.2 版本 ↗<\/a>/);
+assert.match(englishRelease.content, /<strong>v0\.7\.0 · Jul 18, 2026<\/strong>/);
+assert.match(chineseRelease.content, /<strong>v0\.7\.0 · 2026年7月18日<\/strong>/);
+assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.7\.0"[^>]*>View v0\.7\.0 release ↗<\/a>/);
+assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.7\.0"[^>]*>查看 v0\.7\.0 版本 ↗<\/a>/);
 for (const capability of [
-  /Agent and API tool loops with structured output, XTC, and KV-cache quantization controls/,
-  /Continuous batching, LCP reuse, and speculative decoding runtime/,
-  /Track G distinguishes four tested models from theoretical InternLM3/,
-  /v0\.6\.1 hardening and v0\.6\.2 per-model chat-template overrides/,
+  /A sudoless Activity panel with live Apple Silicon readouts and an inference-bottleneck verdict/,
+  /An in-process classifier reads the prefill or decode phase an external monitor cannot see/,
+  /Per-run benchmark bottleneck attribution with a confidence and representative hardware/,
+  /OCR-model recognition, with GLM-OCR verified end-to-end through the stock VLM path/,
 ]) assert.match(englishRelease.content, capability);
 for (const capability of [
-  /智能体与 API 工具循环以及结构化输出、XTC 与 KV 缓存量化控制/,
-  /连续批处理、LCP 复用与投机解码运行时/,
-  /Track G 区分四个实测模型与理论支持的 InternLM3/,
-  /v0\.6\.1 加固与 v0\.6\.2 逐模型聊天模板覆盖/,
+  /免 sudo 的活动面板：实时 Apple 芯片读数与推理瓶颈判定/,
+  /进程内分类器可读取外部监视器看不到的预填充或解码阶段/,
+  /逐次运行的基准瓶颈归因，附置信度与代表性硬件/,
+  /OCR 模型识别，GLM-OCR 通过原有 VLM 路径端到端验证/,
 ]) assert.match(chineseRelease.content, capability);
-assert.match(llms, /Latest release: v0\.6\.2/);
-assert.match(ogImage, /v0\.6\.2/);
+assert.match(llms, /Latest release: v0\.7\.0/);
+assert.match(ogImage, /v0\.7\.0/);
 
 const combined = `${html}\n${zhHTML}\n${llms}\n${ogImage}`;
 for (const staleClaim of [

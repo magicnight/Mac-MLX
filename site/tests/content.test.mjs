@@ -41,7 +41,7 @@ test("the validator exposes the complete evidence contract", async () => {
 
 test("fact, competitor, FAQ, and release registries pass strict validation", async () => {
   const { validateContentHub } = await import("../lib/content.mjs");
-  assert.doesNotThrow(() => validateContentHub({ facts, competitors, faqs, releases, pages, macmlxComparisonProfile }, { today: "2026-07-15", maxAgeDays: 45, allowEmptyPages: true }));
+  assert.doesNotThrow(() => validateContentHub({ facts, competitors, faqs, releases, pages, macmlxComparisonProfile }, { today: "2026-07-19", maxAgeDays: 45, allowEmptyPages: true }));
   assert.equal(facts.filter((fact) => fact.status === "released").length > 0, true);
   assert.equal(facts.filter((fact) => fact.status === "planned").length > 0, true);
   assert.deepEqual(competitors.map((item) => [item.id, item.verifiedVersion]), [
@@ -52,16 +52,16 @@ test("fact, competitor, FAQ, and release registries pass strict validation", asy
     ["swiftlm", "b648"],
   ]);
   assert.equal(faqs.length, 8);
-  assert.equal(releases[0].version, "0.6.2");
+  assert.equal(releases[0].version, "0.7.0");
 });
 
 test("validation rejects stale dates, mutable release sources, and broken references", async () => {
   const { validateFacts, validateFAQs } = await import("../lib/content.mjs");
   const stale = { ...facts[0], lastVerified: "2026-01-01" };
-  assert.throws(() => validateFacts([stale], { today: "2026-07-15", maxAgeDays: 45 }), /stale fact/);
+  assert.throws(() => validateFacts([stale], { today: "2026-07-19", maxAgeDays: 45 }), /stale fact/);
 
   const mutable = { ...facts.find((fact) => fact.status === "released"), sourceUrls: ["https://github.com/magicnight/mac-mlx/blob/main/CHANGELOG.md"] };
-  assert.throws(() => validateFacts([mutable], { today: "2026-07-15", maxAgeDays: 45 }), /immutable release source/);
+  assert.throws(() => validateFacts([mutable], { today: "2026-07-19", maxAgeDays: 45 }), /immutable release source/);
 
   const brokenFAQs = [{ ...faqs[0], factIds: ["not-a-fact"] }, ...faqs.slice(1)];
   assert.throws(() => validateFAQs(brokenFAQs, new Set(facts.map((fact) => fact.id))), /unknown fact/);
@@ -70,7 +70,7 @@ test("validation rejects stale dates, mutable release sources, and broken refere
 test("fact support tiers are governed separately from release lifecycle", async () => {
   const { validateFacts } = await import("../lib/content.mjs");
   assert.throws(
-    () => validateFacts([{ ...facts[0], supportTier: "released" }], { today: "2026-07-15", maxAgeDays: 45 }),
+    () => validateFacts([{ ...facts[0], supportTier: "released" }], { today: "2026-07-19", maxAgeDays: 45 }),
     /invalid fact support tier/,
   );
 });
@@ -87,7 +87,7 @@ test("release status lists reject facts from the wrong lifecycle", async () => {
   ]) {
     const mismatch = { ...releases[0], [field]: [wrongFactId] };
     assert.throws(
-      () => validateReleases([mismatch], factIds, { today: "2026-07-15", maxAgeDays: 45, factsById }),
+      () => validateReleases([mismatch], factIds, { today: "2026-07-19", maxAgeDays: 45, factsById }),
       new RegExp(`${field}.*${expectedStatus}`),
     );
   }
@@ -102,13 +102,13 @@ test("release records require shipped facts but may omit empty lifecycle groups"
     developmentFactIds: [],
   };
   assert.doesNotThrow(() => validateReleases([candidate], factIds, {
-    today: "2026-07-15",
+    today: "2026-07-19",
     maxAgeDays: 45,
     factsById,
   }));
   assert.throws(
     () => validateReleases([{ ...candidate, shippedFactIds: [] }], factIds, {
-      today: "2026-07-15",
+      today: "2026-07-19",
       maxAgeDays: 45,
       factsById,
     }),
@@ -118,18 +118,18 @@ test("release records require shipped facts but may omit empty lifecycle groups"
 
 test("validation rejects future dates and sources outside official ownership", async () => {
   const { validateCompetitors, validateFacts, validateReleases } = await import("../lib/content.mjs");
-  assert.throws(() => validateFacts([{ ...facts[0], lastVerified: "2026-07-16" }], { today: "2026-07-15", maxAgeDays: 45 }), /future fact/);
-  assert.throws(() => validateFacts([{ ...facts[0], sourceUrls: [...facts[0].sourceUrls, "https://example.com/claim"] }], { today: "2026-07-15", maxAgeDays: 45 }), /unapproved macMLX source/);
+  assert.throws(() => validateFacts([{ ...facts[0], lastVerified: "2026-07-20" }], { today: "2026-07-19", maxAgeDays: 45 }), /future fact/);
+  assert.throws(() => validateFacts([{ ...facts[0], sourceUrls: [...facts[0].sourceUrls, "https://example.com/claim"] }], { today: "2026-07-19", maxAgeDays: 45 }), /unapproved macMLX source/);
 
-  const futureCompetitor = { ...competitors[0], snapshotDate: "2026-07-16" };
-  assert.throws(() => validateCompetitors([futureCompetitor], { today: "2026-07-15", maxAgeDays: 45 }), /future competitor snapshot/);
-  assert.throws(() => validateCompetitors([{ ...competitors[0], lastVerified: "2026-07-16" }], { today: "2026-07-15", maxAgeDays: 45 }), /future competitor verification/);
+  const futureCompetitor = { ...competitors[0], snapshotDate: "2026-07-20" };
+  assert.throws(() => validateCompetitors([futureCompetitor], { today: "2026-07-19", maxAgeDays: 45 }), /future competitor snapshot/);
+  assert.throws(() => validateCompetitors([{ ...competitors[0], lastVerified: "2026-07-20" }], { today: "2026-07-19", maxAgeDays: 45 }), /future competitor verification/);
   const foreignCompetitor = { ...competitors[0], officialSources: [...competitors[0].officialSources, "https://example.com/ollama"] };
-  assert.throws(() => validateCompetitors([foreignCompetitor], { today: "2026-07-15", maxAgeDays: 45 }), /unapproved official source/);
+  assert.throws(() => validateCompetitors([foreignCompetitor], { today: "2026-07-19", maxAgeDays: 45 }), /unapproved official source/);
 
-  const futureRelease = { ...releases[0], releaseDate: "2026-07-16" };
-  assert.throws(() => validateReleases([futureRelease], new Set(facts.map((fact) => fact.id)), { today: "2026-07-15", maxAgeDays: 45, factsById: new Map(facts.map((fact) => [fact.id, fact])) }), /future release date/);
-  assert.throws(() => validateReleases([{ ...releases[0], lastVerified: "2026-07-16" }], new Set(facts.map((fact) => fact.id)), { today: "2026-07-15", maxAgeDays: 45, factsById: new Map(facts.map((fact) => [fact.id, fact])) }), /future release verification/);
+  const futureRelease = { ...releases[0], releaseDate: "2026-07-20" };
+  assert.throws(() => validateReleases([futureRelease], new Set(facts.map((fact) => fact.id)), { today: "2026-07-19", maxAgeDays: 45, factsById: new Map(facts.map((fact) => [fact.id, fact])) }), /future release date/);
+  assert.throws(() => validateReleases([{ ...releases[0], lastVerified: "2026-07-20" }], new Set(facts.map((fact) => fact.id)), { today: "2026-07-19", maxAgeDays: 45, factsById: new Map(facts.map((fact) => [fact.id, fact])) }), /future release verification/);
 });
 
 test("competitors, FAQs, releases, and the macMLX comparison profile expose governed records", async () => {
@@ -163,7 +163,7 @@ test("page schema rejects free-form source URLs before rendering", async () => {
   for (const url of ["javascript:alert(1)", "http://example.com", "https://example.com"]) {
     const brokenPages = structuredClone(pages);
     brokenPages[0].blocks.find((block) => block.type === "sources").sources = [{ label: "Bypass", url }];
-    assert.throws(() => validateContentHub({ facts, competitors, faqs, releases, pages: brokenPages, macmlxComparisonProfile }, { today: "2026-07-15", maxAgeDays: 45 }), /free-form sources are not allowed/);
+    assert.throws(() => validateContentHub({ facts, competitors, faqs, releases, pages: brokenPages, macmlxComparisonProfile }, { today: "2026-07-19", maxAgeDays: 45 }), /free-form sources are not allowed/);
   }
 });
 
@@ -171,7 +171,7 @@ test("released proof requires an immutable tagged source pathname", async () => 
   const { validateFacts } = await import("../lib/content.mjs");
   const released = facts.find((fact) => fact.status === "released");
   const querySpoof = { ...released, sourceUrls: ["https://github.com/magicnight/mac-mlx/issues/1?proof=/blob/v0.6.2/fake.swift"] };
-  assert.throws(() => validateFacts([querySpoof], { today: "2026-07-15", maxAgeDays: 45 }), /immutable release source/);
+  assert.throws(() => validateFacts([querySpoof], { today: "2026-07-19", maxAgeDays: 45 }), /immutable release source/);
 });
 
 test("project and release registries share one current release identity", async () => {
@@ -179,7 +179,7 @@ test("project and release registries share one current release identity", async 
   assert.doesNotThrow(() => validateReleaseIdentity(project, releases));
   assert.throws(() => validateReleaseIdentity({ ...project, currentVersion: "9.9.9" }, releases), /currentVersion/);
   assert.throws(() => validateReleaseIdentity({ ...project, releaseDate: "2026-01-01" }, releases), /releaseDate/);
-  const releasePage = pages.find((page) => page.id === "release-v0-6-2");
+  const releasePage = pages.find((page) => page.id === "release-v0-7-0");
   assert.match(releasePage.en.title, new RegExp(project.currentVersion.replaceAll(".", "\\.")));
   assert.match(releasePage.en.directAnswer, new RegExp(project.currentVersion.replaceAll(".", "\\.")));
 });
