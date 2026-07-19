@@ -367,12 +367,12 @@ function occurrenceCount(source, value) {
 
 test("every localized document carries the Signal M metadata and wordmark contract", async () => {
   const { documents, discoveryFiles } = await prepareSite();
-  assert.equal(documents.size, 28);
+  assert.equal(documents.size, 30);
   const htmlDocuments = new Map([
     ...documents,
     ...[...discoveryFiles].filter(([path]) => path.endsWith(".html")),
   ]);
-  assert.equal(htmlDocuments.size, 30);
+  assert.equal(htmlDocuments.size, 32);
 
   for (const [path, html] of htmlDocuments) {
     for (const link of brandLinks) assert.equal(occurrenceCount(html, link), 1, `${path} must contain ${link} exactly once`);

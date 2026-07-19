@@ -1,8 +1,8 @@
 const repository = "https://github.com/magicnight/mac-mlx";
-const release = `${repository}/releases/tag/v0.6.2`;
-const tagged = (path) => `${repository}/blob/v0.6.2/${path}`;
+const release = `${repository}/releases/tag/v0.7.0`;
+const tagged = (path) => `${repository}/blob/v0.7.0/${path}`;
 const main = (path) => `${repository}/blob/main/${path}`;
-const verified = "2026-07-15";
+const verified = "2026-07-19";
 
 function fact(id, status, sinceVersion, pageIds, sources, en, zh, attributes = {}) {
   return Object.freeze({
@@ -112,9 +112,24 @@ export const facts = Object.freeze([
     { title: "InternLM3 theoretical support", summary: "v0.6.2 ships parity-verified InternLM3 code at the theoretical support tier.", detail: "Real generation has not been demonstrated. Public checkpoints ship tokenizer.model but no tokenizer.json, while the Swift tokenizer stack requires tokenizer.json; support remains theoretical until that load-path boundary changes." },
     { title: "InternLM3 理论支持", summary: "v0.6.2 交付通过等价性验证的 InternLM3 代码，支持等级为理论级。", detail: "真实生成尚未得到演示。公开检查点提供 tokenizer.model，但没有 tokenizer.json，而 Swift 分词器栈需要 tokenizer.json；在该加载路径边界改变前，支持仍为理论级。" },
     { supportTier: "theoretical" }),
+  fact("silicon-activity-panel", "released", "0.7.0", ["architecture"], [release, changelog, tagged("macMLX/macMLX/Views/Activity/ActivityView.swift"), tagged("MacMLXCore/Sources/MacMLXCore/Silicon/SiliconMonitorModel.swift")],
+    { title: "Silicon Activity panel", summary: "A new main-window Activity tab shows live Apple Silicon readouts, a prefill/decode throughput split, and the current inference bottleneck with advice.", detail: "The panel reads GPU occupancy, memory bandwidth, thermal and memory pressure, and per-rail power without admin rights or a helper process. It is observability, not a performance guarantee: an unavailable counter renders an em dash with its reason, an idle engine shows no active generation, and estimated values are labeled rather than presented as measured." },
+    { title: "硅活动面板", summary: "新的主窗口活动标签页显示实时 Apple 芯片读数、预填充/解码吞吐拆分，以及当前推理瓶颈与相应建议。", detail: "面板读取 GPU 占用、内存带宽、热与内存压力以及各电轨功耗，无需管理员权限或辅助进程。它是可观测性，而非性能保证：不可用的计数器会显示破折号并给出原因，空闲引擎显示无活动生成，估算值会被标注而非当作实测值。" }),
+  fact("bottleneck-classifier", "released", "0.7.0", ["architecture"], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/Silicon/BottleneckClassifier.swift"), tagged("MacMLXCore/Sources/MacMLXCore/Silicon/BottleneckVerdict.swift")],
+    { title: "Inference bottleneck classifier", summary: "v0.7.0 fuses the hardware samples with the engine's live prefill or decode phase to attribute what limits generation.", detail: "Because the classifier runs in-process it knows which inference phase is active, the signal an external GPU monitor cannot see. It is a smoothed heuristic, not a profiler: it prioritizes memory over thermal over compute or bandwidth, applies hysteresis and three-frame smoothing, and self-calibrates its bandwidth ceiling, so a verdict is guidance rather than a ground-truth measurement." },
+    { title: "推理瓶颈分类器", summary: "v0.7.0 将硬件采样与引擎实时的预填充或解码阶段融合，归因限制生成的因素。", detail: "由于分类器在进程内运行，它知道当前处于哪个推理阶段——这是外部 GPU 监视器无法获取的信号。它是经过平滑的启发式判断，而非性能剖析器：优先级为内存高于热、热高于计算或带宽，应用迟滞与三帧平滑，并自校准带宽上限，因此结论是指引而非真值测量。" }),
+  fact("silicon-sampling", "released", "0.7.0", ["architecture"], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/Silicon/IOReportReader.swift"), tagged("MacMLXCore/Sources/MacMLXCore/Silicon/IOReportSiliconSampler.swift")],
+    { title: "Sudoless silicon sampling", summary: "A runtime IOReport bridge plus samplers read GPU occupancy, memory bandwidth, thermal and memory pressure, and ANE power.", detail: "The IOReport bridge is resolved through dlopen, so a future macOS that renames or removes the private framework degrades the readouts to unavailable rather than failing to launch. Memory bandwidth is reported as an estimate, ANE exposes a power proxy with no fabricated utilization percentage, and the Media Engine, which has no duty-cycle signal, is omitted rather than guessed." },
+    { title: "免 sudo 的硅采样", summary: "运行时 IOReport 桥接与一组采样器读取 GPU 占用、内存带宽、热与内存压力以及 ANE 功耗。", detail: "IOReport 桥接通过 dlopen 解析，因此未来若某个 macOS 重命名或移除该私有框架，读数会降级为不可用而非无法启动。内存带宽以估算值呈现，ANE 提供功耗代理且不虚构利用率百分比，而无占空比信号的媒体引擎则被省略而非猜测。" }),
+  fact("benchmark-attribution", "released", "0.7.0", ["models"], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/Silicon/BenchmarkBottleneck.swift"), tagged("MacMLXCore/Sources/MacMLXCore/Models/BenchmarkResult.swift")],
+    { title: "Benchmark bottleneck attribution", summary: "A benchmark run samples the silicon while generating and attaches what limited its decode steady state to the saved result.", detail: "The attribution names the decode limiter, whether memory, thermal, bandwidth, or compute, with a confidence and the representative hardware behind it. A run too short to attribute is reported as unavailable instead of inventing a verdict, and low-confidence or estimate-based calls are flagged; it describes one measured run, not a family-wide benchmark guarantee." },
+    { title: "基准瓶颈归因", summary: "基准运行在生成过程中采样硅指标，并将限制其解码稳态的因素附加到保存的结果上。", detail: "归因给出解码限制项（内存、热、带宽或计算）及其置信度和背后的代表性硬件。过短而无法归因的运行会报告为不可用，而不是编造结论；低置信度或基于估算的判断会被标注。它描述的是一次实测运行，而非家族级基准保证。" }),
+  fact("ocr-recognition", "released", "0.7.0", ["models"], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/Models/LocalModel.swift"), tagged("docs/model-support.md")],
+    { title: "OCR model recognition", summary: "Dedicated OCR checkpoints receive an OCR badge distinct from the generic Vision badge, and GLM-OCR is verified end-to-end.", detail: "GLM-OCR loads through the stock VLM path with no new model code and reads image text back. The badge is intentionally narrow: it appears only on a model that actually loads, so an OCR family that is detected but not yet ported, such as dots_ocr or deepseek-ocr, earns no badge. This is model recognition, not a universal OCR-quality claim." },
+    { title: "OCR 模型识别", summary: "专用 OCR 检查点会获得区别于通用 Vision 徽章的 OCR 徽章，且 GLM-OCR 已端到端验证。", detail: "GLM-OCR 通过原有 VLM 路径加载，无需新增模型代码，并能读回图像文字。该徽章刻意保持克制：仅出现在真正能加载的模型上，因此被检测到但尚未移植的 OCR 家族（如 dots_ocr 或 deepseek-ocr）不会获得徽章。这是模型识别，而非通用 OCR 质量声明。" }),
   fact("paged-kv", "planned", "future", ["architecture"], [roadmap],
-    { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released in v0.6.2." },
-    { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未在 v0.6.2 发布。" }),
+    { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released in v0.7.0." },
+    { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未在 v0.7.0 发布。" }),
   fact("adaptive-memory-guard", "planned", "future", ["architecture"], [roadmap],
     { title: "Unified adaptive memory guard", summary: "A feedback controller across cache, model pool, and concurrency is planned.", detail: "Released memory probes and pool caps are separate mechanisms and must not be described as this guard." },
     { title: "统一自适应内存守卫", summary: "跨缓存、模型池与并发的反馈控制器处于规划阶段。", detail: "已发布的内存探针和模型池上限是独立机制，不能称为该守卫。" }),
@@ -124,6 +139,18 @@ export const facts = Object.freeze([
   fact("sampling-expanded", "planned", "future", ["models", "choosing-a-model"], [roadmap, main("MacMLXCore/Sources/MacMLXCore/Managers/ModelParametersStore.swift")],
     { title: "Expanded sampling controls", summary: "top-k, min-p, presence, frequency, and repetition penalties, plus per-request seed are planned.", detail: "DeepSeek expert-routing top-k is an internal architecture operation and is unrelated to user sampling top-k." },
     { title: "扩展采样控制", summary: "top-k、min-p、presence、frequency 与 repetition 惩罚项，以及逐请求 seed 处于规划阶段。", detail: "DeepSeek 专家路由 top-k 是架构内部操作，与用户采样 top-k 无关。" }),
+  fact("cold-cache-byte-budget", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheConfig.swift"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheStore.swift")],
+    { title: "Byte-bounded cold KV tier", summary: "On main, the on-disk cold KV cache honors an explicit byte budget, pruned oldest-first, with a toggle to opt the cold tier out.", detail: "This is unreleased work on the main branch, not part of any tagged release. It bounds the previously unbounded cold directory and does not add block sharing or paged allocation; the released cache still reuses exact full prefixes only." },
+    { title: "字节有界的冷 KV 层", summary: "在 main 分支上，磁盘冷 KV 缓存遵循明确的字节预算，按最旧优先清理，并提供关闭冷层的开关。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。它为此前无上限的冷目录设定边界，并未新增块共享或分页分配；已发布的缓存仍只复用完整精确前缀。" }),
+  fact("cold-cache-weight-identity", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheKey.swift"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheStore.swift")],
+    { title: "Weight-identity-guarded cold entries", summary: "On main, cold entries are fingerprinted against model weight identity so a weight swap cannot serve stale KV.", detail: "This is unreleased main-branch work, not part of a tagged release. It is an integrity guard for the cold tier's reuse, not a correctness proof for every cache path, and it does not change the released exact-prefix reuse semantics." },
+    { title: "以权重身份守护的冷条目", summary: "在 main 分支上，冷条目会与模型权重身份指纹绑定，使权重替换后无法再提供陈旧 KV。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。它是冷层复用的完整性守护，而非对所有缓存路径的正确性证明，也不改变已发布的精确前缀复用语义。" }),
+  fact("cold-cache-persistent-index", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/ColdIndex.swift")],
+    { title: "Persistent cross-session cold index", summary: "On main, a persistent cold index enables longest-prefix reuse that survives a restart across sessions.", detail: "This is unreleased main-branch work, not part of a tagged release. Reuse remains exact-prefix, not the planned paged or block-sharing virtualization; the persisted index only extends the existing longest-prefix reuse across process restarts." },
+    { title: "跨会话的持久冷索引", summary: "在 main 分支上，持久冷索引使最长前缀复用可在重启后跨会话保留。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。复用仍为精确前缀，而非规划中的分页或块共享虚拟化；持久索引只是把既有的最长前缀复用延伸到进程重启之后。" }),
+  fact("cold-cache-serial-writer", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/ColdTierWriter.swift")],
+    { title: "Off-actor cold-tier writer", summary: "On main, cold-tier writes move off the store actor onto a dedicated serial writer.", detail: "This is unreleased main-branch work, not part of a tagged release. It relocates disk writes to keep the store actor responsive and does not alter what is cached or the released reuse semantics." },
+    { title: "脱离 actor 的冷层写入器", summary: "在 main 分支上，冷层写入从存储 actor 迁移到专用的串行写入器。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。它将磁盘写入迁出以保持存储 actor 的响应性，并不改变缓存内容或已发布的复用语义。" }),
 ]);
 
 function comparisonCell(text, sourceFactIds) {
@@ -136,13 +163,13 @@ export const macmlxComparisonProfile = Object.freeze({
     runtime: comparisonCell("Swift in-process inference through Apple MLX; the default path requires no Python runtime", ["swift-in-process", "no-python-default"]),
     models: comparisonCell("Supported MLX language, vision, embedding, LoRA, and checkpoint-governed native model workflows", ["vlm-14-families", "embeddings", "lora", "track-g-tested-models", "internlm3-theoretical"]),
     interfaces: comparisonCell("SwiftUI app, macmlx CLI, compatible HTTP APIs with structured output, and integrated tool-routing surfaces", ["shared-core", "openai-compat", "mcp-server", "structured-output", "integrated-tool-routing"]),
-    focus: comparisonCell("Swift-native serving with eligibility-gated continuous batching, LCP prompt reuse, structured output, and speculative decoding", ["continuous-batching", "trie-lcp", "structured-output", "speculative-decoding"]),
+    focus: comparisonCell("Swift-native serving with eligibility-gated continuous batching, LCP prompt reuse, structured output, speculative decoding, and sudoless silicon-bottleneck observability", ["continuous-batching", "trie-lcp", "structured-output", "speculative-decoding", "silicon-activity-panel", "bottleneck-classifier"]),
   }),
   "zh-Hans": Object.freeze({
     platform: comparisonCell("Apple 芯片 macOS 14 或更高版本", ["platform-installation"]),
     runtime: comparisonCell("通过 Apple MLX 运行 Swift 进程内推理；默认路径不需要 Python 运行时", ["swift-in-process", "no-python-default"]),
     models: comparisonCell("受支持的 MLX 语言、视觉、嵌入、LoRA 与按检查点证据治理的原生模型工作流", ["vlm-14-families", "embeddings", "lora", "track-g-tested-models", "internlm3-theoretical"]),
     interfaces: comparisonCell("SwiftUI 应用、macmlx CLI、支持结构化输出的兼容 HTTP API 与集成工具路由接口", ["shared-core", "openai-compat", "mcp-server", "structured-output", "integrated-tool-routing"]),
-    focus: comparisonCell("Swift 原生服务，具备资格门控的连续批处理、LCP 提示复用、结构化输出与推测解码", ["continuous-batching", "trie-lcp", "structured-output", "speculative-decoding"]),
+    focus: comparisonCell("Swift 原生服务，具备资格门控的连续批处理、LCP 提示复用、结构化输出、推测解码，以及免 sudo 的硅瓶颈可观测性", ["continuous-batching", "trie-lcp", "structured-output", "speculative-decoding", "silicon-activity-panel", "bottleneck-classifier"]),
   }),
 });
