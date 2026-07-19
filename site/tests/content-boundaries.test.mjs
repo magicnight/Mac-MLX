@@ -14,7 +14,7 @@ test("home copy preserves the audited VLM and Python boundaries", () => {
   assert.match(project.locales["zh-Hans"].twitterDescription, /默认推理路径/);
 });
 
-test("home source presents the current v0.7.0 release narrative", () => {
+test("home source presents the current v0.8.0 release narrative", () => {
   assert.match(home, /v\{\{currentVersion\}\}/);
   assert.match(home, /Track G/);
   assert.match(home, /structured output/i);

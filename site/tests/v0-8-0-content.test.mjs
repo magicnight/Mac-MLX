@@ -7,52 +7,93 @@ import { project } from "../content/project.mjs";
 import { releases } from "../content/releases.mjs";
 
 const factsById = new Map(facts.map((fact) => [fact.id, fact]));
-const releasedV070FactIds = [
+const releasedV080FactIds = [
+  "cold-cache-byte-budget",
+  "cold-cache-weight-identity",
+  "cold-cache-persistent-index",
+  "cold-cache-serial-writer",
+];
+const siliconOcrFactIds = [
   "silicon-activity-panel",
   "bottleneck-classifier",
   "silicon-sampling",
   "benchmark-attribution",
   "ocr-recognition",
 ];
-const coldCacheDevelopmentFactIds = [
-  "cold-cache-byte-budget",
-  "cold-cache-weight-identity",
-  "cold-cache-persistent-index",
-  "cold-cache-serial-writer",
-];
 
-function assertImmutableV070Source(factId) {
+function assertImmutableV080Source(factId) {
   const item = factsById.get(factId);
   assert.ok(item, `missing ${factId}`);
   assert.equal(item.status, "released", `${factId} must be released`);
-  assert.equal(item.sinceVersion, "0.7.0", `${factId} must ship in v0.7.0`);
+  assert.equal(item.sinceVersion, "0.8.0", `${factId} must ship in v0.8.0`);
   assert.ok(
-    item.sourceUrls.some((url) => url.includes("/releases/tag/v0.7.0") || url.includes("/blob/v0.7.0/")),
-    `${factId} must cite immutable v0.7.0 evidence`,
+    item.sourceUrls.some((url) => url.includes("/releases/tag/v0.8.0") || url.includes("/blob/v0.8.0/")),
+    `${factId} must cite immutable v0.8.0 evidence`,
   );
 }
 
-test("project and release registries identify v0.7.0 as current", () => {
+test("project and release registries identify v0.8.0 as current", () => {
   assert.deepEqual(
     {
       currentVersion: project.currentVersion,
       releaseDate: project.releaseDate,
       lastVerified: project.lastVerified,
     },
-    { currentVersion: "0.7.0", releaseDate: "2026-07-18", lastVerified: "2026-07-19" },
+    { currentVersion: "0.8.0", releaseDate: "2026-07-19", lastVerified: "2026-07-19" },
   );
-  assert.equal(releases[0].id, "v0-7-0");
+  assert.equal(releases[0].id, "v0-8-0");
   assert.equal(releases[0].version, project.currentVersion);
   assert.equal(releases[0].releaseDate, project.releaseDate);
   assert.equal(releases[0].lastVerified, project.lastVerified);
+  assert.ok(releases.some((item) => item.id === "v0-7-0"));
   assert.ok(releases.some((item) => item.id === "v0-6-2"));
   assert.ok(releases.some((item) => item.id === "v0-5-3"));
 });
 
-test("v0.7.0 silicon and OCR capabilities are governed by immutable tagged evidence", () => {
-  releasedV070FactIds.forEach(assertImmutableV070Source);
+test("v0.8.0 tiered cold-cache capabilities are governed by immutable tagged evidence", () => {
+  releasedV080FactIds.forEach(assertImmutableV080Source);
   const shipped = releases[0].shippedFactIds;
-  for (const factId of releasedV070FactIds) assert.ok(shipped.includes(factId), `v0.7.0 must ship ${factId}`);
+  for (const factId of releasedV080FactIds) assert.ok(shipped.includes(factId), `v0.8.0 must ship ${factId}`);
+  assert.deepEqual(releases[0].developmentFactIds, [], "v0.8.0 has no development facts on main");
+  for (const factId of releasedV080FactIds) {
+    assert.ok(!releases[0].limitationFactIds.includes(factId), `${factId} is not a limitation`);
+  }
+});
+
+test("released cold-cache facts keep exact-prefix and no-virtualization boundaries", () => {
+  const tiered = factsById.get("tiered-cache");
+  assert.match(tiered.en.detail, /does not provide released block sharing or paged KV allocation/);
+
+  const byteBudget = factsById.get("cold-cache-byte-budget");
+  assert.match(byteBudget.en.detail, /exact full prefixes only/);
+  assert.match(byteBudget.en.detail, /does not add block sharing or paged allocation/);
+  assert.match(byteBudget["zh-Hans"].detail, /完整精确前缀/);
+
+  const persistent = factsById.get("cold-cache-persistent-index");
+  assert.match(persistent.en.detail, /Reuse remains exact-prefix/);
+  assert.match(persistent.en.detail, /degrades to exact re-hits, never to wrong output/);
+
+  const weightIdentity = factsById.get("cold-cache-weight-identity");
+  assert.match(weightIdentity.en.detail, /rejected and deleted rather than restored/);
+  assert.match(weightIdentity.en.detail, /does not change the released exact-prefix reuse semantics/);
+
+  const serialWriter = factsById.get("cold-cache-serial-writer");
+  assert.match(serialWriter.en.detail, /does not alter what is cached or the released reuse semantics/);
+
+  // Cache virtualization stays planned; the cold-tier work never claims it.
+  assert.equal(factsById.get("paged-kv").status, "planned");
+  assert.doesNotMatch(`${byteBudget.en.summary} ${byteBudget.en.detail}`, /main branch|unreleased/i);
+});
+
+test("v0.7.0 silicon and OCR facts stay shipped with their immutable provenance", () => {
+  const shipped = releases[0].shippedFactIds;
+  for (const factId of siliconOcrFactIds) {
+    const item = factsById.get(factId);
+    assert.ok(item, `missing ${factId}`);
+    assert.equal(item.status, "released", `${factId} must be released`);
+    assert.equal(item.sinceVersion, "0.7.0", `${factId} shipped in v0.7.0`);
+    assert.ok(shipped.includes(factId), `v0.8.0 still ships ${factId}`);
+  }
 });
 
 test("silicon observability facts keep estimated-versus-measured and availability boundaries", () => {
@@ -79,27 +120,6 @@ test("silicon observability facts keep estimated-versus-measured and availabilit
     assert.match(ocr.detail, /deepseek-ocr/);
     assert.match(ocr.summary, /GLM-OCR/);
   }
-});
-
-test("v0.8 cold-cache work stays development on main, not a released or shipped claim", () => {
-  for (const factId of coldCacheDevelopmentFactIds) {
-    const item = factsById.get(factId);
-    assert.ok(item, `missing ${factId}`);
-    assert.equal(item.status, "development", `${factId} must stay in development`);
-    assert.equal(item.sinceVersion, "post-0.7.0", `${factId} must be tracked after v0.7.0`);
-    assert.ok(
-      item.sourceUrls.some((url) => url.includes("/blob/main/")),
-      `${factId} must reference post-tag main`,
-    );
-    assert.match(`${item.en.summary} ${item.en.detail}`, /main|unreleased/i);
-    assert.match(item.en.detail, /not part of (?:any|a) tagged release/i);
-  }
-  assert.deepEqual(releases[0].developmentFactIds, coldCacheDevelopmentFactIds);
-  for (const factId of coldCacheDevelopmentFactIds) {
-    assert.ok(!releases[0].shippedFactIds.includes(factId), `${factId} must not be shipped`);
-  }
-  const tiered = factsById.get("tiered-cache");
-  assert.match(tiered.en.detail, /does not provide released block sharing or paged KV allocation/);
 });
 
 test("model support facts preserve measured and theoretical boundaries", () => {

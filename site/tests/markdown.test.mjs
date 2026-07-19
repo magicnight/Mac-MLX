@@ -14,7 +14,7 @@ const context = { project, routes, pages, facts, competitors, faqs, releases };
 
 test("every route has a registry-derived Markdown counterpart in both locales", () => {
   const documents = renderMarkdownDocuments(context);
-  assert.equal(documents.size, 30);
+  assert.equal(documents.size, 32);
   for (const route of routes) {
     for (const [locale, directory] of [["en", "en"], ["zh-Hans", "zh"]]) {
       const path = `content/${directory}/${route.id}.md`;
@@ -36,8 +36,8 @@ test("every route has a registry-derived Markdown counterpart in both locales", 
 test("short llms files are navigational and full files preserve fact/status/source parity", () => {
   const indexes = renderLLMSIndexes(context);
   assert.deepEqual([...indexes.keys()], ["llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt"]);
-  assert.match(indexes.get("llms.txt"), /Latest release: v0\.7\.0/);
-  assert.match(indexes.get("zh/llms.txt"), /最新版本：v0\.7\.0/);
+  assert.match(indexes.get("llms.txt"), /Latest release: v0\.8\.0/);
+  assert.match(indexes.get("zh/llms.txt"), /最新版本：v0\.8\.0/);
   assert.doesNotMatch(indexes.get("llms.txt"), /## Governed facts/);
   assert.doesNotMatch(indexes.get("zh/llms.txt"), /## 受治理事实/);
 

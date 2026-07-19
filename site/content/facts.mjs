@@ -1,6 +1,6 @@
 const repository = "https://github.com/magicnight/mac-mlx";
-const release = `${repository}/releases/tag/v0.7.0`;
-const tagged = (path) => `${repository}/blob/v0.7.0/${path}`;
+const release = `${repository}/releases/tag/v0.8.0`;
+const tagged = (path) => `${repository}/blob/v0.8.0/${path}`;
 const main = (path) => `${repository}/blob/main/${path}`;
 const verified = "2026-07-19";
 
@@ -128,8 +128,8 @@ export const facts = Object.freeze([
     { title: "OCR model recognition", summary: "Dedicated OCR checkpoints receive an OCR badge distinct from the generic Vision badge, and GLM-OCR is verified end-to-end.", detail: "GLM-OCR loads through the stock VLM path with no new model code and reads image text back. The badge is intentionally narrow: it appears only on a model that actually loads, so an OCR family that is detected but not yet ported, such as dots_ocr or deepseek-ocr, earns no badge. This is model recognition, not a universal OCR-quality claim." },
     { title: "OCR 模型识别", summary: "专用 OCR 检查点会获得区别于通用 Vision 徽章的 OCR 徽章，且 GLM-OCR 已端到端验证。", detail: "GLM-OCR 通过原有 VLM 路径加载，无需新增模型代码，并能读回图像文字。该徽章刻意保持克制：仅出现在真正能加载的模型上，因此被检测到但尚未移植的 OCR 家族（如 dots_ocr 或 deepseek-ocr）不会获得徽章。这是模型识别，而非通用 OCR 质量声明。" }),
   fact("paged-kv", "planned", "future", ["architecture"], [roadmap],
-    { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released in v0.7.0." },
-    { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未在 v0.7.0 发布。" }),
+    { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released in v0.8.0." },
+    { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未在 v0.8.0 发布。" }),
   fact("adaptive-memory-guard", "planned", "future", ["architecture"], [roadmap],
     { title: "Unified adaptive memory guard", summary: "A feedback controller across cache, model pool, and concurrency is planned.", detail: "Released memory probes and pool caps are separate mechanisms and must not be described as this guard." },
     { title: "统一自适应内存守卫", summary: "跨缓存、模型池与并发的反馈控制器处于规划阶段。", detail: "已发布的内存探针和模型池上限是独立机制，不能称为该守卫。" }),
@@ -139,18 +139,18 @@ export const facts = Object.freeze([
   fact("sampling-expanded", "planned", "future", ["models", "choosing-a-model"], [roadmap, main("MacMLXCore/Sources/MacMLXCore/Managers/ModelParametersStore.swift")],
     { title: "Expanded sampling controls", summary: "top-k, min-p, presence, frequency, and repetition penalties, plus per-request seed are planned.", detail: "DeepSeek expert-routing top-k is an internal architecture operation and is unrelated to user sampling top-k." },
     { title: "扩展采样控制", summary: "top-k、min-p、presence、frequency 与 repetition 惩罚项，以及逐请求 seed 处于规划阶段。", detail: "DeepSeek 专家路由 top-k 是架构内部操作，与用户采样 top-k 无关。" }),
-  fact("cold-cache-byte-budget", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheConfig.swift"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheStore.swift")],
-    { title: "Byte-bounded cold KV tier", summary: "On main, the on-disk cold KV cache honors an explicit byte budget, pruned oldest-first, with a toggle to opt the cold tier out.", detail: "This is unreleased work on the main branch, not part of any tagged release. It bounds the previously unbounded cold directory and does not add block sharing or paged allocation; the released cache still reuses exact full prefixes only." },
-    { title: "字节有界的冷 KV 层", summary: "在 main 分支上，磁盘冷 KV 缓存遵循明确的字节预算，按最旧优先清理，并提供关闭冷层的开关。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。它为此前无上限的冷目录设定边界，并未新增块共享或分页分配；已发布的缓存仍只复用完整精确前缀。" }),
-  fact("cold-cache-weight-identity", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheKey.swift"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheStore.swift")],
-    { title: "Weight-identity-guarded cold entries", summary: "On main, cold entries are fingerprinted against model weight identity so a weight swap cannot serve stale KV.", detail: "This is unreleased main-branch work, not part of a tagged release. It is an integrity guard for the cold tier's reuse, not a correctness proof for every cache path, and it does not change the released exact-prefix reuse semantics." },
-    { title: "以权重身份守护的冷条目", summary: "在 main 分支上，冷条目会与模型权重身份指纹绑定，使权重替换后无法再提供陈旧 KV。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。它是冷层复用的完整性守护，而非对所有缓存路径的正确性证明，也不改变已发布的精确前缀复用语义。" }),
-  fact("cold-cache-persistent-index", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/ColdIndex.swift")],
-    { title: "Persistent cross-session cold index", summary: "On main, a persistent cold index enables longest-prefix reuse that survives a restart across sessions.", detail: "This is unreleased main-branch work, not part of a tagged release. Reuse remains exact-prefix, not the planned paged or block-sharing virtualization; the persisted index only extends the existing longest-prefix reuse across process restarts." },
-    { title: "跨会话的持久冷索引", summary: "在 main 分支上，持久冷索引使最长前缀复用可在重启后跨会话保留。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。复用仍为精确前缀，而非规划中的分页或块共享虚拟化；持久索引只是把既有的最长前缀复用延伸到进程重启之后。" }),
-  fact("cold-cache-serial-writer", "development", "post-0.7.0", [], [main("CHANGELOG.md"), main("MacMLXCore/Sources/MacMLXCore/PromptCache/ColdTierWriter.swift")],
-    { title: "Off-actor cold-tier writer", summary: "On main, cold-tier writes move off the store actor onto a dedicated serial writer.", detail: "This is unreleased main-branch work, not part of a tagged release. It relocates disk writes to keep the store actor responsive and does not alter what is cached or the released reuse semantics." },
-    { title: "脱离 actor 的冷层写入器", summary: "在 main 分支上，冷层写入从存储 actor 迁移到专用的串行写入器。", detail: "这是 main 分支上尚未发布的工作，不属于任何标签版本。它将磁盘写入迁出以保持存储 actor 的响应性，并不改变缓存内容或已发布的复用语义。" }),
+  fact("cold-cache-byte-budget", "released", "0.8.0", [], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheConfig.swift"), tagged("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheStore.swift")],
+    { title: "Byte-bounded cold KV tier", summary: "v0.8.0 bounds the on-disk cold KV cache to an explicit byte budget, pruned oldest-first, with a toggle to opt the cold tier out.", detail: "The previously unbounded cold directory now honors the Cold (SSD) budget with the Hot (RAM) budget wired alongside; an over-budget directory is trimmed on first launch, removing only regenerable cache rather than model files or settings. It does not add block sharing or paged allocation; the released cache still reuses exact full prefixes only." },
+    { title: "字节有界的冷 KV 层", summary: "v0.8.0 将磁盘冷 KV 缓存约束到明确的字节预算，按最旧优先清理，并提供关闭冷层的开关。", detail: "此前无上限的冷目录现遵循 Cold（SSD）预算，并同时接入 Hot（RAM）预算；首次启动时超出预算的目录会被裁剪，且只移除可再生的缓存，而非模型文件或设置。它并未新增块共享或分页分配；已发布的缓存仍只复用完整精确前缀。" }),
+  fact("cold-cache-weight-identity", "released", "0.8.0", [], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheKey.swift"), tagged("MacMLXCore/Sources/MacMLXCore/PromptCache/PromptCacheStore.swift")],
+    { title: "Weight-identity-guarded cold entries", summary: "v0.8.0 fingerprints each cold entry against model weight identity so a weight swap cannot serve stale KV.", detail: "The fingerprint covers the model's config plus every safetensors shard; if the same path later holds re-downloaded, re-quantized, or swapped weights, the stale entry is rejected and deleted rather than restored into silently wrong output. It is an integrity guard for the cold tier's reuse, not a correctness proof for every cache path, and it does not change the released exact-prefix reuse semantics." },
+    { title: "以权重身份守护的冷条目", summary: "v0.8.0 将每个冷条目与模型权重身份指纹绑定，使权重替换后无法再提供陈旧 KV。", detail: "指纹覆盖模型 config 及每个 safetensors 分片；若同一路径后续换成重新下载、重新量化或替换的权重，陈旧条目会被拒绝并删除，而不是恢复为静默错误的输出。它是冷层复用的完整性守护，而非对所有缓存路径的正确性证明，也不改变已发布的精确前缀复用语义。" }),
+  fact("cold-cache-persistent-index", "released", "0.8.0", [], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/PromptCache/ColdIndex.swift")],
+    { title: "Persistent cross-session cold index", summary: "v0.8.0 persists a cold index so longest-prefix reuse survives a restart across sessions.", detail: "A follow-up turn that extends an earlier session's prompt reuses the shared prefix straight off disk, while a missing, unreadable, or version-mismatched index degrades to exact re-hits, never to wrong output. Reuse remains exact-prefix, not the planned paged or block-sharing virtualization; the persisted index only extends the existing longest-prefix reuse across process restarts." },
+    { title: "跨会话的持久冷索引", summary: "v0.8.0 持久化冷索引，使最长前缀复用可在重启后跨会话保留。", detail: "延续更早会话提示的后续轮次可直接从磁盘复用共享前缀；缺失、不可读或版本不匹配的索引会降级为精确命中，绝不会导致错误输出。复用仍为精确前缀，而非规划中的分页或块共享虚拟化；持久索引只是把既有的最长前缀复用延伸到进程重启之后。" }),
+  fact("cold-cache-serial-writer", "released", "0.8.0", [], [release, changelog, tagged("MacMLXCore/Sources/MacMLXCore/PromptCache/ColdTierWriter.swift")],
+    { title: "Off-actor cold-tier writer", summary: "v0.8.0 moves cold-tier writes off the cache actor onto a dedicated serial background writer.", detail: "Persisting an evicted KV snapshot, hundreds of milliseconds for a large cache, no longer blocks another request's cache lookup; the write lands atomically through a temp file and rename, and the on-disk result is unchanged. It relocates disk writes to keep the store actor responsive and does not alter what is cached or the released reuse semantics." },
+    { title: "脱离 actor 的冷层写入器", summary: "v0.8.0 将冷层写入从缓存 actor 迁移到专用的串行后台写入器。", detail: "持久化被逐出的 KV 快照（大型缓存可达数百毫秒）不再阻塞其他请求的缓存查找；写入通过临时文件加重命名原子落盘，磁盘上的结果保持不变。它将磁盘写入迁出以保持存储 actor 的响应性，并不改变缓存内容或已发布的复用语义。" }),
 ]);
 
 function comparisonCell(text, sourceFactIds) {

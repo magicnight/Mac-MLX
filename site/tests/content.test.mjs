@@ -52,7 +52,7 @@ test("fact, competitor, FAQ, and release registries pass strict validation", asy
     ["swiftlm", "b648"],
   ]);
   assert.equal(faqs.length, 8);
-  assert.equal(releases[0].version, "0.7.0");
+  assert.equal(releases[0].version, "0.8.0");
 });
 
 test("validation rejects stale dates, mutable release sources, and broken references", async () => {
@@ -179,7 +179,7 @@ test("project and release registries share one current release identity", async 
   assert.doesNotThrow(() => validateReleaseIdentity(project, releases));
   assert.throws(() => validateReleaseIdentity({ ...project, currentVersion: "9.9.9" }, releases), /currentVersion/);
   assert.throws(() => validateReleaseIdentity({ ...project, releaseDate: "2026-01-01" }, releases), /releaseDate/);
-  const releasePage = pages.find((page) => page.id === "release-v0-7-0");
+  const releasePage = pages.find((page) => page.id === "release-v0-8-0");
   assert.match(releasePage.en.title, new RegExp(project.currentVersion.replaceAll(".", "\\.")));
   assert.match(releasePage.en.directAnswer, new RegExp(project.currentVersion.replaceAll(".", "\\.")));
 });

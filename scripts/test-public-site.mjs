@@ -275,24 +275,24 @@ assert.doesNotMatch(englishRelease.classes, /\bbuilding\b/);
 assert.doesNotMatch(chineseRelease.classes, /\bbuilding\b/);
 assert.equal(englishRelease.content.match(/<li\b/g)?.length, 4);
 assert.equal(chineseRelease.content.match(/<li\b/g)?.length, 4);
-assert.match(englishRelease.content, /<strong>v0\.7\.0 · Jul 18, 2026<\/strong>/);
-assert.match(chineseRelease.content, /<strong>v0\.7\.0 · 2026年7月18日<\/strong>/);
-assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.7\.0"[^>]*>View v0\.7\.0 release ↗<\/a>/);
-assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.7\.0"[^>]*>查看 v0\.7\.0 版本 ↗<\/a>/);
+assert.match(englishRelease.content, /<strong>v0\.8\.0 · Jul 19, 2026<\/strong>/);
+assert.match(chineseRelease.content, /<strong>v0\.8\.0 · 2026年7月19日<\/strong>/);
+assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.8\.0"[^>]*>View v0\.8\.0 release ↗<\/a>/);
+assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.8\.0"[^>]*>查看 v0\.8\.0 版本 ↗<\/a>/);
 for (const capability of [
-  /A sudoless Activity panel with live Apple Silicon readouts and an inference-bottleneck verdict/,
-  /An in-process classifier reads the prefill or decode phase an external monitor cannot see/,
-  /Per-run benchmark bottleneck attribution with a confidence and representative hardware/,
-  /OCR-model recognition, with GLM-OCR verified end-to-end through the stock VLM path/,
+  /The cold SSD KV cache is now byte-bounded, pruned oldest-first, with a toggle to opt out/,
+  /Each cold entry is fingerprinted against model weight identity, so a weight swap cannot serve stale KV/,
+  /A persisted cold index gives longest-prefix reuse that survives a restart across sessions/,
+  /Cold-tier writes move onto a serial background writer, so one spill no longer stalls another request/,
 ]) assert.match(englishRelease.content, capability);
 for (const capability of [
-  /免 sudo 的活动面板：实时 Apple 芯片读数与推理瓶颈判定/,
-  /进程内分类器可读取外部监视器看不到的预填充或解码阶段/,
-  /逐次运行的基准瓶颈归因，附置信度与代表性硬件/,
-  /OCR 模型识别，GLM-OCR 通过原有 VLM 路径端到端验证/,
+  /冷 SSD KV 缓存现按字节预算约束，最旧优先清理，并可一键关闭冷层/,
+  /每个冷条目都与模型权重身份指纹绑定，权重替换后无法再提供陈旧 KV/,
+  /持久冷索引让最长前缀复用在重启后跨会话保留/,
+  /冷层写入迁移到串行后台写入器，一次 spill 不再阻塞其他请求/,
 ]) assert.match(chineseRelease.content, capability);
-assert.match(llms, /Latest release: v0\.7\.0/);
-assert.match(ogImage, /v0\.7\.0/);
+assert.match(llms, /Latest release: v0\.8\.0/);
+assert.match(ogImage, /v0\.8\.0/);
 
 const combined = `${html}\n${zhHTML}\n${llms}\n${ogImage}`;
 for (const staleClaim of [

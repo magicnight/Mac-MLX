@@ -8,7 +8,7 @@ import { prepareSite, validateSocialAssets } from "../../scripts/build-public-si
 
 test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404 outputs", async () => {
   const { documents, markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-07-19" });
-  assert.equal(markdownDocuments.size, 30);
+  assert.equal(markdownDocuments.size, 32);
   assert.deepEqual([...discoveryFiles.keys()], [
     "llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt",
     "robots.txt", "sitemap.xml", "404.html", "zh/404.html",
@@ -16,10 +16,10 @@ test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404
   const sitemap = discoveryFiles.get("sitemap.xml");
   const llms = discoveryFiles.get("llms.txt");
   const llmsFull = discoveryFiles.get("llms-full.txt");
-  assert.equal(sitemap.match(/<url>/g)?.length, 30);
-  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-7-0\/<\/loc>[\s\S]*?<lastmod>2026-07-19<\/lastmod>/);
+  assert.equal(sitemap.match(/<url>/g)?.length, 32);
+  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-8-0\/<\/loc>[\s\S]*?<lastmod>2026-07-19<\/lastmod>/);
   assert.doesNotMatch(sitemap, /404/);
-  assert.match(llms, /Latest release: v0\.7\.0/);
+  assert.match(llms, /Latest release: v0\.8\.0/);
   assert.match(llmsFull, /### continuous-batching[\s\S]*?- Status: released[\s\S]*?- Title: Eligibility-gated continuous batching/);
   assert.match(llmsFull, /### paged-kv[\s\S]*?- Status: planned[\s\S]*?- Title: Paged KV, block sharing, and CoW/);
   const internLMEnglish = llmsFull.match(/### internlm3-theoretical\n([\s\S]*?)(?=\n### |\n## Canonical)/)?.[1];
@@ -39,8 +39,8 @@ test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404
     assert.match(card, new RegExp(`data-status="theoretical"[\\s\\S]*?>${label}<`));
     assert.doesNotMatch(card, />Released<|>已发布</);
   }
-  assert.ok(markdownDocuments.has("content/en/release-v0-7-0.md"));
-  assert.ok(markdownDocuments.has("content/zh/release-v0-7-0.md"));
+  assert.ok(markdownDocuments.has("content/en/release-v0-8-0.md"));
+  assert.ok(markdownDocuments.has("content/zh/release-v0-8-0.md"));
   assert.match(discoveryFiles.get("404.html"), /noindex,follow/);
   assert.match(discoveryFiles.get("zh\/404.html") ?? discoveryFiles.get("zh/404.html"), /noindex,follow/);
 });

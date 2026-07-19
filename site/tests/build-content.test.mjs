@@ -14,7 +14,7 @@ before(async () => {
   ({ documents: generatedDocuments } = await prepareSite());
 });
 
-test("the build emits all 30 localized HTML documents", async () => {
+test("the build emits all 32 localized HTML documents", async () => {
   documents = new Map();
   for (const route of routes) {
     for (const [locale, path] of Object.entries(route.paths)) {
@@ -22,7 +22,7 @@ test("the build emits all 30 localized HTML documents", async () => {
       documents.set(`${route.id}:${locale}`, generatedDocuments.get(path));
     }
   }
-  assert.equal(documents.size, 30);
+  assert.equal(documents.size, 32);
 });
 
 test("every article is localized, answer-first, semantic, source-linked, and cross-locale", () => {
@@ -54,7 +54,7 @@ test("generated content exposes the audited facts and exact visible structures",
   const vlm = documents.get("vision-language-models:en");
   const faq = documents.get("faq:en");
   const compare = documents.get("compare:en");
-  const release = documents.get("release-v0-7-0:en");
+  const release = documents.get("release-v0-8-0:en");
   assert.match(architecture, /separate processes keep separate in-memory engine instances/);
   assert.match(architecture, /data-status="released"/);
   assert.match(architecture, /data-status="planned"/);
