@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-19
+
 Tiered SSD KV cache, hardened end to end: the cold cache is now bounded,
 weight-safe, survives a restart, and no longer stalls other requests while it
 spills.
