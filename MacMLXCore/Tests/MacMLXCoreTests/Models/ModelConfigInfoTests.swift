@@ -84,3 +84,70 @@ func configInfoReturnsNilForMalformedJSON() throws {
 
     #expect(ModelConfigInfo.read(from: dir) == nil)
 }
+
+@Test
+func configInfoParsesArchitecturesCasePreserved() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig("""
+    {
+        "model_type": "bert",
+        "architectures": ["BertForSequenceClassification"]
+    }
+    """, in: dir)
+
+    let info = ModelConfigInfo.read(from: dir)
+    // Case-preserved (unlike model_type) — the reranker suffix check is
+    // case-sensitive.
+    #expect(info?.architectures == ["BertForSequenceClassification"])
+}
+
+@Test
+func configInfoArchitecturesIsNilWhenAbsent() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig(#"{"model_type": "bert"}"#, in: dir)
+
+    #expect(ModelConfigInfo.read(from: dir)?.architectures == nil)
+}
+
+@Test
+func configInfoParsesNumLabels() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig(#"{"model_type": "bert", "num_labels": 5}"#, in: dir)
+
+    #expect(ModelConfigInfo.read(from: dir)?.numLabels == 5)
+}
+
+@Test
+func configInfoNumLabelsIsNilWhenAbsent() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig(#"{"model_type": "bert"}"#, in: dir)
+
+    #expect(ModelConfigInfo.read(from: dir)?.numLabels == nil)
+}
+
+@Test
+func configInfoCountsId2LabelEntries() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig("""
+    {
+        "model_type": "bert",
+        "id2label": {"0": "negative", "1": "neutral", "2": "positive"}
+    }
+    """, in: dir)
+
+    #expect(ModelConfigInfo.read(from: dir)?.id2labelCount == 3)
+}
+
+@Test
+func configInfoId2LabelCountIsNilWhenAbsent() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig(#"{"model_type": "bert"}"#, in: dir)
+
+    #expect(ModelConfigInfo.read(from: dir)?.id2labelCount == nil)
+}

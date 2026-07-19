@@ -25,17 +25,51 @@ public struct ModelConfigInfo: Sendable, Equatable {
     /// `max_position_embeddings`, `max_sequence_length`, `n_positions`,
     /// `seq_length`. `nil` if none are present.
     public let contextLength: Int?
+    /// `config.json`'s `architectures` array (e.g.
+    /// `["BertForSequenceClassification"]`, `["Qwen3ForCausalLM"]`),
+    /// verbatim and case-preserved. `nil` when the key is absent.
+    ///
+    /// The load-bearing field for reranker detection: a cross-encoder
+    /// reranker shares its `model_type` (`bert` / `xlm-roberta`) with the
+    /// text embedders macMLX auto-classifies as `.embedder`, so `model_type`
+    /// alone can't tell them apart — the `*ForSequenceClassification` head in
+    /// `architectures` is what distinguishes a reranker (see
+    /// `ModelLibraryManager.upgradeFormat`).
+    public let architectures: [String]?
+    /// `config.json`'s `num_labels` (a `*ForSequenceClassification` head's
+    /// output width). `nil` when absent — many reranker checkpoints omit it
+    /// and rely on the HF default of `1`.
+    ///
+    /// The second reranker-detection signal, alongside `architectures`: a
+    /// GENUINE multi-class classifier (e.g. a 5-label sentiment BERT) also
+    /// carries a `*ForSequenceClassification` architecture but must NOT be
+    /// mistaken for a single-logit reranker — `RerankEngine` always builds
+    /// `Linear(hidden, 1)`, so a checkpoint whose real `classifier.weight` is
+    /// `[N, hidden]` (`N > 1`) would fail `verify: [.all]` with a cryptic
+    /// load error instead of a clear "not a reranker" classification.
+    public let numLabels: Int?
+    /// The number of entries in `config.json`'s `id2label` map, if present.
+    /// A second, independent source for the same single-vs-multi-label
+    /// signal `numLabels` provides — some checkpoints populate `id2label`
+    /// without an explicit `num_labels`.
+    public let id2labelCount: Int?
 
     public init(
         modelType: String?,
         quantizationBits: Int?,
         quantizationGroupSize: Int?,
-        contextLength: Int?
+        contextLength: Int?,
+        architectures: [String]? = nil,
+        numLabels: Int? = nil,
+        id2labelCount: Int? = nil
     ) {
         self.modelType = modelType
         self.quantizationBits = quantizationBits
         self.quantizationGroupSize = quantizationGroupSize
         self.contextLength = contextLength
+        self.architectures = architectures
+        self.numLabels = numLabels
+        self.id2labelCount = id2labelCount
     }
 
     /// Reads and parses `<directory>/config.json`. Returns `nil` when the
@@ -67,11 +101,23 @@ public struct ModelConfigInfo: Sendable, Equatable {
             ?? (json["n_positions"] as? Int)
             ?? (json["seq_length"] as? Int)
 
+        // Case-preserved — `hasSuffix("ForSequenceClassification")` in the
+        // reranker classifier is case-sensitive.
+        let architectures = json["architectures"] as? [String]
+
+        let numLabels = json["num_labels"] as? Int
+        // `id2label` is a `{"0": "LABEL_0", ...}` map in config.json — its
+        // entry count is the label count, same signal as `num_labels`.
+        let id2labelCount = (json["id2label"] as? [String: Any])?.count
+
         return ModelConfigInfo(
             modelType: modelType,
             quantizationBits: bits,
             quantizationGroupSize: groupSize,
-            contextLength: contextLength
+            contextLength: contextLength,
+            architectures: architectures,
+            numLabels: numLabels,
+            id2labelCount: id2labelCount
         )
     }
 }

@@ -328,11 +328,12 @@ public actor MLXSwiftEngine: InferenceEngine {
                 )
                 support = .vlm(container)
 
-            case .gguf, .unknown, .embedder:
+            case .gguf, .unknown, .embedder, .reranker:
                 // Surfaced via the Models tab — these formats never
                 // reach the engine in practice, but throw a clean
                 // error if someone hand-constructs a `LocalModel`.
-                // Embedder models are served by `EmbeddingEngine`, not
+                // Embedder models are served by `EmbeddingEngine` and
+                // reranker (cross-encoder) models by `RerankEngine`, not
                 // this generation engine.
                 let reason = "Unsupported model format: \(model.format.rawValue). " +
                     "MLXSwiftEngine handles `mlx` (text) and `mlxVLM` (vision-language) only."

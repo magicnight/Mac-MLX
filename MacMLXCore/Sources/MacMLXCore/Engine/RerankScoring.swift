@@ -1,5 +1,39 @@
 import Foundation
 
+// MARK: - Shared ranking
+
+/// Rank per-document scores descending and truncate to `topN`.
+///
+/// The ranking core shared by BOTH `/v1/rerank` paths — the true
+/// cross-encoder (``RerankEngine`` raw logits) and the bi-encoder cosine
+/// fallback (`rerankByCosine`) — so they order and truncate identically and
+/// this logic is unit-testable in isolation from either scorer.
+///
+/// `scores[i]` is document `i`'s relevance; the result is `(index, score)`
+/// pairs sorted by descending score. `sorted(by:)` is not guaranteed stable,
+/// so ties may order arbitrarily (acceptable — equal scores are equally
+/// relevant). When `topN` is provided and in range the result is truncated to
+/// the top `topN`; a negative or out-of-range `topN` returns the full ranking.
+func rankAndTruncate(scores: [Float], topN: Int? = nil) -> [(index: Int, score: Float)] {
+    let ranked = scores.enumerated()
+        .map { (index: $0.offset, score: $0.element) }
+        .sorted { $0.score > $1.score }
+    if let topN, topN >= 0, topN < ranked.count {
+        return Array(ranked.prefix(topN))
+    }
+    return ranked
+}
+
+/// Logistic sigmoid mapping a raw cross-encoder relevance logit to `(0, 1)`.
+///
+/// Exposed as the API `relevance_score` for the cross-encoder path so callers
+/// get a bounded, Cohere/Jina-style score. Being strictly monotonic, it NEVER
+/// reorders what `rankAndTruncate` produced from the raw logits — it only
+/// rescales for display. Computed in `Double` for endpoint JSON.
+func rerankSigmoid(_ logit: Float) -> Double {
+    1.0 / (1.0 + Foundation.exp(-Double(logit)))
+}
+
 // MARK: - Bi-encoder rerank scoring
 
 /// Cosine similarity between two vectors.
@@ -39,12 +73,6 @@ func rerankByCosine(
     documents: [[Float]],
     topN: Int? = nil
 ) -> [(index: Int, score: Float)] {
-    let scored = documents.enumerated().map { index, doc in
-        (index: index, score: cosineSimilarity(query, doc))
-    }
-    let ranked = scored.sorted { $0.score > $1.score }
-    if let topN, topN >= 0, topN < ranked.count {
-        return Array(ranked.prefix(topN))
-    }
-    return ranked
+    let scores = documents.map { cosineSimilarity(query, $0) }
+    return rankAndTruncate(scores: scores, topN: topN)
 }
