@@ -69,31 +69,47 @@ public final class EngineCoordinator {
 
     private let logs: LogManager
 
+    /// Live prompt-cache budget read by the pool factory each time it mints an
+    /// engine. Boxed because the coordinator is built in `AppState.init` before
+    /// settings are read from disk, and the factory can't await `SettingsManager`
+    /// — the real budget is pushed in once at bootstrap via
+    /// ``updatePromptCacheConfig(_:)``.
+    private let promptCacheConfigBox: PromptCacheConfigBox
+
     // MARK: - Init
 
-    /// - Parameter siliconObserver: optional W3 silicon-metrics seam. When
-    ///   provided, every `MLXSwiftEngine` the pool mints reports its prefill →
-    ///   decode → complete phase timeline to this observer (the `SiliconMonitor`),
-    ///   feeding the observation panel's bottleneck classifier. `nil` (the default)
-    ///   keeps the pre-W3 behaviour byte-for-byte: no observer attached, generation
-    ///   path unchanged.
+    /// - Parameters:
+    ///   - siliconObserver: optional W3 silicon-metrics seam. When provided,
+    ///     every `MLXSwiftEngine` the pool mints reports its prefill → decode →
+    ///     complete phase timeline to this observer (the `SiliconMonitor`),
+    ///     feeding the observation panel's bottleneck classifier. `nil` (the
+    ///     default) keeps the pre-W3 behaviour byte-for-byte: no observer
+    ///     attached, generation path unchanged.
+    ///   - promptCache: initial prompt-cache budget for engines minted before
+    ///     ``updatePromptCacheConfig(_:)`` runs. Defaults to the safe production
+    ///     defaults; `AppState.bootstrap` pushes the user's persisted values in
+    ///     right after settings load.
     public init(
         logs: LogManager,
-        siliconObserver: (any SiliconEngineObserver)? = nil
+        siliconObserver: (any SiliconEngineObserver)? = nil,
+        promptCache: PromptCacheConfig = PromptCacheConfig()
     ) {
         self.logs = logs
         self.engineID = .mlxSwift
+        let configBox = PromptCacheConfigBox(promptCache)
+        self.promptCacheConfigBox = configBox
         // Default budget: 50% of total RAM (10^9 GB — Apple convention).
         // Task 4 will persist this in SettingsManager and push updates
         // through `setPoolBudget(bytes:)`.
         let totalGB = MemoryProbe.totalMemoryGB()
         let budgetGB = max(4.0, totalGB * 0.5)
         let budgetBytes = Int64(budgetGB * 1_000_000_000)
-        // Capture the Sendable observer into the @Sendable pool factory so each
-        // freshly-minted engine reports its phase timeline. Passing nil resolves to
-        // MLXSwiftEngine's own default (observer-free).
+        // Capture the Sendable observer + config box into the @Sendable pool
+        // factory so each freshly-minted engine reports its phase timeline and
+        // reads the current prompt-cache budget. Passing nil observer resolves
+        // to MLXSwiftEngine's own default (observer-free).
         self.pool = ModelPool(maxBytes: budgetBytes) { _ in
-            MLXSwiftEngine(siliconObserver: siliconObserver)
+            MLXSwiftEngine(siliconObserver: siliconObserver, promptCache: configBox.current)
         }
     }
 
@@ -364,5 +380,43 @@ public final class EngineCoordinator {
     /// happens on the next `load(_:)`.
     public func setPoolBudget(bytes: Int64) async {
         await pool.setMaxBytes(bytes)
+    }
+
+    /// Push the persisted prompt-cache budget into the pool factory so every
+    /// engine minted *after* this call uses it. Called from `AppState.bootstrap`
+    /// right after settings load — before any model can be loaded — so the real
+    /// budget applies from the first-ever engine. Engines already resident keep
+    /// the config they were built with (at bootstrap there are none). Mirrors
+    /// the `setPoolBudget` push idiom for the model pool.
+    public func updatePromptCacheConfig(_ config: PromptCacheConfig) {
+        promptCacheConfigBox.set(config)
+    }
+}
+
+/// Thread-safe holder for the prompt-cache budget the (synchronous, `@Sendable`)
+/// pool factory reads when minting each engine. `@unchecked Sendable` with an
+/// `NSLock` mirrors the repo's other tiny cross-isolation boxes (e.g.
+/// `HFDownloader.SpeedSampler`): the lock carries the synchronisation, the state
+/// is a small value type, so a plain lock is the right primitive. `nonisolated`
+/// opts the box out of the app target's default `@MainActor` isolation so the
+/// `@Sendable` factory closure can read `current` off the main actor.
+private nonisolated final class PromptCacheConfigBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: PromptCacheConfig
+
+    init(_ value: PromptCacheConfig) {
+        self.value = value
+    }
+
+    var current: PromptCacheConfig {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ new: PromptCacheConfig) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = new
     }
 }

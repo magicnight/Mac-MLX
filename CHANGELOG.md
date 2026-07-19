@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The cold (SSD) KV cache is now bounded.** The on-disk KV cache
+  (`~/.mac-mlx/kv-cache`) previously grew without limit; it now honors the
+  Cold (SSD) budget (default 20 GiB), pruned oldest-first, and the Hot (RAM)
+  budget is likewise wired. A new "Spill to cold (SSD) tier" toggle opts the
+  whole cold tier out. On the first launch after this change an over-budget
+  cold directory is trimmed down to the budget — this only removes regenerable
+  cache, never model files or settings.
+
 ## [0.7.0] - 2026-07-18
 
 Silicon-metrics observability: a live view of what's actually limiting

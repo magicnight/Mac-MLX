@@ -41,7 +41,9 @@ public struct CLIContext: Sendable {
     public func makeEngine() throws -> any InferenceEngine {
         switch settings.preferredEngine {
         case .mlxSwift:
-            return MLXSwiftEngine()
+            // Thread the user's persisted hot/cold KV-cache budgets into the
+            // engine's prompt-cache store, matching the GUI surface.
+            return MLXSwiftEngine(promptCache: PromptCacheConfig(from: settings))
         case .swiftLM:
             throw CLIError(
                 "SwiftLM engine is not available in this build (deferred — see issue #12). Pick MLX Swift in the GUI Settings or remove the override."

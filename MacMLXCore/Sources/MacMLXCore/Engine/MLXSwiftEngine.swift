@@ -42,6 +42,14 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     public private(set) var loadedModel: LocalModel?
 
+    /// Weight-identity fingerprint (``ModelFingerprint/compute(directory:fileManager:)``)
+    /// of the resident model's on-disk bytes, captured at load beside
+    /// ``loadedModel``. Threaded into every cold-tier prompt-cache read/write so a
+    /// restored KV snapshot is only ever reused against the exact weights it was
+    /// computed from. `nil` when the model has no readable `config.json` — the
+    /// cold tier treats that as "never reuse", never a wildcard match.
+    private var loadedModelFingerprint: String?
+
     /// Version string including the mlx-swift-lm library tag.
     public let version: String = "mlx-swift-lm 3.31.3"
 
@@ -193,13 +201,25 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     // MARK: Initialiser
 
-    /// - Parameter siliconObserver: optional W2 bottleneck-classifier seam.
-    ///   Defaults to nil, keeping the generation path unchanged; pass one to
-    ///   receive per-generation phase-transition notifications.
-    public init(siliconObserver: SiliconEngineObserver? = nil) {
+    /// - Parameters:
+    ///   - siliconObserver: optional W2 bottleneck-classifier seam. Defaults to
+    ///     nil, keeping the generation path unchanged; pass one to receive
+    ///     per-generation phase-transition notifications.
+    ///   - promptCache: prompt-cache budget for the two-tier store. Defaults to
+    ///     ``PromptCacheConfig``'s safe production defaults (bounded hot bytes,
+    ///     bounded cold disk, cold tier on); the GUI + CLI construction sites
+    ///     override it with the user's persisted `Settings` values.
+    public init(
+        siliconObserver: SiliconEngineObserver? = nil,
+        promptCache: PromptCacheConfig = PromptCacheConfig()
+    ) {
         self.siliconObserver = siliconObserver
         self.promptCacheStore = PromptCacheStore(
-            root: DataRoot.macMLX("kv-cache")
+            root: DataRoot.macMLX("kv-cache"),
+            maxEntries: promptCache.maxEntries,
+            maxBytes: promptCache.hotBytes,
+            coldCapBytes: promptCache.coldCapBytes,
+            coldEnabled: promptCache.coldEnabled
         )
     }
 
@@ -321,8 +341,18 @@ public actor MLXSwiftEngine: InferenceEngine {
                 loadedModel = nil
                 throw EngineError.modelLoadFailed(reason: reason)
             }
+            // Wave 2a: fingerprint the resident weights so the cold prompt-cache
+            // tier can reject a restored KV snapshot whose weights changed under
+            // the same directory path (a re-download / re-quantize / swap).
+            let newFingerprint = ModelFingerprint.compute(directory: model.directory)
+            // No clear-on-reload here for the HOT tier: `PromptCacheStore.fetchNearest`
+            // now gates every hot hit on this fingerprint, so a stale entry left by a
+            // swap-weights-at-same-path reload misses at the point of reuse — safe
+            // regardless of the load/unload/switch sequence, which a same-id-only
+            // clear here could not cover.
             loadedSupport = support
             loadedModel = model
+            loadedModelFingerprint = newFingerprint
             // A2d-2: probe batch-serving coverage for the resident model once, while
             // the container's serial mutex is free (the drive loop later holds it for
             // whole cohorts). A VLM never batches, so clear the state for it.
@@ -430,6 +460,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     public func unload() async throws {
         loadedSupport = .none
         loadedModel = nil
+        // No model resident ⇒ no fingerprint (Wave 2a). Harmless if left stale
+        // (it is overwritten on the next load before any read), but cleared for
+        // hygiene so no unload can leave a dangling weight identity behind.
+        loadedModelFingerprint = nil
         draftContainer = nil
         loadedDraftModelID = nil
         // No model resident ⇒ no adapter (Track E).
@@ -1081,6 +1115,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 generateParams: generateParams,
                 sampling: params,
                 modelID: loadedModelSnapshot.id,
+                modelFingerprint: loadedModelFingerprint,
                 hasTools: request.tools?.isEmpty == false,
                 numDraftTokens: request.numDraftTokens,
                 responseFormat: request.responseFormat,
@@ -1211,6 +1246,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         generateParams: GenerateParameters,
         sampling: GenerationParameters,
         modelID: String,
+        modelFingerprint: String?,
         hasTools: Bool,
         numDraftTokens: Int?,
         responseFormat: ResponseFormat?,
@@ -1359,7 +1395,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         // deliberate prompt-cache bypass).
         let hit = bypassPromptCache
             ? nil
-            : await promptCacheStore.fetchNearest(modelID: modelID, tokens: inputTokens)
+            : await promptCacheStore.fetchNearest(
+                modelID: modelID, tokens: inputTokens, modelFingerprint: modelFingerprint)
         let priorCache: [any KVCache]?
         let promptInput: LMInput
         if let hit {
@@ -1561,7 +1598,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             await promptCacheStore.insert(
                 modelID: modelID,
                 tokens: finalTokens,
-                snapshot: PromptCacheSnapshot(workingCache)
+                snapshot: PromptCacheSnapshot(workingCache),
+                modelFingerprint: modelFingerprint
             )
         }
 

@@ -63,19 +63,25 @@ public struct Settings: Codable, Equatable, Sendable {
 
     /// Hot prompt-cache capacity in megabytes — in-memory only.
     ///
-    /// MVP note: `PromptCacheStore`'s `hotCapacity` is an *entry* count,
-    /// not a byte budget. We persist the MB value for forward-compat so
-    /// a byte-accurate budget can land in v0.4.0.1 without a settings
-    /// migration. Today the engine ignores this value and uses the
-    /// default 8-entry cap.
+    /// Wired into `PromptCacheStore.maxBytes` (via ``PromptCacheConfig``) as the
+    /// PRIMARY hot-tier budget: MB × 1 MiB. A generous entry count remains as a
+    /// secondary safety ceiling, so bytes dominate for typical MB-scale caches.
     public var kvCacheHotMB: Int
 
     /// Cold prompt-cache disk cap in gigabytes.
     ///
-    /// MVP note: automatic cold-tier pruning is not yet implemented —
-    /// rely on Settings → "Clear All KV Caches" to reclaim space. Real
-    /// enforcement lands in v0.4.0.1.
+    /// Wired into `PromptCacheStore.coldCapBytes` (via ``PromptCacheConfig``):
+    /// GB × 1 GiB. The store's `pruneCold` enforces it by mtime-LRU after every
+    /// demotion and once on load; "Clear All KV Caches" still wipes both tiers.
     public var kvCacheColdGB: Int
+
+    /// Master opt-in for the cold (on-disk safetensors) prompt-cache tier.
+    ///
+    /// Default `true`: the cold tier already runs today, so enabling it *with*
+    /// a byte budget (see `kvCacheColdGB`) is strictly safer than the previously
+    /// unbounded status quo. When `false` the store is a pure hot cache — no KV
+    /// state is ever written to or read from disk.
+    public var kvCacheColdEnabled: Bool
 
     /// ModelPool byte budget, expressed in gigabytes (Apple's 10^9 GB
     /// convention). When resident models' summed estimated footprint
@@ -151,6 +157,7 @@ public struct Settings: Codable, Equatable, Sendable {
         hfEndpoint: "https://huggingface.co",
         kvCacheHotMB: 512,
         kvCacheColdGB: 20,
+        kvCacheColdEnabled: true,
         maxResidentMemoryGB: max(4, Int(MemoryProbe.totalMemoryGB()) / 2),
         audioEnabled: false,
         sttModel: nil,
@@ -192,6 +199,7 @@ public struct Settings: Codable, Equatable, Sendable {
         hfEndpoint: String = "https://huggingface.co",
         kvCacheHotMB: Int = 512,
         kvCacheColdGB: Int = 20,
+        kvCacheColdEnabled: Bool = true,
         maxResidentMemoryGB: Int = max(4, Int(MemoryProbe.totalMemoryGB()) / 2),
         audioEnabled: Bool = false,
         sttModel: String? = nil,
@@ -216,6 +224,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.hfEndpoint = hfEndpoint
         self.kvCacheHotMB = kvCacheHotMB
         self.kvCacheColdGB = kvCacheColdGB
+        self.kvCacheColdEnabled = kvCacheColdEnabled
         self.maxResidentMemoryGB = maxResidentMemoryGB
         self.audioEnabled = audioEnabled
         self.sttModel = sttModel
@@ -247,6 +256,7 @@ public struct Settings: Codable, Equatable, Sendable {
         case hfEndpoint
         case kvCacheHotMB
         case kvCacheColdGB
+        case kvCacheColdEnabled
         case maxResidentMemoryGB
         case audioEnabled
         case sttModel
@@ -276,6 +286,10 @@ public struct Settings: Codable, Equatable, Sendable {
             ?? "https://huggingface.co"
         self.kvCacheHotMB = try c.decodeIfPresent(Int.self, forKey: .kvCacheHotMB) ?? 512
         self.kvCacheColdGB = try c.decodeIfPresent(Int.self, forKey: .kvCacheColdGB) ?? 20
+        // Pre-budget settings.json files predate the cold-tier toggle — default
+        // it on so an upgrade keeps the (now bounded) cold tier running.
+        self.kvCacheColdEnabled =
+            try c.decodeIfPresent(Bool.self, forKey: .kvCacheColdEnabled) ?? true
         self.maxResidentMemoryGB =
             (try c.decodeIfPresent(Int.self, forKey: .maxResidentMemoryGB))
             ?? max(4, Int(MemoryProbe.totalMemoryGB()) / 2)
