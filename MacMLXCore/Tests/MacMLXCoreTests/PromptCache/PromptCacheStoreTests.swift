@@ -59,29 +59,33 @@ final class PromptCacheStoreTests: XCTestCase {
         hit?.snapshot.caches.first?.offset
     }
 
-    /// Total bytes of every regular file under `root` — the cold tier's on-disk
-    /// footprint, for asserting the byte-cap invariant.
+    /// Total bytes of the cold tier's `*.safetensors` payload files under `root`
+    /// — the footprint the byte cap actually governs. The `index.json` manifest
+    /// is deliberately excluded: like ``PromptCacheStore/pruneColdDirectory`` it
+    /// is bookkeeping outside the cache-payload budget, so counting it would
+    /// misstate the cap invariant.
     private func coldDirBytes(_ root: URL) -> Int {
         guard
             let en = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
         else { return 0 }
         var total = 0
-        for case let url as URL in en {
+        for case let url as URL in en where url.pathExtension == "safetensors" {
             let v = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
             if v?.isRegularFile == true, let s = v?.fileSize { total += s }
         }
         return total
     }
 
-    /// Count of regular files under `root` (cold-tier file count).
+    /// Count of the cold tier's `*.safetensors` payload files under `root` (the
+    /// manifest is excluded, matching the byte-budget's scope).
     private func coldFileCount(_ root: URL) -> Int {
         guard
             let en = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: [.isRegularFileKey])
         else { return 0 }
         var count = 0
-        for case let url as URL in en {
+        for case let url as URL in en where url.pathExtension == "safetensors" {
             let v = try? url.resourceValues(forKeys: [.isRegularFileKey])
             if v?.isRegularFile == true { count += 1 }
         }
@@ -560,5 +564,153 @@ final class PromptCacheStoreTests: XCTestCase {
             modelID: model, tokens: [1, 2], modelFingerprint: fpA)
         XCTAssertNil(rejected)
         XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+    }
+
+    // MARK: - cold-tier cross-session restart (Wave 2b)
+    //
+    // A "restart" is simulated by constructing a SECOND ``PromptCacheStore`` over
+    // the SAME root after the first has demoted an entry: the fresh store's
+    // `init` rebuilds the cold trie from the `index.json` manifest the first
+    // store flushed. `demoteToCold(tokens:fingerprint:)` (above) is the base — it
+    // leaves `tokens` on disk (and in the manifest) while a disjoint `[900,901]`
+    // stays hot in the now-discarded first store.
+
+    /// The persisted cold entry answers an EXACT cross-session query after a
+    /// restart — the manifest-rebuilt cold trie serves it (reuse == tokenCount-1).
+    func testColdSurvivesRestartExactHit() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        let restarted = PromptCacheStore(root: root)
+        let hit = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4], modelFingerprint: fpA)
+        XCTAssertNotNil(hit)
+        XCTAssertEqual(hit?.reusedTokenCount, 3)
+    }
+
+    /// FLAGSHIP: the whole point of Wave 2b. A follow-up turn that EXTENDS a
+    /// prompt persisted in an earlier session reuses the shared 4-token prefix
+    /// from disk (longest-common-prefix across a restart), prefilling only the
+    /// 2-token delta — no full cold prefill.
+    func testColdSurvivesRestartLCPExtendedPrompt() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        let restarted = PromptCacheStore(root: root)
+        let hit = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpA)
+        XCTAssertNotNil(hit)
+        XCTAssertEqual(hit?.reusedTokenCount, 4)
+        // Incremental prefill is only the newly-appended suffix.
+        XCTAssertEqual(6 - (hit?.reusedTokenCount ?? 0), 2)
+    }
+
+    /// A manifest whose format version has moved on is discarded wholesale: the
+    /// cold trie stays empty so cross-session LCP is lost (extended query nil),
+    /// but the content-addressed exact-hash ``fetchFromCold`` still serves the
+    /// on-disk file, so an exact re-hit survives.
+    func testRestartFormatVersionMismatch() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        // Bump the stamped format version so the rebuild rejects the manifest.
+        let indexURL = root.appending(path: "index.json")
+        let original = ColdIndex.load(from: indexURL)
+        XCTAssertNotNil(original)
+        ColdIndex.write(
+            ColdIndexManifest(formatVersion: 999, entries: original?.entries ?? []),
+            to: indexURL)
+
+        let restarted = PromptCacheStore(root: root)
+        // Degraded: no cross-session LCP for an extended prompt.
+        let extended = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpA)
+        XCTAssertNil(extended)
+        // But the exact-hash fallback still restores the persisted entry.
+        let exact = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4], modelFingerprint: fpA)
+        XCTAssertNotNil(exact)
+        XCTAssertEqual(exact?.reusedTokenCount, 3)
+    }
+
+    /// After a restart, an EXTENDED query carrying a different fingerprint
+    /// (weights swapped under the same path) is rejected AND the stale cold file
+    /// is deleted — the Wave 2a weight-safety guard, now applied on the cold-trie
+    /// LCP path too.
+    func testRestartFingerprintMismatchRejectsAndDeletes() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        let restarted = PromptCacheStore(root: root)
+        let hit = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpB)
+        XCTAssertNil(hit)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
+    }
+
+    /// With the manifest deleted but the safetensors kept, the rebuild finds no
+    /// index so the cold trie starts empty (no LCP for an extended prompt), yet
+    /// the content-addressed exact hash still restores the persisted entry.
+    func testRestartManifestMissingFallsBackToExactHash() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        try FileManager.default.removeItem(at: root.appending(path: "index.json"))
+
+        let restarted = PromptCacheStore(root: root)
+        let extended = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpA)
+        XCTAssertNil(extended)
+        let exact = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4], modelFingerprint: fpA)
+        XCTAssertNotNil(exact)
+        XCTAssertEqual(exact?.reusedTokenCount, 3)
+    }
+
+    /// REGRESSION (Wave 2b): the cross-session LCP trim must derive its held
+    /// length from the matched trie key (hash-anchored `candidate.heldCount`),
+    /// NEVER the manifest's parallel `tokenCount` scalar. Here `index.json` is
+    /// hand-corrupted so an entry keeps valid `tokens` + `hashString` — it still
+    /// passes ``ColdIndex/isConsistent`` (hash == SHA(modelID, tokens)) and is
+    /// admitted by the rebuild — but carries a LYING `tokenCount` (6, not 4).
+    /// The restored 4-position cache must be reused whole, not trimmed against
+    /// the lie: under the pre-fix code `heldCount` was that 6, so a `toTrim` of
+    /// 6 − 4 = 2 silently trimmed the real cache down to 2 positions while still
+    /// reporting reuse 4 — a RoPE-misaligning silent wrong output. Asserting the
+    /// snapshot actually holds 4 positions (`offset`) pins that shut; the reuse
+    /// count alone would not (the pre-fix code reported 4 there too).
+    func testColdTrieLCPIgnoresCorruptManifestTokenCount() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        // Poison ONLY the count; keep tokens + hashString so the hash gate — the
+        // only check the rebuild applies — still passes (the fix must not lean
+        // on isConsistent rejecting it).
+        let indexURL = root.appending(path: "index.json")
+        let original = try XCTUnwrap(ColdIndex.load(from: indexURL))
+        let poisoned = original.entries.map { e in
+            ColdIndexEntry(
+                hashString: e.hashString, modelID: e.modelID, tokens: e.tokens,
+                tokenCount: e.tokenCount + 2, modelFingerprint: e.modelFingerprint,
+                nbytes: e.nbytes, mtime: e.mtime, isTrimmable: e.isTrimmable)
+        }
+        XCTAssertTrue(poisoned.allSatisfy(ColdIndex.isConsistent))
+        ColdIndex.write(
+            ColdIndexManifest(formatVersion: original.formatVersion, entries: poisoned),
+            to: indexURL)
+
+        let restarted = PromptCacheStore(root: root)
+        let hit = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpA)
+        XCTAssertNotNil(hit)
+        XCTAssertEqual(hit?.reusedTokenCount, 4)
+        // The crux: the restored cache truly holds 4 positions, not 2.
+        XCTAssertEqual(offset(hit), 4)
     }
 }
