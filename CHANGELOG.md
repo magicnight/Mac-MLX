@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Tiered SSD KV cache, hardened end to end: the cold cache is now bounded,
+weight-safe, survives a restart, and no longer stalls other requests while it
+spills.
+
+### Added
+- **Cross-session prompt reuse survives a restart.** The cold (SSD) KV cache
+  now persists an index alongside its safetensors payloads, so a follow-up turn
+  that extends a prompt from an earlier session reuses the shared prefix
+  straight off disk (longest-common-prefix) — not only an exact re-hit of an
+  identical prompt. A missing, unreadable, or version-mismatched index degrades
+  to exact re-hits, never to wrong output. (PR #100)
+
 ### Fixed
 - **The cold (SSD) KV cache is now bounded.** The on-disk KV cache
   (`~/.mac-mlx/kv-cache`) previously grew without limit; it now honors the
@@ -16,7 +28,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   budget is likewise wired. A new "Spill to cold (SSD) tier" toggle opts the
   whole cold tier out. On the first launch after this change an over-budget
   cold directory is trimmed down to the budget — this only removes regenerable
-  cache, never model files or settings.
+  cache, never model files or settings. (PR #98)
+- **A restored cache can no longer be served against the wrong weights.** Each
+  cold entry is fingerprinted against the model's weight identity (its
+  `config.json` plus every safetensors shard). If the same path later holds
+  re-downloaded, re-quantized, or swapped weights, the stale entry is rejected
+  and deleted rather than restored into silently wrong output. (PR #99)
+
+### Changed
+- **Cold-tier writes no longer stall concurrent requests.** Persisting an
+  evicted KV snapshot — hundreds of milliseconds for a large cache — moves off
+  the cache actor onto a serial background writer, so one request's spill no
+  longer blocks another request's cache lookup. The write lands atomically
+  (temp file then rename) and the on-disk result is unchanged. (PR #101)
 
 ## [0.7.0] - 2026-07-18
 
