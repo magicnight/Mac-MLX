@@ -122,6 +122,24 @@ struct ModelLibraryManagerRerankerTests {
         #expect(models[0].format == .reranker)
     }
 
+    /// Bugbot #103: a checkpoint that OMITS `num_labels` but declares a
+    /// multi-entry `id2label` — a genuine multi-class head such as the 3-way
+    /// NLI cross-encoder `nli-deberta-v3-base` — must NOT be taken for a
+    /// reranker. The absent `num_labels` must not override the contradicting
+    /// `id2label` count (effective label count is 3), so this stays an
+    /// `.embedder` (bert model_type) rather than misrouting to `RerankEngine`,
+    /// where a `[3, hidden]` classifier head would fail `verify: [.all]`.
+    @Test
+    func absentNumLabelsWithMultiEntryId2labelStaysEmbedder() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "bert-nli", modelType: "bert",
+            architectures: ["BertForSequenceClassification"],
+            id2label: ["0": "contradiction", "1": "entailment", "2": "neutral"])
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models[0].format == .embedder)
+    }
+
     // MARK: - Helpers
 
     /// Lay down a `.mlx`-shaped directory (tokenizer.json + `.safetensors` +

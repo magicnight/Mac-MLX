@@ -376,16 +376,21 @@ public actor ModelLibraryManager {
         // head, so a multi-label checkpoint's real `classifier.weight`
         // (`[N, hidden]`, `N > 1`) would fail `verify: [.all]` with a
         // cryptic load error rather than being cleanly routed elsewhere.
-        // Gate on the label count: `num_labels` (or, absent that,
-        // `id2label`'s entry count) must be `1` — or absent entirely, since
-        // many reranker checkpoints omit `num_labels` and rely on the HF
-        // default of `1`. Only an EXPLICIT `num_labels > 1` (with no
-        // contradicting `id2label` of count 1) disqualifies.
+        // Gate on the EFFECTIVE label count: `num_labels` when present, else
+        // `id2label`'s entry count. Real rerankers (ms-marco-MiniLM,
+        // bge-reranker) omit `num_labels` but declare a single-entry
+        // `id2label`, so the fallback matters; it must resolve to `1`, or be
+        // absent entirely when a checkpoint carries neither field. A
+        // multi-entry `id2label` under an absent `num_labels` (e.g. a 3-way
+        // NLI cross-encoder like nli-deberta-v3-base) is a genuine multi-class
+        // head and must NOT be taken for a reranker — the absent `num_labels`
+        // must not override the contradicting `id2label` count.
         if let architectures = json["architectures"] as? [String],
            architectures.last?.hasSuffix("ForSequenceClassification") == true {
             let numLabels = json["num_labels"] as? Int
             let id2labelCount = (json["id2label"] as? [String: Any])?.count
-            if numLabels == 1 || id2labelCount == 1 || numLabels == nil {
+            let effectiveLabelCount = numLabels ?? id2labelCount
+            if effectiveLabelCount == nil || effectiveLabelCount == 1 {
                 return .reranker
             }
             // Explicit multi-label config — fall through to the model_type
