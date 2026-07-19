@@ -18,6 +18,8 @@ import Testing
 //   rerankInvalidBodyReturns400                 : 19_640
 //   embeddingsNonEmbedderModelReturns400        : 19_650
 //   rerankNonEmbedderModelReturns400            : 19_660
+//   rerankRerankerModelRoutesToRerankerLoad     : 19_670
+//   rerankReturnDocumentsFieldDecodes           : 19_680
 
 @Suite("HummingbirdServer embeddings/rerank")
 struct HummingbirdServerEmbeddingsTests {
@@ -183,5 +185,51 @@ struct HummingbirdServerEmbeddingsTests {
 
         #expect(response.statusCode == 400)
         #expect(errorCode(data) == "invalid_request_error")
+    }
+
+    /// A `.reranker` model must ROUTE to the cross-encoder branch — NOT be
+    /// rejected by the embedder kind-gate (which would 400 `model_not_embedder`).
+    /// The bogus directory has no weights, so the load fails → 500 `load_failed`;
+    /// reaching a LOAD (rather than a 400) is exactly what proves the reranker
+    /// routing. Producing real ordered scores needs a real checkpoint (deferred)
+    /// — that ranking logic is covered purely by `RerankScoringTests`.
+    @Test
+    func rerankRerankerModelRoutesToRerankerLoad() async throws {
+        let server = serverResolving("cross-encoder-model", format: .reranker)
+        let port = try await server.start(preferredPort: 19_670)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
+
+        let (data, response) = try await postRaw(url, jsonObject: [
+            "model": "cross-encoder-model",
+            "query": "what is the capital of france",
+            "documents": ["paris is the capital", "berlin is in germany"],
+        ])
+        await server.stop()
+
+        // Routed to the reranker → attempted load → failed (no weights on disk).
+        // A 400 here would mean it was wrongly rejected as a non-embedder.
+        #expect(response.statusCode == 500)
+        #expect(errorCode(data) == "load_failed")
+    }
+
+    /// The new optional `return_documents` field must decode. A 404 (not a 400)
+    /// proves the body — including `return_documents` — decoded far enough to
+    /// reach model resolution.
+    @Test
+    func rerankReturnDocumentsFieldDecodes() async throws {
+        let server = makeServer()
+        let port = try await server.start(preferredPort: 19_680)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
+
+        let (data, response) = try await postRaw(url, jsonObject: [
+            "model": "no-such-embedder-xyz",
+            "query": "hello",
+            "documents": ["a", "b"],
+            "return_documents": true,
+        ])
+        await server.stop()
+
+        #expect(response.statusCode == 404)
+        #expect(errorCode(data) == "model_not_found")
     }
 }

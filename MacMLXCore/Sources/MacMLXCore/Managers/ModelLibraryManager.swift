@@ -66,7 +66,7 @@ public actor ModelLibraryManager {
                 )
                 results.append(model)
 
-            case .mlxVLM, .embedder:
+            case .mlxVLM, .embedder, .reranker:
                 // `ModelFormat.detect(in:)` never returns these directly
                 // — they're set by `upgradeFormat` above. Reachable only
                 // via tests that hand-craft a format. Fall through to the
@@ -356,9 +356,43 @@ public actor ModelLibraryManager {
     private func upgradeFormat(directory: URL) -> ModelFormat {
         let configURL = directory.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let modelType = (json["model_type"] as? String)?.lowercased()
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
+            return .mlx
+        }
+        // Reranker wins, checked FIRST — a cross-encoder reranker
+        // (e.g. cross-encoder/ms-marco-MiniLM-L-6-v2) has `model_type` `bert`
+        // or `xlm-roberta`, EXACTLY the encoders `knownEmbedderTypes` below
+        // would tag `.embedder`. `model_type` therefore can't separate them;
+        // the `*ForSequenceClassification` head in `architectures` (a single
+        // relevance logit) is the discriminator. Take the LAST architecture —
+        // HF lists the concrete task head there. Case-sensitive suffix match:
+        // the HF class name is `…ForSequenceClassification`.
+        //
+        // A `*ForSequenceClassification` architecture alone is NOT sufficient:
+        // a genuine multi-class classifier (e.g. a 5-label sentiment BERT)
+        // carries the same architecture suffix but is NOT a reranker.
+        // `RerankEngine` always builds a single-logit `Linear(hidden, 1)`
+        // head, so a multi-label checkpoint's real `classifier.weight`
+        // (`[N, hidden]`, `N > 1`) would fail `verify: [.all]` with a
+        // cryptic load error rather than being cleanly routed elsewhere.
+        // Gate on the label count: `num_labels` (or, absent that,
+        // `id2label`'s entry count) must be `1` — or absent entirely, since
+        // many reranker checkpoints omit `num_labels` and rely on the HF
+        // default of `1`. Only an EXPLICIT `num_labels > 1` (with no
+        // contradicting `id2label` of count 1) disqualifies.
+        if let architectures = json["architectures"] as? [String],
+           architectures.last?.hasSuffix("ForSequenceClassification") == true {
+            let numLabels = json["num_labels"] as? Int
+            let id2labelCount = (json["id2label"] as? [String: Any])?.count
+            if numLabels == 1 || id2labelCount == 1 || numLabels == nil {
+                return .reranker
+            }
+            // Explicit multi-label config — fall through to the model_type
+            // checks below (typically lands as `.embedder`, since reranker
+            // and embedder checkpoints share `model_type`).
+        }
+        guard let modelType = (json["model_type"] as? String)?.lowercased() else {
             return .mlx
         }
         if Self.knownVLMTypes.contains(modelType) {
