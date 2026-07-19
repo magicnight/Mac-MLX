@@ -949,6 +949,284 @@ final class PromptCacheStoreTests: XCTestCase {
         await gate.open(1)
         for task in afterSecondDemote { await task.value }
     }
+
+    // MARK: - Bugbot-flagged hardening
+
+    /// Bugbot #1 (MED): the synchronous BACKPRESSURE write must mirror
+    /// `finishWrite`'s `.failure` reconciliation — a failed inline write must
+    /// not leave a phantom `coldEntries` record for a file that never landed.
+    ///
+    /// Forces the backpressure path by holding TWO detached writes open on a
+    /// shared barrier (`inFlight.count == maxInFlightWrites == 2`), then a
+    /// THIRD demote whose target shard path is sabotaged (a regular FILE
+    /// where a directory must go — the same technique
+    /// `testDetachedWriteFailureReconcilesRecord` uses against the detached
+    /// path) so `ColdTierWriter.writeSynchronously` throws.
+    func testBackpressureSyncWriteFailureReconcilesRecord() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1)
+        let gate = WriteGate()
+        await store.installWriteBarrier { _ in await gate.wait() }
+
+        // Sabotage the shard path for the key that will take the backpressure
+        // path: a regular FILE where its shard directory must go, so
+        // `savePromptCache`'s temp write underneath it cannot create its file.
+        let sabotaged = [5, 6]
+        let sabotagedShard = String(
+            PromptCacheKey(modelID: model, tokens: sabotaged).hashString.prefix(1))
+        try Data("blocker".utf8).write(
+            to: root.appending(path: sabotagedShard, directoryHint: .notDirectory))
+
+        // Two ordinary demotes each take the DETACHED path (inFlight count is
+        // 0, then 1, both < maxInFlightWrites) and park on the shared barrier.
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts [1,2] -> inFlight 0->1
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts [3,4] -> inFlight 1->2
+            modelID: model, tokens: sabotaged, snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        let parked = await store.inFlightTasksSnapshot()
+        XCTAssertEqual(
+            parked.count, 2, "two detached writes must be in flight before the backpressure demote")
+
+        // This insert evicts `sabotaged`; inFlight.count == 2 == maxInFlightWrites,
+        // so ITS demote takes the SYNCHRONOUS backpressure path (bypassing the
+        // barrier entirely) and its sabotaged write throws.
+        await store.insert(
+            modelID: model, tokens: [7, 8], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+
+        // Bugbot #1 crux: the phantom record must be reconciled — a fetch for
+        // the sabotaged key is a clean miss, not a hit against a file that
+        // never landed.
+        let miss = await store.fetchNearest(
+            modelID: model, tokens: sabotaged, modelFingerprint: fpA)
+        XCTAssertNil(miss)
+
+        // Clean up: release the two parked detached writes.
+        await gate.open()
+        for task in parked { await task.value }
+    }
+
+    /// Bugbot #2 (MED): after a SUCCESSFUL backpressure sync write, the cold
+    /// cap must be re-enforced — mirroring `finishWrite`'s `.success` branch —
+    /// since the demote-time prune (which ran before this write's file
+    /// existed) could not count it. Forces the backpressure path the same way
+    /// as the #1 test, but lets the write actually land.
+    func testBackpressureSyncWriteSuccessEnforcesColdCap() async throws {
+        try requireMLXRuntimeOrSkip()
+        // Learn one cold file's on-disk footprint.
+        let probeRoot = tmpRoot()
+        let probe = PromptCacheStore(root: probeRoot, maxEntries: 1)
+        await probe.insert(
+            modelID: model, tokens: [100, 101], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await probe.insert(
+            modelID: model, tokens: [200, 201], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await probe.drainInFlight()
+        let oneColdFile = coldDirBytes(probeRoot)
+        XCTAssertGreaterThan(oneColdFile, 0)
+
+        // A ~1.5-file cap: two REAL files together exceed it, one alone does not.
+        let root = tmpRoot()
+        let cap = oneColdFile + oneColdFile / 2
+        let store = PromptCacheStore(root: root, maxEntries: 1, coldCapBytes: cap)
+
+        // K1 demotes and lands normally (no barrier yet) — one real file on disk.
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts [1,2]
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.drainInFlight()
+        let k1File = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: k1File.path))
+
+        // Now park two MORE detached writes so a further demote sees
+        // inFlight.count == maxInFlightWrites and takes the backpressure path.
+        let gate = WriteGate()
+        await store.installWriteBarrier { _ in await gate.wait() }
+        await store.insert(  // evicts [3,4] -> spawns, parks; inFlight 0->1
+            modelID: model, tokens: [5, 6], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts [5,6] -> spawns, parks; inFlight 1->2
+            modelID: model, tokens: [7, 8], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        let parked = await store.inFlightTasksSnapshot()
+        XCTAssertEqual(parked.count, 2, "two detached writes must be in flight to force backpressure")
+
+        // This insert evicts [7,8]; inFlight.count == 2 == maxInFlightWrites,
+        // so its demote takes the synchronous backpressure path and lands its
+        // file immediately (the barrier is never consulted on this path).
+        await store.insert(
+            modelID: model, tokens: [9, 10], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        let bpFile = PromptCacheKey(modelID: model, tokens: [7, 8]).shardedFileURL(under: root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bpFile.path))
+
+        // Bugbot #2 crux: with K1 and the backpressure file both landed (2
+        // real files, over the ~1.5x cap — [3,4]/[5,6] haven't landed, still
+        // parked, so they're invisible to this check), the backpressure
+        // write's post-write re-prune must already have brought the directory
+        // back under cap, evicting the OLDER file (K1) and protecting the
+        // just-landed one.
+        XCTAssertLessThanOrEqual(coldDirBytes(root), cap)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: k1File.path),
+            "the older landed file must be pruned once the backpressure write's cap re-check runs")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: bpFile.path),
+            "the just-landed backpressure file must survive its own prune")
+
+        // Clean up: release the two parked detached writes.
+        await gate.open()
+        for task in parked { await task.value }
+    }
+
+    /// Bugbot #3 (HIGH, defensive): a concurrent fetch must await an in-flight
+    /// write for a key even when a file for that key ALREADY exists on disk —
+    /// never read a file a pending write might be actively replacing.
+    ///
+    /// Exploits the only way a same-hash file can already exist while a NEW
+    /// write for that hash is in flight (same-hash writes are deduped, so two
+    /// writes can never overlap): demote K, let it fully land (file on disk,
+    /// `inFlight` clears) → promote it back into the hot tier via a cold hit
+    /// (which drops the cold INDEX record but deliberately leaves the FILE on
+    /// disk as content-addressed backing) → evict it again, re-demoting K.
+    /// The re-demote's write is held open on the barrier: now the OLD file is
+    /// still on disk while a genuinely NEW write for the identical hash is in
+    /// flight.
+    func testInFlightWriteIsAwaitedEvenWhenFileAlreadyExists() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1)
+        let k = [1, 2]
+
+        // Land K's file for real (no barrier yet).
+        await store.insert(
+            modelID: model, tokens: k, snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts K -> lands its cold file
+            modelID: model, tokens: [900, 901], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.drainInFlight()
+        let coldFile = PromptCacheKey(modelID: model, tokens: k).shardedFileURL(under: root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+
+        // Promote K back into the hot tier via a cold hit — drops the cold
+        // INDEX record but leaves the FILE on disk. This also evicts the
+        // current resident [900,901] as a budget side effect (an ordinary,
+        // unbarriered demote); drain it so `inFlight` is clean before the
+        // barrier-gated phase below.
+        let promoted = await store.fetchNearest(modelID: model, tokens: k, modelFingerprint: fpA)
+        XCTAssertNotNil(promoted)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: coldFile.path),
+            "promotion must not delete the backing file")
+        await store.drainInFlight()
+
+        // Install the barrier and evict K again: since K's ORIGINAL write long
+        // since completed (drained above), this is a genuinely NEW write for
+        // the same hash — dedup does not apply. It records a fresh index entry
+        // and spawns a NEW detached write, which parks: the OLD file is on
+        // disk while a write for the SAME key is in flight.
+        let gate = WriteGate()
+        await store.installWriteBarrier { _ in await gate.wait() }
+        await store.insert(  // K is resident again after promotion; evict it
+            modelID: model, tokens: [902, 903], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await gate.awaitEntered()
+        let pending = await store.inFlightTasksSnapshot()
+        XCTAssertEqual(pending.count, 1, "the re-demote's write must be in flight")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: coldFile.path),
+            "the OLD file must still be on disk while the new write is parked")
+
+        // Bugbot #3 crux: a concurrent fetch must AWAIT the in-flight write
+        // (never just read the pre-existing file) before answering.
+        let modelID = model
+        let fingerprint = fpA
+        let fetch = Task {
+            await store.fetchNearest(modelID: modelID, tokens: k, modelFingerprint: fingerprint)
+        }
+        await Task.yield()  // bias toward exercising the await-in-flight path
+        await gate.open()
+        let hit = await fetch.value
+        XCTAssertNotNil(hit)
+        XCTAssertEqual(hit?.reusedTokenCount, 1)  // exact hit reuses all but the last
+
+        await store.drainInFlight()
+    }
+
+    /// Bugbot #4 (HIGH, defensive): re-demoting the SAME key while its
+    /// detached write is still in flight must NOT re-record the cold index —
+    /// the dedup check now runs BEFORE any recording (FIX C reordered it), so
+    /// a deduped re-demote leaves `coldEntries` exactly as the ORIGINAL
+    /// (in-flight) demote left it.
+    func testDedupSkipsReRecordingWhileWriteInFlight() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 1)
+        let gate = WriteGate()
+        await store.installWriteBarrier { _ in await gate.wait() }
+        let k = [1, 2]
+        let kHash = PromptCacheKey(modelID: model, tokens: k).hashString
+
+        // Demote K: records the ORIGINAL entry, spawns its detached write,
+        // parks on the barrier — it never lands during this test.
+        await store.insert(
+            modelID: model, tokens: k, snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts K
+            modelID: model, tokens: [900, 901], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await gate.awaitEntered()
+        let originalEntries = await store.coldEntriesSnapshot()
+        let originalEntry = try XCTUnwrap(originalEntries[kHash])
+        let hashesAfterFirstDemote = await store.inFlightHashes()
+        XCTAssertTrue(hashesAfterFirstDemote.contains(kHash))
+
+        // Re-insert K (a fresh, independently-computed snapshot for the SAME
+        // key), then evict it a second time WHILE its original write is still
+        // in flight. (The intervening eviction of [900,901] spawns its own,
+        // unrelated detached write on the same shared barrier — expected and
+        // harmless.)
+        await store.insert(
+            modelID: model, tokens: k, snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts [900,901]
+            modelID: model, tokens: [902, 903], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+        await store.insert(  // evicts K again -> demoteToCold(K) runs a SECOND time
+            modelID: model, tokens: [904, 905], snapshot: makeSnapshot(tokenCount: 2),
+            modelFingerprint: fpA)
+
+        // Sanity: K's hash is still registered as in flight — the dedup path
+        // returns before touching `inFlight`, so it is exactly as it was.
+        let hashesAfterReDemote = await store.inFlightHashes()
+        XCTAssertTrue(hashesAfterReDemote.contains(kHash))
+
+        // Bugbot #4 crux: the index record for K must be BYTE-IDENTICAL to
+        // what the FIRST demote wrote (``ColdIndexEntry`` is `Equatable`,
+        // including `mtime`). Re-recording (the old bug, when dedup ran AFTER
+        // recording) would have refreshed `mtime`, leaving the index
+        // describing content that ISN'T what the in-flight write will
+        // actually land.
+        let entryAfterDedup = await store.coldEntriesSnapshot()[kHash]
+        XCTAssertEqual(
+            entryAfterDedup, originalEntry,
+            "a deduped re-demote must not re-record the index entry")
+
+        // Clean up: release everything parked on the shared gate.
+        await gate.open()
+        await store.drainInFlight()
+    }
 }
 
 /// A one-shot gate for deterministic write-barrier ordering in the Stage 3a tests,

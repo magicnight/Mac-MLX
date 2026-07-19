@@ -229,6 +229,21 @@ public actor PromptCacheStore {
         Array(inFlight.values)
     }
 
+    /// The set of hashes currently registered as in flight. Test-only: lets a
+    /// test confirm a specific key's write is (or isn't) registered without
+    /// needing `Task` identity comparison (`Task` has no public `Equatable`).
+    func inFlightHashes() -> Set<String> {
+        Set(inFlight.keys)
+    }
+
+    /// Snapshot of the current cold-tier index records, keyed by hash.
+    /// Test-only: lets a test verify a deduped re-demote (Bugbot #4) left the
+    /// ORIGINAL record byte-identical (``ColdIndexEntry`` is `Equatable`,
+    /// including `mtime`) rather than re-stamping it.
+    func coldEntriesSnapshot() -> [String: ColdIndexEntry] {
+        coldEntries
+    }
+
     // MARK: - Insert
 
     /// Store `snapshot` under `tokens` for `modelID`. The snapshot's KV offset
@@ -516,15 +531,19 @@ public actor PromptCacheStore {
     /// `internal` (not `private`) purely so the disabled-tier no-op is unit
     /// testable without MLX — see `PromptCacheColdPruneTests`.
     ///
-    /// The synchronous bookkeeping is unchanged and in order — guards, index +
+    /// Order of operations: guards, THEN the same-key dedup check (Bugbot #4 —
+    /// deliberately BEFORE any recording, so a dedup return never re-stamps the
+    /// index with content that won't be what actually lands), THEN the index +
     /// trie record, prune, flush — so a concurrent cold-trie fetch and a restart
-    /// both see the entry immediately. Only the FILE write changes: instead of a
-    /// synchronous `savePromptCache` that stalled every concurrent
-    /// `fetchNearest`/`insert` for ~43 ms per 300 MiB snapshot, the write is handed
-    /// to ``coldWriter`` on a detached task and registered in ``inFlight``. This
-    /// method stays synchronous (the barrier is awaited inside the task, not here),
-    /// so the `insert` → `store` → `evictOne` chain and `insert`'s public signature
-    /// are untouched.
+    /// both see the entry immediately. Only the FILE write differs by path: the
+    /// common case hands it to ``coldWriter`` on a detached task registered in
+    /// ``inFlight``; a bounded backpressure fallback (too many detached writes
+    /// already in flight) writes synchronously inline instead, mirroring
+    /// ``finishWrite``'s success/failure reconciliation itself, since it
+    /// bypasses that method entirely (Bugbot #1, #2). This method stays
+    /// synchronous (the barrier is awaited inside the detached task, not here),
+    /// so the `insert` → `store` → `evictOne` chain and `insert`'s public
+    /// signature are untouched.
     func demoteToCold(
         modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?
     ) {
@@ -551,6 +570,24 @@ public actor PromptCacheStore {
             "modelFingerprint": fingerprint,
         ]
 
+        // Dedup (Bugbot #4): a write for this exact content-addressed key is
+        // already in flight, and its index record (recorded when THAT demote
+        // ran, below) already stands. Returning HERE — before this call would
+        // re-record coldEntries/coldTrie/the manifest — keeps the index
+        // consistent with the file that will actually land on disk. Recording
+        // again here (the old order) would re-stamp the record with THIS call's
+        // metadata (e.g. a fresh `mtime`) while the in-flight write lands the
+        // ORIGINAL call's content — index and file would disagree about what's
+        // on disk. A same-fingerprint re-demote is identical content anyway
+        // (nothing lost by skipping); a fingerprint-divergent one leaves
+        // index == file == the in-flight (original) content, which a later
+        // fetch validates against the FILE's own embedded fingerprint and
+        // rejects if the weights have since changed — never a silent
+        // divergence, never wrong output. This also avoids registering a
+        // second concurrent same-hash write, which would risk an intra-epoch
+        // `inFlight` clobber.
+        if inFlight[hash] != nil { return }
+
         // Record the entry into the cold index (source of truth) + cold trie so
         // an in-process cold-trie fetch can find it now, and a restart can
         // rebuild cross-session LCP from the manifest. The full token array is
@@ -572,14 +609,15 @@ public actor PromptCacheStore {
         // ORDERING NUANCE (Stage 3a): the write below hasn't landed yet, so this
         // prune scans a directory that does NOT yet hold the in-flight file — it
         // is therefore neither counted nor a prune victim this round. The cap is
-        // re-enforced when the write lands (``finishWrite``) and on the next
+        // re-enforced when the write lands (``finishWrite`` for the detached
+        // path, or inline below for the backpressure path) and on the next
         // demote; this transient under-count is acceptable. `flushColdIndex`
         // persists the entry as expected-to-land; a later write failure is
-        // reconciled + reflushed by ``finishWrite``.
+        // reconciled + reflushed (by ``finishWrite``, or inline below).
         pruneCold(protecting: url)
         flushColdIndex()
 
-        // ---- File write: detached off this executor (I1–I4). ----
+        // ---- File write. ----
         // Carry the evicted caches to the writer via the module's Sendable KV
         // carrier. ``evictOne`` just `pop`-ed these out of the hot trie, so the
         // store holds the SOLE reference: exclusive ownership transfers to the
@@ -590,18 +628,31 @@ public actor PromptCacheStore {
         // region checker rejects every attempt to extract it as `sending`.)
         let snapshot = PromptCacheSnapshot(caches)
 
-        // Dedup: an identical content-addressed write is already in flight, so a
-        // second is pure waste. The index record above is idempotent (same hash
-        // ⇒ same file, same bytes), so skipping the spawn loses nothing (I-dedup).
-        if inFlight[hash] != nil { return }
-
         // Backpressure: with `maxInFlightWrites` background writers already each
         // pinning a KV snapshot in memory, degrade to a synchronous inline write
         // (blocks this executor for one write) rather than spawn an unbounded
         // number more. Bounded memory beats bounded latency for a spill path.
+        // This bypasses ``finishWrite`` entirely, so it mirrors BOTH of that
+        // method's outcomes inline (Bugbot #1, #2):
         if inFlight.count >= maxInFlightWrites {
-            try? ColdTierWriter.writeSynchronously(
-                snapshot: snapshot, to: url, metadata: metadata)
+            do {
+                try ColdTierWriter.writeSynchronously(
+                    snapshot: snapshot, to: url, metadata: metadata)
+                // #2: the file has landed now, so re-enforce the cap the
+                // demote-time prune above could not yet count (mirrors
+                // ``finishWrite``'s `.success` branch).
+                if pruneCold(protecting: url) { flushColdIndex() }
+            } catch {
+                // #1: reconcile the phantom index record for a write that never
+                // landed (mirrors ``finishWrite``'s `.failure` branch). No epoch
+                // guard needed here — unlike a detached write's delayed
+                // completion, this runs synchronously inside `demoteToCold` on
+                // THIS actor's executor with no intervening suspension, so no
+                // `clearAll` can have run between the record above and this catch.
+                dropColdRecord(modelID: modelID, tokens: tokens)
+                try? FileManager.default.removeItem(at: url)
+                flushColdIndex()
+            }
             return
         }
 
@@ -704,10 +755,16 @@ public actor PromptCacheStore {
     /// for a speculatively restored prefix).
     ///
     /// `loadPromptCache` still reads synchronously on this executor (~1.3 ms —
-    /// cheap; moving the READ off-actor is Stage 3c, deferred). The one Stage 3a
-    /// change: a missing file is no longer an immediate miss — if a detached WRITE
-    /// for this exact key is in flight, await it and re-check, so a mid-write entry
-    /// is a hit not a phantom miss (I1).
+    /// cheap; moving the READ off-actor is Stage 3c, deferred). The Stage 3a
+    /// change: a missing file is no longer an immediate miss — if a detached
+    /// WRITE for this exact key is in flight, await it and re-check, so a
+    /// mid-write entry is a hit not a phantom miss (I1). Hardened defensively
+    /// (Bugbot #3): the await is UNCONDITIONAL on `inFlight`, not gated on
+    /// `fileExists` first — even when a file already appears to exist, a
+    /// pending write for the same key might be mid-rename (content-addressed,
+    /// so it can only be replacing the file with identical bytes — never wrong
+    /// output either way, but this avoids ever reading a file a write is
+    /// actively touching).
     private func fetchFromCold(
         modelID: String, tokens: [Int], fingerprint: String?
     ) async -> PromptCacheHit? {
@@ -717,16 +774,12 @@ public actor PromptCacheStore {
         guard coldEnabled else { return nil }
         let key = PromptCacheKey(modelID: modelID, tokens: tokens)
         let url = key.shardedFileURL(under: root)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            // A still-in-flight detached write for this key is a hit-in-waiting.
-            // Await it, then RE-CHECK: after a successful write the file now
-            // exists (proceed to load); after a failed one `finishWrite` already
-            // dropped the record and the file is genuinely absent (clean miss).
-            // Reentrancy discipline: `await` is a suspension point, so re-read
-            // `fileExists` fresh rather than trusting the pre-await check.
-            if let task = inFlight[key.hashString] { await task.value }
-            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        }
+        // Await any in-flight write for this key BEFORE reading, regardless of
+        // whether a file currently appears to exist. Reentrancy discipline: the
+        // await is a suspension point, so `fileExists` below is a FRESH read,
+        // never trusted from before the await.
+        if let task = inFlight[key.hashString] { await task.value }
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let restored: [any KVCache]
         let meta: [String: String]
         do {
@@ -792,6 +845,10 @@ public actor PromptCacheStore {
     /// `async` as of Stage 3a: a candidate whose file is absent may just be a
     /// detached WRITE still in flight, so the vanished-file branch awaits any such
     /// write and re-validates before treating absence as a lazy miss (I1).
+    /// Hardened defensively (Bugbot #3): the await is UNCONDITIONAL on
+    /// `inFlight` per candidate, not gated on `fileExists` first — see
+    /// ``fetchFromCold`` for why a file appearing to exist doesn't make the
+    /// await skippable.
     private func fetchFromColdTrie(
         modelID: String, tokens: [Int], fingerprint: String?
     ) async -> PromptCacheHit? {
@@ -807,22 +864,23 @@ public actor PromptCacheStore {
 
             let candidateKey = PromptCacheKey(modelID: modelID, tokens: candidate.key)
             let url = candidateKey.shardedFileURL(under: root)
+            let h = candidateKey.hashString
             // The manifest is a hint: a record whose file has vanished (pruned by
-            // another process, deleted) degrades to a lazy miss. But a missing file
-            // may instead be a detached WRITE still in flight (I1) — await it, then
-            // RE-VALIDATE from scratch. Reentrancy discipline: the `await` is a
-            // suspension point, so re-read `coldEntries`/`fileExists` fresh and
-            // never trust the pre-await `search`/`pointer`. Only a file still absent
-            // after the write settles — a genuine vanish, or a write that
+            // another process, deleted) degrades to a lazy miss. A missing file
+            // may instead be a detached WRITE still in flight (I1). Defensive
+            // hardening (Bugbot #3): await any in-flight write for this key
+            // UNCONDITIONALLY — not only when the file is currently missing —
+            // then RE-VALIDATE from scratch. Reentrancy discipline: the `await`
+            // is a suspension point, so re-read `coldEntries`/`fileExists` fresh
+            // and never trust the pre-await `search`/`pointer`. Only a file still
+            // absent after the write settles — a genuine vanish, or a write that
             // `finishWrite` already reconciled away — is dropped as a lazy miss.
-            if !FileManager.default.fileExists(atPath: url.path) {
-                if let task = inFlight[candidateKey.hashString] { await task.value }
-                guard coldEntries[candidateKey.hashString] != nil,
-                    FileManager.default.fileExists(atPath: url.path)
-                else {
-                    dropColdRecord(modelID: modelID, tokens: candidate.key)
-                    continue
-                }
+            if let task = inFlight[h] { await task.value }
+            guard coldEntries[h] != nil,
+                FileManager.default.fileExists(atPath: url.path)
+            else {
+                dropColdRecord(modelID: modelID, tokens: candidate.key)
+                continue
             }
             let restored: [any KVCache]
             let meta: [String: String]
