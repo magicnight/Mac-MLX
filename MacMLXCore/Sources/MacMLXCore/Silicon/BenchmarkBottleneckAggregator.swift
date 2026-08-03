@@ -1,5 +1,7 @@
 // Copyright © 2026 macMLX. English comments only.
 
+import Foundation
+
 /// Folds the stream of per-frame `BottleneckVerdict`s produced *during* a
 /// benchmark run into one dominant `BenchmarkBottleneck` attribution.
 ///
@@ -64,6 +66,32 @@ public struct BenchmarkBottleneckAggregator: Sendable {
     private var peakThermal: ThermalPressure?
 
     public init() {}
+
+    // MARK: - Timed-window admission
+
+    /// Whether the measurement interval `sample` covers lies entirely at or after
+    /// `windowStart` — the admission rule for a window-scoped attribution, i.e. a
+    /// benchmark that must fold in its timed iterations but not its un-counted
+    /// warm-up.
+    ///
+    /// `SiliconSample.timestamp` is the END of the interval the deltas cover, not its
+    /// start: the sampler stamps the sample and then polls, and the poll returns the
+    /// counters accumulated since the PREVIOUS poll. A sample therefore describes
+    /// `[timestamp - intervalSeconds, timestamp]`. Testing `timestamp` alone against
+    /// `windowStart` admits the sample that straddles the boundary — the one whose
+    /// interval opened before the window did — which for a ~1 Hz sampler can charge
+    /// almost a full second of warm-up work to the timed run, and is precisely the
+    /// frame the window exists to exclude. Requiring the whole interval to fall
+    /// inside the window drops it.
+    ///
+    /// The first sample of a session carries `intervalSeconds == 0` (no prior window),
+    /// where this degenerates to a plain `timestamp >= windowStart` test.
+    public static func sampleFallsEntirelyWithinWindow(
+        _ sample: SiliconSample,
+        windowStart: Date
+    ) -> Bool {
+        sample.timestamp.addingTimeInterval(-sample.intervalSeconds) >= windowStart
+    }
 
     /// Ingest one frame: a classifier verdict and the hardware sample it was drawn
     /// from. Prefill (and any non-decode) frames are ignored; only decode frames
