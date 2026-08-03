@@ -24,6 +24,12 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
     /// only the offending id — never a resolved/standardized path — so it
     /// can't be used by a probing client as a path oracle.
     case invalidDraftModelID(id: String)
+    /// An audio operation failed after the model was resident (v0.9 W1a) —
+    /// undecodable upload, or a synthesis/transcription forward pass that
+    /// threw. Distinct from `modelLoadFailed` so `/v1/audio/*` can tell a bad
+    /// request apart from a bad model, and from `generationInProgress` because
+    /// nothing about it is a concurrency condition.
+    case audioProcessingFailed(reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -47,6 +53,8 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
             return "Draft model id is not valid: '\(id)'. Ids must be plain names using only "
                 + "letters, digits, '.', '_', '-', and must not start with '.' or contain a "
                 + "path separator."
+        case .audioProcessingFailed(let reason):
+            return "Audio processing failed: \(reason)"
         }
     }
 }

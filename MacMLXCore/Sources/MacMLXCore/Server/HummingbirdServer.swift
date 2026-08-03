@@ -301,6 +301,23 @@ private struct RerankRequest: Decodable, Sendable {
     let return_documents: Bool?
 }
 
+// MARK: - Audio request types (v0.9 W1a)
+
+/// OpenAI-compatible `/v1/audio/speech` request body.
+///
+/// Every field is optional at the DECODE layer on purpose: OpenAI's `model`,
+/// `input`, and `voice` are all required, but decoding them as non-optional
+/// would collapse "you forgot `voice`" into a generic "Invalid JSON". They are
+/// validated individually in `handleAudioSpeech` so each missing field names
+/// itself.
+private struct SpeechRequest: Decodable, Sendable {
+    let model: String?
+    let input: String?
+    let voice: String?
+    let response_format: String?
+    let speed: Double?
+}
+
 /// Ollama-compatible chat request body. Simpler than OpenAI's —
 /// no `stream_options`, system message expressed the same way.
 private struct OllamaChatRequest: Decodable, Sendable {
@@ -943,6 +960,12 @@ public actor HummingbirdServer {
     /// engine, no pool — matching the embedder MVP (see `RerankEngine`).
     private var rerankEngine: RerankEngine?
 
+    /// Lazily-created speech engine for `/v1/audio/transcriptions` +
+    /// `/v1/audio/speech` (v0.9 W1a). A third sibling to `embeddingEngine` /
+    /// `rerankEngine`, holding its own STT and TTS models and cold-swapping
+    /// each independently — see `AudioEngine`. Single engine, no pool.
+    private var audioEngine: AudioEngine?
+
     /// Binary generation lock. MLX model state (tokenizer, KV cache,
     /// MLX allocator) is not safe to share across concurrent
     /// `generate()` calls — the actor serialises method entry, but
@@ -1405,6 +1428,21 @@ public actor HummingbirdServer {
         router.post("/v1/rerank") { request, context -> Response in
             await server.incrementRequest()
             return try await server.handleRerank(request: request, context: context)
+        }
+
+        // POST /v1/audio/transcriptions — OpenAI-compatible speech-to-text
+        // (v0.9 W1a). multipart/form-data; served by `AudioEngine`.
+        router.post("/v1/audio/transcriptions") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleAudioTranscriptions(request: request, context: context)
+        }
+
+        // POST /v1/audio/speech — OpenAI-compatible text-to-speech (v0.9 W1a).
+        // JSON in, raw audio bytes out. See `SpeechAudioFormat` for why the
+        // default format is `wav` rather than OpenAI's `mp3`.
+        router.post("/v1/audio/speech") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleAudioSpeech(request: request, context: context)
         }
 
         // POST /x/models/load
@@ -4019,6 +4057,450 @@ public actor HummingbirdServer {
                 code: "load_failed"
             )
         }
+    }
+
+    // MARK: - Audio: transcriptions + speech (v0.9 W1a)
+
+    /// Ceiling on an uploaded audio body, matching OpenAI's own 25 MB limit.
+    /// Applied at `collect(upTo:)` — the request is never read past it — and
+    /// again inside `MultipartFormParser` as a second line of defence. The
+    /// route-wide `context.maxUploadSize` (2 MB) is far too small for audio,
+    /// which is why these two handlers pass an explicit bound instead.
+    private static let audioUploadLimitBytes = 25 * 1024 * 1024
+
+    /// Ceiling on `/v1/audio/speech` `input`, matching OpenAI's 4096
+    /// characters. A synthesis request body needs no more than that, and
+    /// bounding it keeps a single request from monopolising the engine.
+    private static let speechInputCharacterLimit = 4096
+
+    /// Lazily create the shared audio engine. Unlike the embedder/reranker
+    /// there is no cold-swap gate here: `AudioEngine` owns its own STT and TTS
+    /// residency and swaps each independently.
+    private func ensureAudioEngine() -> AudioEngine {
+        if let audioEngine { return audioEngine }
+        let engine = AudioEngine()
+        audioEngine = engine
+        return engine
+    }
+
+    /// `POST /v1/audio/transcriptions` — OpenAI-compatible speech-to-text.
+    ///
+    /// `multipart/form-data` with a required `file` and `model`, plus optional
+    /// `response_format` (`json` | `text` | `verbose_json`), `language`, and
+    /// `temperature`.
+    ///
+    /// Two deliberate divergences from OpenAI, both surfaced as explicit 400s
+    /// rather than quiet substitutions:
+    /// - `srt` / `vtt` are rejected — macMLX emits no subtitle container.
+    /// - `prompt` is rejected — the upstream `STTGenerateParameters` has no
+    ///   field to carry it, so accepting it would mean silently discarding it.
+    ///
+    /// `model` is a Hugging Face repo id, not a `macmlx list` entry — see
+    /// `AudioEngine` for why audio models resolve differently.
+    private func handleAudioTranscriptions(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer: ByteBuffer
+        do {
+            buffer = try await request.body.collect(upTo: Self.audioUploadLimitBytes)
+        } catch {
+            return errorResponse(
+                status: .contentTooLarge,
+                message: "Audio upload exceeds the \(Self.audioUploadLimitBytes)-byte limit.",
+                code: "file_too_large"
+            )
+        }
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
+              !data.isEmpty
+        else {
+            return errorResponse(
+                status: .badRequest, message: "Empty body", code: "invalid_request_error")
+        }
+
+        let form: MultipartFormParser.Form
+        switch Self.parseAudioForm(body: data, contentType: request.headers[.contentType]) {
+        case .success(let parsed):
+            form = parsed
+        case .failure(let error):
+            let tooLarge = Self.isBodyTooLarge(error)
+            return errorResponse(
+                status: tooLarge ? .contentTooLarge : .badRequest,
+                message: error.localizedDescription,
+                code: tooLarge ? "file_too_large" : "invalid_request_error")
+        }
+
+        guard let filePart = form.file("file"), !filePart.body.isEmpty else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Missing required multipart field `file` (an audio file part).",
+                code: "invalid_request_error")
+        }
+        guard let model = form.value("model")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty
+        else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Missing required multipart field `model` (a Hugging Face repo id, "
+                    + "e.g. `openai/whisper-tiny`).",
+                code: "invalid_request_error")
+        }
+
+        let rawFormat = form.value("response_format")
+        guard let format = AudioTranscriptionFormat.parse(rawFormat) else {
+            return errorResponse(
+                status: .badRequest,
+                message: Self.unsupportedTranscriptionFormatMessage(rawFormat),
+                code: "unsupported_response_format")
+        }
+
+        if let prompt = form.value("prompt"), !prompt.isEmpty {
+            return errorResponse(
+                status: .badRequest,
+                message: "`prompt` is not supported: the MLX speech-to-text models macMLX "
+                    + "drives take no prompt/context conditioning, so the value would be "
+                    + "discarded. Omit the field.",
+                code: "unsupported_parameter")
+        }
+
+        var temperature: Float?
+        if let raw = form.value("temperature"), !raw.isEmpty {
+            guard let parsed = Float(raw), parsed >= 0, parsed <= 1, parsed.isFinite else {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`temperature` must be a number between 0 and 1 (got '\(raw)').",
+                    code: "invalid_request_error")
+            }
+            temperature = parsed
+        }
+        let language = form.value("language").flatMap { $0.isEmpty ? nil : $0 }
+
+        // AVFoundation reads from a file, so the upload has to land on disk.
+        // The extension is a decode hint; keep the client's when it is a plain
+        // token, drop it otherwise rather than inventing one.
+        let audioURL = FileManager.default.temporaryDirectory.appending(
+            path: "macmlx-http-audio-\(UUID().uuidString)"
+                + Self.sanitizedExtension(of: filePart.filename))
+        do {
+            try filePart.body.write(to: audioURL)
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Could not stage the uploaded audio: \(error.localizedDescription)",
+                code: "audio_failed")
+        }
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+
+        let engine = ensureAudioEngine()
+        do {
+            try await engine.loadSTT(model)
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Failed to load \(model): \(error.localizedDescription)",
+                code: "load_failed")
+        }
+
+        // Same lock discipline as /v1/embeddings: a throw on acquire means the
+        // lock is NOT held, so that path must not release.
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled")
+        }
+        let transcription: AudioEngine.Transcription
+        do {
+            transcription = try await engine.transcribe(
+                audioURL: audioURL, language: language, temperature: temperature)
+            releaseGenerationLock()
+        } catch {
+            releaseGenerationLock()
+            return errorResponse(
+                status: .internalServerError,
+                message: "Transcription failed: \(error.localizedDescription)",
+                code: "audio_failed")
+        }
+
+        if format == .text {
+            var headers = HTTPFields()
+            headers[.contentType] = "text/plain; charset=utf-8"
+            return Response(
+                status: .ok,
+                headers: headers,
+                body: .init(byteBuffer: ByteBuffer(bytes: Array(transcription.text.utf8)))
+            )
+        }
+        return try jsonResponseAny(Self.transcriptionJSON(transcription, format: format))
+    }
+
+    /// `POST /v1/audio/speech` — OpenAI-compatible text-to-speech. JSON in,
+    /// raw audio bytes out.
+    ///
+    /// Required `model` / `input` / `voice`; optional `response_format` and
+    /// `speed`. Only `wav` and `pcm` are served, and `speed` must be `1.0` —
+    /// see ``SpeechAudioFormat`` for why every other value is a 400 instead of
+    /// a silently substituted format or a silently ignored knob.
+    private func handleAudioSpeech(
+        request: Request,
+        context: BasicRequestContext
+    ) async throws -> Response {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            return errorResponse(
+                status: .badRequest, message: "Empty body", code: "invalid_request_error")
+        }
+
+        let req: SpeechRequest
+        do {
+            req = try JSONDecoder().decode(SpeechRequest.self, from: data)
+        } catch {
+            return errorResponse(
+                status: .badRequest,
+                message: "Invalid JSON: \(error.localizedDescription)",
+                code: "invalid_request_error")
+        }
+
+        guard let model = req.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty
+        else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Missing required field `model` (a Hugging Face repo id, e.g. "
+                    + "`mlx-community/Kokoro-82M-4bit`).",
+                code: "invalid_request_error")
+        }
+        guard let input = req.input, !input.isEmpty else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Missing required field `input` (the text to speak).",
+                code: "invalid_request_error")
+        }
+        guard input.count <= Self.speechInputCharacterLimit else {
+            return errorResponse(
+                status: .badRequest,
+                message: "`input` is \(input.count) characters; the limit is "
+                    + "\(Self.speechInputCharacterLimit).",
+                code: "invalid_request_error")
+        }
+        guard let voice = req.voice?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !voice.isEmpty
+        else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Missing required field `voice` (a voice id the requested model "
+                    + "defines, e.g. `af_heart` for Kokoro).",
+                code: "invalid_request_error")
+        }
+
+        guard let format = SpeechAudioFormat.parse(req.response_format) else {
+            return errorResponse(
+                status: .badRequest,
+                message: Self.unsupportedSpeechFormatMessage(req.response_format),
+                code: "unsupported_response_format")
+        }
+        if let speed = req.speed {
+            guard speed.isFinite, SpeechAudioFormat.speedRange.contains(speed) else {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`speed` must be between \(SpeechAudioFormat.speedRange.lowerBound) "
+                        + "and \(SpeechAudioFormat.speedRange.upperBound) (got \(speed)).",
+                    code: "invalid_request_error")
+            }
+            guard speed == SpeechAudioFormat.supportedSpeed else {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`speed` \(speed) is not supported: macMLX has no playback-rate "
+                        + "control wired into synthesis yet, so the value would be discarded. "
+                        + "Omit the field or send \(SpeechAudioFormat.supportedSpeed).",
+                    code: "unsupported_parameter")
+            }
+        }
+
+        let engine = ensureAudioEngine()
+        do {
+            try await engine.loadTTS(model)
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Failed to load \(model): \(error.localizedDescription)",
+                code: "load_failed")
+        }
+
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled")
+        }
+        let speech: AudioEngine.Speech
+        do {
+            speech = try await engine.synthesize(text: input, voice: voice)
+            releaseGenerationLock()
+        } catch {
+            releaseGenerationLock()
+            return errorResponse(
+                status: .internalServerError,
+                message: "Speech synthesis failed: \(error.localizedDescription)",
+                code: "audio_failed")
+        }
+
+        let bytes: Data
+        switch format {
+        case .wav:
+            guard let encoded = WAVEncoder.encode(
+                samples: speech.samples, sampleRate: speech.sampleRate)
+            else {
+                return errorResponse(
+                    status: .internalServerError,
+                    message: "Could not encode WAV at \(speech.sampleRate) Hz.",
+                    code: "audio_failed")
+            }
+            bytes = encoded
+        case .pcm:
+            // Headerless PCM carries no sample rate, and OpenAI defines the
+            // format as 24 kHz. Serving a model's 22.05 kHz output under that
+            // name would play back at the wrong pitch, so refuse instead.
+            guard speech.sampleRate == SpeechAudioFormat.pcmSampleRate else {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "`pcm` is defined as headerless \(SpeechAudioFormat.pcmSampleRate) Hz "
+                        + "audio, but \(model) synthesizes at \(speech.sampleRate) Hz. Request "
+                        + "`wav`, which carries the real sample rate in its header.",
+                    code: "unsupported_response_format")
+            }
+            bytes = WAVEncoder.pcm16LittleEndian(samples: speech.samples)
+        }
+
+        var headers = HTTPFields()
+        headers[.contentType] = format.contentType
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: .init(byteBuffer: ByteBuffer(bytes: bytes))
+        )
+    }
+
+    // MARK: Audio helpers (pure, testable)
+
+    /// Serialize a transcription into its `json` / `verbose_json` body.
+    ///
+    /// `verbose_json` carries only the fields macMLX can actually determine:
+    /// `task`, `duration` (measured from the decoded sample count), `text`,
+    /// and `segments` of `{id, start, end, text}`. `language` appears only
+    /// when the model reported one — an unknown language is omitted rather
+    /// than guessed. OpenAI's per-segment statistics (`seek`, `tokens`,
+    /// `avg_logprob`, `compression_ratio`, `no_speech_prob`) are NOT emitted:
+    /// the upstream models do not expose them, and inventing them would be
+    /// worse than their absence.
+    ///
+    /// `nonisolated static` and pure so the wire shape is unit-testable with
+    /// no server and no model. `.text` is handled by the caller (it is not
+    /// JSON) and maps to the plain `json` body here if ever passed.
+    nonisolated static func transcriptionJSON(
+        _ transcription: AudioEngine.Transcription,
+        format: AudioTranscriptionFormat
+    ) -> [String: Any] {
+        guard format == .verboseJSON else {
+            return ["text": transcription.text]
+        }
+        var body: [String: Any] = [
+            "task": "transcribe",
+            "duration": transcription.duration,
+            "text": transcription.text,
+            "segments": transcription.segments.map { segment in
+                [
+                    "id": segment.id,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text,
+                ] as [String: Any]
+            },
+        ]
+        if let language = transcription.language {
+            body["language"] = language
+        }
+        return body
+    }
+
+    /// The 400 message for a transcription `response_format` macMLX won't
+    /// serve — specific when the value is a real OpenAI format we don't
+    /// implement, generic when it isn't a format at all.
+    nonisolated static func unsupportedTranscriptionFormatMessage(_ raw: String?) -> String {
+        let supported = AudioTranscriptionFormat.allCases.map(\.rawValue).joined(separator: ", ")
+        if AudioTranscriptionFormat.isRecognizedButUnsupported(raw) {
+            return "`response_format` '\(raw ?? "")' is not supported: macMLX does not emit "
+                + "subtitle containers. Supported: \(supported)."
+        }
+        return "`response_format` '\(raw ?? "")' is not a known transcription format. "
+            + "Supported: \(supported)."
+    }
+
+    /// The 400 message for a speech `response_format` macMLX won't serve.
+    /// Names the compressed formats explicitly so callers understand this is a
+    /// missing encoder, not a typo — and so nobody mistakes the refusal for
+    /// macMLX quietly downgrading them to WAV.
+    nonisolated static func unsupportedSpeechFormatMessage(_ raw: String?) -> String {
+        let supported = SpeechAudioFormat.allCases.map(\.rawValue).joined(separator: ", ")
+        if SpeechAudioFormat.isRecognizedButUnsupported(raw) {
+            return "`response_format` '\(raw ?? "")' is not supported: macMLX ships no "
+                + "\(SpeechAudioFormat.recognizedButUnsupported.joined(separator: "/")) encoder "
+                + "and will not return other bytes under that content type. Supported: "
+                + "\(supported) (default: \(SpeechAudioFormat.default.rawValue))."
+        }
+        return "`response_format` '\(raw ?? "")' is not a known speech format. Supported: "
+            + "\(supported) (default: \(SpeechAudioFormat.default.rawValue))."
+    }
+
+    /// Run ``MultipartFormParser`` against an upload, surfacing the outcome as
+    /// a `Result` rather than a thrown error.
+    ///
+    /// The indirection is a COMPILER WORKAROUND, not a style preference:
+    /// catching `MultipartFormParser`'s typed-throws error directly inside the
+    /// actor-isolated `async` handler crashed the Swift 6.2 frontend in
+    /// `SILGenCleanup` ("Found ownership error?!" from the linear-lifetime
+    /// checker). Doing the `do`/`catch` in a small synchronous `nonisolated`
+    /// function and handing back a `Result` compiles cleanly. Revisit once the
+    /// toolchain is upgraded.
+    nonisolated static func parseAudioForm(
+        body: Data,
+        contentType: String?
+    ) -> Result<MultipartFormParser.Form, MultipartFormParser.ParseError> {
+        do {
+            return .success(try MultipartFormParser.parse(
+                body: body, contentType: contentType, maxBytes: audioUploadLimitBytes))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Whether a multipart failure was the size ceiling (413) rather than a
+    /// malformed body (400). Also kept out of the async handler — see
+    /// ``parseAudioForm(body:contentType:)``.
+    nonisolated static func isBodyTooLarge(_ error: MultipartFormParser.ParseError) -> Bool {
+        switch error {
+        case .bodyTooLarge: return true
+        default: return false
+        }
+    }
+
+    /// A safe `.ext` for the staged upload, or `""`.
+    ///
+    /// The client-supplied filename is untrusted: it can contain path
+    /// separators, NUL, `..`, or anything else. Only a short alphanumeric
+    /// token is kept, and it is used solely as a decode hint — never as the
+    /// file name, which is always a fresh UUID.
+    nonisolated static func sanitizedExtension(of filename: String?) -> String {
+        guard let filename else { return "" }
+        let candidate = URL(filePath: filename).pathExtension.lowercased()
+        guard !candidate.isEmpty, candidate.count <= 8,
+              candidate.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
+        else { return "" }
+        return ".\(candidate)"
     }
 
     // MARK: JSON helpers
