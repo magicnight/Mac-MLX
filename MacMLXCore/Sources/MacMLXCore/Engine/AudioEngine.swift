@@ -141,13 +141,15 @@ public actor AudioEngine {
     ///
     /// - Parameter modelID: A Hugging Face repo id (`owner/name`). Validated
     ///   before any network call so a malformed id fails fast and locally.
-    /// - Throws: ``EngineError/modelLoadFailed(reason:)`` for a malformed id or
-    ///   any upstream load failure (unknown architecture, missing weights, no
-    ///   network, …).
+    /// - Throws: ``EngineError/invalidAudioModelID(reason:)`` for a malformed
+    ///   id — raised here, with nothing sent over the network, which is why the
+    ///   caller can answer 400 — or ``EngineError/modelLoadFailed(reason:)``
+    ///   for an upstream load failure (unknown architecture, missing weights,
+    ///   no network, …), which really is server-side.
     public func loadSTT(_ modelID: String) async throws {
         if loadedSTTModelID == modelID, sttModel != nil { return }
         guard Self.isHubRepoID(modelID) else {
-            throw EngineError.modelLoadFailed(reason: Self.repoIDHint(modelID, kind: "STT"))
+            throw EngineError.invalidAudioModelID(reason: Self.repoIDHint(modelID, kind: "STT"))
         }
         // Drop the old model first: two resident audio models plus an LLM is
         // more memory than a swap needs to hold.
@@ -169,11 +171,13 @@ public actor AudioEngine {
     ///   the upstream TTS loader also accepts an absolute local directory
     ///   containing `config.json`; that path is left unvalidated here and
     ///   simply forwarded.
-    /// - Throws: ``EngineError/modelLoadFailed(reason:)``.
+    /// - Throws: ``EngineError/invalidAudioModelID(reason:)`` for an id that is
+    ///   neither shape, or ``EngineError/modelLoadFailed(reason:)`` for an
+    ///   upstream load failure. Same split as ``loadSTT(_:)``.
     public func loadTTS(_ modelID: String) async throws {
         if loadedTTSModelID == modelID, ttsModel != nil { return }
         guard Self.isHubRepoID(modelID) || Self.looksLikeLocalDirectory(modelID) else {
-            throw EngineError.modelLoadFailed(reason: Self.repoIDHint(modelID, kind: "TTS"))
+            throw EngineError.invalidAudioModelID(reason: Self.repoIDHint(modelID, kind: "TTS"))
         }
         ttsModel = nil
         loadedTTSModelID = nil

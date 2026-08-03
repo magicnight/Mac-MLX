@@ -175,15 +175,43 @@ struct AudioEngineHelpersTests {
     func aMalformedModelIDIsRejectedLocallyWithoutAnyNetworkCall() async throws {
         // The guard runs before `STT.loadModel`, so this test never reaches
         // the Hub — it is safe to run offline and in CI.
+        //
+        // The EXACT case matters, not just "some EngineError": the server maps
+        // `invalidAudioModelID` to 400 and everything else to 500, so throwing
+        // `modelLoadFailed` here would silently turn a client typo back into a
+        // retryable "internal error". See
+        // `HummingbirdServer.audioModelLoadFailure`.
         let engine = AudioEngine()
-        await #expect(throws: EngineError.self) {
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {
             try await engine.loadSTT("not-a-repo-id")
         }
         #expect(await engine.loadedSTTModelID == nil)
 
-        await #expect(throws: EngineError.self) {
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("../escape", kind: "TTS"))) {
             try await engine.loadTTS("../escape")
         }
+        #expect(await engine.loadedTTSModelID == nil)
+    }
+
+    @Test
+    func aPathTraversalIDIsRejectedAsAClientErrorOnBothLoaders() async throws {
+        // `..` in a client-controlled id would otherwise walk out of the audio
+        // cache. It is refused locally, and as the caller's mistake — never as
+        // a server fault, which a client SDK would retry.
+        let engine = AudioEngine()
+        for badID in ["../etc", "owner/..", "./x", "a/b/c"] {
+            await #expect(throws: EngineError.invalidAudioModelID(
+                reason: AudioEngine.repoIDHint(badID, kind: "STT"))) {
+                try await engine.loadSTT(badID)
+            }
+            await #expect(throws: EngineError.invalidAudioModelID(
+                reason: AudioEngine.repoIDHint(badID, kind: "TTS"))) {
+                try await engine.loadTTS(badID)
+            }
+        }
+        #expect(await engine.loadedSTTModelID == nil)
         #expect(await engine.loadedTTSModelID == nil)
     }
 }

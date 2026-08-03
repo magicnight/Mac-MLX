@@ -155,11 +155,64 @@ struct MultipartFormParserTests {
     }
 
     @Test
+    func rejectsAContentTypeThatMerelyContainsMultipartFormData() {
+        // The media type is matched exactly, not searched for as a substring:
+        // `application/not-multipart/form-data` is not multipart and must not
+        // be parsed as one just because the literal appears inside it.
+        let data = body(parts: [textField("model", "m")])
+        let impostors = [
+            "application/not-multipart/form-data",
+            "application/not-multipart/form-data; boundary=\(Self.boundary)",
+            "x-multipart/form-data; boundary=\(Self.boundary)",
+            "multipart/form-data-ish; boundary=\(Self.boundary)",
+            "text/plain; note=multipart/form-data; boundary=\(Self.boundary)",
+        ]
+        for contentType in impostors {
+            #expect(throws: MultipartFormParser.ParseError.notMultipart(contentType: contentType)) {
+                try MultipartFormParser.parse(
+                    body: data, contentType: contentType, maxBytes: 1 << 20)
+            }
+        }
+    }
+
+    @Test
+    func acceptsTheMediaTypeInAnyCaseAndWithSurroundingWhitespace() throws {
+        // RFC 9110: the media type is case-insensitive, and optional whitespace
+        // may sit around it and around the ';' that starts the parameters.
+        let data = body(parts: [textField("model", "m")])
+        let variants = [
+            "multipart/form-data; boundary=\(Self.boundary)",
+            "MULTIPART/FORM-DATA; boundary=\(Self.boundary)",
+            "Multipart/Form-Data;boundary=\(Self.boundary)",
+            "  multipart/form-data  ;  boundary=\(Self.boundary)",
+        ]
+        for contentType in variants {
+            let form = try MultipartFormParser.parse(
+                body: data, contentType: contentType, maxBytes: 1 << 20)
+            #expect(form.value("model") == "m", "should have parsed '\(contentType)'")
+        }
+    }
+
+    @Test
     func rejectsMissingBoundaryParameter() {
         let data = body(parts: [textField("model", "m")])
         #expect(throws: MultipartFormParser.ParseError.missingBoundary) {
             try MultipartFormParser.parse(
                 body: data, contentType: "multipart/form-data", maxBytes: 1 << 20)
+        }
+    }
+
+    @Test
+    func aTrailingSemicolonWithNoBoundaryStillReportsTheMissingBoundary() {
+        // Tightening the media-type match must not turn "multipart, but you
+        // forgot the boundary" into "not multipart at all" — those are
+        // different mistakes and the message has to name the right one.
+        let data = body(parts: [textField("model", "m")])
+        for contentType in ["multipart/form-data;", "multipart/form-data; charset=utf-8"] {
+            #expect(throws: MultipartFormParser.ParseError.missingBoundary) {
+                try MultipartFormParser.parse(
+                    body: data, contentType: contentType, maxBytes: 1 << 20)
+            }
         }
     }
 

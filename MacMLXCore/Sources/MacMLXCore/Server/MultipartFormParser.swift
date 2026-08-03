@@ -113,8 +113,16 @@ public enum MultipartFormParser {
     /// boundary must be 1–70 characters.
     public static func boundary(fromContentType contentType: String?) throws(ParseError) -> String {
         guard let contentType else { throw ParseError.notMultipart(contentType: nil) }
-        let lowered = contentType.lowercased()
-        guard lowered.contains("multipart/form-data") else {
+        // Match the media type EXACTLY, not as a substring: a substring test
+        // would accept `application/not-multipart/form-data` and go on to parse
+        // a body that never claimed to be multipart. Everything up to the first
+        // ';' is the media type — parameters start there, and a quoted string
+        // can only appear inside a parameter value, so splitting on that ';'
+        // needs no quote tracking (the loop below, which does, starts after it).
+        let mediaType = contentType.prefix { $0 != ";" }
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        guard mediaType == "multipart/form-data" else {
             throw ParseError.notMultipart(contentType: contentType)
         }
 

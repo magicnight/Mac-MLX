@@ -1,4 +1,6 @@
 import Foundation
+import HTTPTypes
+import NIOCore
 import Testing
 @testable import MacMLXCore
 
@@ -410,5 +412,127 @@ struct HummingbirdServerAudioTests {
 
         #expect(response.statusCode == 400)
         #expect(errorCode(data) == "invalid_request_error")
+    }
+}
+
+// MARK: - Audio failure classification
+//
+// The two `/v1/audio/*` handlers answer with whatever these pure mappings
+// decide, so the mappings are where the "is this the caller's fault or ours?"
+// question is actually settled — and they are testable with no server, no
+// port, no network, and no checkpoint. Both cases exist because reporting a
+// client mistake as 5xx does real damage: it hides the mistake behind
+// "internal error", and 5xx is the class client SDKs retry on by default, so
+// an id that can never load gets replayed forever.
+
+@Suite("HummingbirdServer audio failure classification")
+struct HummingbirdServerAudioFailureClassificationTests {
+
+    /// A stand-in for a failure with no relationship to `EngineError`.
+    private struct UnrelatedFailure: Error {}
+
+    // MARK: Model-load failures → 400 vs 500
+
+    @Test
+    func aLocallyRejectedModelIDBecomes400NotAServerError() {
+        let hint = AudioEngine.repoIDHint("not-a-repo-id", kind: "STT")
+        let failure = HummingbirdServer.audioModelLoadFailure(
+            EngineError.invalidAudioModelID(reason: hint), model: "not-a-repo-id")
+
+        #expect(failure.status == .badRequest)
+        #expect(failure.code == "invalid_request_error")
+        // The caller has to be able to see WHAT shape was expected.
+        #expect(failure.message.contains("owner/name"))
+        #expect(failure.message.contains("not-a-repo-id"))
+    }
+
+    @Test
+    func aRealLoadFailureStays500() {
+        let failure = HummingbirdServer.audioModelLoadFailure(
+            EngineError.modelLoadFailed(reason: "the Hub was unreachable"),
+            model: "openai/whisper-tiny")
+
+        #expect(failure.status == .internalServerError)
+        #expect(failure.code == "load_failed")
+        #expect(failure.message.contains("openai/whisper-tiny"))
+        #expect(failure.message.contains("the Hub was unreachable"))
+    }
+
+    @Test
+    func anErrorFromOutsideEngineErrorStays500() {
+        let failure = HummingbirdServer.audioModelLoadFailure(
+            UnrelatedFailure(), model: "openai/whisper-tiny")
+
+        #expect(failure.status == .internalServerError)
+        #expect(failure.code == "load_failed")
+    }
+
+    @Test
+    func everyOtherEngineErrorStays500() {
+        // Only the LOCAL rejection is a client error; nothing else in the enum
+        // gets downgraded to 400 by accident.
+        let others: [EngineError] = [
+            .modelNotLoaded,
+            .modelNotFound("openai/whisper-tiny"),
+            .engineNotReady,
+            .generationInProgress,
+            .audioProcessingFailed(reason: "forward pass threw"),
+            .unsupportedOperation("transcribe"),
+        ]
+        for error in others {
+            let failure = HummingbirdServer.audioModelLoadFailure(
+                error, model: "openai/whisper-tiny")
+            #expect(failure.status == .internalServerError, "\(error) should stay 500")
+            #expect(failure.code == "load_failed")
+        }
+    }
+
+    /// The engine and the mapping have to agree end to end: what `loadSTT` /
+    /// `loadTTS` actually throw for a malformed id must be what the mapping
+    /// classifies as a 400. Asserting the two halves separately would let them
+    /// drift apart silently.
+    @Test
+    func whatTheEngineThrowsForAMalformedIDIsWhatTheMappingCalls400() async {
+        let engine = AudioEngine()
+        for badID in ["not-a-repo-id", "../etc", "owner/..", "a/b/c", "owner/na me"] {
+            do {
+                try await engine.loadSTT(badID)
+                Issue.record("loadSTT(\(badID)) should have been rejected locally")
+            } catch {
+                let failure = HummingbirdServer.audioModelLoadFailure(error, model: badID)
+                #expect(failure.status == .badRequest, "\(badID) should be a 400")
+                #expect(failure.code == "invalid_request_error")
+            }
+            do {
+                try await engine.loadTTS(badID)
+                Issue.record("loadTTS(\(badID)) should have been rejected locally")
+            } catch {
+                let failure = HummingbirdServer.audioModelLoadFailure(error, model: badID)
+                #expect(failure.status == .badRequest, "\(badID) should be a 400")
+                #expect(failure.code == "invalid_request_error")
+            }
+        }
+    }
+
+    // MARK: Upload-collection failures → 413 vs everything else
+
+    @Test
+    func onlyTheSizeCeilingCountsAsTooLarge() {
+        // The one error SwiftNIO's `collect(upTo:)` throws when the body runs
+        // past the bound — see `HummingbirdServer.isUploadTooLarge`.
+        #expect(HummingbirdServer.isUploadTooLarge(NIOTooManyBytesError(maxBytes: 25 * 1024 * 1024)))
+    }
+
+    @Test
+    func cancellationAndStreamFailuresAreNotReportedAsTooLarge() {
+        // Answering "your file is too large" to a cancelled request or a
+        // client that hung up mid-upload sends the reader looking for a size
+        // problem that does not exist.
+        #expect(HummingbirdServer.isUploadTooLarge(CancellationError()) == false)
+        #expect(HummingbirdServer.isUploadTooLarge(UnrelatedFailure()) == false)
+        #expect(HummingbirdServer.isUploadTooLarge(
+            EngineError.audioProcessingFailed(reason: "decode failed")) == false)
+        #expect(HummingbirdServer.isUploadTooLarge(
+            ChannelError.ioOnClosedChannel) == false)
     }
 }

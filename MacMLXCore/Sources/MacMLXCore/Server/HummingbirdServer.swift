@@ -4105,6 +4105,11 @@ public actor HummingbirdServer {
         do {
             buffer = try await request.body.collect(upTo: Self.audioUploadLimitBytes)
         } catch {
+            // ONLY the ceiling is a 413 — see `isUploadTooLarge`. A cancelled
+            // task or a client that hung up mid-upload rethrows, taking the
+            // same path as every other `collect(upTo:)` in this file, which
+            // leaves those to Hummingbird's own error handling.
+            guard Self.isUploadTooLarge(error) else { throw error }
             return errorResponse(
                 status: .contentTooLarge,
                 message: "Audio upload exceeds the \(Self.audioUploadLimitBytes)-byte limit.",
@@ -4195,10 +4200,9 @@ public actor HummingbirdServer {
         do {
             try await engine.loadSTT(model)
         } catch {
+            let failure = Self.audioModelLoadFailure(error, model: model)
             return errorResponse(
-                status: .internalServerError,
-                message: "Failed to load \(model): \(error.localizedDescription)",
-                code: "load_failed")
+                status: failure.status, message: failure.message, code: failure.code)
         }
 
         // Same lock discipline as /v1/embeddings: a throw on acquire means the
@@ -4323,10 +4327,9 @@ public actor HummingbirdServer {
         do {
             try await engine.loadTTS(model)
         } catch {
+            let failure = Self.audioModelLoadFailure(error, model: model)
             return errorResponse(
-                status: .internalServerError,
-                message: "Failed to load \(model): \(error.localizedDescription)",
-                code: "load_failed")
+                status: failure.status, message: failure.message, code: failure.code)
         }
 
         do {
@@ -4486,6 +4489,61 @@ public actor HummingbirdServer {
         case .bodyTooLarge: return true
         default: return false
         }
+    }
+
+    /// Whether a `request.body.collect(upTo:)` failure was the size ceiling
+    /// being hit — the one condition that is genuinely a 413.
+    ///
+    /// The type is read off the dependencies rather than assumed. `Request.body`
+    /// is a `RequestBody`, an `AsyncSequence` with `Element == ByteBuffer`
+    /// (hummingbird 2.25.0, `HummingbirdCore/Request/RequestBody.swift:17,59`),
+    /// so `collect(upTo:)` resolves to SwiftNIO's
+    /// `extension AsyncSequence where Element == ByteBuffer` overload
+    /// (swift-nio 2.101.2, `NIOCore/AsyncAwaitSupport.swift:480`), whose only
+    /// thrown error is `NIOTooManyBytesError`. Hummingbird itself agrees on the
+    /// mapping: it conforms that error to `HTTPResponseError` with status
+    /// `.contentTooLarge` in
+    /// `Hummingbird/Error/NIOCore+HTTPResponseError.swift:13-14`.
+    ///
+    /// Everything else that can surface from the iteration — a cancelled task,
+    /// a client that hung up mid-upload, a transport failure — is a different
+    /// problem, and answering "your file is too large" to those points whoever
+    /// is debugging in exactly the wrong direction.
+    ///
+    /// `nonisolated static` and pure so the classification is unit-testable
+    /// without a server or a real oversized upload.
+    nonisolated static func isUploadTooLarge(_ error: any Error) -> Bool {
+        error is NIOTooManyBytesError
+    }
+
+    /// Map a failure from `AudioEngine.loadSTT` / `loadTTS` onto a wire status,
+    /// message, and error code.
+    ///
+    /// `AudioEngine` validates the requested repo id locally, before any
+    /// network call, and raises ``EngineError/invalidAudioModelID(reason:)``
+    /// when it is malformed. That is a client mistake, not a server fault: no
+    /// retry can ever make `not-a-repo-id` resolve. Reporting it as 500 hides a
+    /// typo behind "internal error" AND invites client SDKs, which retry 5xx by
+    /// default, to replay a request that is guaranteed to fail forever — so it
+    /// becomes a 400 whose message is the engine's hint verbatim (it already
+    /// names the id and the expected `owner/name` shape). Everything else — an
+    /// unreachable Hub, missing weights, an architecture upstream cannot
+    /// build — really did fail server-side and stays 500 `load_failed`.
+    ///
+    /// `nonisolated static` and pure so both handlers share one classification
+    /// and it is unit-testable with no server and no checkpoint.
+    nonisolated static func audioModelLoadFailure(
+        _ error: any Error,
+        model: String
+    ) -> (status: HTTPResponse.Status, message: String, code: String) {
+        if let engineError = error as? EngineError, case .invalidAudioModelID = engineError {
+            return (.badRequest, error.localizedDescription, "invalid_request_error")
+        }
+        return (
+            .internalServerError,
+            "Failed to load \(model): \(error.localizedDescription)",
+            "load_failed"
+        )
     }
 
     /// A safe `.ext` for the staged upload, or `""`.
