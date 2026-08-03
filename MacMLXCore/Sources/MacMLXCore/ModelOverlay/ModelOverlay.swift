@@ -1,6 +1,7 @@
 import Foundation
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 
 /// Registration hook for **macMLX-owned model architectures** — pure-Swift
 /// implementations of model families that upstream `mlx-swift-lm` does not
@@ -42,6 +43,18 @@ public enum ModelOverlay {
     ///
     /// - Note: `async` because `ModelTypeRegistry` is an `actor`.
     public static func registerAll() async {
+        // MTP (Multi-Token Prediction) speculative drafters. `MTPDrafterTypeRegistry
+        // .shared` ships EMPTY — the drafter implementations live in MLXVLM and
+        // importing them into MLXLMCommon would be circular, so upstream leaves
+        // registration to the app (see `Gemma4AssistantRegistration`'s doc comment).
+        // Registered here, in the same one-shot startup step as the LLM types
+        // below, so `MTPDrafterModelFactory.shared` can resolve a drafter's
+        // `model_type` and `MTPDrafterDetection` can tell an MTP drafter from a
+        // classic draft model without loading anything. This is a registration of
+        // an UPSTREAM type, not a macMLX-owned architecture — nothing to delete
+        // when upstream lands more drafters; add their registration calls here.
+        await Gemma4AssistantRegistration.register()
+
         // DeepSeek V3.2 — pure-Swift port (see `Models/DeepseekV32.swift`).
         // The creator closure is inlined because the package's `create`
         // helper is `private`. `JSONDecoder.json5()` matches the decoder the
