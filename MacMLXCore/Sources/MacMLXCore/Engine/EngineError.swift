@@ -24,6 +24,21 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
     /// only the offending id — never a resolved/standardized path — so it
     /// can't be used by a probing client as a path oracle.
     case invalidDraftModelID(id: String)
+    /// An audio operation failed after the model was resident (v0.9 W1a) —
+    /// undecodable upload, or a synthesis/transcription forward pass that
+    /// threw. Distinct from `modelLoadFailed` so `/v1/audio/*` can tell a bad
+    /// request apart from a bad model, and from `generationInProgress` because
+    /// nothing about it is a concurrency condition.
+    case audioProcessingFailed(reason: String)
+    /// The `model` a `/v1/audio/*` request named was rejected locally (v0.9
+    /// W1a), before any network call: it is not shaped like a Hugging Face
+    /// repo id. Deliberately distinct from `modelLoadFailed` so the handlers
+    /// answer 400 rather than 500 — no retry can ever make a malformed id
+    /// resolve, and 5xx is exactly what client SDKs retry on by default.
+    /// The payload is a complete sentence naming the offending id and the
+    /// expected `owner/name` shape (see `AudioEngine.repoIDHint(_:kind:)`), so
+    /// `errorDescription` returns it verbatim instead of prefixing it again.
+    case invalidAudioModelID(reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -47,6 +62,10 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
             return "Draft model id is not valid: '\(id)'. Ids must be plain names using only "
                 + "letters, digits, '.', '_', '-', and must not start with '.' or contain a "
                 + "path separator."
+        case .audioProcessingFailed(let reason):
+            return "Audio processing failed: \(reason)"
+        case .invalidAudioModelID(let reason):
+            return reason
         }
     }
 }
