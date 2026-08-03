@@ -221,4 +221,82 @@ struct BenchmarkBottleneckAggregatorTests {
         #expect(hw?.meanBandwidthGBs == nil)
         #expect(hw?.peakThermalPressure == .fair)   // public API, still present
     }
+
+    // MARK: - Timed-window admission
+
+    /// A sample whose measurement interval ENDS at `endingAt` and covers
+    /// `intervalSeconds` before that — the shape `IOReportSiliconSampler` produces
+    /// (stamp the time, then poll for the deltas accumulated since the previous poll).
+    private func windowSample(
+        endingAt: TimeInterval,
+        intervalSeconds: Double
+    ) -> SiliconSample {
+        SiliconSample(
+            timestamp: Date(timeIntervalSince1970: endingAt),
+            intervalSeconds: intervalSeconds,
+            ioReportAvailable: true,
+            ioReportUnavailableReason: nil,
+            gpuUtilization: nil,
+            dramBandwidth: nil,
+            gpuBandwidth: nil,
+            aneBandwidth: nil,
+            cpuPower: nil,
+            gpuPower: nil,
+            anePower: nil,
+            dramPower: nil,
+            thermalPressure: .nominal,
+            memoryPressure: nil
+        )
+    }
+
+    /// Every case below places its sample relative to a window that opens at t=100.
+    private var windowStart: Date { Date(timeIntervalSince1970: 100) }
+
+    private func admits(endingAt: TimeInterval, intervalSeconds: Double) -> Bool {
+        BenchmarkBottleneckAggregator.sampleFallsEntirelyWithinWindow(
+            windowSample(endingAt: endingAt, intervalSeconds: intervalSeconds),
+            windowStart: windowStart)
+    }
+
+    @Test("A sample whose whole interval sits inside the window is admitted")
+    func intervalFullyInsideWindowIsAdmitted() {
+        // Covers [101, 102] — every delta accumulated after the window opened.
+        #expect(admits(endingAt: 102, intervalSeconds: 1.0) == true)
+    }
+
+    @Test("A sample whose whole interval sits before the window is rejected")
+    func intervalFullyBeforeWindowIsRejected() {
+        // Covers [98, 99] — over before the window opened.
+        #expect(admits(endingAt: 99, intervalSeconds: 1.0) == false)
+    }
+
+    @Test("A sample straddling the window start is rejected, not admitted on its end alone")
+    func intervalStraddlingWindowStartIsRejected() {
+        // Covers [99.9, 100.9]: it ENDS inside the window but BEGAN before it, so
+        // nearly all of its deltas are pre-window (warm-up) work. Testing the
+        // timestamp alone — 100.9 >= 100 — would wrongly admit it. This is the
+        // off-by-one-interval the predicate exists to prevent.
+        #expect(admits(endingAt: 100.9, intervalSeconds: 1.0) == false)
+    }
+
+    @Test("The first sample of a session (zero interval) compares on its timestamp alone")
+    func zeroIntervalSampleComparesOnTimestampAlone() {
+        // `intervalSeconds == 0` means "no prior window", so there is no interval to
+        // straddle: exactly at the window start is inside, just before it is not.
+        #expect(admits(endingAt: 100, intervalSeconds: 0) == true)
+        #expect(admits(endingAt: 99.9, intervalSeconds: 0) == false)
+    }
+
+    @Test("An interval starting exactly at the window start is admitted")
+    func intervalStartingExactlyAtWindowStartIsAdmitted() {
+        // Covers [100, 101] — touches the boundary but carries no pre-window work.
+        #expect(admits(endingAt: 101, intervalSeconds: 1.0) == true)
+    }
+
+    @Test("An interval ending exactly at the window start is rejected")
+    func intervalEndingExactlyAtWindowStartIsRejected() {
+        // Covers [99, 100]: all of its deltas predate the window; the shared instant
+        // carries none of them.
+        #expect(admits(endingAt: 100, intervalSeconds: 1.0) == false)
+    }
 }

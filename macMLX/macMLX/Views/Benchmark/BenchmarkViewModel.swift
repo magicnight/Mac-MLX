@@ -75,6 +75,25 @@ final class BenchmarkViewModel {
     /// the user clicks Cancel.
     private var runTask: Task<Void, Never>?
 
+    /// Identity token of the run that currently owns this view model's run
+    /// state. Bumped by both `start()` and `cancel()`, so at most one run is
+    /// ever the owner and every earlier run is retired the instant a newer one
+    /// begins (or the user cancels).
+    ///
+    /// Cancellation is cooperative — a cancelled run keeps winding down while
+    /// its current token finishes, and used to run its unconditional epilogue
+    /// long after a restarted run had taken over: clearing `isRunning` under a
+    /// live run, dropping the restarted run's `runTask` (leaving Cancel with
+    /// nothing to cancel), and letting the dead run's error land in the live
+    /// run's banner. Each of `doRun`'s own state writes is therefore gated on
+    /// still being the owner, re-checked after every suspension point (including
+    /// inside `reloadHistoryOwned(generation:)`, whose store read suspends after
+    /// its call site's check). What a retired run does still do is finish its
+    /// in-flight inference: the stream bridging `coordinator.generate` is not
+    /// wired for cancellation, so the tokens keep coming until the generation
+    /// ends on its own — it just no longer writes any of this state.
+    @ObservationIgnored private var currentGeneration: Int = 0
+
     /// Poll cadence for reading the monitor's current verdict during a run. The
     /// hardware sampler produces a fresh sample ~1 Hz; polling faster and de-duping
     /// on the sample timestamp folds each sample's verdict in exactly once.
@@ -118,7 +137,10 @@ final class BenchmarkViewModel {
         await reloadHistory()
     }
 
-    /// Reload saved results. Called after each successful run.
+    /// Reload saved results. For the user-initiated paths (appear, delete, clear),
+    /// where the newest read is always the one to keep. A benchmark run must use
+    /// `reloadHistoryOwned(generation:)` instead, so its read cannot land after a
+    /// Cancel + restart has handed the state to another run.
     func reloadHistory() async {
         do {
             history = try await store.list()
@@ -141,17 +163,22 @@ final class BenchmarkViewModel {
             errorMessage = "Pick a model first."
             return
         }
+        currentGeneration &+= 1
+        let generation = currentGeneration
         errorMessage = nil
         isRunning = true
         statusMessage = "Preparing…"
         runTask = Task { [weak self] in
-            await self?.doRun(model: model)
+            await self?.doRun(model: model, generation: generation)
         }
     }
 
     /// Cancel an in-flight benchmark (best-effort — the active generation
-    /// completes its current token before returning).
+    /// completes its current token before returning). Retires the in-flight
+    /// run so its epilogue can no longer write state that a restart may have
+    /// taken over in the meantime.
     func cancel() {
+        currentGeneration &+= 1
         runTask?.cancel()
         runTask = nil
         isRunning = false
@@ -160,13 +187,40 @@ final class BenchmarkViewModel {
 
     // MARK: - Internals
 
-    private func doRun(model: LocalModel) async {
-        let loadTime = await ensureModelLoaded(model: model)
-        if Task.isCancelled {
-            isRunning = false
-            statusMessage = ""
-            return
+    /// Whether `generation` is still the run that owns the view model's run
+    /// state. False for any run retired by a later `start()` or by `cancel()`.
+    private func owns(_ generation: Int) -> Bool { generation == currentGeneration }
+
+    /// `reloadHistory()` for a benchmark run: re-checks ownership AFTER the store
+    /// read suspends, not just before it. Checking only at the call site is not
+    /// enough — the suspension inside `reloadHistory()` is its own hand-off point,
+    /// so a run that owned the state when it called could still have been retired by
+    /// a Cancel + restart by the time `store.list()` returns, and would then write
+    /// `history` (and a stale error banner) over the live run's.
+    private func reloadHistoryOwned(generation: Int) async {
+        do {
+            let loaded = try await store.list()
+            guard owns(generation) else { return }
+            history = loaded
+            if lastResult == nil { lastResult = history.first }
+        } catch {
+            guard owns(generation) else { return }
+            // Not fatal — the store has corrupt-file tolerance, but a
+            // directory-level error still shows up via `errorMessage`.
+            errorMessage = "Failed to load benchmark history: \(error.localizedDescription)"
         }
+    }
+
+    private func doRun(model: LocalModel, generation: Int) async {
+        // The task body only starts after `start()` returns, so a cancel plus
+        // restart can already have retired this run before its first write.
+        guard owns(generation) else { return }
+        let loadTime = await ensureModelLoaded(model: model, generation: generation)
+        // Ownership subsumes cancellation, so there is no separate `Task.isCancelled`
+        // check here: `cancel()` invalidates the generation and cancels the task in
+        // the same synchronous @MainActor step, so a cancelled task is always a
+        // retired one and this guard has already returned.
+        guard owns(generation) else { return }
         statusMessage = "Warming up…"
 
         // Capture the coordinator's generate function into a @Sendable
@@ -179,16 +233,32 @@ final class BenchmarkViewModel {
             // Force hop to @MainActor to call coordinator.generate(_:).
             // The stream values themselves are Sendable (GenerateChunk).
             AsyncThrowingStream { continuation in
-                Task { @MainActor in
+                let task = Task { @MainActor in
                     let inner = coordinator.generate(request)
                     do {
                         for try await chunk in inner {
-                            continuation.yield(chunk)
+                            // Honor the yield result instead of discarding it.
+                            // `.terminated` means the runner stopped consuming
+                            // (Cancel), so stop pulling from the engine rather
+                            // than draining this generation to completion.
+                            if case .terminated = continuation.yield(chunk) {
+                                break
+                            }
                         }
                         continuation.finish()
                     } catch {
                         continuation.finish(throwing: error)
                     }
+                }
+                // Propagate this stream's termination — including the consumer
+                // being cancelled by the Cancel button — into the Task driving
+                // generation. Without it, cancelling only the consumer left this
+                // Task and the engine's generation loop running to maxTokens:
+                // the GPU kept burning after Cancel, and a run restarted right
+                // after competed with those zombies for a measurably lower
+                // tok/s. Mirrors the same fix in `EngineCoordinator.generate`.
+                continuation.onTermination = { @Sendable _ in
+                    task.cancel()
                 }
             }
         }
@@ -210,8 +280,23 @@ final class BenchmarkViewModel {
         //
         // The collector is a fresh object owned by this run and captured by this run's
         // task alone. If the user cancels and immediately restarts, the cancelled run
-        // is still winding down with its own collector, so its tail decode frames can
-        // never fold into the restarted run's attribution — the two never share state.
+        // is still winding down with its own collector, so no aggregator state is
+        // shared and its tail frames cannot land in the restarted run's saved
+        // attribution. The two DO still share the signal source: `siliconMonitor`'s
+        // `verdict`/`phase` are single-valued, so while two generations overlap both
+        // collectors read whichever generation transitioned last — see the concurrent-
+        // generation KNOWN LIMITATION on `SiliconMonitorModel`. Per-generation
+        // attribution needs generation IDs on the observer seam and is deferred.
+        //
+        // Sampling starts here, before the runner does anything, so the hardware
+        // sampler and the classifier are already warm when the timed window opens. The
+        // collector itself stays shut until the runner reports the warm-up finished
+        // (`onWarmupComplete` below): the warm-up is deliberately un-representative —
+        // CPU-frequency ramp, JIT, first kernel launches. Most warm-up frames never
+        // reach the collector anyway, because the warm-up is its own generation and
+        // the monitor withholds a verdict until its rolling window has refilled; the
+        // window catches the residual case where a slow model's warm-up runs long
+        // enough to publish verdicts of its own.
         let collector = BottleneckCollector()
         let monitor = siliconMonitor
         siliconMonitor.activateSampling()
@@ -236,9 +321,15 @@ final class BenchmarkViewModel {
                 generationTokens: genN,
                 runs: runsN,
                 modelLoadTimeS: loadTime,
-                notes: notesCopy
+                notes: notesCopy,
+                onWarmupComplete: { [collector] in
+                    // Pin the boundary synchronously, on the runner's own thread, so
+                    // the hop below cannot push it past the first measured frames.
+                    let boundary = Date()
+                    Task { @MainActor in collector.openTimedWindow(at: boundary) }
+                }
             )
-            if Task.isCancelled { return }
+            guard owns(generation) else { return }
             // Attach the collected attribution. `result()` is nil when the run was
             // too short to produce any decode verdict — then no attribution is
             // claimed and the UI honestly reports it as unavailable.
@@ -250,17 +341,19 @@ final class BenchmarkViewModel {
                 level: .info,
                 category: .engine
             )
-            await reloadHistory()
+            await reloadHistoryOwned(generation: generation)
         } catch is CancellationError {
             // User cancelled — state already reset in cancel(). No-op.
         } catch {
-            errorMessage = error.localizedDescription
             await logs.log(
                 "Benchmark failed: \(error.localizedDescription)",
                 level: .error,
                 category: .engine
             )
+            guard owns(generation) else { return }
+            errorMessage = error.localizedDescription
         }
+        guard owns(generation) else { return }
         isRunning = false
         statusMessage = ""
         runTask = nil
@@ -270,11 +363,12 @@ final class BenchmarkViewModel {
     /// (or nothing) is loaded, triggers a load and returns the measured
     /// cold-load time in seconds. Returns 0 when the model was already
     /// loaded.
-    private func ensureModelLoaded(model: LocalModel) async -> Double {
+    private func ensureModelLoaded(model: LocalModel, generation: Int) async -> Double {
         if coordinator.currentModel?.id == model.id,
            coordinator.status.isLoaded {
             return 0
         }
+        guard owns(generation) else { return 0 }
         statusMessage = "Loading \(model.id)…"
         let start = Date()
         _ = await coordinator.load(model)
@@ -309,13 +403,39 @@ private final class BottleneckCollector {
     private var aggregator = BenchmarkBottleneckAggregator()
     private var lastSampleTimestamp: Date?
 
-    /// Fold the monitor's current verdict if it is a fresh decode-phase reading.
-    /// Prefill frames and the classifier's per-generation warm-up publish no usable
-    /// decode verdict, so they are naturally skipped; the ~1 Hz sample is de-duped on
-    /// its timestamp so a faster poll folds each sample exactly once.
+    /// Instant the runner's timed window opened, or nil while it has not opened yet.
+    /// Nothing is folded before it, and no sample whose measurement interval reaches
+    /// back before it is folded after it.
+    private var timedWindowStart: Date?
+
+    /// Open the attribution window at `instant` — the moment the runner finished its
+    /// un-counted warm-up iteration. Comparing sample intervals against the instant
+    /// (rather than merely flipping a flag) also discards the stale ~1 Hz sample that
+    /// may still be the monitor's latest when the window opens, which would otherwise
+    /// be a warm-up frame folded into a timed run's attribution.
+    func openTimedWindow(at instant: Date) {
+        timedWindowStart = instant
+    }
+
+    /// Fold the monitor's current verdict if it is a fresh decode-phase reading whose
+    /// measurement interval lies wholly inside the timed window — the admission rule
+    /// is `BenchmarkBottleneckAggregator.sampleFallsEntirelyWithinWindow`, in Core
+    /// where it is unit-testable. Prefill frames publish no decode verdict and are
+    /// naturally skipped; the ~1 Hz sample is de-duped on its timestamp so a faster
+    /// poll folds each sample exactly once.
+    ///
+    /// The classifier's own per-generation gate (`SiliconMonitorModel.ingest`, which
+    /// withholds a verdict until the rolling window holds this generation's frames)
+    /// already suppresses most warm-up frames, since the warm-up is a separate
+    /// generation that resets that counter. The window is the remaining guard, for the
+    /// slow-model case where a warm-up lasts long enough to publish a verdict of its
+    /// own.
     func collect(from monitor: SiliconMonitor) {
+        guard let timedWindowStart else { return }
         guard let verdict = monitor.verdict, verdict.phase == .decode,
               let sample = monitor.latestSample,
+              BenchmarkBottleneckAggregator.sampleFallsEntirelyWithinWindow(
+                sample, windowStart: timedWindowStart),
               sample.timestamp != lastSampleTimestamp
         else { return }
         lastSampleTimestamp = sample.timestamp

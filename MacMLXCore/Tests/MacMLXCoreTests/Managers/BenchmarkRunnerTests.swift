@@ -119,6 +119,107 @@ func runRequiresAtLeastOneRun() async {
     #expect(result != nil)
 }
 
+// MARK: - Warm-up boundary signal
+
+/// Thread-safe ordered event log. `@unchecked Sendable`: the mutable array is
+/// guarded by an `NSLock`, because the runner drives it from its own actor
+/// (through the `@Sendable` generate closure and the warm-up callback) while
+/// the test reads it back afterwards.
+private final class PhaseEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+
+    func record(_ event: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+    }
+
+    var recorded: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
+@Test
+func warmupCompleteFiresOnceBetweenWarmupAndMeasuredIterations() async throws {
+    let log = PhaseEventLog()
+    let runner = BenchmarkRunner { _ in
+        log.record("generate")
+        return cannedStream(chunks: ["a", "b"], promptTokens: 32)
+    }
+
+    _ = try await runner.run(
+        modelID: "m",
+        engineID: .mlxSwift,
+        engineVersion: "",
+        promptTokens: 32,
+        generationTokens: 2,
+        runs: 3,
+        onWarmupComplete: { log.record("warmupComplete") }
+    )
+
+    // One un-counted warm-up generate, then the boundary signal exactly once,
+    // then exactly `runs` measured generates. Anything observing the machine
+    // from the signal onwards therefore sees only measured iterations.
+    #expect(
+        log.recorded == [
+            "generate", "warmupComplete", "generate", "generate", "generate",
+        ]
+    )
+}
+
+@Test
+func runWithoutWarmupCallbackKeepsPreviousBehaviour() async throws {
+    let log = PhaseEventLog()
+    let runner = BenchmarkRunner { _ in
+        log.record("generate")
+        return cannedStream(chunks: ["a", "b"], promptTokens: 32)
+    }
+
+    // Call shape every pre-existing caller uses: no `onWarmupComplete` at all.
+    let result = try await runner.run(
+        modelID: "m",
+        engineID: .mlxSwift,
+        engineVersion: "",
+        promptTokens: 32,
+        generationTokens: 2,
+        runs: 2
+    )
+
+    #expect(log.recorded == ["generate", "generate", "generate"])
+    #expect(result.runs == 2)
+    #expect(result.generationTPS > 0)
+}
+
+@Test
+func warmupCompleteDoesNotFireWhenWarmupThrows() async {
+    struct StreamError: Error {}
+    let log = PhaseEventLog()
+    let runner = BenchmarkRunner { _ in
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: StreamError())
+        }
+    }
+
+    do {
+        _ = try await runner.run(
+            modelID: "m",
+            engineID: .mlxSwift,
+            engineVersion: "",
+            promptTokens: 8,
+            generationTokens: 1,
+            runs: 1,
+            onWarmupComplete: { log.record("warmupComplete") }
+        )
+        Issue.record("Expected run() to rethrow the warm-up stream's error")
+    } catch {
+        // A run that never reached a measured iteration signals no boundary.
+        #expect(log.recorded.isEmpty)
+    }
+}
+
 @Test
 func runPropagatesStreamError() async {
     struct StreamError: Error {}

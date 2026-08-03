@@ -55,6 +55,14 @@ public actor BenchmarkRunner {
     ///     unchanged into the result. Pass 0 when the model was already
     ///     loaded.
     ///   - notes: user-supplied free-form notes.
+    ///   - onWarmupComplete: fired exactly once, after the un-counted warm-up
+    ///     iteration has finished and before the first measured iteration
+    ///     starts. Lets a caller that observes the machine during the run
+    ///     (hardware sampling, bottleneck attribution) restrict its observation
+    ///     to the measured window, so the deliberately un-representative
+    ///     warm-up frames — CPU-frequency ramp, JIT, first kernel launches —
+    ///     do not skew what the run is attributed to. Optional: callers that
+    ///     don't observe anything pass nothing and behave exactly as before.
     public func run(
         modelID: String,
         engineID: EngineID,
@@ -63,7 +71,8 @@ public actor BenchmarkRunner {
         generationTokens: Int = 200,
         runs: Int = 3,
         modelLoadTimeS: Double = 0,
-        notes: String = ""
+        notes: String = "",
+        onWarmupComplete: (@Sendable () -> Void)? = nil
     ) async throws -> BenchmarkResult {
         precondition(runs > 0, "runs must be >= 1")
 
@@ -75,10 +84,19 @@ public actor BenchmarkRunner {
             generationTokens: 20
         )
 
+        // The warm-up is over and the timed window is about to open. A throwing
+        // warm-up propagates before this point, so the callback never fires for
+        // a run that produced no measured iteration at all.
+        onWarmupComplete?()
+
         // Measured iterations.
         var samples: [SingleSample] = []
         samples.reserveCapacity(runs)
         for _ in 0..<runs {
+            // A cancelled run must stop starting new generations. Without this
+            // the loop runs to `runs` even after Cancel, spawning a generation
+            // per iteration that the consumer immediately abandons.
+            try Task.checkCancellation()
             let s = try await measureOne(
                 modelID: modelID,
                 promptTokens: promptTokens,
