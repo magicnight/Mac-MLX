@@ -11,14 +11,30 @@
 		0A701A512F91E797000E48AF /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A701A502F91E797000E48AF /* Sparkle */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		0AB1C2D42FA100010000000B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0A46F3552F9142070046E74C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0A46F35C2F9142070046E74C;
+			remoteInfo = macMLX;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		0A46F35D2F9142070046E74C /* macMLX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = macMLX.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0AB1C2D42FA1000100000002 /* macMLXTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = macMLXTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		0A46F35F2F9142070046E74C /* macMLX */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = macMLX;
+			sourceTree = "<group>";
+		};
+		0AB1C2D42FA1000100000003 /* macMLXTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = macMLXTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -33,6 +49,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		0AB1C2D42FA1000100000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -40,6 +63,7 @@
 			isa = PBXGroup;
 			children = (
 				0A46F35F2F9142070046E74C /* macMLX */,
+				0AB1C2D42FA1000100000003 /* macMLXTests */,
 				0A46F35E2F9142070046E74C /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				0A46F35D2F9142070046E74C /* macMLX.app */,
+				0AB1C2D42FA1000100000002 /* macMLXTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -79,6 +104,29 @@
 			productReference = 0A46F35D2F9142070046E74C /* macMLX.app */;
 			productType = "com.apple.product-type.application";
 		};
+		0AB1C2D42FA1000100000001 /* macMLXTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0AB1C2D42FA1000100000007 /* Build configuration list for PBXNativeTarget "macMLXTests" */;
+			buildPhases = (
+				0AB1C2D42FA1000100000004 /* Sources */,
+				0AB1C2D42FA1000100000005 /* Frameworks */,
+				0AB1C2D42FA1000100000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0AB1C2D42FA100010000000A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				0AB1C2D42FA1000100000003 /* macMLXTests */,
+			);
+			name = macMLXTests;
+			packageProductDependencies = (
+			);
+			productName = macMLXTests;
+			productReference = 0AB1C2D42FA1000100000002 /* macMLXTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -91,6 +139,9 @@
 				TargetAttributes = {
 					0A46F35C2F9142070046E74C = {
 						CreatedOnToolsVersion = 26.4;
+					};
+					0AB1C2D42FA1000100000001 = {
+						TestTargetID = 0A46F35C2F9142070046E74C;
 					};
 				};
 			};
@@ -113,12 +164,20 @@
 			projectRoot = "";
 			targets = (
 				0A46F35C2F9142070046E74C /* macMLX */,
+				0AB1C2D42FA1000100000001 /* macMLXTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		0A46F35B2F9142070046E74C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0AB1C2D42FA1000100000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -135,7 +194,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		0AB1C2D42FA1000100000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0AB1C2D42FA100010000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0A46F35C2F9142070046E74C /* macMLX */;
+			targetProxy = 0AB1C2D42FA100010000000B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		0A46F3662F9142080046E74C /* Debug */ = {
@@ -328,6 +402,56 @@
 			};
 			name = Release;
 		};
+		0AB1C2D42FA1000100000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chaosdevops.macMLXTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/macMLX.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/macMLX";
+			};
+			name = Debug;
+		};
+		0AB1C2D42FA1000100000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chaosdevops.macMLXTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/macMLX.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/macMLX";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -345,6 +469,15 @@
 			buildConfigurations = (
 				0A46F3692F9142080046E74C /* Debug */,
 				0A46F36A2F9142080046E74C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0AB1C2D42FA1000100000007 /* Build configuration list for PBXNativeTarget "macMLXTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0AB1C2D42FA1000100000008 /* Debug */,
+				0AB1C2D42FA1000100000009 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -60,16 +60,19 @@ final class BenchmarkViewModel {
 
     // MARK: - Dependencies
 
-    private let coordinator: EngineCoordinator
+    /// The engine seam. Production always passes the app's single
+    /// `EngineCoordinator` (see `BenchmarkEngineProviding`); the protocol only
+    /// exists so tests can drive the run lifecycle against a scripted engine.
+    private let coordinator: any BenchmarkEngineProviding
     private let library: ModelLibraryManager
     private let store: BenchmarkStore
-    private let logs: LogManager
+    private let logs: any BenchmarkLogging
 
     /// The shared silicon monitor. During a run this VM activates its sampling and
     /// reads its live bottleneck verdicts to attribute what limited the run — the
     /// same in-process observer the Activity panel uses, so no second observer is
     /// attached to the engine.
-    private let siliconMonitor: SiliconMonitor
+    private let siliconMonitor: any BenchmarkSiliconSampling
 
     /// In-flight benchmark task, retained so the UI can abandon it when
     /// the user clicks Cancel.
@@ -102,11 +105,11 @@ final class BenchmarkViewModel {
     // MARK: - Init
 
     init(
-        coordinator: EngineCoordinator,
+        coordinator: any BenchmarkEngineProviding,
         library: ModelLibraryManager,
         store: BenchmarkStore,
-        logs: LogManager,
-        siliconMonitor: SiliconMonitor
+        logs: any BenchmarkLogging,
+        siliconMonitor: any BenchmarkSiliconSampling
     ) {
         self.coordinator = coordinator
         self.library = library
@@ -371,7 +374,9 @@ final class BenchmarkViewModel {
         guard owns(generation) else { return 0 }
         statusMessage = "Loading \(model.id)…"
         let start = Date()
-        _ = await coordinator.load(model)
+        // `adapter: nil` is what the coordinator's own default already resolved
+        // to here; it is spelled out because the seam declares the full shape.
+        _ = await coordinator.load(model, adapter: nil)
         return Date().timeIntervalSince(start)
     }
 
@@ -430,7 +435,7 @@ private final class BottleneckCollector {
     /// generation that resets that counter. The window is the remaining guard, for the
     /// slow-model case where a warm-up lasts long enough to publish a verdict of its
     /// own.
-    func collect(from monitor: SiliconMonitor) {
+    func collect(from monitor: any BenchmarkSiliconSampling) {
         guard let timedWindowStart else { return }
         guard let verdict = monitor.verdict, verdict.phase == .decode,
               let sample = monitor.latestSample,

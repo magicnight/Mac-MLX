@@ -33,6 +33,13 @@ struct macMLXApp: App {
             RootView()
                 .environment(appState)
                 .task {
+                    #if DEBUG
+                    // Hosting the unit-test bundle: bootstrap runs against the
+                    // user's real settings — it can bind the HTTP server port
+                    // and re-load their last model. Running unit tests must
+                    // not do either. Compiled out of Release.
+                    if TestHostDetection.isHostingTests { return }
+                    #endif
                     await appState.bootstrap()
                     // Wire the menu bar manager once AppState is ready.
                     appDelegate.menuBarManager.setup(appState: appState)
