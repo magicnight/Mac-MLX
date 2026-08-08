@@ -214,3 +214,21 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      # App-target unit tests. NOT gated on Metal, and deliberately so: the
+      # suite drives BenchmarkViewModel against a scripted stub engine, so no
+      # MLX kernel ever runs and this job needs no MetalToolchain download.
+      # (Anything that does need MLX belongs in the `metal` job instead.)
+      #
+      # The app is the tests' TEST_HOST, so it gets launched for real — hence
+      # ad-hoc signing here rather than the CODE_SIGNING_ALLOWED=NO used for
+      # the build-only step above; macOS will not execute a wholly unsigned
+      # bundle. Reuses the same DerivedData the build step just populated.
+      - name: Test macMLXTests (app target)
+        run: |
+          xcodebuild test \
+            -project macMLX/macMLX.xcodeproj \
+            -scheme macMLXTests \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -skipPackagePluginValidation

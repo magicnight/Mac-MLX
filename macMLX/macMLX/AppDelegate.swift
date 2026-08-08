@@ -45,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        // Hosting the unit-test bundle: the single-instance check below would
+        // terminate the test host whenever a real macMLX is already running,
+        // taking the whole test run down with it. Compiled out of Release.
+        if TestHostDetection.isHostingTests { return }
+        #endif
+
         // Fix #2: single-instance check. If another macMLX is already
         // running, raise that instance and quit ourselves. Prevents the
         // duplicate menu-bar-icon scenario when the user launches twice
