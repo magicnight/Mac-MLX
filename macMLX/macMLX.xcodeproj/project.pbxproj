@@ -506,7 +506,7 @@
 			repositoryURL = "https://github.com/magicnight/mlx-swift.git";
 			requirement = {
 				kind = revision;
-				revision = 049bb52f24fed0a0b26b183edbd0de78fcf9da3e;
+				revision = 860f6b24785a59e52e574557f6605c6b2c734fbb;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

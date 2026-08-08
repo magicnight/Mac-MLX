@@ -246,22 +246,40 @@ jobs:
             echo "::error::$RESOLVED is missing — the app never resolved its packages."
             exit 1
           fi
-          python3 - "$RESOLVED" <<'PY'
-          import json, sys
+          python3 - "$RESOLVED" MacMLXCore/Package.swift <<'PY'
+          import json, re, sys
+
+          manifest = open(sys.argv[2]).read()
+          match = re.search(
+              r'magicnight/mlx-swift\.git".*?revision:\s*"([0-9a-f]+)"', manifest, re.S)
+          if not match:
+              print("::error::MacMLXCore/Package.swift no longer pins the fork by revision.")
+              sys.exit(1)
+          declared = match.group(1)
+
           pins = json.load(open(sys.argv[1]))
           pins = pins.get("pins") or pins.get("object", {}).get("pins", [])
           for pin in pins:
               location = pin.get("location") or pin.get("repositoryURL", "")
-              if "mlx-swift" in location and "mlx-swift-lm" not in location:
-                  if "magicnight/mlx-swift" in location:
-                      print(f"app resolved the fork: {location} @ {pin['state']}")
-                      sys.exit(0)
+              if "mlx-swift" not in location or "mlx-swift-lm" in location:
+                  continue
+              if "magicnight/mlx-swift" not in location:
                   print(
-                      "::error::The app resolved "
-                      f"{location} instead of magicnight/mlx-swift. It would "
-                      "ship without the fork's cherry-picks."
+                      f"::error::The app resolved {location} instead of "
+                      "magicnight/mlx-swift. It would ship without the fork's "
+                      "cherry-picks."
                   )
                   sys.exit(1)
+              resolved = pin.get("state", {}).get("revision", "")
+              if resolved != declared:
+                  print(
+                      f"::error::The app resolved the fork at {resolved}, but "
+                      f"MacMLXCore pins {declared}. A stale resolution ships "
+                      "cherry-picks that were never tested together."
+                  )
+                  sys.exit(1)
+              print(f"app resolved the fork at the pinned revision {resolved}")
+              sys.exit(0)
           print("::error::The app's resolved graph names no mlx-swift at all.")
           sys.exit(1)
           PY

@@ -348,6 +348,25 @@ Verify by diffing the embedded region against its source: they match verbatim
 apart from a short auto-generated header, so a content difference means the
 regeneration is wrong.
 
+A patched kernel has **three** copies in the fork, and an audit that finds only
+one of them will reach the wrong conclusion:
+
+| copy | compiled? |
+|---|---|
+| `mlx/backend/metal/kernels/**` (the submodule) | no — the authoritative source only |
+| `mlx-generated/<name>.cpp` (stringified) | **yes**, by the JIT at runtime |
+| `mlx-generated/metal/**/<name>.h` | no, unless a `.metal` in `KERNEL_LIST` includes it |
+
+Patch all three anyway. `tools/fix-metal-includes.sh` copies every header it
+finds under the kernels directory, so the third one is one regeneration away
+from becoming live, and until then it is a second answer to "did we patch this
+kernel?" that contradicts the first.
+
+Whether a NAX kernel is JIT-only is checkable: `KERNEL_LIST` in that script is
+the set compiled ahead of time. `steel_attention_nax.metal` is not in it, and
+nothing under `mlx-generated/metal/` includes the NAX header — that kernel is
+built at runtime from `metal::steel_attention_nax()`, i.e. from the `.cpp`.
+
 ### Carrying a fix is not shipping it: check what each root resolves
 
 `magicnight/mlx-swift` and the `ml-explore/mlx-swift` that `mlx-swift-lm`

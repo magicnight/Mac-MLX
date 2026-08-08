@@ -26,12 +26,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   type and read the mask from the wrong offsets, producing non-finite output
   with no error — exactly the context lengths the tiered SSD KV cache exists to
   reach. Reproduced here on an M5 Max and carried onto the vendored MLX fork
-  (`ml-explore/mlx#3361`), along with three more upstream fixes our pin
-  predated: a sorted `gather_mm` row stride that affects MoE decode (`#3960`),
-  a `gather_qmm` kernel-name mismatch that fails quantized MoE on the same
-  hardware (`#3632`), and a Metal kernel-cache lookup that inserted into the
-  cache while holding only a read lock, which concurrent requests can hit
-  (`#4043`). Apple Silicon before M5 is unaffected by the first three.
+  (`ml-explore/mlx#3361`), along with a Metal kernel-cache lookup that inserted
+  into the cache while holding only a read lock — something concurrent requests
+  can hit, and which can hand back the wrong compiled kernel rather than merely
+  crash (`#4043`). Two further upstream fixes are carried preventively, with no
+  reproduction on this hardware: a sorted `gather_mm` row stride (`#3960`) and
+  a `gather_qmm` tile-size mismatch (`#3632`). Apple Silicon before M5 is
+  unaffected by all but `#4043`.
 
 ## [0.8.0] - 2026-07-19
 

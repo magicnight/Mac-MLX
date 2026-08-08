@@ -11,17 +11,22 @@ let package = Package(
         // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
         // upstream mlx-swift 0.31.6 plus NINE cherry-picks, all already in
         // mlx-core but not yet vendored by any mlx-swift release (see
-        // ml-explore/mlx-swift#441). All but #4043 and #3632 produce silently
-        // wrong numbers rather than an error, which is why the ones we could
+        // ml-explore/mlx-swift#441). Most of them produce silently wrong
+        // numbers rather than an error, which is why the ones we could
         // reproduce here carry a parity test rather than being left to surface
-        // on their own:
+        // on their own. Two are carried preventively — #3560 and #3960 — and
+        // say so:
         //
         //   - ml-explore/mlx#3498 — batched single-token RoPE fix.
         //   - ml-explore/mlx#4043 — the Metal kernel cache looked itself up
         //     with operator[] while holding only a shared lock, so a lookup
         //     miss inserted into the map while other threads read it. We serve
         //     concurrent requests, so two of them compiling different kernels
-        //     at once is ordinary traffic, not a corner case.
+        //     at once is ordinary traffic. The realistic outcomes include a
+        //     torn read handing back the wrong pipeline state — the wrong
+        //     kernel dispatched, not only a crash. This closes the hot path;
+        //     Device::clear_library still mutates the same map under a
+        //     different mutex, which nothing we call reaches.
         //   - ml-explore/mlx#3810 — NAX split-K GEMM instantiated the JIT
         //     kernel with the output dtype instead of the input dtype, so a
         //     bf16 matmul read its inputs as float: out-of-bounds loads and
@@ -44,28 +49,49 @@ let package = Package(
         //     an unaligned tile. Carried preventively.
         //   - ml-explore/mlx#3361 — the NAX attention kernel held its tile
         //     positions in short, so a KV sequence past 32767 wrapped negative
-        //     and the mask was read from the wrong offsets. Reproduced here on
+        //     and the mask was read from a negative offset. Reproduced here on
         //     an M5 Max: cosine 0.0 and non-finite output at KV=40960, correct
         //     at KV=8192. This is the flagship long-context path — the tiered
         //     SSD KV cache exists precisely to reach these lengths. Pinned by
         //     NAXAttentionAndAddMMParityTests.
+        //
+        //     Only the array-mask half was ever reachable. The causal half
+        //     overflows the same way but uses the positions solely in `r < c`,
+        //     where both sides shift by 65536 together and the comparison
+        //     survives — and they always do shift together, since that block
+        //     runs only near the diagonal. Measured: the causal case passes
+        //     against the pre-fix pin at KV=40960. Both halves are widened
+        //     anyway, to stay in step with upstream.
         //   - ml-explore/mlx#3960 — sorted gather_mm derived the activation row
-        //     stride from a dimension that can be a singleton, which is the
-        //     shape MoE expert dispatch produces during single-token decode.
-        //   - ml-explore/mlx#3632 — gather_qmm built a NAX kernel name the
-        //     library does not export, so quantized MoE on NAX hardware fails
-        //     to load its kernel. Loud rather than silent, unlike the rest.
+        //     stride from a dimension that can be a singleton. Carried
+        //     preventively: MoE decode is the shape that would produce it, but
+        //     ensure_row_contiguous appears to normalise the stride before the
+        //     kernel sees it, and no triggering input has been constructed.
+        //   - ml-explore/mlx#3632 — gather_qmm_nax built its kernel name with
+        //     bk = 32 while the sibling qmm_nax uses 64. In an ahead-of-time
+        //     build that name is not exported and the lookup fails; mlx-swift
+        //     excludes nojit_kernels.cpp and instantiates on demand, so we
+        //     never hit the failure. Carried to keep the tiling in step with
+        //     upstream, not to fix a break we have.
         //
         // #3497 and #3631 are pinned by QuantizedMatmulParityTests, #3560 by
         // SteelGemmSafeLoadParityTests.
         //
-        // Deliberately NOT carried: ml-explore/mlx#3422 ("AddMM was completely
-        // broken on NAX"). That defect arrived with upstream's NAXFrag refactor
-        // after v0.31.1 — the epilogue bound its destination fragment by value
-        // and dropped the bias. Our vendored tree predates the refactor and
-        // binds a reference, so it never had the bug; the rest of that commit
-        // is split-K tuning against a code shape we do not have. The addmm case
-        // in NAXAttentionAndAddMMParityTests holds that property.
+        // Deliberately NOT carried: ml-explore/mlx#3422. Upstream's own summary
+        // lists what it does: split-K matmuls were being routed to the non-NAX
+        // version (a routing bug — correct results, slower kernel), tuning for
+        // the M5 Max, and "AddMM was completely broken on NAX". Only the last
+        // is a correctness bug, and it arrived with the NAXFrag refactor after
+        // v0.31.1: the epilogue bound its destination fragment by value and
+        // dropped the bias. Our tree predates the refactor and binds a
+        // reference, so it never had it.
+        //
+        // The matmul.cpp half does apply cleanly — we have that code shape. It
+        // is left out because it is routing and tuning measured on a
+        // post-refactor tree, and there is no way to validate a retune here.
+        // Revisit if NAX split-K throughput ever matters. The addmm case in
+        // NAXAttentionAndAddMMParityTests holds the correctness property either
+        // way.
         //
         // The fork carries no API changes. Drop this override and return to
         // the upstream package as soon as mlx-swift vendors core >= 0.32
@@ -73,7 +99,7 @@ let package = Package(
         // the switch-back). Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "049bb52f24fed0a0b26b183edbd0de78fcf9da3e"),
+            revision: "860f6b24785a59e52e574557f6605c6b2c734fbb"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
