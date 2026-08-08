@@ -277,3 +277,43 @@ requirements (`brew install --cask` validates `xattr` / Gatekeeper
 state on macOS 14+), which we don't have until issue #19 lands. Users
 who want GUI distribution via Homebrew can revisit this once the DMG
 is signed + notarized.
+
+## Before every release: scan upstream mlx for fixes we don't carry
+
+`MacMLXCore/Package.swift` pins a **fork** of mlx-swift by revision. That buys
+reproducibility and costs us what a version range gives for free: upstream's
+correctness fixes stop arriving. Nothing warns us — build green, tests green,
+and the shipped binary quietly runs unpatched kernels.
+
+This is not hypothetical. `ml-explore/mlx#3810` (NAX split-K GEMM reading bf16
+inputs as float — silent garbage, no crash, no NaN guard) sat in mlx v0.32.0
+for a month while our DMG shipped without it. It surfaced only because a
+stranger mentioned it in passing on an unrelated issue thread.
+
+So, as a release step:
+
+```bash
+./scripts/scan-upstream-mlx-fixes.sh
+```
+
+It resolves the fork point of our vendored mlx, then lists upstream commits
+since then that touch `mlx/backend/metal` and read like fixes, minus the ones
+the fork already carries. It decides nothing — it hands a human a candidate
+list.
+
+For each candidate, the questions that matter:
+
+- **Can it reach us at all?** Some fixes are CUDA-only.
+- **Is it JIT-only?** mlx-swift builds with `MLX_METAL_JIT=ON`, so a JIT-only
+  fix reaches us even when the AOT-compiled Python wheel is unaffected — this
+  is exactly how #3810 hid.
+- **What dtype/shape/hardware window triggers it?** Narrow windows still
+  matter when the failure is silent; wrong numbers are worse than a crash,
+  because they read as a bad model rather than a bug.
+
+Anything that can produce wrong numbers gets a cherry-pick onto the fork
+before release, plus a regression test that fails if a later bump drops it
+(see `NAXSplitKGemmParityTests` for the shape of one).
+
+When mlx-swift finally vendors mlx-core ≥ 0.32 and the fork dies, delete this
+section and the script with it.
