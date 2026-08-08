@@ -33,7 +33,28 @@ final class AVSpeechPlayer: NSObject, SpeechPlaying {
         player.delegate = self
         self.player = player
         self.onFinish = onFinish
-        player.play()
+
+        // `play()` can return false after a successful init — no output device,
+        // the buffer refuses to prepare. No delegate callback follows a refusal,
+        // so ignoring the result strands the caller: it has already entered its
+        // speaking state and would wait forever for a finish that cannot come.
+        // Tear down and throw so the failure surfaces where the caller can show
+        // it, exactly as an init failure does.
+        guard player.play() else {
+            stop()
+            throw PlaybackError.couldNotStart
+        }
+    }
+
+    enum PlaybackError: LocalizedError {
+        case couldNotStart
+
+        var errorDescription: String? {
+            switch self {
+            case .couldNotStart:
+                "Could not start audio playback."
+            }
+        }
     }
 
     func stop() {
