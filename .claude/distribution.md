@@ -317,3 +317,33 @@ before release, plus a regression test that fails if a later bump drops it
 
 When mlx-swift finally vendors mlx-core ≥ 0.32 and the fork dies, delete this
 section and the script with it.
+
+### Carrying a fix: bumping the submodule is not always enough
+
+mlx is a git submodule of mlx-swift, but mlx-swift does **not** compile the
+submodule's Metal kernel headers. It embeds them, stringified, into checked-in
+files under `Source/Cmlx/mlx-generated/`, and the JIT compiles those. Moving
+the submodule pointer leaves those copies holding the old kernel text.
+
+So the rule depends on what the upstream fix touched:
+
+| fix touches | submodule bump enough? |
+|---|---|
+| host C++ (`backend/metal/*.cpp`, `*.h` outside `kernels/`) | yes — compiled from source |
+| `backend/metal/kernels/**` | **no** — regenerate `mlx-generated/` too |
+
+`ml-explore/mlx#3810` was the first kind and made the second look unnecessary.
+`#3497` and `#3631` were the second kind: after the bump their parity tests
+failed with **byte-identical** numbers, because the JIT was still compiling the
+pre-fix text. Identical readings rather than improved ones is the tell — if a
+fix appears to have no effect at all, check what is actually being compiled
+before concluding the fix doesn't apply to us.
+
+When regenerating, replace only the section belonging to the header you
+patched. Several generated files embed more than one source — `fp_quantized.cpp`
+and `fp_quantized_nax.cpp` each carry `fp4.h` and `fp8.h` alongside the main
+one — and replacing wholesale silently drops them.
+
+Verify by diffing the embedded region against its source: they match verbatim
+apart from a short auto-generated header, so a content difference means the
+regeneration is wrong.
