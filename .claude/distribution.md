@@ -347,3 +347,47 @@ one — and replacing wholesale silently drops them.
 Verify by diffing the embedded region against its source: they match verbatim
 apart from a short auto-generated header, so a content difference means the
 regeneration is wrong.
+
+### Carrying a fix is not shipping it: check what each root resolves
+
+`magicnight/mlx-swift` and the `ml-explore/mlx-swift` that `mlx-swift-lm`
+depends on share the SwiftPM identity `mlx-swift`. When identities collide the
+**root** package's declaration picks the winner, so every root that builds a
+shippable artifact has to declare the fork itself. There are three:
+
+| artifact | root | declares the fork in |
+|---|---|---|
+| `MacMLXCore` tests | `MacMLXCore/Package.swift` | itself |
+| `macmlx` CLI / Homebrew tarball | `macmlx-cli/Package.swift` | itself |
+| `macMLX.app` / the DMG | `macMLX/macMLX.xcodeproj` | its `packageReferences` |
+
+Each was found the same way and separately: the CLI in 2026-08, the app in
+2026-08 while reading unrelated `xcodebuild -list` output. In both cases the
+fork was declared in `MacMLXCore` alone, both builds resolved upstream, and
+nothing failed — the artifacts built, ran, and produced plausible output using
+unpatched kernels. `MacMLXCore`'s parity tests could not catch it because they
+are their own root and resolve the fork correctly, which is exactly what made
+the gap invisible: the fixes were verified in a graph the shipped product did
+not use.
+
+The declaration tests (`CLIForkPinTests`, `AppForkPinTests`) guard against the
+declaration being dropped. They do not prove the resolution honored it, so CI
+also asserts the app's resolved `Package.resolved` names the fork. When adding
+a fourth root, add both.
+
+### A probe that passes has proved nothing until it reached the kernel
+
+These fixes live in kernels chosen by a dispatch decision, so a probe answers
+"does this bug reach us?" only if its inputs actually select the kernel that
+carries the bug. The first probe for `ml-explore/mlx#3361` used a single query
+row to keep the tensors small, and passed — MLX routes to the vector attention
+kernel at `query_sequence_length <= 8` and to the steel/NAX one above it, so it
+had exercised a kernel that never had the defect. Re-run at 128 query rows it
+failed immediately: cosine 0.0 and non-finite output.
+
+Before reading a pass as "not applicable", find the dispatch condition in the
+backend and check the probe satisfies it. Read the vendored code for the defect
+itself too — `#3422` really is inapplicable to us, but that is because our
+vintage predates the refactor that introduced it, which only the source shows.
+Absent both checks a green probe means "did not reach it", not "does not have
+it".

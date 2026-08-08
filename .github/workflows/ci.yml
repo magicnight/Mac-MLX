@@ -233,6 +233,39 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
+      # The app resolved upstream mlx-swift for months while MacMLXCore's own
+      # tests resolved the fork, so every cherry-pick was verified in a graph
+      # the shipped app did not use. `AppForkPinTests` guards the declaration;
+      # this guards the outcome, which is the part that actually ships. The
+      # lockfile is gitignored, so it can only be checked after a resolve —
+      # which the build step above has just done.
+      - name: The app resolved the controlled mlx-swift fork
+        run: |
+          RESOLVED=macMLX/macMLX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          if [ ! -f "$RESOLVED" ]; then
+            echo "::error::$RESOLVED is missing — the app never resolved its packages."
+            exit 1
+          fi
+          python3 - "$RESOLVED" <<'PY'
+          import json, sys
+          pins = json.load(open(sys.argv[1]))
+          pins = pins.get("pins") or pins.get("object", {}).get("pins", [])
+          for pin in pins:
+              location = pin.get("location") or pin.get("repositoryURL", "")
+              if "mlx-swift" in location and "mlx-swift-lm" not in location:
+                  if "magicnight/mlx-swift" in location:
+                      print(f"app resolved the fork: {location} @ {pin['state']}")
+                      sys.exit(0)
+                  print(
+                      "::error::The app resolved "
+                      f"{location} instead of magicnight/mlx-swift. It would "
+                      "ship without the fork's cherry-picks."
+                  )
+                  sys.exit(1)
+          print("::error::The app's resolved graph names no mlx-swift at all.")
+          sys.exit(1)
+          PY
+
       # App-target unit tests. NOT gated on Metal, and deliberately so: the
       # suite drives BenchmarkViewModel against a scripted stub engine, so no
       # MLX kernel ever runs and this job needs no MetalToolchain download.

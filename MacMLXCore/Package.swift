@@ -9,13 +9,19 @@ let package = Package(
     ],
     dependencies: [
         // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
-        // upstream mlx-swift 0.31.6 plus FOUR cherry-picks, all already in
+        // upstream mlx-swift 0.31.6 plus NINE cherry-picks, all already in
         // mlx-core but not yet vendored by any mlx-swift release (see
-        // ml-explore/mlx-swift#441). Every one of the last three produces
-        // silently wrong numbers rather than a crash, and each was reproduced
-        // here on an M5 Max before being carried:
+        // ml-explore/mlx-swift#441). All but #4043 and #3632 produce silently
+        // wrong numbers rather than an error, which is why the ones we could
+        // reproduce here carry a parity test rather than being left to surface
+        // on their own:
         //
         //   - ml-explore/mlx#3498 — batched single-token RoPE fix.
+        //   - ml-explore/mlx#4043 — the Metal kernel cache looked itself up
+        //     with operator[] while holding only a shared lock, so a lookup
+        //     miss inserted into the map while other threads read it. We serve
+        //     concurrent requests, so two of them compiling different kernels
+        //     at once is ordinary traffic, not a corner case.
         //   - ml-explore/mlx#3810 — NAX split-K GEMM instantiated the JIT
         //     kernel with the output dtype instead of the input dtype, so a
         //     bf16 matmul read its inputs as float: out-of-bounds loads and
@@ -34,8 +40,32 @@ let package = Package(
         //     leaves a column band corrupted. Reached through an lm_head whose
         //     vocab is unaligned — MiniCPM3-4B's 73448 is one, and one we
         //     list as supported.
+        //   - ml-explore/mlx#3560 — steel GEMM safe load read past the edge of
+        //     an unaligned tile. Carried preventively.
+        //   - ml-explore/mlx#3361 — the NAX attention kernel held its tile
+        //     positions in short, so a KV sequence past 32767 wrapped negative
+        //     and the mask was read from the wrong offsets. Reproduced here on
+        //     an M5 Max: cosine 0.0 and non-finite output at KV=40960, correct
+        //     at KV=8192. This is the flagship long-context path — the tiered
+        //     SSD KV cache exists precisely to reach these lengths. Pinned by
+        //     NAXAttentionAndAddMMParityTests.
+        //   - ml-explore/mlx#3960 — sorted gather_mm derived the activation row
+        //     stride from a dimension that can be a singleton, which is the
+        //     shape MoE expert dispatch produces during single-token decode.
+        //   - ml-explore/mlx#3632 — gather_qmm built a NAX kernel name the
+        //     library does not export, so quantized MoE on NAX hardware fails
+        //     to load its kernel. Loud rather than silent, unlike the rest.
         //
-        // The last two are pinned by QuantizedMatmulParityTests.
+        // #3497 and #3631 are pinned by QuantizedMatmulParityTests, #3560 by
+        // SteelGemmSafeLoadParityTests.
+        //
+        // Deliberately NOT carried: ml-explore/mlx#3422 ("AddMM was completely
+        // broken on NAX"). That defect arrived with upstream's NAXFrag refactor
+        // after v0.31.1 — the epilogue bound its destination fragment by value
+        // and dropped the bias. Our vendored tree predates the refactor and
+        // binds a reference, so it never had the bug; the rest of that commit
+        // is split-K tuning against a code shape we do not have. The addmm case
+        // in NAXAttentionAndAddMMParityTests holds that property.
         //
         // The fork carries no API changes. Drop this override and return to
         // the upstream package as soon as mlx-swift vendors core >= 0.32
@@ -43,7 +73,7 @@ let package = Package(
         // the switch-back). Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "4a9db6cee379727898c538a376c16ff3b147d7d2"),
+            revision: "049bb52f24fed0a0b26b183edbd0de78fcf9da3e"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),

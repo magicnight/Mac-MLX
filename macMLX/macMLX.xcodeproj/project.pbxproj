@@ -157,6 +157,7 @@
 			packageReferences = (
 				0A46F36B2F9144FF0046E74C /* XCLocalSwiftPackageReference "../MacMLXCore" */,
 				0A701A4F2F91E797000E48AF /* XCRemoteSwiftPackageReference "Sparkle" */,
+				0AB1C2D42FA1000100000010 /* XCRemoteSwiftPackageReference "mlx-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0A46F35E2F9142070046E74C /* Products */;
@@ -498,6 +499,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 2.0.0;
+			};
+		};
+		0AB1C2D42FA1000100000010 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/magicnight/mlx-swift.git";
+			requirement = {
+				kind = revision;
+				revision = 049bb52f24fed0a0b26b183edbd0de78fcf9da3e;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

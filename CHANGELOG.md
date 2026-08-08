@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **macMLX.app was not running the patched MLX engine at all.** The app is
+  built from an Xcode project, and that project declared no `mlx-swift`
+  dependency of its own — so when our controlled fork and the upstream
+  `mlx-swift` that `mlx-swift-lm` pulls in collided on the same package
+  identity, upstream won and the app linked it. Every release since the fork
+  was introduced therefore shipped a GUI without any of its correctness
+  cherry-picks, even though `MacMLXCore`'s own tests (which resolve the fork,
+  being their own root) verified each one. The CLI had the same defect from a
+  different root and was fixed earlier; this is the app's half. The project now
+  pins the fork by revision, a test guards the declaration, and CI now asserts
+  the *resolved* graph rather than trusting the declaration.
+- **Long-context attention returned garbage on M5 hardware.** Past a 32K KV
+  sequence the NAX attention kernel wrapped its tile positions through a 16-bit
+  type and read the mask from the wrong offsets, producing non-finite output
+  with no error — exactly the context lengths the tiered SSD KV cache exists to
+  reach. Reproduced here on an M5 Max and carried onto the vendored MLX fork
+  (`ml-explore/mlx#3361`), along with three more upstream fixes our pin
+  predated: a sorted `gather_mm` row stride that affects MoE decode (`#3960`),
+  a `gather_qmm` kernel-name mismatch that fails quantized MoE on the same
+  hardware (`#3632`), and a Metal kernel-cache lookup that inserted into the
+  cache while holding only a read lock, which concurrent requests can hit
+  (`#4043`). Apple Silicon before M5 is unaffected by the first three.
+
 ## [0.8.0] - 2026-07-19
 
 Tiered SSD KV cache, hardened end to end: the cold cache is now bounded,
