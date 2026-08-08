@@ -43,7 +43,7 @@ let package = Package(
         // the switch-back). Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "e93141ef1c7551fbe5e50281eefb792537a82fc4"),
+            revision: "4a9db6cee379727898c538a376c16ff3b147d7d2"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),

@@ -112,6 +112,24 @@ jobs:
           swift package --package-path macmlx-cli resolve
           swift test --package-path macmlx-cli
 
+      # The two resolves above rewrite Package.resolved in place when a manifest
+      # has moved on without it. That self-healing is why a Swift test cannot
+      # police its own lockfile — by the time assertions run, the file has
+      # already been corrected — so the check has to live out here, where the
+      # rewrite itself is the evidence.
+      #
+      # A stale lockfile does not break the build (SwiftPM re-resolves), but it
+      # leaves a checked-in file naming an engine revision nobody runs. That is
+      # the same quiet mismatch that let the CLI ship against upstream mlx-swift
+      # while the app used the controlled fork.
+      - name: Lockfiles are up to date
+        run: |
+          if ! git diff --exit-code -- MacMLXCore/Package.resolved macmlx-cli/Package.resolved; then
+            echo "::error::A Package.resolved changed during resolve — the checked-in lockfile is stale."
+            echo "Run 'swift package --package-path <pkg> resolve' locally and commit the result."
+            exit 1
+          fi
+
       - name: Smoke-run macmlx --version
         run: swift run --package-path macmlx-cli macmlx --version
 
