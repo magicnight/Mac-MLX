@@ -19,6 +19,17 @@ struct ChatMessageView: View {
     /// management — same underlying semantics as Git's soft reset but
     /// at the per-message level.
     var onTruncate: (() -> Void)? = nil
+    /// Toggle read-aloud for this message (v0.8+). Nil for messages that
+    /// can't be spoken — user turns, tool rows, and every message when no
+    /// text-to-speech model is installed.
+    var onSpeak: (() -> Void)? = nil
+    /// This message currently owns the speaker: the button offers "stop".
+    var isSpeaking: Bool = false
+    /// Waiting on the synthesis model, before any sound exists to play.
+    var isSynthesizingSpeech: Bool = false
+    /// Why read-aloud failed for THIS message, or nil. Scoped per message so
+    /// one bubble's failure isn't reported on every other one.
+    var speechError: String? = nil
 
     var body: some View {
         if let activity = message.toolActivity {
@@ -129,8 +140,51 @@ struct ChatMessageView: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+
+                // Read-aloud lives in the metadata row rather than floating
+                // over the bubble: it's a secondary action on a finished
+                // message, the same weight as the token count beside it.
+                if let onSpeak {
+                    speakButton(onSpeak)
+                }
+            }
+
+            if let speechError {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text(speechError)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
+    }
+
+    /// Speaker control for one assistant message. Three states, because
+    /// "waiting for the model" and "audio is playing" feel identical
+    /// otherwise — and synthesis can take seconds with nothing audible.
+    @ViewBuilder
+    private func speakButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            if isSynthesizingSpeech {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.7)
+            } else {
+                Image(systemName: isSpeaking ? "stop.circle.fill" : "speaker.wave.2")
+                    .font(.caption2)
+                    .foregroundStyle(isSpeaking ? Color.accentColor : Color.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(
+            isSynthesizingSpeech
+            ? "Generating speech… click to cancel"
+            : (isSpeaking ? "Stop reading" : "Read this reply aloud")
+        )
     }
 
     /// Inline thumbnail strip rendered above the text bubble for any

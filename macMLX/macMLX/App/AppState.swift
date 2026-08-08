@@ -69,6 +69,21 @@ public final class AppState {
     /// same rationale as `chat`.
     let benchmark: BenchmarkViewModel
 
+    /// In-process speech engine backing the chat tab's transcription and
+    /// read-aloud actions. Cheap to hold: constructing it loads no model, and
+    /// the view models below cold-swap on demand.
+    let audio: AudioEngine
+
+    /// Audio-attachment view model for the chat composer. Owned here for the
+    /// same reason as `chat`: a transcription in flight must survive a sidebar
+    /// tab switch rather than being torn down mid-run.
+    let audioTranscription: AudioTranscriptionViewModel
+
+    /// Read-aloud view model. App-scoped deliberately — "at most one message is
+    /// speaking" is a global invariant, enforceable only by a single owner
+    /// (see `SpeechPlaybackViewModel`).
+    let speechPlayback: SpeechPlaybackViewModel
+
     /// Long-lived model-library VM. Owned by AppState (not
     /// ModelLibraryView's @State) so tab switches don't tear down
     /// in-flight HF downloads — same pattern as `chat` (issue #1).
@@ -156,6 +171,12 @@ public final class AppState {
             logs: logs,
             siliconMonitor: siliconMonitor
         )
+
+        let audio = AudioEngine()
+        self.audio = audio
+        self.audioTranscription = AudioTranscriptionViewModel(service: audio)
+        self.speechPlayback = SpeechPlaybackViewModel(
+            service: audio, player: AVSpeechPlayer())
 
         // Rehydrate per-model state after any model load, regardless of
         // which surface triggered it (Models tab, Benchmark tab, CLI via

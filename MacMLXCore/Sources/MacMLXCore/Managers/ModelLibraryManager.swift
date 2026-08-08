@@ -79,6 +79,14 @@ public actor ModelLibraryManager {
                 )
                 results.append(model)
 
+            case .audioSTT, .audioTTS:
+                // Unreachable from this scan: audio models live in their own
+                // cache layout and are discovered by `scanAudioModels(root:)`,
+                // and `ModelFormat.detect(in:)` never returns these. Listed
+                // explicitly so adding an audio format can't silently acquire
+                // managed-directory discovery it was never designed for.
+                break
+
             case .gguf:
                 print("[ModelLibraryManager] Skipping GGUF directory: \(dirName)")
 
@@ -176,6 +184,104 @@ public actor ModelLibraryManager {
         var seenIDs = Set<String>()
         let deduped = results.filter { seenIDs.insert($0.id).inserted }
         return deduped.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// Scans the `mlx-audio-swift` download cache for speech models.
+    ///
+    /// A third scan alongside ``scan(_:)`` and ``scanHuggingFaceCache(directories:)``
+    /// rather than an option on either, because the layout is a third one:
+    /// `<root>/mlx-audio/<owner>_<repo>/`, flat, with no `snapshots/<sha>`
+    /// indirection and no guarantee of the `tokenizer.json` that
+    /// `ModelFormat.detect(in:)` insists on (mlx-audio downloads match
+    /// `*.safetensors`, `*.json`, `*.txt`, `*.wav`, and several speech
+    /// families ship no `tokenizer.json` at all). Running the managed-directory
+    /// scan over this root would therefore find nothing.
+    ///
+    /// Completeness is judged by EXACTLY the criterion
+    /// `ModelUtils.resolveOrDownloadModel` applies to decide whether its own
+    /// cache entry is usable or must be re-downloaded: at least one non-empty
+    /// `.safetensors`, plus a `config.json` that parses. Matching it is the
+    /// point — listing a directory upstream would consider incomplete would
+    /// offer the user a model that re-downloads the moment they touch it.
+    ///
+    /// Discovered ids are REPO IDS (`openai/whisper-tiny`), recovered from the
+    /// folder name, not directory paths: ``AudioEngine/loadSTT(_:)`` accepts
+    /// only a repo id, so an id of any other shape would be unloadable.
+    /// `isExternalReference` stays `false` — unlike an HF-cache entry this
+    /// directory is inside macMLX's own data root, so deleting it is the
+    /// app's business and costs at most a re-download.
+    ///
+    /// Best-effort at every level, like the sibling scans: a missing root, an
+    /// unreadable entry, an unparseable config, or a `model_type` neither
+    /// upstream loader dispatches on all skip that one entry rather than
+    /// failing the scan. Skipping an unrecognised type is the honest gate —
+    /// a badge is only shown for a model that can actually load.
+    ///
+    /// - Parameter root: The `HubCache` root ``AudioEngine`` is pinned to
+    ///   (`AudioEngine.modelCacheDirectory`). The `mlx-audio` subdirectory is
+    ///   appended here.
+    /// - Returns: Discovered audio models, sorted by `displayName`.
+    @discardableResult
+    public func scanAudioModels(root: URL) async -> [LocalModel] {
+        let audioRoot = root.appendingPathComponent(AudioModelRegistry.cacheSubdirectory)
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: audioRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var results: [LocalModel] = []
+
+        for entry in entries {
+            guard (try? isDirectory(entry)) == true,
+                  let repoID = AudioModelRegistry.repoID(fromCacheFolderName: entry.lastPathComponent)
+            else { continue }
+
+            let fileURLs = (try? fileManager.contentsOfDirectory(
+                at: entry,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+
+            guard hasUsableWeights(fileURLs),
+                  let config = readConfig(in: entry),
+                  let format = AudioModelRegistry.format(
+                      forModelType: AudioModelRegistry.modelType(fromConfig: config))
+            else { continue }
+
+            results.append(buildLocalModel(
+                dirName: repoID,
+                dirURL: entry,
+                fileURLs: fileURLs,
+                format: format
+            ))
+        }
+
+        return results.sorted {
+            $0.displayName.localizedCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    /// Whether at least one non-empty `.safetensors` is present — upstream's
+    /// own "is this cache entry complete" test. A zero-byte weight file is the
+    /// signature of an interrupted download, which upstream reacts to by
+    /// clearing the directory and starting over.
+    private func hasUsableWeights(_ fileURLs: [URL]) -> Bool {
+        fileURLs.contains { url in
+            guard url.pathExtension.lowercased() == "safetensors" else { return false }
+            let resolved = url.resolvingSymlinksInPath()
+            let size = (try? resolved.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            return size > 0
+        }
+    }
+
+    /// Decode a directory's `config.json`, or `nil` when absent/malformed.
+    private func readConfig(in directory: URL) -> [String: Any]? {
+        let configURL = directory.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json
     }
 
     /// Deletes `model`'s on-disk directory.

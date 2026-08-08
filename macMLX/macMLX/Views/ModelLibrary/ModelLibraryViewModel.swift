@@ -158,6 +158,19 @@ final class ModelLibraryViewModel {
                         .sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
                 }
 
+                // Speech models (v0.8+). Always merged, with no opt-in toggle:
+                // unlike the HF cache this directory belongs to macMLX, so
+                // anything in it got there because the user asked this app to
+                // fetch it. No de-duplication pass either — audio ids are repo
+                // ids under a cache root nothing else scans, so they cannot
+                // collide with either of the scans above.
+                let audioModels = await library.scanAudioModels(
+                    root: AudioEngine.modelCacheDirectory)
+                if !audioModels.isEmpty {
+                    found = (found + audioModels)
+                        .sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
+                }
+
                 guard !Task.isCancelled else { return }
                 localModels = found
                 await LogManager.shared.info(
