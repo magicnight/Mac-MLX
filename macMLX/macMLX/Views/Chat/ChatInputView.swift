@@ -15,15 +15,37 @@ struct ChatInputView: View {
     /// True when the loaded model accepts images (VLM). Drives the
     /// paperclip button's enabled state.
     let canAttachImages: Bool
+    /// True when a speech-to-text model is installed and unambiguously
+    /// resolvable. Drives the waveform button's enabled state — the button is
+    /// always visible so the feature is discoverable, and its tooltip explains
+    /// what is missing rather than the control silently not being there.
+    let canTranscribeAudio: Bool
+    /// A transcription is running: the waveform button becomes a stop control.
+    let isTranscribingAudio: Bool
+    /// Why the last transcription produced no text, or `nil`. Shown inline
+    /// above the composer so a failure is never swallowed.
+    let transcriptionError: String?
     let onSend: () -> Void
     let onStop: () -> Void
+    /// User picked an audio file to transcribe.
+    let onPickAudio: (URL) -> Void
+    /// User asked to abandon the running transcription.
+    let onCancelTranscription: () -> Void
+    /// User dismissed the transcription error.
+    let onDismissTranscriptionError: () -> Void
 
     @State private var isFileImporterPresented = false
+    @State private var isAudioImporterPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !attachedImages.isEmpty {
                 thumbnailStrip
+            }
+            if isTranscribingAudio {
+                transcribingStatusRow
+            } else if let transcriptionError {
+                transcriptionErrorRow(transcriptionError)
             }
             inputRow
         }
@@ -51,6 +73,18 @@ struct ChatInputView: View {
             case .failure:
                 // Silent — fileImporter surfaces its own error UI.
                 break
+            }
+        }
+        .fileImporter(
+            isPresented: $isAudioImporterPresented,
+            allowedContentTypes: [.audio, .mp3, .wav, .mpeg4Audio, .aiff],
+            allowsMultipleSelection: false
+        ) { result in
+            // One file at a time: the result replaces the composer's contents
+            // conceptually, and batching several transcripts into one message
+            // is not an ask anyone has made.
+            if case .success(let urls) = result, let url = urls.first {
+                onPickAudio(url)
             }
         }
     }
@@ -86,6 +120,82 @@ struct ChatInputView: View {
         }
     }
 
+    /// Live status while the model works. Transcription has no token stream to
+    /// watch, so without this the composer would sit inert for however long the
+    /// file takes and read as a button that did nothing.
+    private var transcribingStatusRow: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Transcribing…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Button("Cancel", action: onCancelTranscription)
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 2)
+    }
+
+    /// Inline failure notice for the last transcription. Dismissible, and
+    /// placed above the composer so it reads as belonging to the input rather
+    /// than to the conversation.
+    private func transcriptionErrorRow(_ message: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button(action: onDismissTranscriptionError) {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 2)
+    }
+
+    /// Audio-transcription button. Flips to a stop control while a
+    /// transcription runs, so the action is always cancellable — the model can
+    /// take a while on a long file and there must be a way out that is not
+    /// "quit the app".
+    private var transcribeButton: some View {
+        Button {
+            if isTranscribingAudio {
+                onCancelTranscription()
+            } else {
+                isAudioImporterPresented = true
+            }
+        } label: {
+            if isTranscribingAudio {
+                Image(systemName: "stop.circle")
+                    .foregroundStyle(.orange)
+                    .frame(width: 28, height: 28)
+            } else {
+                Image(systemName: "waveform")
+                    .foregroundStyle(canTranscribeAudio ? .secondary : Color.secondary.opacity(0.4))
+                    .frame(width: 28, height: 28)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isTranscribingAudio && !canTranscribeAudio)
+        .help(
+            isTranscribingAudio
+            ? "Stop transcribing"
+            : (canTranscribeAudio
+               ? "Transcribe an audio file into the message box"
+               : "Install a speech-to-text model (Whisper, Parakeet, …) to transcribe audio")
+        )
+    }
+
     private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
             // Image picker button (paperclip). Disabled when the loaded
@@ -104,6 +214,12 @@ struct ChatInputView: View {
                 ? "Attach image (jpeg, png, webp, gif, heic, bmp)"
                 : "Load a vision-capable model (Qwen-VL, Gemma-3, SmolVLM, …) to attach images"
             )
+
+            // Audio transcription. Independent of `isModelLoaded` on purpose:
+            // it runs on `AudioEngine`, not the chat model, so it works before
+            // a chat model is loaded — transcribing a file and then picking a
+            // model to ask about it is a reasonable order to work in.
+            transcribeButton
 
             // Auto-growing TextField keeps the cursor vertically centered
             // on a single line and expands to up to 5 lines. macOS 14+.
@@ -183,8 +299,14 @@ struct AsyncThumbnailImage: View {
             isGenerating: false,
             isModelLoaded: true,
             canAttachImages: true,
+            canTranscribeAudio: true,
+            isTranscribingAudio: false,
+            transcriptionError: nil,
             onSend: {},
-            onStop: {}
+            onStop: {},
+            onPickAudio: { _ in },
+            onCancelTranscription: {},
+            onDismissTranscriptionError: {}
         )
         ChatInputView(
             text: .constant(""),
@@ -192,8 +314,45 @@ struct AsyncThumbnailImage: View {
             isGenerating: true,
             isModelLoaded: true,
             canAttachImages: false,
+            canTranscribeAudio: false,
+            isTranscribingAudio: false,
+            transcriptionError: nil,
             onSend: {},
-            onStop: {}
+            onStop: {},
+            onPickAudio: { _ in },
+            onCancelTranscription: {},
+            onDismissTranscriptionError: {}
+        )
+        // Transcribing, and the failure state.
+        ChatInputView(
+            text: .constant(""),
+            attachedImages: .constant([]),
+            isGenerating: false,
+            isModelLoaded: true,
+            canAttachImages: false,
+            canTranscribeAudio: true,
+            isTranscribingAudio: true,
+            transcriptionError: nil,
+            onSend: {},
+            onStop: {},
+            onPickAudio: { _ in },
+            onCancelTranscription: {},
+            onDismissTranscriptionError: {}
+        )
+        ChatInputView(
+            text: .constant(""),
+            attachedImages: .constant([]),
+            isGenerating: false,
+            isModelLoaded: true,
+            canAttachImages: false,
+            canTranscribeAudio: true,
+            isTranscribingAudio: false,
+            transcriptionError: AudioTranscriptionViewModel.noSpeechMessage,
+            onSend: {},
+            onStop: {},
+            onPickAudio: { _ in },
+            onCancelTranscription: {},
+            onDismissTranscriptionError: {}
         )
     }
     .frame(width: 500)

@@ -19,7 +19,8 @@ struct LocalModelRow: View {
     let onShowDetails: () -> Void
 
     /// Short capsule label for the model's format: "OCR" for dedicated OCR models,
-    /// "Vision" for other VLMs, "Embed" for text embedders, "MLX" for plain text.
+    /// "Vision" for other VLMs, "Embed" for text embedders, "Rerank" for
+    /// cross-encoders, "STT"/"TTS" for speech models, "MLX" for plain text.
     /// OCR wins over Vision — an OCR model is still a `.mlxVLM`, but the more specific
     /// label tells the user what it is for.
     private var formatLabel: String {
@@ -27,7 +28,21 @@ struct LocalModelRow: View {
         switch model.format {
         case .mlxVLM: return "Vision"
         case .embedder: return "Embed"
+        case .reranker: return "Rerank"
+        case .audioSTT: return "STT"
+        case .audioTTS: return "TTS"
         default: return "MLX"
+        }
+    }
+
+    /// Tooltip for the format capsule. Only the abbreviated speech labels earn
+    /// one — "STT"/"TTS" carry no meaning for the newcomers this app is partly
+    /// for, and the badge is the only place their kind is stated.
+    private var formatHelp: String? {
+        switch model.format {
+        case .audioSTT: return "Speech-to-text — transcribe audio from the chat composer."
+        case .audioTTS: return "Text-to-speech — read assistant replies aloud."
+        default: return nil
         }
     }
 
@@ -71,6 +86,7 @@ struct LocalModelRow: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
                         .background(Color.green.opacity(0.12), in: Capsule())
+                        .help(formatHelp ?? "")
 
                     if model.isExternalReference {
                         Label("HF Cache", systemImage: "link")
@@ -95,7 +111,18 @@ struct LocalModelRow: View {
             Spacer()
 
             // Actions
-            if isLoading {
+            //
+            // Speech models have no Load action at all. They are served by
+            // `AudioEngine` from the chat tab, and routing one through
+            // `EngineCoordinator.load` is a guaranteed `modelLoadFailed` —
+            // so the affordance is withheld rather than offered and then
+            // explained, the same call `isExternalReference` makes for Delete.
+            if model.isAudio {
+                Text("Used from Chat")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Speech models load on demand when you transcribe audio or read a reply aloud.")
+            } else if isLoading {
                 ProgressView()
                     .scaleEffect(0.75)
                     .frame(width: 60)
@@ -118,12 +145,17 @@ struct LocalModelRow: View {
 
             CopyIDButton(id: model.id)
 
-            Button(action: onTogglePin) {
-                Image(systemName: isPinned ? "pin.fill" : "pin")
-                    .foregroundStyle(isPinned ? .orange : .secondary)
+            // Pinning governs eviction from the generation model pool, which
+            // never holds a speech model — so the control would write a
+            // preference nothing reads. Hidden for the same reason as Load.
+            if !model.isAudio {
+                Button(action: onTogglePin) {
+                    Image(systemName: isPinned ? "pin.fill" : "pin")
+                        .foregroundStyle(isPinned ? .orange : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(isPinned ? "Pinned — won't auto-evict" : "Pin to keep resident")
             }
-            .buttonStyle(.plain)
-            .help(isPinned ? "Pinned — won't auto-evict" : "Pin to keep resident")
 
             // HF-cache-referenced models aren't owned by macMLX — hide the
             // destructive action rather than let it delete shared cache

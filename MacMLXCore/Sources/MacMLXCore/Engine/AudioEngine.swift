@@ -67,6 +67,14 @@ public actor AudioEngine {
     public struct Speech: Sendable {
         public let samples: [Float]
         public let sampleRate: Int
+
+        /// Public so a caller outside this module can construct one — the GUI's
+        /// playback tests script synthesis results without a model. Mirrors
+        /// ``TranscriptionSegment``, which is public-init for the same reason.
+        public init(samples: [Float], sampleRate: Int) {
+            self.samples = samples
+            self.sampleRate = sampleRate
+        }
     }
 
     // MARK: Configuration

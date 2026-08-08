@@ -41,9 +41,33 @@ private struct ChatContent: View {
     /// the icon to a checkmark for ~1.2s after the user hits the button
     /// (or ⇧⌘C) so they have visual feedback that it worked.
     @State private var justCopiedModelID: Bool = false
+    /// Speech models discovered in the mlx-audio cache (v0.8+). Scanned here
+    /// rather than read off `appState.modelLibrary`, whose list stays empty
+    /// until the user actually visits the Models tab — the transcribe and
+    /// read-aloud controls have to work on a first run that never went there.
+    @State private var audioModels: [LocalModel] = []
 
     private var isModelLoaded: Bool {
         appState.coordinator.status.isLoaded
+    }
+
+    // MARK: - Speech model resolution (v0.8+)
+
+    /// Which STT model the transcribe button will use, or `nil` when the
+    /// choice is not unambiguous. See `LocalModel.resolveAudioModelID`.
+    private var sttModelID: String? {
+        LocalModel.resolveAudioModelID(
+            preferred: appState.currentSettings.sttModel,
+            from: audioModels,
+            format: .audioSTT)
+    }
+
+    /// Which TTS model the read-aloud button will use, or `nil`.
+    private var ttsModelID: String? {
+        LocalModel.resolveAudioModelID(
+            preferred: appState.currentSettings.ttsModel,
+            from: audioModels,
+            format: .audioTTS)
     }
 
     var body: some View {
@@ -80,17 +104,30 @@ private struct ChatContent: View {
                 isGenerating: viewModel.isGenerating,
                 isModelLoaded: isModelLoaded,
                 canAttachImages: viewModel.canAttachImages,
+                canTranscribeAudio: sttModelID != nil,
+                isTranscribingAudio: appState.audioTranscription.isTranscribing,
+                transcriptionError: appState.audioTranscription.errorMessage,
                 onSend: {
                     Task { await viewModel.send() }
                 },
                 onStop: {
                     viewModel.stopGeneration()
+                },
+                onPickAudio: { url in
+                    transcribe(url)
+                },
+                onCancelTranscription: {
+                    appState.audioTranscription.cancel()
+                },
+                onDismissTranscriptionError: {
+                    appState.audioTranscription.clearError()
                 }
             )
         }
         .navigationTitle("Chat")
         .task {
             await reloadAvailableModels()
+            await reloadAudioModels()
         }
         .onChange(of: appState.currentSettings.modelDirectory) { _, _ in
             Task { await reloadAvailableModels() }
@@ -227,6 +264,43 @@ private struct ChatContent: View {
         availableModels = (try? await appState.library.scan(dir)) ?? []
     }
 
+    private func reloadAudioModels() async {
+        audioModels = await appState.library.scanAudioModels(
+            root: AudioEngine.modelCacheDirectory)
+    }
+
+    // MARK: - Speech actions (v0.8+)
+
+    /// Transcribe `url` and APPEND the text to whatever is already in the
+    /// composer, rather than replacing it: the user may well have typed the
+    /// question before attaching the recording, and silently discarding that
+    /// would be the worse failure of the two.
+    private func transcribe(_ url: URL) {
+        Task { @MainActor in
+            await appState.audioTranscription.transcribe(
+                audioURL: url,
+                modelID: sttModelID
+            ) { text in
+                if viewModel.inputText.isEmpty {
+                    viewModel.inputText = text
+                } else {
+                    viewModel.inputText += " " + text
+                }
+            }
+        }
+    }
+
+    private func speak(_ message: UIChatMessage) {
+        Task { @MainActor in
+            await appState.speechPlayback.toggle(
+                messageID: message.id,
+                text: message.content,
+                modelID: ttsModelID,
+                voice: appState.currentSettings.ttsVoice
+            )
+        }
+    }
+
     // MARK: - Toolbar
 
     private var chatToolbar: some View {
@@ -328,7 +402,20 @@ private struct ChatContent: View {
                                 }
                                 : nil,
                             onDelete: { viewModel.delete(messageCopy.id) },
-                            onTruncate: { viewModel.truncateAfter(messageCopy.id) }
+                            onTruncate: { viewModel.truncateAfter(messageCopy.id) },
+                            // Only finished assistant prose is speakable: a
+                            // still-streaming bubble would be read aloud
+                            // half-written, and tool rows are JSON.
+                            onSpeak: (message.role == .assistant
+                                      && message.toolActivity == nil
+                                      && !message.isGenerating
+                                      && ttsModelID != nil)
+                                ? { speak(messageCopy) }
+                                : nil,
+                            isSpeaking: appState.speechPlayback.isActive(message.id),
+                            isSynthesizingSpeech:
+                                appState.speechPlayback.isSynthesizing(message.id),
+                            speechError: appState.speechPlayback.errorMessage(for: message.id)
                         )
                         .id(message.id)
                     }

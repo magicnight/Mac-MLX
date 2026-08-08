@@ -91,6 +91,45 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
+    /// Whether this entry is an ``AudioEngine`` model rather than something the
+    /// generation engine can load. Drives the Model Library's suppression of
+    /// the Load action: routing one of these through `EngineCoordinator.load`
+    /// is a guaranteed failure, so the affordance is withheld rather than
+    /// offered and then explained.
+    public var isAudio: Bool {
+        format == .audioSTT || format == .audioTTS
+    }
+
+    /// Resolve which audio model a GUI action should use.
+    ///
+    /// - Parameters:
+    ///   - preferred: The user's persisted choice (`Settings.sttModel` /
+    ///     `Settings.ttsModel`). Honoured whenever it names a model actually
+    ///     present in `models` with the requested `format`.
+    ///   - models: Every discovered model; filtered by `format` here.
+    ///   - format: ``ModelFormat/audioSTT`` or ``ModelFormat/audioTTS``.
+    /// - Returns: The repo id to hand ``AudioEngine``, or `nil` when the
+    ///   choice is not unambiguous.
+    ///
+    /// The no-preference rule is deliberately strict: fall through to the
+    /// single installed model of that kind ONLY when there is exactly one.
+    /// With two or more, picking "the first" would silently transcribe with a
+    /// model the user never chose, and would change which one as soon as an
+    /// alphabetically-earlier model was installed. Returning `nil` instead
+    /// lets the caller say so and send the user to Settings. A stale
+    /// `preferred` that no longer names an installed model falls back to the
+    /// same rule rather than failing outright — uninstalling a model should
+    /// not brick the button while an unambiguous alternative exists.
+    public static func resolveAudioModelID(
+        preferred: String?, from models: [LocalModel], format: ModelFormat
+    ) -> String? {
+        let candidates = models.filter { $0.format == format }
+        if let preferred, candidates.contains(where: { $0.id == preferred }) {
+            return preferred
+        }
+        return candidates.count == 1 ? candidates[0].id : nil
+    }
+
     /// `model_type` values that denote a dedicated OCR model (as opposed to a
     /// general-purpose vision-language model). Deliberately narrow — only
     /// architectures whose whole purpose is text recognition — so the "OCR" badge
@@ -162,6 +201,21 @@ public enum ModelFormat: String, Codable, Hashable, Sendable, CaseIterable {
     /// engine. A model classified `.embedder` remains the documented
     /// bi-encoder cosine fallback for `/v1/rerank`.
     case reranker
+    /// Speech-to-text model served by ``AudioEngine`` (v0.8+). Unlike every
+    /// other case here it is NOT discovered from the managed model directory:
+    /// mlx-audio-swift keeps its downloads in its own layout under
+    /// `~/.mac-mlx/audio-models/mlx-audio/<owner>_<repo>/`, so
+    /// `ModelLibraryManager.scanAudioModels(root:)` finds these, never
+    /// `scan(_:)`. Classified by `config.json`'s `model_type` against
+    /// ``AudioModelRegistry/sttModelTypes``. Never routable to the generation
+    /// engine — `LocalModel.draftCandidates` and the chat model switcher both
+    /// exclude it by format.
+    case audioSTT
+    /// Text-to-speech model served by ``AudioEngine`` (v0.8+). Same on-disk
+    /// layout and discovery path as ``audioSTT``, distinguished by a
+    /// `model_type` in ``AudioModelRegistry/ttsModelTypes``. The two registries
+    /// are disjoint, so the distinction is exact rather than a priority order.
+    case audioTTS
     case gguf
     case unknown
 
