@@ -115,10 +115,20 @@ pattern = re.compile(
     r"\b(fix|fixes|fixed|bug|correct|incorrect|wrong|invalid|garbage|nan|"
     r"overflow|out.of.bounds|race|crash|regression)\b", re.I)
 
-rows, skipped = [], []
+rows, skipped, unparsed = [], [], []
 for line in sys.stdin:
-    parts = line.rstrip("\n").split("\t")
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    # maxsplit=2: a commit subject is copied verbatim from GitHub and may
+    # contain tabs. Splitting on every tab would yield >3 fields and drop the
+    # row — silently losing exactly the kind of commit this script exists to
+    # surface. The subject is the last field, so it keeps whatever it contains.
+    parts = line.split("\t", 2)
     if len(parts) != 3:
+        # Never swallow a row. A scanner that quietly discards input is worse
+        # than no scanner, because it reads as "nothing to see here".
+        unparsed.append(line)
         continue
     sha, date, subject = parts
     if not pattern.search(subject):
@@ -128,6 +138,13 @@ for line in sys.stdin:
         skipped.append((sha, date, subject))
         continue
     rows.append((sha, date, subject))
+
+if unparsed:
+    print(f"WARNING: {len(unparsed)} row(s) could not be parsed and were NOT")
+    print("scanned. Read them by hand — this tool must never lose a commit:")
+    for line in unparsed:
+        print(f"  {line!r}")
+    print()
 
 if skipped:
     print("Already carried by the fork:")
