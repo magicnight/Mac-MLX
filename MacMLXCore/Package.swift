@@ -9,9 +9,11 @@ let package = Package(
     ],
     dependencies: [
         // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
-        // upstream mlx-swift 0.31.6 plus TWO cherry-picks, both already in
-        // mlx-core 0.32.0 but not yet vendored by any mlx-swift release (see
-        // ml-explore/mlx-swift#441):
+        // upstream mlx-swift 0.31.6 plus FOUR cherry-picks, all already in
+        // mlx-core but not yet vendored by any mlx-swift release (see
+        // ml-explore/mlx-swift#441). Every one of the last three produces
+        // silently wrong numbers rather than a crash, and each was reproduced
+        // here on an M5 Max before being carried:
         //
         //   - ml-explore/mlx#3498 — batched single-token RoPE fix.
         //   - ml-explore/mlx#3810 — NAX split-K GEMM instantiated the JIT
@@ -19,8 +21,21 @@ let package = Package(
         //     bf16 matmul read its inputs as float: out-of-bounds loads and
         //     silent garbage, no crash and no NaN guard. Reachable on NAX
         //     hardware for a non-float32 matmul with batch 1, M*N >= 2048^2,
-        //     K >= 10240 and K >= 3*max(M, N) — reproduced here on an M5 Max,
-        //     and pinned by NAXSplitKGemmParityTests.
+        //     K >= 10240 and K >= 3*max(M, N). Pinned by
+        //     NAXSplitKGemmParityTests.
+        //   - ml-explore/mlx#3497 — qvm mishandles a stride-0 batch dimension,
+        //     the shape GQA produces when a quantized KV cache is broadcast
+        //     across repeat groups. Only the non-transposed product (scores @
+        //     values) reaches it, and only for M >= 2, which is why ordinary
+        //     single-token decode never showed it and speculative decoding
+        //     does. Not hardware-gated.
+        //   - ml-explore/mlx#3631 — NAX qmm edge-tile bounds computed in
+        //     short(), wrapping past 32767, so an unaligned N above 2^15
+        //     leaves a column band corrupted. Reached through an lm_head whose
+        //     vocab is unaligned — MiniCPM3-4B's 73448 is one, and one we
+        //     list as supported.
+        //
+        // The last two are pinned by QuantizedMatmulParityTests.
         //
         // The fork carries no API changes. Drop this override and return to
         // the upstream package as soon as mlx-swift vendors core >= 0.32
@@ -28,7 +43,7 @@ let package = Package(
         // the switch-back). Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "e1dd2c89fc47c7d73a9bc09ae5d21752c6662eb6"),
+            revision: "e93141ef1c7551fbe5e50281eefb792537a82fc4"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
