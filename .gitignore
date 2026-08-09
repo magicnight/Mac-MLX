@@ -59,6 +59,10 @@ public/
 
 # Process/dev docs — implementation plans kept local, not synced to git
 docs/superpowers/plans/
+.omx/
+
+# Local agent tool config — contains API keys, must never be committed
+.codex/
 
 # Isolated feature worktrees
 .worktrees/
