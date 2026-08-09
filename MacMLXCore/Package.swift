@@ -9,13 +9,24 @@ let package = Package(
     ],
     dependencies: [
         // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
-        // upstream mlx-swift 0.31.6 plus FOUR cherry-picks, all already in
+        // upstream mlx-swift 0.31.6 plus NINE cherry-picks, all already in
         // mlx-core but not yet vendored by any mlx-swift release (see
-        // ml-explore/mlx-swift#441). Every one of the last three produces
-        // silently wrong numbers rather than a crash, and each was reproduced
-        // here on an M5 Max before being carried:
+        // ml-explore/mlx-swift#441). Most of them produce silently wrong
+        // numbers rather than an error, which is why the ones we could
+        // reproduce here carry a parity test rather than being left to surface
+        // on their own. Two are carried preventively — #3560 and #3960 — and
+        // say so:
         //
         //   - ml-explore/mlx#3498 — batched single-token RoPE fix.
+        //   - ml-explore/mlx#4043 — the Metal kernel cache looked itself up
+        //     with operator[] while holding only a shared lock, so a lookup
+        //     miss inserted into the map while other threads read it. We serve
+        //     concurrent requests, so two of them compiling different kernels
+        //     at once is ordinary traffic. The realistic outcomes include a
+        //     torn read handing back the wrong pipeline state — the wrong
+        //     kernel dispatched, not only a crash. This closes the hot path;
+        //     Device::clear_library still mutates the same map under a
+        //     different mutex, which nothing we call reaches.
         //   - ml-explore/mlx#3810 — NAX split-K GEMM instantiated the JIT
         //     kernel with the output dtype instead of the input dtype, so a
         //     bf16 matmul read its inputs as float: out-of-bounds loads and
@@ -34,8 +45,53 @@ let package = Package(
         //     leaves a column band corrupted. Reached through an lm_head whose
         //     vocab is unaligned — MiniCPM3-4B's 73448 is one, and one we
         //     list as supported.
+        //   - ml-explore/mlx#3560 — steel GEMM safe load read past the edge of
+        //     an unaligned tile. Carried preventively.
+        //   - ml-explore/mlx#3361 — the NAX attention kernel held its tile
+        //     positions in short, so a KV sequence past 32767 wrapped negative
+        //     and the mask was read from a negative offset. Reproduced here on
+        //     an M5 Max: cosine 0.0 and non-finite output at KV=40960, correct
+        //     at KV=8192. This is the flagship long-context path — the tiered
+        //     SSD KV cache exists precisely to reach these lengths. Pinned by
+        //     NAXAttentionAndAddMMParityTests.
         //
-        // The last two are pinned by QuantizedMatmulParityTests.
+        //     Only the array-mask half was ever reachable. The causal half
+        //     overflows the same way but uses the positions solely in `r < c`,
+        //     where both sides shift by 65536 together and the comparison
+        //     survives — and they always do shift together, since that block
+        //     runs only near the diagonal. Measured: the causal case passes
+        //     against the pre-fix pin at KV=40960. Both halves are widened
+        //     anyway, to stay in step with upstream.
+        //   - ml-explore/mlx#3960 — sorted gather_mm derived the activation row
+        //     stride from a dimension that can be a singleton. Carried
+        //     preventively: MoE decode is the shape that would produce it, but
+        //     ensure_row_contiguous appears to normalise the stride before the
+        //     kernel sees it, and no triggering input has been constructed.
+        //   - ml-explore/mlx#3632 — gather_qmm_nax built its kernel name with
+        //     bk = 32 while the sibling qmm_nax uses 64. In an ahead-of-time
+        //     build that name is not exported and the lookup fails; mlx-swift
+        //     excludes nojit_kernels.cpp and instantiates on demand, so we
+        //     never hit the failure. Carried to keep the tiling in step with
+        //     upstream, not to fix a break we have.
+        //
+        // #3497 and #3631 are pinned by QuantizedMatmulParityTests, #3560 by
+        // SteelGemmSafeLoadParityTests.
+        //
+        // Deliberately NOT carried: ml-explore/mlx#3422. Upstream's own summary
+        // lists what it does: split-K matmuls were being routed to the non-NAX
+        // version (a routing bug — correct results, slower kernel), tuning for
+        // the M5 Max, and "AddMM was completely broken on NAX". Only the last
+        // is a correctness bug, and it arrived with the NAXFrag refactor after
+        // v0.31.1: the epilogue bound its destination fragment by value and
+        // dropped the bias. Our tree predates the refactor and binds a
+        // reference, so it never had it.
+        //
+        // The matmul.cpp half does apply cleanly — we have that code shape. It
+        // is left out because it is routing and tuning measured on a
+        // post-refactor tree, and there is no way to validate a retune here.
+        // Revisit if NAX split-K throughput ever matters. The addmm case in
+        // NAXAttentionAndAddMMParityTests holds the correctness property either
+        // way.
         //
         // The fork carries no API changes. Drop this override and return to
         // the upstream package as soon as mlx-swift vendors core >= 0.32
@@ -43,7 +99,7 @@ let package = Package(
         // the switch-back). Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "4a9db6cee379727898c538a376c16ff3b147d7d2"),
+            revision: "860f6b24785a59e52e574557f6605c6b2c734fbb"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
