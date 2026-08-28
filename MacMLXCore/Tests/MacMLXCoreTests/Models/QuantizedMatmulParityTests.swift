@@ -168,4 +168,106 @@ struct QuantizedMatmulParityTests {
             computed in short() wrapping past 32767.
             """)
     }
+
+    // MARK: - mlx#4251 — qvm split-K dropped the tail columns
+
+    /// `qvm_split_k` sized its dispatch grid with `N / bn`, a floor division, so
+    /// any output width that is not a multiple of the tile left its final
+    /// columns without a threadgroup — and therefore unwritten. Its own
+    /// non-split-K sibling, ten lines away in the same file, already used the
+    /// ceiling form; that internal disagreement is the clearest evidence the
+    /// floor was wrong.
+    ///
+    /// Reaching it takes the whole dispatch chain: `M` below the vector limit,
+    /// `transpose == false`, and `K >= 1024`. The tile is
+    /// `min(group_size, 32) * 2`, i.e. 64 for every group size, while a
+    /// non-transposed weight is quantized along `N` and so only has to be a
+    /// multiple of `group_size`. At group size 64 or 128 that makes `N` a
+    /// multiple of 64 and the floor is exact — it is **group size 32** that
+    /// admits an `N` of 96, 160, 224 and leaves 32 columns behind.
+    @Test("a group-32 quantized vector-matrix product writes its tail columns")
+    func groupSize32QvmWritesTailColumns() {
+        let k = 2048, n = 96, m = 1  // K >= 1024 → split-K; n % 64 == 32 → tail
+        let groupSize = 32, bits = 4
+
+        MLXRandom.seed(3)
+        let weights = MLXRandom.normal([k, n]).asType(.float16)
+        let (weightsQ, scales, biases) = MLX.quantized(
+            weights, groupSize: groupSize, bits: bits)
+        let dequantized = MLX.dequantized(
+            weightsQ, scales: scales, biases: biases,
+            groupSize: groupSize, bits: bits).asType(.float32)
+
+        let x = MLXRandom.normal([m, k]).asType(.bfloat16)
+        let underTest = MLX.quantizedMatmul(
+            x, weightsQ, scales: scales, biases: biases,
+            transpose: false, groupSize: groupSize, bits: bits)
+        let reference = MLX.matmul(x.asType(.float32), dequantized)
+        MLX.eval(underTest, reference)
+
+        let difference = maxAbsDiff(underTest, reference)
+        #expect(
+            difference < 1.0,
+            """
+            Group-32 quantized vector-matrix product diverged from its \
+            dequantized reference (N=\(n), K=\(k), M=\(m)): max |diff| \
+            \(difference). This is ml-explore/mlx#4251 — qvm_split_k floors \
+            N / 64, so the last \(n % 64) columns are never dispatched.
+            """)
+    }
+
+    // MARK: - mlx#3922 — sorted gather_qmm above 32K rows
+
+    /// The sorted-RHS affine NAX kernel narrowed its remaining-row count to
+    /// `short` before clamping it to the tile, so once the gathered activation
+    /// matrix passes 32768 rows the intermediate wraps negative and early tiles
+    /// leave output rows unwritten. Same shape as `#3631`, which this fork
+    /// already carries, and it lands on the same place: quantized MoE.
+    ///
+    /// 32768 rows is not exotic for us. A sorted gather_qmm sees one row per
+    /// (token, expert) pair, so an 8K-token prompt through top-4 routing is
+    /// already at the seam, and the tiered SSD KV cache exists to serve prompts
+    /// far longer than that.
+    ///
+    /// The check is deliberately coarse — did every row get written — rather
+    /// than a tight numeric bound, because the failure is unwritten memory
+    /// rather than drift.
+    @Test("a sorted gather_qmm writes every row past the 32K seam")
+    func sortedGatherQMMWritesEveryRowPast32K() {
+        let m = 32769, k = 256, n = 64, experts = 2  // m > 32768 is the seam
+        let groupSize = 64, bits = 4
+
+        MLXRandom.seed(5)
+        let weights = MLXRandom.normal([experts, n, k]).asType(.float16)
+        let (weightsQ, scales, biases) = MLX.quantized(
+            weights, groupSize: groupSize, bits: bits)
+
+        let x = MLXRandom.normal([m, k], scale: 0.5).asType(.bfloat16)
+        // Sorted: every row of the first half hits expert 0, the rest expert 1.
+        let rhsIndices = MLX.concatenated([
+            MLXArray.zeros([m / 2], type: Int32.self),
+            MLXArray.ones([m - m / 2], type: Int32.self),
+        ])
+
+        let underTest = MLX.gatherQuantizedMM(
+            x.expandedDimensions(axis: 1), weightsQ, scales: scales, biases: biases,
+            rhsIndices: rhsIndices, transpose: true,
+            groupSize: groupSize, bits: bits, sortedIndices: true)
+        MLX.eval(underTest)
+
+        // An unwritten row is left at whatever the buffer held; with inputs this
+        // far from zero, a row that is exactly zero across all N did not get
+        // written. Checking the row sums keeps this O(M) rather than O(M*N).
+        let rowMagnitude = MLX.sum(MLX.abs(underTest.asType(.float32)), axis: -1)
+            .reshaped([m])
+        let emptyRows = MLX.sum((rowMagnitude .== 0).asType(.int32)).item(Int32.self)
+        #expect(
+            emptyRows == 0,
+            """
+            \(emptyRows) of \(m) rows came back all-zero from a sorted \
+            gather_qmm. On NAX hardware this is ml-explore/mlx#3922 — the \
+            remaining-row count narrows to short before the clamp, so past \
+            32768 rows the early tiles never write.
+            """)
+    }
 }

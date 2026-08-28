@@ -10,6 +10,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Quantized MoE dropped output rows past a 32K seam, and narrow quantized
+  products dropped their tail columns.** Two more upstream MLX defects, both
+  reproduced on an M5 Max before being carried: a sorted expert dispatch left
+  32 of 32769 rows unwritten once the gathered activation matrix passed 32768
+  rows — one row per token-expert pair, so an 8K-token prompt through top-4
+  routing already reaches it (`ml-explore/mlx#3922`); and a quantized
+  vector-matrix product at group size 32 never dispatched the columns past the
+  last whole 64-wide tile, measured at 128 absolute error on a 96-wide output
+  (`ml-explore/mlx#4251`). Also carried, by mechanism rather than
+  reproduction: a completion handler that could run against freed state when
+  the app quits with GPU work in flight (`#3167`), and a header filter that
+  silently drops every project header when the checkout lives under a
+  directory named Xcode (`#3873`).
+
+### Fixed
 - **macMLX.app was not running the patched MLX engine at all.** The app is
   built from an Xcode project, and that project declared no `mlx-swift`
   dependency of its own — so when our controlled fork and the upstream
