@@ -36,7 +36,7 @@ test("every article is localized, answer-first, semantic, source-linked, and cro
       assert.match(html, /class="article-body"/);
       assert.match(html, /class="content-section sources"/);
       assert.match(html, /class="related-pages"/);
-      assert.match(html, /<time datetime="2026-07-19">2026-07-19<\/time>/);
+      assert.match(html, /<time datetime="2026-08-28">2026-08-28<\/time>/);
       assert.match(html, /class="site-header"/);
       assert.match(html, /class="site-footer"/);
       assert.match(html, new RegExp(`<link rel="canonical" href="https:\/\/macmlx\\.app${path.replaceAll("/", "\\/")}">`));
@@ -114,6 +114,6 @@ test("repeated content builds are byte-identical", async () => {
 
 test("build validation uses an injectable actual UTC date without changing rendered dates", async () => {
   await assert.doesNotReject(prepareSite({ today: "2026-08-28" }));
-  await assert.rejects(prepareSite({ today: "2026-09-05" }), /stale (?:competitor|fact)/);
-  assert.match(generatedDocuments.get("/architecture/"), /2026-07-19/);
+  await assert.rejects(prepareSite({ today: "2026-10-20" }), /stale (?:competitor|fact)/);
+  assert.match(generatedDocuments.get("/architecture/"), /2026-08-28/);
 });

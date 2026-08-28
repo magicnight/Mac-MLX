@@ -14,7 +14,7 @@ function page(id, path, title, description, directAnswer, eyebrow, relatedIds, b
     id,
     kind: "article",
     paths: Object.freeze({ en: path, "zh-Hans": `/zh${path}` }),
-    lastVerified: "2026-07-19",
+    lastVerified: "2026-08-28",
     relatedIds: Object.freeze(relatedIds),
     blocks: Object.freeze([...blocks, Object.freeze({ type: "related", heading: b("Related pages", "相关页面"), relatedIds: Object.freeze(relatedIds) })]),
     ...localized,

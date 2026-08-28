@@ -39,7 +39,7 @@ test("project and release registries identify v0.8.0 as current", () => {
       releaseDate: project.releaseDate,
       lastVerified: project.lastVerified,
     },
-    { currentVersion: "0.8.0", releaseDate: "2026-07-19", lastVerified: "2026-07-19" },
+    { currentVersion: "0.8.0", releaseDate: "2026-07-19", lastVerified: "2026-08-28" },
   );
   assert.equal(releases[0].id, "v0-8-0");
   assert.equal(releases[0].version, project.currentVersion);

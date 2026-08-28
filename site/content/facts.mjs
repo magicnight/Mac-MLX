@@ -2,7 +2,7 @@ const repository = "https://github.com/magicnight/mac-mlx";
 const release = `${repository}/releases/tag/v0.8.0`;
 const tagged = (path) => `${repository}/blob/v0.8.0/${path}`;
 const main = (path) => `${repository}/blob/main/${path}`;
-const verified = "2026-07-19";
+const verified = "2026-08-28";
 
 function fact(id, status, sinceVersion, pageIds, sources, en, zh, attributes = {}) {
   return Object.freeze({

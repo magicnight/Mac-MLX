@@ -4,7 +4,7 @@ export const releases = Object.freeze([
     version: "0.8.0",
     status: "released",
     releaseDate: "2026-07-19",
-    lastVerified: "2026-07-19",
+    lastVerified: "2026-08-28",
     officialSources: Object.freeze([
       "https://github.com/magicnight/mac-mlx/releases/tag/v0.8.0",
       "https://github.com/magicnight/mac-mlx/blob/v0.8.0/CHANGELOG.md",
@@ -72,7 +72,7 @@ export const releases = Object.freeze([
     version: "0.7.0",
     status: "released",
     releaseDate: "2026-07-18",
-    lastVerified: "2026-07-19",
+    lastVerified: "2026-08-28",
     officialSources: Object.freeze([
       "https://github.com/magicnight/mac-mlx/releases/tag/v0.7.0",
       "https://github.com/magicnight/mac-mlx/blob/v0.7.0/CHANGELOG.md",
@@ -136,7 +136,7 @@ export const releases = Object.freeze([
     version: "0.6.2",
     status: "released",
     releaseDate: "2026-07-11",
-    lastVerified: "2026-07-19",
+    lastVerified: "2026-08-28",
     officialSources: Object.freeze([
       "https://github.com/magicnight/mac-mlx/releases/tag/v0.6.2",
       "https://github.com/magicnight/mac-mlx/blob/v0.6.2/CHANGELOG.md",
@@ -195,7 +195,7 @@ export const releases = Object.freeze([
     version: "0.5.3",
     status: "released",
     releaseDate: "2026-07-08",
-    lastVerified: "2026-07-19",
+    lastVerified: "2026-08-28",
     officialSources: Object.freeze([
       "https://github.com/magicnight/mac-mlx/releases/tag/v0.5.3",
       "https://github.com/magicnight/mac-mlx/blob/v0.5.3/CHANGELOG.md",
