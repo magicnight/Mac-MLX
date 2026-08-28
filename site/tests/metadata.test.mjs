@@ -35,9 +35,9 @@ test("home metadata is localized, reciprocal, Markdown-addressable, and uses sta
     assert.equal(website["@id"], "https://macmlx.app/#website");
     assert.equal(software["@id"], "https://macmlx.app/#software");
     assert.equal(project.currentVersion, "0.8.0");
-    assert.equal(project.lastVerified, "2026-07-19");
+    assert.equal(project.lastVerified, "2026-08-28");
     assert.equal(software.softwareVersion, "0.8.0");
-    assert.equal(software.dateModified, "2026-07-19");
+    assert.equal(software.dateModified, "2026-08-28");
     assert.equal(software.codeRepository, project.repositoryURL);
     assert.equal(software.downloadUrl, project.downloadURL);
     assert.equal(software.offers.price, "0");
@@ -117,7 +117,7 @@ test("the v0.8.0 release page exposes immutable release identity with localized 
     const article = graph.find((node) => node["@type"] === "TechArticle");
     const softwareRelease = graph.find((node) => node["@type"] === "SoftwareApplication");
     const breadcrumbs = graph.find((node) => node["@type"] === "BreadcrumbList");
-    assert.equal(article.dateModified, "2026-07-19");
+    assert.equal(article.dateModified, "2026-08-28");
     assert.equal(new URL(article.mainEntityOfPage).pathname, path);
     assert.equal(softwareRelease["@id"], "https://github.com/magicnight/mac-mlx/releases/tag/v0.8.0#software-release");
     assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.8.0");
@@ -148,7 +148,7 @@ test("historical release entities keep version-specific immutable metadata", asy
       const graph = jsonLD(documents.get(path))["@graph"];
       const article = graph.find((node) => node["@type"] === "TechArticle");
       const softwareRelease = graph.find((node) => node["@type"] === "SoftwareApplication");
-      assert.equal(article.dateModified, "2026-07-19");
+      assert.equal(article.dateModified, "2026-08-28");
       assert.equal(softwareRelease["@id"], `https://github.com/magicnight/mac-mlx/releases/tag/v${version}#software-release`);
       assert.equal(softwareRelease.url, `https://github.com/magicnight/mac-mlx/releases/tag/v${version}`);
       assert.equal(softwareRelease.softwareVersion, version);

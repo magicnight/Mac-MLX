@@ -27,7 +27,7 @@ test("every route has a registry-derived Markdown counterpart in both locales", 
       assert.match(markdown, /## (Related pages|相关页面)/);
       const canonicalLabel = locale === "en" ? "Canonical: " : "规范网址：";
       assert.match(markdown, new RegExp(`${canonicalLabel}${project.origin}${route.paths[locale].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(markdown, /Last verified: 2026-07-19|最后核验：2026-07-19/);
+      assert.match(markdown, /Last verified: 2026-08-28|最后核验：2026-08-28/);
       assert.doesNotMatch(markdown, /undefined|\{\{|\}\}/);
     }
   }

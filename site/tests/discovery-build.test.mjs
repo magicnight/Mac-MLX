@@ -17,7 +17,7 @@ test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404
   const llms = discoveryFiles.get("llms.txt");
   const llmsFull = discoveryFiles.get("llms-full.txt");
   assert.equal(sitemap.match(/<url>/g)?.length, 32);
-  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-8-0\/<\/loc>[\s\S]*?<lastmod>2026-07-19<\/lastmod>/);
+  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-8-0\/<\/loc>[\s\S]*?<lastmod>2026-08-28<\/lastmod>/);
   assert.doesNotMatch(sitemap, /404/);
   assert.match(llms, /Latest release: v0\.8\.0/);
   assert.match(llmsFull, /### continuous-batching[\s\S]*?- Status: released[\s\S]*?- Title: Eligibility-gated continuous batching/);
