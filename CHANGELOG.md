@@ -9,20 +9,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-- **Quantized MoE dropped output rows past a 32K seam, and narrow quantized
-  products dropped their tail columns.** Two more upstream MLX defects, both
-  reproduced on an M5 Max before being carried: a sorted expert dispatch left
-  32 of 32769 rows unwritten once the gathered activation matrix passed 32768
-  rows — one row per token-expert pair, so an 8K-token prompt through top-4
-  routing already reaches it (`ml-explore/mlx#3922`); and a quantized
-  vector-matrix product at group size 32 never dispatched the columns past the
-  last whole 64-wide tile, measured at 128 absolute error on a 96-wide output
-  (`ml-explore/mlx#4251`). Also carried, by mechanism rather than
-  reproduction: a completion handler that could run against freed state when
-  the app quits with GPU work in flight (`#3167`), and a header filter that
-  silently drops every project header when the checkout lives under a
-  directory named Xcode (`#3873`).
+## [0.9.0] - 2026-08-28
+
+Audio arrives, reranking becomes a real cross-encoder, and the shipped app
+finally runs the MLX engine we have been patching for two months.
+
+### Added
+- **Speech to text and text to speech, running in-process on MLX.** Transcribe
+  an audio file or synthesise speech from text through
+  `POST /v1/audio/transcriptions` and `POST /v1/audio/speech`, both
+  OpenAI-shaped. The engine is `mlx-audio-swift` — MIT, and every one of its
+  dependencies was already in our graph — so there is still no Python anywhere,
+  and no Core ML detour. Downloads land under `~/.mac-mlx/audio-models`.
+  Formats are reported honestly: a request for a container we cannot produce is
+  refused rather than silently served as something else.
+- **Audio in the app.** Transcription is an attachment in the chat composer —
+  pick a file, watch a cancellable row, get the text dropped into the input so
+  you can edit it before sending. Playback is a button on each assistant
+  message, with takeover, so starting one stops the other. The model library
+  lists audio checkpoints, which needed its own scan: `mlx-audio` writes a flat
+  layout and often ships no `tokenizer.json`, so the usual format detection
+  cannot classify them.
+- **A true cross-encoder reranker.** `/v1/rerank` previously scored each
+  [query, document] pair as two independent embeddings and a cosine similarity
+  — a bi-encoder approximation. A pair is now tokenized jointly and run through
+  a BERT encoder with a single-logit classification head, so the score reflects
+  query-document interaction. Bi-encoder scoring remains as the fallback for
+  checkpoints that are not rerankers.
+- **Multi-token-prediction drafters are registered and detectable.** A draft
+  model can now be identified as an MTP block drafter from its `config.json`
+  alone, before any weights load. The engine is deliberately not wired to it
+  yet: the iterator needs the target model to emit drafter state, and the only
+  upstream model that does is unreachable from any checkpoint macMLX can load
+  today.
 
 ### Fixed
 - **macMLX.app was not running the patched MLX engine at all.** The app is
@@ -31,23 +50,47 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `mlx-swift` that `mlx-swift-lm` pulls in collided on the same package
   identity, upstream won and the app linked it. Every release since the fork
   was introduced therefore shipped a GUI without any of its correctness
-  cherry-picks, even though `MacMLXCore`'s own tests (which resolve the fork,
-  being their own root) verified each one. The CLI had the same defect from a
-  different root and was fixed earlier; this is the app's half. The project now
-  pins the fork by revision, a test guards the declaration, and CI now asserts
-  the *resolved* graph rather than trusting the declaration.
+  cherry-picks, even though `MacMLXCore`'s own tests verified each one. This is
+  the first DMG that actually carries them. The CLI had the same defect from a
+  different root and was fixed alongside.
 - **Long-context attention returned garbage on M5 hardware.** Past a 32K KV
   sequence the NAX attention kernel wrapped its tile positions through a 16-bit
   type and read the mask from the wrong offsets, producing non-finite output
   with no error — exactly the context lengths the tiered SSD KV cache exists to
-  reach. Reproduced here on an M5 Max and carried onto the vendored MLX fork
-  (`ml-explore/mlx#3361`), along with a Metal kernel-cache lookup that inserted
-  into the cache while holding only a read lock — something concurrent requests
-  can hit, and which can hand back the wrong compiled kernel rather than merely
-  crash (`#4043`). Two further upstream fixes are carried preventively, with no
-  reproduction on this hardware: a sorted `gather_mm` row stride (`#3960`) and
-  a `gather_qmm` tile-size mismatch (`#3632`). Apple Silicon before M5 is
-  unaffected by all but `#4043`.
+  reach (`ml-explore/mlx#3361`).
+- **Quantized mixture-of-experts dropped output rows, and narrow quantized
+  products dropped their tail columns.** A sorted expert dispatch left rows
+  unwritten once the gathered activation matrix passed 32768 rows — one row per
+  token-expert pair, so an 8K-token prompt through top-4 routing already
+  reaches it (`mlx#3922`); and a quantized vector-matrix product at group size
+  32 never dispatched the columns past the last whole tile (`mlx#4251`). Both
+  reproduced here before being carried.
+- **Ten further upstream MLX correctness fixes** the fork's pin predated,
+  covering quantized matmul batch strides and edge tiles, split-K GEMM dtype
+  selection, MoE row strides, a kernel-cache lookup that inserted under a read
+  lock, and teardown while the GPU is busy. Apple Silicon before M5 is
+  unaffected by most of them.
+- **Cancel now actually stops a benchmark run**, and a cancelled run can no
+  longer clobber the state or the bottleneck attribution of the run that
+  replaced it. Warm-up frames no longer skew that attribution.
+- **The cold KV cache write no longer holds the eval lock**, so spilling to SSD
+  stops stalling other requests.
+- **A speech playback failure is surfaced** instead of leaving the button stuck
+  in a speaking state.
+
+### Changed
+- The app gained a unit-test target, so GUI code is testable for the first
+  time; the benchmark run lifecycle is covered by it.
+- Releases now scan upstream MLX for correctness fixes the pinned fork does not
+  carry, because pinning by revision buys reproducibility at the cost of
+  silently missing them.
+
+### Known limitations
+- The audio and reranker paths are code-complete and unit-tested, but have not
+  been validated against real checkpoints on this machine.
+- Multi-token prediction is registered and detectable, not yet used for
+  decoding.
+
 
 ## [0.8.0] - 2026-07-19
 
