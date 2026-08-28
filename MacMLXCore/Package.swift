@@ -9,7 +9,7 @@ let package = Package(
     ],
     dependencies: [
         // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
-        // upstream mlx-swift 0.31.6 plus NINE cherry-picks, all already in
+        // upstream mlx-swift 0.31.6 plus THIRTEEN cherry-picks, all already in
         // mlx-core but not yet vendored by any mlx-swift release (see
         // ml-explore/mlx-swift#441). Most of them produce silently wrong
         // numbers rather than an error, which is why the ones we could
@@ -74,8 +74,43 @@ let package = Package(
         //     never hit the failure. Carried to keep the tiling in step with
         //     upstream, not to fix a break we have.
         //
-        // #3497 and #3631 are pinned by QuantizedMatmulParityTests, #3560 by
-        // SteelGemmSafeLoadParityTests.
+        //   - ml-explore/mlx#3922 — the sorted-RHS affine NAX kernel narrowed
+        //     its remaining-row count to short before clamping it to the tile,
+        //     so past 32768 rows the intermediate wrapped and early tiles left
+        //     output rows unwritten. Reproduced here: 32 of 32769 rows came
+        //     back all-zero, which is exactly one tile height — the count is
+        //     the mechanism's fingerprint. One row per (token, expert) pair
+        //     means an 8K-token prompt through top-4 routing already sits on
+        //     the seam.
+        //   - ml-explore/mlx#4251 — qvm_split_k sized its grid with N / bn, a
+        //     floor, so a width that is not a multiple of the 64-wide tile
+        //     left its tail columns undispatched and therefore unwritten. Its
+        //     own non-split-K sibling in the same file already used the
+        //     ceiling. Reachable at group size 32, where N need only be a
+        //     multiple of 32: reproduced at N=96 with max |diff| 127.9.
+        //   - ml-explore/mlx#3167 — a kernel completing after process teardown
+        //     began could run its completion handler against freed state. Not
+        //     reproduced here — it needs a race window — but the mechanism is
+        //     ours: a SwiftUI app quitting while background MLX work is in
+        //     flight.
+        //   - ml-explore/mlx#3873 — the preamble generator filtered SDK headers
+        //     with grep -v "Xcode", which also matches a checkout living under
+        //     a directory named Xcode, silently dropping every project header.
+        //     Our DerivedData paths qualify. Not biting today, since we compile
+        //     the checked-in generated sources rather than regenerating, which
+        //     is precisely why it would have gone unnoticed.
+        //
+        // #3497, #3631, #3922 and #4251 are pinned by
+        // QuantizedMatmulParityTests, #3560 by SteelGemmSafeLoadParityTests.
+        //
+        // Deliberately deferred: ml-explore/mlx#3963 widens Metal's implicit
+        // `thread` address space to explicit, which the compiler shipping from
+        // Xcode 27.0 Beta 4 onward requires. It is not a runtime concern — mlx
+        // requests LanguageVersion4_0 and our kernels compile — and CI, release
+        // and this machine are all pinned at Xcode 26.x. It is also 36 files
+        // touching 34 kernel headers, every one of which would need its
+        // stringified copy rewritten. Carry it before unpinning Xcode, not
+        // before.
         //
         // Deliberately NOT carried: ml-explore/mlx#3422. Upstream's own summary
         // lists what it does: split-K matmuls were being routed to the non-NAX
@@ -99,7 +134,7 @@ let package = Package(
         // the switch-back). Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "860f6b24785a59e52e574557f6605c6b2c734fbb"),
+            revision: "eccbc24d03d33f4dc9a0e1585567218d6c42bff1"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
