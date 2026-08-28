@@ -367,6 +367,43 @@ the set compiled ahead of time. `steel_attention_nax.metal` is not in it, and
 nothing under `mlx-generated/metal/` includes the NAX header — that kernel is
 built at runtime from `metal::steel_attention_nax()`, i.e. from the `.cpp`.
 
+### Moving off v0.31.1 is not a version bump
+
+The fork's exit condition — "drop the override once mlx-swift vendors core >=
+0.32" — reads like a one-line change. It is not. Everything below is known
+upstream today; rediscovering any of it the hard way is avoidable.
+
+**The one that would hit us first.** `ml-explore/mlx#3348` made
+`CommandEncoder` and `default_stream()` thread-local, first released in core
+**v0.31.2**. mlx-swift's `Stream.gpu` / `Stream.cpu` are process-global
+`static let`s materialized on whichever thread first touches MLX, so evaluating
+from any other OS thread aborts:
+
+    Fatal error: There is no Stream(gpu, 0) in current thread.
+
+A process abort, not a throw. We run a Hummingbird server on concurrent
+requests, a SwiftUI app, and Swift Concurrency tasks that hop cooperative-pool
+threads — we evaluate from other threads constantly. Filed as
+`ml-explore/mlx-swift#457`, open with no maintainer response. The fix is on the
+mlx-c side: point the two default-stream entry points at
+`new_thread_unsafe_stream`, which registers in the global registry the Swift
+statics were built for. That binding landed in `ml-explore/mlx-c#122`.
+`CrossThreadEvalTripwireTests` is the tripwire; it is green today because our
+pin, v0.31.1, is the last release before the change.
+
+**The rest, from a working 0.32.1 bump someone published on mlx-swift#450:**
+
+| what | where it bites |
+|---|---|
+| `qmv()` passes 6 template args to 5-param kernel templates | JIT-only builds — ours. First quantized matvec aborts. `mlx#4350`, fixed by `mlx#4372`, **in v0.32.2** |
+| generated `*_nax.cpp` reference symbols the header gates out below deployment target 26.2 | we target macOS 14 — needs `MLX_METAL_NO_NAX` and excluding the seven `mlx-generated/*_nax.cpp` |
+| `tools/update-mlx.sh` kernel make-list missing `gemv` and `searchsorted` at 0.32.x | our regeneration workflow — regenerated sources fail to link |
+| mlx-c compile-cache calls need the 0.32.x `compile_cache()` handle | mlx-c v0.6.0 predates it; main now pins core v0.32.2 |
+| FFT C API grew a norm parameter | ~20 call sites in `FFT.swift` |
+
+Check each against the then-current state before starting; several were fixed
+between being written down and being read.
+
 ### Carrying a fix is not shipping it: check what each root resolves
 
 `magicnight/mlx-swift` and the `ml-explore/mlx-swift` that `mlx-swift-lm`
