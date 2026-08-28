@@ -7,7 +7,7 @@ import test from "node:test";
 import { prepareSite, validateSocialAssets } from "../../scripts/build-public-site.mjs";
 
 test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404 outputs", async () => {
-  const { documents, markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-07-19" });
+  const { documents, markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-08-28" });
   assert.equal(markdownDocuments.size, 32);
   assert.deepEqual([...discoveryFiles.keys()], [
     "llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt",

@@ -67,7 +67,7 @@ test("article metadata emits TechArticle and breadcrumbs, with visible FAQ data 
 });
 
 test("the site builder uses centralized metadata exactly once in every HTML document", async () => {
-  const { documents } = await prepareSite({ today: "2026-07-19" });
+  const { documents } = await prepareSite({ today: "2026-08-28" });
   assert.equal(documents.size, 32);
   for (const [path, html] of documents) {
     const socialLocale = path.startsWith("/zh/") ? "zh" : "en";
@@ -81,7 +81,7 @@ test("the site builder uses centralized metadata exactly once in every HTML docu
 });
 
 test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current hierarchy", async () => {
-  const { documents } = await prepareSite({ today: "2026-07-19" });
+  const { documents } = await prepareSite({ today: "2026-08-28" });
   const nested = pages.filter((page) => page.paths.en.split("/").filter(Boolean).length > 1);
   for (const page of nested) {
     for (const locale of ["en", "zh-Hans"]) {
@@ -103,7 +103,7 @@ test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current
 });
 
 test("the v0.8.0 release page exposes immutable release identity with localized canonical metadata", async () => {
-  const { documents } = await prepareSite({ today: "2026-07-19" });
+  const { documents } = await prepareSite({ today: "2026-08-28" });
   const releasePage = pages.find((page) => page.id === "release-v0-8-0");
   assert.ok(releasePage);
 
@@ -134,7 +134,7 @@ test("the v0.8.0 release page exposes immutable release identity with localized 
 });
 
 test("historical release entities keep version-specific immutable metadata", async () => {
-  const { documents } = await prepareSite({ today: "2026-07-19" });
+  const { documents } = await prepareSite({ today: "2026-08-28" });
   for (const [id, version, datePublished] of [
     ["release-v0-7-0", "0.7.0", "2026-07-18"],
     ["release-v0-6-2", "0.6.2", "2026-07-11"],
