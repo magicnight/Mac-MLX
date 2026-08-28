@@ -30,7 +30,7 @@ test("page and route catalogs contain the exact bilingual hub", () => {
 });
 
 test("every page validates cross-references and has related coverage", () => {
-  assert.doesNotThrow(() => validateContentHub({ facts, competitors, faqs, releases, pages, macmlxComparisonProfile }, { today: "2026-07-19", maxAgeDays: 45 }));
+  assert.doesNotThrow(() => validateContentHub({ facts, competitors, faqs, releases, pages, macmlxComparisonProfile }, { today: "2026-08-28", maxAgeDays: 45 }));
   assert.equal(pages.every((page) => page.relatedIds.length >= 2), true);
   assert.deepEqual(new Set(pages.flatMap((page) => page.relatedIds)), new Set(pages.map((page) => page.id)));
 });
