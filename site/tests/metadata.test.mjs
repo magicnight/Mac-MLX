@@ -34,9 +34,9 @@ test("home metadata is localized, reciprocal, Markdown-addressable, and uses sta
     const software = graph.find((node) => node["@type"] === "SoftwareApplication");
     assert.equal(website["@id"], "https://macmlx.app/#website");
     assert.equal(software["@id"], "https://macmlx.app/#software");
-    assert.equal(project.currentVersion, "0.8.0");
+    assert.equal(project.currentVersion, "0.9.0");
     assert.equal(project.lastVerified, "2026-08-28");
-    assert.equal(software.softwareVersion, "0.8.0");
+    assert.equal(software.softwareVersion, "0.9.0");
     assert.equal(software.dateModified, "2026-08-28");
     assert.equal(software.codeRepository, project.repositoryURL);
     assert.equal(software.downloadUrl, project.downloadURL);
@@ -68,7 +68,7 @@ test("article metadata emits TechArticle and breadcrumbs, with visible FAQ data 
 
 test("the site builder uses centralized metadata exactly once in every HTML document", async () => {
   const { documents } = await prepareSite({ today: "2026-08-28" });
-  assert.equal(documents.size, 32);
+  assert.equal(documents.size, 34);
   for (const [path, html] of documents) {
     const socialLocale = path.startsWith("/zh/") ? "zh" : "en";
     assert.equal(html.match(/<title>/g)?.length, 1, path);
@@ -102,9 +102,9 @@ test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current
   }
 });
 
-test("the v0.8.0 release page exposes immutable release identity with localized canonical metadata", async () => {
+test("the v0.9.0 release page exposes immutable release identity with localized canonical metadata", async () => {
   const { documents } = await prepareSite({ today: "2026-08-28" });
-  const releasePage = pages.find((page) => page.id === "release-v0-8-0");
+  const releasePage = pages.find((page) => page.id === "release-v0-9-0");
   assert.ok(releasePage);
 
   for (const locale of ["en", "zh-Hans"]) {
@@ -119,10 +119,10 @@ test("the v0.8.0 release page exposes immutable release identity with localized 
     const breadcrumbs = graph.find((node) => node["@type"] === "BreadcrumbList");
     assert.equal(article.dateModified, "2026-08-28");
     assert.equal(new URL(article.mainEntityOfPage).pathname, path);
-    assert.equal(softwareRelease["@id"], "https://github.com/magicnight/mac-mlx/releases/tag/v0.8.0#software-release");
-    assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.8.0");
-    assert.equal(softwareRelease.softwareVersion, "0.8.0");
-    assert.equal(softwareRelease.datePublished, "2026-07-19");
+    assert.equal(softwareRelease["@id"], "https://github.com/magicnight/mac-mlx/releases/tag/v0.9.0#software-release");
+    assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.9.0");
+    assert.equal(softwareRelease.softwareVersion, "0.9.0");
+    assert.equal(softwareRelease.datePublished, "2026-08-28");
     assert.equal(softwareRelease.dateModified, undefined);
     assert.equal(softwareRelease.downloadUrl, undefined);
     assert.equal(new URL(softwareRelease.mainEntityOfPage).pathname, path);

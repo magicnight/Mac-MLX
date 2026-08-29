@@ -84,7 +84,7 @@ test("project registry keeps supported facts and locale metadata together", () =
   assert.equal(project.origin, "https://macmlx.app");
   assert.equal(project.repositoryURL, "https://github.com/magicnight/mac-mlx");
   assert.equal(project.downloadURL, "https://github.com/magicnight/mac-mlx/releases/latest");
-  assert.equal(project.currentVersion, "0.8.0");
+  assert.equal(project.currentVersion, "0.9.0");
   assert.deepEqual(Object.keys(project.locales), ["en", "zh-Hans"]);
   for (const locale of Object.values(project.locales)) {
     assert.ok(locale.title);
@@ -180,7 +180,7 @@ test("build emits independent locale documents without runtime bilingual attribu
   }
 });
 
-test("rendered home presents v0.8.0 as the current shipped release", () => {
+test("rendered home presents v0.9.0 as the current shipped release", () => {
   const englishRelease = elementWithClass(english, "article", "release-current");
   const chineseRelease = elementWithClass(chinese, "article", "release-current");
 
@@ -188,23 +188,23 @@ test("rendered home presents v0.8.0 as the current shipped release", () => {
   assert.doesNotMatch(chineseRelease.classes, /\bbuilding\b/);
   assert.equal(englishRelease.content.match(/<li\b/g)?.length, 4);
   assert.equal(chineseRelease.content.match(/<li\b/g)?.length, 4);
-  assert.match(englishRelease.content, /<strong>v0\.8\.0 · Jul 19, 2026<\/strong>/);
-  assert.match(chineseRelease.content, /<strong>v0\.8\.0 · 2026年7月19日<\/strong>/);
-  assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.8\.0"[^>]*>View v0\.8\.0 release ↗<\/a>/);
-  assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.8\.0"[^>]*>查看 v0\.8\.0 版本 ↗<\/a>/);
+  assert.match(englishRelease.content, /<strong>v0\.9\.0 · Aug 28, 2026<\/strong>/);
+  assert.match(chineseRelease.content, /<strong>v0\.9\.0 · 2026年8月28日<\/strong>/);
+  assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.9\.0"[^>]*>View v0\.9\.0 release ↗<\/a>/);
+  assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.9\.0"[^>]*>查看 v0\.9\.0 版本 ↗<\/a>/);
 
   for (const capability of [
-    /The cold SSD KV cache is now byte-bounded, pruned oldest-first, with a toggle to opt out/,
-    /Each cold entry is fingerprinted against model weight identity, so a weight swap cannot serve stale KV/,
-    /A persisted cold index gives longest-prefix reuse that survives a restart across sessions/,
-    /Cold-tier writes move onto a serial background writer, so one spill no longer stalls another request/,
+    /Speech to text and text to speech run in-process on MLX, with no Python and no Core ML detour/,
+    /A true cross-encoder scores each query-document pair jointly, with bi-encoder cosine kept as the fallback/,
+    /Transcription is a cancellable chat attachment, and assistant messages gained a speech button/,
+    /The app finally links the patched MLX engine, so this DMG carries its correctness fixes/,
   ]) assert.match(englishRelease.content, capability);
 
   for (const capability of [
-    /冷 SSD KV 缓存现按字节预算约束，最旧优先清理，并可一键关闭冷层/,
-    /每个冷条目都与模型权重身份指纹绑定，权重替换后无法再提供陈旧 KV/,
-    /持久冷索引让最长前缀复用在重启后跨会话保留/,
-    /冷层写入迁移到串行后台写入器，一次 spill 不再阻塞其他请求/,
+    /语音转文字与文字转语音在进程内基于 MLX 运行，不需要 Python，也不绕道 Core ML/,
+    /真正的交叉编码器对每个查询-文档对联合打分，双编码器余弦保留为回退路径/,
+    /转写以可取消的聊天附件形式提供，助手消息新增朗读按钮/,
+    /应用终于链接了补丁版 MLX 引擎，这个 DMG 才真正携带其正确性修复/,
   ]) assert.match(chineseRelease.content, capability);
 });
 
