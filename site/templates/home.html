@@ -153,7 +153,7 @@
             <div class="feature-top"><span>02</span><span>API</span></div>
             <div class="terminal-lines" aria-hidden="true"><code>POST /v1/chat/completions</code><code>POST /v1/messages</code><code>POST /v1/embeddings</code><code>macmlx mcp serve</code></div>
             <h3 data-en="Fits existing workflows" data-zh="融入现有工作流">Fits existing workflows</h3>
-            <p data-en="Compatible OpenAI, Anthropic, Ollama, MCP, embeddings, and rerank surfaces support agent and API tool loops plus structured output controls for supported workflows." data-zh="兼容的 OpenAI、Anthropic、Ollama、MCP、嵌入与重排入口，为受支持的工作流提供智能体与 API 工具循环以及结构化输出控制。">Compatible OpenAI, Anthropic, Ollama, MCP, embeddings, and rerank surfaces support agent and API tool loops plus structured output controls for supported workflows.</p>
+            <p data-en="Compatible OpenAI, Anthropic, Ollama, MCP, embeddings, rerank, and audio surfaces support agent and API tool loops plus structured output controls for supported workflows." data-zh="兼容的 OpenAI、Anthropic、Ollama、MCP、嵌入、重排与音频入口，为受支持的工作流提供智能体与 API 工具循环以及结构化输出控制。">Compatible OpenAI, Anthropic, Ollama, MCP, embeddings, rerank, and audio surfaces support agent and API tool loops plus structured output controls for supported workflows.</p>
           </article>
 
           <article class="feature-card reveal">
@@ -279,20 +279,20 @@
             <ul>
               <li data-en="Language models + 14 detected VLM families" data-zh="语言模型 + 检测到的 14 个 VLM 家族">Language models + 14 detected VLM families</li>
               <li data-en="Prompt cache, model pool, and LoRA adapters" data-zh="提示缓存、模型池与 LoRA 适配器">Prompt cache, model pool, and LoRA adapters</li>
-              <li data-en="OpenAI, Anthropic, Ollama, MCP, embeddings, rerank" data-zh="兼容 OpenAI、Anthropic、Ollama、MCP、嵌入与重排">OpenAI, Anthropic, Ollama, MCP, embeddings, rerank</li>
+              <li data-en="OpenAI, Anthropic, Ollama, MCP, embeddings, rerank, audio" data-zh="兼容 OpenAI、Anthropic、Ollama、MCP、嵌入、重排与音频">OpenAI, Anthropic, Ollama, MCP, embeddings, rerank, audio</li>
               <li data-en="Pure-Swift DeepSeek V3.2 architecture" data-zh="纯 Swift 的 DeepSeek V3.2 架构">Pure-Swift DeepSeek V3.2 architecture</li>
             </ul>
             <a href="{{changelogURL}}" data-en="Read the changelog ↗" data-zh="查看更新日志 ↗">Read the changelog ↗</a>
           </article>
 
           <article class="release-column release-current reveal">
-            <div class="release-head"><span data-en="Current release" data-zh="当前版本">Current release</span><strong data-en="v{{currentVersion}} · Jul 19, 2026" data-zh="v{{currentVersion}} · 2026年7月19日">v{{currentVersion}} · Jul 19, 2026</strong></div>
-            <h3 data-en="The v0.8 SSD cache is hardened" data-zh="v0.8 SSD 缓存已加固">The v0.8 SSD cache is hardened</h3>
+            <div class="release-head"><span data-en="Current release" data-zh="当前版本">Current release</span><strong data-en="v{{currentVersion}} · Aug 28, 2026" data-zh="v{{currentVersion}} · 2026年8月28日">v{{currentVersion}} · Aug 28, 2026</strong></div>
+            <h3 data-en="v0.9 adds audio and a real reranker" data-zh="v0.9 新增音频与真正的重排器">v0.9 adds audio and a real reranker</h3>
             <ul>
-              <li data-en="The cold SSD KV cache is now byte-bounded, pruned oldest-first, with a toggle to opt out" data-zh="冷 SSD KV 缓存现按字节预算约束，最旧优先清理，并可一键关闭冷层">The cold SSD KV cache is now byte-bounded, pruned oldest-first, with a toggle to opt out</li>
-              <li data-en="Each cold entry is fingerprinted against model weight identity, so a weight swap cannot serve stale KV" data-zh="每个冷条目都与模型权重身份指纹绑定，权重替换后无法再提供陈旧 KV">Each cold entry is fingerprinted against model weight identity, so a weight swap cannot serve stale KV</li>
-              <li data-en="A persisted cold index gives longest-prefix reuse that survives a restart across sessions" data-zh="持久冷索引让最长前缀复用在重启后跨会话保留">A persisted cold index gives longest-prefix reuse that survives a restart across sessions</li>
-              <li data-en="Cold-tier writes move onto a serial background writer, so one spill no longer stalls another request" data-zh="冷层写入迁移到串行后台写入器，一次 spill 不再阻塞其他请求">Cold-tier writes move onto a serial background writer, so one spill no longer stalls another request</li>
+              <li data-en="Speech to text and text to speech run in-process on MLX, with no Python and no Core ML detour" data-zh="语音转文字与文字转语音在进程内基于 MLX 运行，不需要 Python，也不绕道 Core ML">Speech to text and text to speech run in-process on MLX, with no Python and no Core ML detour</li>
+              <li data-en="A true cross-encoder scores each query-document pair jointly, with bi-encoder cosine kept as the fallback" data-zh="真正的交叉编码器对每个查询-文档对联合打分，双编码器余弦保留为回退路径">A true cross-encoder scores each query-document pair jointly, with bi-encoder cosine kept as the fallback</li>
+              <li data-en="Transcription is a cancellable chat attachment, and assistant messages gained a speech button" data-zh="转写以可取消的聊天附件形式提供，助手消息新增朗读按钮">Transcription is a cancellable chat attachment, and assistant messages gained a speech button</li>
+              <li data-en="The app finally links the patched MLX engine, so this DMG carries its correctness fixes" data-zh="应用终于链接了补丁版 MLX 引擎，这个 DMG 才真正携带其正确性修复">The app finally links the patched MLX engine, so this DMG carries its correctness fixes</li>
             </ul>
             <a href="{{repositoryURL}}/releases/tag/v{{currentVersion}}" data-en="View v{{currentVersion}} release ↗" data-zh="查看 v{{currentVersion}} 版本 ↗">View v{{currentVersion}} release ↗</a>
           </article>
