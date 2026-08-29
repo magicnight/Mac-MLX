@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1786158746026,
+  "lastScanned": 1787926929520,
   "projectRoot": "/Users/kevin/Projects/macmlx",
   "techStack": {
     "languages": [],
@@ -40,7 +40,7 @@
       "path": "Formula",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1786158746014,
+      "lastAccessed": 1787926929506,
       "keyFiles": [
         "macmlx.rb"
       ]
@@ -49,7 +49,7 @@
       "path": "MacMLXCore",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1786158746015,
+      "lastAccessed": 1787926929506,
       "keyFiles": [
         "Package.resolved",
         "Package.swift"
@@ -59,7 +59,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 3,
-      "lastAccessed": 1786158746015,
+      "lastAccessed": 1787926929507,
       "keyFiles": [
         "deepseek-v32-swift-port.md",
         "model-support.md",
@@ -70,7 +70,7 @@
       "path": "macMLX",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1786158746015,
+      "lastAccessed": 1787926929507,
       "keyFiles": [
         "Info.plist"
       ]
@@ -79,7 +79,7 @@
       "path": "macmlx-cli",
       "purpose": null,
       "fileCount": 2,
-      "lastAccessed": 1786158746015,
+      "lastAccessed": 1787926929507,
       "keyFiles": [
         "Package.resolved",
         "Package.swift"
@@ -89,7 +89,7 @@
       "path": "public",
       "purpose": "Public files",
       "fileCount": 8,
-      "lastAccessed": 1786158746016,
+      "lastAccessed": 1787926929507,
       "keyFiles": [
         "404.html",
         "_headers",
@@ -101,8 +101,8 @@
     "scripts": {
       "path": "scripts",
       "purpose": "Build/utility scripts",
-      "fileCount": 15,
-      "lastAccessed": 1786158746016,
+      "fileCount": 16,
+      "lastAccessed": 1787926929507,
       "keyFiles": [
         "ExportOptions.plist",
         "build-public-site.mjs",
@@ -115,7 +115,7 @@
       "path": "site",
       "purpose": null,
       "fileCount": 3,
-      "lastAccessed": 1786158746016,
+      "lastAccessed": 1787926929507,
       "keyFiles": [
         "README.md",
         "routes.mjs",
@@ -126,28 +126,28 @@
       "path": "skills",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1786158746016,
+      "lastAccessed": 1787926929507,
       "keyFiles": []
     },
     "MacMLXCore/Tests": {
       "path": "MacMLXCore/Tests",
       "purpose": "Test files",
       "fileCount": 0,
-      "lastAccessed": 1786158746016,
+      "lastAccessed": 1787926929508,
       "keyFiles": []
     },
     "macmlx-cli/Tests": {
       "path": "macmlx-cli/Tests",
       "purpose": "Test files",
       "fileCount": 0,
-      "lastAccessed": 1786158746017,
+      "lastAccessed": 1787926929508,
       "keyFiles": []
     },
     "public/assets": {
       "path": "public/assets",
       "purpose": "Static assets",
       "fileCount": 1,
-      "lastAccessed": 1786158746017,
+      "lastAccessed": 1787926929508,
       "keyFiles": [
         "og-image.svg"
       ]
@@ -156,14 +156,14 @@
       "path": "site/assets",
       "purpose": "Static assets",
       "fileCount": 0,
-      "lastAccessed": 1786158746017,
+      "lastAccessed": 1787926929508,
       "keyFiles": []
     },
     "site/lib": {
       "path": "site/lib",
       "purpose": "Library code",
       "fileCount": 15,
-      "lastAccessed": 1786158746017,
+      "lastAccessed": 1787926929509,
       "keyFiles": [
         "breadcrumbs.mjs",
         "build-output.mjs",
@@ -174,7 +174,7 @@
       "path": "site/tests",
       "purpose": "Test files",
       "fileCount": 24,
-      "lastAccessed": 1786158746017,
+      "lastAccessed": 1787926929509,
       "keyFiles": [
         "article-quality.test.mjs",
         "brand-logo.test.mjs",
@@ -182,37 +182,6 @@
       ]
     }
   },
-  "hotPaths": [
-    {
-      "path": "docs/superpowers/plans/2026-07-08-omlx-upstream-parity-refresh.md",
-      "accessCount": 1,
-      "lastAccessed": 1785731815352,
-      "type": "file"
-    },
-    {
-      "path": "docs/superpowers/plans/2026-07-08-omlx-ui-adoption.md",
-      "accessCount": 1,
-      "lastAccessed": 1785731815554,
-      "type": "file"
-    },
-    {
-      "path": "macMLX/macMLX/Views/Benchmark/BenchmarkViewModel.swift",
-      "accessCount": 1,
-      "lastAccessed": 1785764152080,
-      "type": "file"
-    },
-    {
-      "path": "MacMLXCore/Package.swift",
-      "accessCount": 1,
-      "lastAccessed": 1785764815034,
-      "type": "file"
-    },
-    {
-      "path": "macMLX/macMLX/macMLX.entitlements",
-      "accessCount": 1,
-      "lastAccessed": 1785764949199,
-      "type": "file"
-    }
-  ],
+  "hotPaths": [],
   "userDirectives": []
 }
