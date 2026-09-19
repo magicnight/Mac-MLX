@@ -124,7 +124,32 @@ Three things an app cannot get right on its own:
 
 ### Compatibility audit
 
-Checked statically, Apple's client against `HummingbirdServer`:
+This section was rewritten after running the thing rather than reading it. A
+protocol-only stub reproducing `HummingbirdServer`'s exact frame shapes was
+served on `127.0.0.1:8123`, and Apple's `ChatCompletionsLanguageModel` was
+pointed at it through a real `LanguageModelSession`. No model is involved, so
+this is a wire-contract result, not a generation result.
+
+**Both paths completed.** A plain `respond(to:)` returned the streamed text, and
+a `@Generable` round trip returned a parsed typed value. Notably the stub sent
+**no usage frame**, and the conversation still completed — so the missing
+`stream_options` support costs usage reporting, it does not break the
+conversation. Earlier drafts of this document overstated that.
+
+**What Apple's client actually sends** (captured verbatim):
+
+```
+User-Agent: com.apple.FoundationModels
+Accept: text/event-stream
+{"tool_choice":"auto","stream":true,"stream_options":{"include_usage":true},
+ "messages":[…],"model":"…","tools":[]}
+```
+
+`tools: []` and `tool_choice: "auto"` are sent unconditionally, even with no
+tools registered. Whether an empty `tools` array changes macMLX's chat-template
+path is untested and should be checked.
+
+Static audit of the remaining fields, Apple's client against `HummingbirdServer`:
 
 | Apple's client sends / expects | macMLX server | Status |
 |---|---|---|
@@ -145,12 +170,38 @@ usage frame at all. A repo-wide search for `stream_options`, `streamOptions` and
 `include_usage` across `MacMLXCore` finds one hit, and it is a comment about the
 Ollama request shape — not an implementation.
 
-One gap, and it is small and well-defined. It matters more than its size
-suggests: without a usage frame in the stream, the executor cannot emit
-`.updateUsage`, so `cachedTokenCount` — which is exactly what macMLX's tiered
-prompt cache is for — never reaches the app, and neither do the
-`tokensPerSecond` / `timeToFirstToken` metadata values Apple's own provider
-examples surface.
+The gap is small and well defined, and it degrades rather than fails: without a
+usage frame the executor cannot emit `.updateUsage`, so `cachedTokenCount` —
+which is exactly what macMLX's tiered prompt cache is for — never reaches the
+app, and neither do the `tokensPerSecond` / `timeToFirstToken` metadata values
+Apple's own provider examples surface.
+
+### Guided generation has a real boundary, and it is narrower than it looks
+
+The captured `response_format` is
+`{"type":"json_schema","json_schema":{"name":…,"strict":true,"schema":{…}}}`.
+`ResponseFormatDecoder.compileObjectSchema` reads the top level by key lookup,
+so Apple's extra `title`, `x-order` and `$defs` keys are ignored harmlessly.
+Property schemas are different: `compilePropertyType` runs an allow-list gate
+(`type`, `enum`, `description`, `title`, `default`) and throws
+`unsupportedFeature` — a 400 — for anything else.
+
+Measured against schemas Apple actually emitted:
+
+| `@Generable` shape | macMLX decoder |
+|---|---|
+| flat struct of `String` / `Int`, with or without `@Guide(description:)` | **accepted** — verified end to end against the stub |
+| array property, e.g. `[String]` | **400** — Apple emits `items`, which is not allow-listed |
+| nested `@Generable` | **400** — Apple emits `$ref: "#/$defs/…"`, which is not allow-listed |
+| enum-backed property | untested; `enum` is allow-listed so it should pass |
+| range or pattern guides | untested — the description guide used here emitted only `description`, so it is unknown whether `.range(…)` emits `minimum`/`maximum` |
+
+So "macMLX supports guided generation through Apple's API" is true only for flat
+structs today. Widening `allowedPropertyKeys` is not the fix on its own: the
+constraint automaton has to actually enforce `items` and resolve `$ref`, or the
+400 would become silently wrong output — which the allow-list exists to prevent.
+This is a separate work item from B1, and larger. Until it is done, the
+documentation must say which shapes work.
 
 ### Work items
 
