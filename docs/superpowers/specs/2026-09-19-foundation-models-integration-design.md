@@ -176,6 +176,43 @@ which is exactly what macMLX's tiered prompt cache is for — never reaches the
 app, and neither do the `tokensPerSecond` / `timeToFirstToken` metadata values
 Apple's own provider examples surface.
 
+### Xcode 27 as a consumer
+
+Xcode 27 ships `OpenAICompliantChatModelProvider` in
+`IDEIntelligenceModelService`, alongside an `openAIBaseURL` setting, so pointing
+it at macMLX is a supported configuration rather than a hack.
+
+Its model-discovery call, captured from a real Xcode 27 against the stub:
+
+```
+GET /v1/models?
+User-Agent: Xcode/25183.107.5 CFNetwork/3896.100.1.1.1 Darwin/27.0.0
+Accept: application/json
+Authorization: Bearer
+```
+
+Two things follow, both verified against Hummingbird 2.25.0 — the exact version
+macMLX pins — using `router.get("/v1/models")`, the exact registration
+`HummingbirdServer.swift:1372` uses:
+
+| path | result |
+|---|---|
+| `/v1/models` | 200 |
+| `/v1/models?` — what Xcode actually sends | **200**, the query string is stripped by the router |
+| `/v1/v1/models?` | 404 |
+
+So macMLX's routing accepts Xcode's discovery request unchanged. But the base
+URL entered in Xcode must **not** end in `/v1`: Xcode appends `/v1/models`
+itself, and a base of `http://localhost:8000/v1` produces `/v1/v1/models`, which
+404s. Documentation must state the correct value is `http://localhost:8000`.
+
+A second consequence of `/v1/models` reporting **only the currently loaded
+model**: with nothing loaded macMLX returns `{"object":"list","data":[]}`, and
+Xcode's provider will have an empty model list. Whether Xcode treats that as a
+misconfigured provider is untested. If it does, the model-list endpoint may need
+to report available-but-not-loaded models for this integration to feel working
+rather than broken.
+
 ### Guided generation has a real boundary, and it is narrower than it looks
 
 The captured `response_format` is
