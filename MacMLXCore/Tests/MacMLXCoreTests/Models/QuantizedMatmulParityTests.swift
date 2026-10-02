@@ -270,4 +270,69 @@ struct QuantizedMatmulParityTests {
             32768 rows the early tiles never write.
             """)
     }
+
+    // MARK: - mlx#4009 — sorted gather_qmm on a ragged K
+
+    /// The sorted-RHS affine NAX kernel got its K tail wrong in two places when
+    /// K is not a multiple of the 64-wide tile: the activation tile for the last
+    /// block was bounded by the full `BK` rather than the K remainder, and the
+    /// weight loader's partial-tile zeroing tested the wrong axis, so with a
+    /// 32-row remainder it wiped half the output columns of a simdgroup instead
+    /// of the out-of-range K. Upstream measured 92–97% of output elements wrong
+    /// at K=160 on an M5 Max. ml-explore/mlx#4009; reported as mlx#3887.
+    ///
+    /// The window is narrower than it looks and easy to describe: K must be a
+    /// multiple of the group size but not of 64, which only group size 32
+    /// admits (K = 32, 96, 160, 224, …). `--q-group-size 32` is a common
+    /// conversion choice, and a checkpoint whose hidden or MoE-intermediate size
+    /// sits at 32 mod 64 then produces garbage that reads like a bad model, not
+    /// a bug. Same dispatch as `#3922`: `gather_qmm_rhs` gates on NAX and
+    /// transpose but not on K alignment, so a ragged K really is sent here.
+    @Test("a sorted gather_qmm on a ragged K matches its dequantized reference")
+    func sortedGatherQMMRaggedKMatchesReference() {
+        let m = 64, k = 160, n = 64, experts = 2  // k % 64 == 32 is the seam
+        let groupSize = 32, bits = 4
+
+        MLXRandom.seed(7)
+        let weights = MLXRandom.normal([experts, n, k]).asType(.float16)
+        let (weightsQ, scales, biases) = MLX.quantized(
+            weights, groupSize: groupSize, bits: bits)
+        let dequantized = MLX.dequantized(
+            weightsQ, scales: scales, biases: biases,
+            groupSize: groupSize, bits: bits).asType(.float32)
+
+        let x = MLXRandom.normal([m, k], scale: 0.5).asType(.bfloat16)
+        // Sorted: the first half of the rows hit expert 0, the rest expert 1,
+        // which keeps the batch on the sorted-RHS path (B >= 16, B / E >= 4).
+        let rhsIndices = MLX.concatenated([
+            MLXArray.zeros([m / 2], type: Int32.self),
+            MLXArray.ones([m - m / 2], type: Int32.self),
+        ])
+
+        let underTest = MLX.gatherQuantizedMM(
+            x.expandedDimensions(axis: 1), weightsQ, scales: scales, biases: biases,
+            rhsIndices: rhsIndices, transpose: true,
+            groupSize: groupSize, bits: bits, sortedIndices: true)
+            .reshaped([m, n])
+
+        // Reference: each half against its own expert's dequantized weight.
+        let xf = x.asType(.float32)
+        let reference = MLX.concatenated([
+            MLX.matmul(xf[0 ..< (m / 2)], dequantized[0].transposed()),
+            MLX.matmul(xf[(m / 2)...], dequantized[1].transposed()),
+        ])
+        MLX.eval(underTest, reference)
+
+        let difference = maxAbsDiff(underTest, reference)
+        #expect(
+            difference < 1.0,
+            """
+            Sorted gather_qmm on a ragged K diverged from its dequantized \
+            reference (K=\(k), N=\(n), M=\(m), group size \(groupSize)): \
+            max |diff| \(difference). On NAX hardware this is \
+            ml-explore/mlx#4009 — the K tail is bounded by the full tile and \
+            the weight loader zeroes the wrong axis, so a 32-wide remainder \
+            corrupts most of the output.
+            """)
+    }
 }
