@@ -68,7 +68,10 @@ let package = Package(
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
             revision: "1026d239d831ac7ddd154c970bb6c1bff08c0e0c"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.32.3"),
+        // Minor-pinned: a minor bump of mlx-swift-lm raises its mlx-swift floor,
+        // which the fork's revision pin can satisfy at resolution but not at the
+        // source level. Move both together, never one.
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", .upToNextMinor(from: "3.32.3")),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
         // Use 1.3.x series: avoids 0.1.24's pin on swift-argument-parser 1.4.x

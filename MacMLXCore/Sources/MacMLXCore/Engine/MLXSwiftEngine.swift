@@ -987,10 +987,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         // whose `TokenIterator(input:model:cache:processor:sampler:…)` initializer
         // carries no quantization parameters; that combination is logged and the
         // KV-quant request silently deferred (see `runLLMGeneration`).
-        // `chunking: .remainder` keeps the prefill chunk boundaries — and so
-        // the exact outputs — that this engine has always produced. mlx-swift-lm
-        // 3.32.3 made `.balanced` the default; moving to it is a measured change
-        // of its own, not something a dependency bump gets to decide.
+        // `chunking: .remainder` restores the legacy prefill stride and reserved
+        // tail that mlx-swift-lm 3.32.3 replaced with `.balanced` by default.
+        // Checked by reading against 3.31.4 for the generic `LLMModel` path and
+        // every VLM path; it does not cover Gemma3Text, whose prefill 3.32.3
+        // reworked on its own (it now chunks at 128 regardless), and no
+        // output-level comparison was possible here. Moving to `.balanced` is a
+        // measured change of its own, not something a dependency bump decides.
         let generateParams = GenerateParameters(
             maxTokens: params.maxTokens,
             kvBits: params.kvBits,
@@ -1270,6 +1273,11 @@ public actor MLXSwiftEngine: InferenceEngine {
         let topLogprobs = sampling.topLogprobs ?? 0
         let usesXTC = (xtcProbability ?? 0) > 0 && sampling.temperature > 0
         let usesCustomPipeline = responseFormat != nil || logitBias != nil || usesXTC || wantsLogprobs
+        // This flag also keeps our logit processors out of speculative decoding,
+        // where mlx-swift-lm 3.32.3's `LogitProcessor.copy()` would hand the
+        // draft round the default struct copy. Ours hold reference-type state
+        // (`LogprobsCaptureProcessor`'s boxes, the JSON constraint table, the
+        // chained composite's children) that a shallow copy would share.
         // KV-cache quantization rides the stock/speculative/VLM `TokenIterator`
         // (built from `generateParams`), which the custom pipeline bypasses — so a
         // request that combines `kv_bits` with a custom feature gets no

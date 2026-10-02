@@ -162,6 +162,9 @@ extension MLXSwiftEngine: BatchGenerationServing {
                 maxTokens: params.maxTokens,
                 temperature: Float(params.temperature),
                 topP: Float(params.topP),
+                // The batched path prefills by hand in `ModelBatchInferenceCore`
+                // and never reads this; set for parity with the single-stream
+                // path so a future consumer inherits the same stride.
                 prefill: PrefillParameters(chunking: .remainder)),
             // GenerateRequest carries no stop-strings field, so the batched path has
             // none to honour — parity with what the single-stream path receives.

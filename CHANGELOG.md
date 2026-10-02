@@ -18,8 +18,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   0.32.3 registers every stream globally — and `CrossThreadEvalTripwireTests`
   now guards against regressing it rather than predicting it.
 - mlx-swift-lm moves to 3.32.3 with it. Prefill chunking is pinned to the
-  legacy `.remainder` strategy so generated tokens are unchanged by the
-  upgrade; the new `.balanced` default is a separate, measured change.
+  legacy `.remainder` stride rather than 3.32.3's new `.balanced` default,
+  which keeps the generic text and vision prefill boundaries where they were
+  (checked by reading, not by an output comparison, which this project cannot
+  run). Gemma3Text's prefill was reworked upstream on its own and is not
+  covered. Adopting `.balanced` is a separate, measured change.
 - mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
   v0.1.3 plus two one-line compatibility commits) because no released
   version builds against mlx-swift-lm 3.32.3.

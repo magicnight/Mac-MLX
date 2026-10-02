@@ -7,7 +7,7 @@ import MLXLMCommon
 /// mlx-lm's `to_batch_cache` (`generate.py`), restricted to the v1 dense-only
 /// scope.
 ///
-/// ## Dense-only gate (mirrors A1's `batchPositioned`)
+/// ## Dense-only gate (mirrors `BatchDecodeRunner.areDenseBatchableCaches`)
 /// Python's `to_batch_cache` also maps `RotatingKVCache → BatchRotatingKVCache`.
 /// The rotating sibling is deferred (see ``BatchKVCache``'s "Deferred to a
 /// follow-up wave" note), so this converter REFUSES — returns `nil` for the

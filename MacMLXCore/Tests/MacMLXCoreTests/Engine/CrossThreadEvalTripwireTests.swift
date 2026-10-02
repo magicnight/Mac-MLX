@@ -38,9 +38,9 @@ import MLX
 /// That a thread-unsafe stream shared across threads is safe under concurrent
 /// *graph construction*. mlx-swift serialises `eval` behind `evalLock`; ops
 /// that build the graph do not take it, which is the same shape as before this
-/// move. This test exercises one thread at a time. It was first observed to
-/// pass, rather than merely held green, against 0.32.3 — the old base could
-/// not have run it at all.
+/// move. This test exercises one thread at a time. Passing on the old base
+/// (core v0.31.1, before the thread-local stream model) was trivial and proved
+/// nothing; passing on 0.32.3 is the first run that carries information.
 @Suite(
     "Cross-thread eval tripwire",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))

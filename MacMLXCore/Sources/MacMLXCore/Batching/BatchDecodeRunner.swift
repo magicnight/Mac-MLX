@@ -158,6 +158,17 @@ final class BatchDecodeRunner {
     ///     EOS); the caller owns this policy.
     ///   - cohort: one ``BatchSlotConfig`` per row, all equal prompt length.
     ///   - globalMaxTokens: hard per-row token ceiling (default 4096).
+    /// Whether every cache is one of the two plain dense types the batched
+    /// step evaluator is proven against. A `CacheList` (hybrid models) reaches
+    /// its children through concrete-type subscripts and a `QuantizedKVCache`
+    /// reaches its real update through a capability probe; the batched path
+    /// performs neither, and both implement the plain `update` as a fatalError.
+    /// Refusing the whole batch when any cache is off-list keeps the failure
+    /// loud and early. Pinned by `BatchDecodeRunnerCacheGateTests`.
+    static func areDenseBatchableCaches(_ caches: [KVCache]) -> Bool {
+        caches.allSatisfy { $0 is KVCacheSimple || $0 is RotatingKVCache }
+    }
+
     static func make(
         model: any LanguageModel,
         tokenizer: any Tokenizer,
@@ -179,13 +190,9 @@ final class BatchDecodeRunner {
         // decoded in lockstep below.
         //
         // Coverage gate: refuse before allocating any streams unless every
-        // cache is one of the two plain dense types the batched step evaluator
-        // is proven against. A `CacheList` (hybrid models) reaches its children
-        // through concrete-type subscripts and a `QuantizedKVCache` reaches its
-        // real update through a capability probe; the batched path performs
-        // neither, and both implement the plain `update` as a fatalError.
+        // cache passes `areDenseBatchableCaches`.
         let caches = try model.newCache(parameters: nil)
-        guard caches.allSatisfy({ $0 is KVCacheSimple || $0 is RotatingKVCache }) else {
+        guard Self.areDenseBatchableCaches(caches) else {
             throw BatchUnsupportedError.cacheNotBatchable
         }
 
