@@ -122,8 +122,8 @@ final class BatchSchedulerModelTests: XCTestCase {
             }
 
             /// Stock scalar-offset B=1 greedy — the production single-stream path.
-            func stockGreedy(_ prompt: [Int]) -> [Int] {
-                let cache = model.newCache(parameters: nil)
+            func stockGreedy(_ prompt: [Int]) throws -> [Int] {
+                let cache = try model.newCache(parameters: nil)
                 func lastArgmax(_ logits: MLXArray) -> Int {
                     let sequenceLength = logits.dim(1)
                     return logits[0..., (sequenceLength - 1)..., 0...]
@@ -149,7 +149,7 @@ final class BatchSchedulerModelTests: XCTestCase {
                 prompts: [promptShort, promptLong, promptOther], padToken: 0)
             return RaggedRun(
                 trajectories: trajectories,
-                stockRefs: [stockGreedy(promptShort), stockGreedy(promptLong), stockGreedy(promptOther)],
+                stockRefs: try [stockGreedy(promptShort), stockGreedy(promptLong), stockGreedy(promptOther)],
                 isolationRow0: isolation[0],
                 leftPadding: leftPadding)
         }

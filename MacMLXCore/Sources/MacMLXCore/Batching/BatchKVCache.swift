@@ -43,8 +43,8 @@ import MLXNN
 /// NOT yet wired into any live decode loop — that seam is A2c.
 ///
 /// ## Isolation
-/// Holds non-`Sendable` MLX state; like ``BatchPositionedCacheWrapper`` it is a
-/// `final class` used within a single isolation domain (inside
+/// Holds non-`Sendable` MLX state; it is a `final class` used within a single
+/// isolation domain (inside
 /// `ModelContainer.perform` / the A2c scheduler actor), never shared across
 /// tasks.
 ///

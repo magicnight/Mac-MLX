@@ -57,10 +57,13 @@ extension MLXSwiftEngine: BatchGenerationServing {
                     // ARCHITECTURE (verified `ropeOffset`). The probe is cheap — type
                     // checks plus an empty `newCache` array, no MLX compute — matching
                     // `ModelBatchInferenceCore.ensureCoverage`.
+                    // `newCache` throws since mlx-swift-lm 3.32.3; a model whose
+                    // cache cannot even be allocated is not covered.
                     let covered =
                         BatchModelAllowlist.contains(context.model)
-                        && BatchCacheConverter.makeBatchCaches(
-                            from: context.model.newCache(parameters: nil), leftPadding: [0]) != nil
+                        && (try? context.model.newCache(parameters: nil)).flatMap {
+                            BatchCacheConverter.makeBatchCaches(from: $0, leftPadding: [0])
+                        } != nil
                     // Complete EOS set, exactly as upstream `buildStopTokenIds`: config
                     // ids + tokenizer EOS + encoded `extraEOSTokens`.
                     var eos = context.configuration.eosTokenIds
@@ -158,7 +161,8 @@ extension MLXSwiftEngine: BatchGenerationServing {
             parameters: GenerateParameters(
                 maxTokens: params.maxTokens,
                 temperature: Float(params.temperature),
-                topP: Float(params.topP)),
+                topP: Float(params.topP),
+                prefill: PrefillParameters(chunking: .remainder)),
             // GenerateRequest carries no stop-strings field, so the batched path has
             // none to honour — parity with what the single-stream path receives.
             stopStrings: [])

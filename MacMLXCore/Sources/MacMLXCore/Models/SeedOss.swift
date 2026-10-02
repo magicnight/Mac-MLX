@@ -8,8 +8,8 @@ import MLXNN
 //
 // A macMLX-owned model architecture (`model_type: seed_oss`) registered into the
 // stock mlx-swift-lm factory via `ModelOverlay` (no fork), following the
-// `Mellum2.swift` / `DeepseekV32.swift` precedent. Upstream mlx-swift-lm 3.31.4
-// has no `seed_oss` type.
+// `Mellum2.swift` / `DeepseekV32.swift` precedent. Upstream mlx-swift-lm has no
+// `seed_oss` type as of 3.32.3.
 //
 // Seed-OSS is a standard dense Llama-family decoder — GQA + SwiGLU MLP, one RoPE
 // family, RMSNorm — with exactly three architecture-specific twists, all bias

@@ -725,7 +725,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
             ))
             let ids = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
-            let text = await container.decode(tokens: ids)
+            let text = await container.decode(tokenIds: ids)
             return MessageSegmenter.promptOpensThink(text)
         } catch {
             return false
@@ -987,13 +987,18 @@ public actor MLXSwiftEngine: InferenceEngine {
         // whose `TokenIterator(input:model:cache:processor:sampler:…)` initializer
         // carries no quantization parameters; that combination is logged and the
         // KV-quant request silently deferred (see `runLLMGeneration`).
+        // `chunking: .remainder` keeps the prefill chunk boundaries — and so
+        // the exact outputs — that this engine has always produced. mlx-swift-lm
+        // 3.32.3 made `.balanced` the default; moving to it is a measured change
+        // of its own, not something a dependency bump gets to decide.
         let generateParams = GenerateParameters(
             maxTokens: params.maxTokens,
             kvBits: params.kvBits,
             kvGroupSize: params.kvGroupSize ?? 64,
             quantizedKVStart: params.quantizedKVStart ?? 0,
             temperature: Float(params.temperature),
-            topP: Float(params.topP)
+            topP: Float(params.topP),
+            prefill: PrefillParameters(chunking: .remainder)
         )
 
         // Map our ChatMessage array to MLXLMCommon Chat.Message array.
@@ -1226,7 +1231,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             cache: cache,
             processor: processor,
             sampler: sampler,
-            prefillStepSize: generateParams.prefillStepSize,
+            prefill: generateParams.prefill,
             maxTokens: generateParams.maxTokens
         )
 
@@ -1338,11 +1343,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             // Probe with a throwaway `[KVCache]` from `newCache(parameters:)`
             // on BOTH containers — lightweight: no prefill, just the
             // allocation shape, discarded immediately after the check.
-            let targetCacheIsTrimmable = await container.perform { context in
-                MLXLMCommon.canTrimPromptCache(context.model.newCache(parameters: generateParams))
+            let targetCacheIsTrimmable = try await container.perform { context in
+                MLXLMCommon.canTrimPromptCache(try context.model.newCache(parameters: generateParams))
             }
-            let draftCacheIsTrimmable = await draftContainer.perform { context in
-                MLXLMCommon.canTrimPromptCache(context.model.newCache(parameters: generateParams))
+            let draftCacheIsTrimmable = try await draftContainer.perform { context in
+                MLXLMCommon.canTrimPromptCache(try context.model.newCache(parameters: generateParams))
             }
             if Self.canUseSpeculativeDecoding(
                 targetCacheIsTrimmable: targetCacheIsTrimmable,
@@ -1464,7 +1469,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             toolCallFormat: ToolCallFormat?
         ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
-                let cache: [any KVCache] = priorCacheBox?.caches
+                let cache: [any KVCache] = try priorCacheBox?.caches
                     ?? context.model.newCache(parameters: generateParams)
                 let stream: AsyncStream<TokenGeneration>
                 if usesCustomPipeline {
@@ -1845,7 +1850,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         let inputBox = NonSendableBox(lmInput)
 
         let stream: AsyncStream<TokenGeneration> = try await container.perform(nonSendable: inputBox) { context, inputBox in
-            let cache = context.model.newCache(parameters: generateParams)
+            let cache = try context.model.newCache(parameters: generateParams)
             return try MLXLMCommon.generateTokens(
                 input: inputBox.value,
                 cache: cache,

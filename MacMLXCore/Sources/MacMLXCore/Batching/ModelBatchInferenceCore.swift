@@ -88,7 +88,7 @@ final class ModelBatchInferenceCore: BatchInferenceCore {
         // Fresh stock caches for this row's isolated B=1 prefill. Dense by the
         // coverage gate, so wrapping is unnecessary — a single row at a scalar
         // offset is the correct (non-batched) RoPE path.
-        let stock = model.newCache(parameters: nil)
+        let stock = try model.newCache(parameters: nil)
         let promptLength = config.promptTokens.count
         let promptArray = MLXArray(config.promptTokens.map { Int32($0) }, [1, promptLength])
 
@@ -186,7 +186,7 @@ final class ModelBatchInferenceCore: BatchInferenceCore {
         // re-throw) on every subsequent admit, otherwise a second submit
         // against an uncovered model would bypass the gate silently.
         guard BatchModelAllowlist.contains(model),
-            BatchCacheConverter.makeBatchCaches(from: model.newCache(parameters: nil), leftPadding: [0])
+            BatchCacheConverter.makeBatchCaches(from: try model.newCache(parameters: nil), leftPadding: [0])
                 != nil
         else {
             throw BatchUnsupportedError.cacheNotBatchable

@@ -8,12 +8,12 @@ import Foundation
 ///
 /// A2a never performs the sequential fallback itself — it refuses loudly so the
 /// caller (the A2c scheduler / A2d server) can route the request through the
-/// existing single-generation path. This mirrors ``batchPositioned(_:batch:)``'s
-/// "fail early, never silently produce garbage" contract.
+/// existing single-generation path: fail early, never silently produce garbage.
 enum BatchUnsupportedError: Error, Equatable, CustomStringConvertible {
-    /// `batchPositioned(_:batch:)` returned `nil`: the model's KV caches are not
-    /// a safely batch-positionable dense type (`CacheList`, `QuantizedKVCache`,
-    /// …). See ``BatchPositionedCacheWrapper``.
+    /// The model's KV caches are not all plain dense caches
+    /// (`KVCacheSimple` / `RotatingKVCache`). A `CacheList` or a
+    /// `QuantizedKVCache` reaches its real update through casts the batched
+    /// path does not perform, and implements plain `update` as a fatalError.
     case cacheNotBatchable
 
     /// The cohort was empty. A batched decode needs at least one row.

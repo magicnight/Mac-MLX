@@ -44,7 +44,7 @@ struct Cohere2CacheTests {
     func newCacheMixedSchedule() throws {
         let slidingWindow = 3
         let model = try tinyModel(slidingWindow: slidingWindow)
-        let caches = model.newCache(parameters: nil)
+        let caches = try model.newCache(parameters: nil)
 
         #expect(caches.count == 8)
 
