@@ -697,23 +697,42 @@ struct ResponseFormatDecoderTests {
     }
 
     /// The same expansion with long strings instead of many: 1,000 references
-    /// to a 64 KiB `const`, or to an object whose one key is 64 KiB, stay under
-    /// the node and value budgets, yet the automaton's program would copy the
-    /// string once per reference — 64 MB. The byte budget refuses both.
-    /// Mutation: without it both compile (no 400).
+    /// to a 64 KiB `const`, to an object whose one key is 64 KiB, or to an enum
+    /// of 30 values of 60 KiB stay under the node and value budgets (the enum
+    /// is 30,000 values in all), yet the automaton's program would copy the
+    /// strings once per reference — 64 MB, 64 MB and 1.8 GB. The byte budget
+    /// refuses all three. Mutation: without the charge on a name, a `const` or
+    /// an enum value, that variant compiles (no 400).
     @Test
     func boundsNameAndValueBytesAfterRefExpansion() {
         let long = String(repeating: "a", count: 65_536)
         var properties: [String: JSONValue] = [:]
         for index in 0..<1_000 { properties["p\(index)"] = ref("#/$defs/E") }
-        let viaValue = root(["o": root(properties)], extra: ["$defs": obj(["E": obj(["const": .string(long)])])])
-        let viaKey = root(["o": root(properties)], extra: ["$defs": obj(["E": root([long: string])])])
-        for schema in [viaValue, viaKey] {
+        let enumValues = (0..<30).map { JSONValue.string(String(repeating: "e", count: 61_440) + "\($0)") }
+        let variants: [(String, JSONValue)] = [
+            ("const", root(["o": root(properties)], extra: ["$defs": obj(["E": obj(["const": .string(long)])])])),
+            ("key", root(["o": root(properties)], extra: ["$defs": obj(["E": root([long: string])])])),
+            ("enum", root(
+                ["o": root(properties)],
+                extra: ["$defs": obj(["E": obj(["type": .string("string"), "enum": .array(enumValues)])])])),
+        ]
+        for (name, schema) in variants {
             let elapsed = ContinuousClock().measure {
-                expectUnsupported(schema: schema, containing: "schema too large")
+                expectUnsupported(schema: schema, containing: "bytes of property names")
             }
-            #expect(elapsed < .seconds(1), "took \(elapsed)")
+            #expect(elapsed < .seconds(1), "\(name): took \(elapsed)")
         }
+    }
+
+    /// `required` entries are charged too: a property name just over half the
+    /// byte cap compiles while it is optional and is refused once it is also
+    /// required, because the name is then counted twice. Mutation: without the
+    /// charge on `required` entries the second schema compiles.
+    @Test
+    func requiredEntriesCountAgainstTheByteBudget() throws {
+        let name = String(repeating: "k", count: ResponseFormatDecoder.maxSchemaBytes / 2 + 1)
+        _ = try compile(root([name: string]))
+        expectUnsupported(schema: root([name: string], required: [name]), containing: "bytes of property names")
     }
 
     @Test
