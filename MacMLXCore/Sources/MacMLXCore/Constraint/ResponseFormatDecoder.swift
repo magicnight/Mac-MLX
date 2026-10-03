@@ -26,8 +26,10 @@
 ///    accepted and ignored anywhere; so is `x-order` on an object, and
 ///    `$schema` / `$id` at the root. Property order never constrains key order
 ///    on the wire. A schema may hold at most ``maxSchemaDepth`` containers
-///    open at once and ``maxSchemaNodes`` nodes after `$ref` expansion, and a
-///    recursive schema is rejected because no bound on its documents exists.
+///    open at once; after `$ref` expansion, at most ``maxSchemaNodes`` nodes,
+///    ``maxSchemaLiterals`` enum and `const` values and ``maxSchemaBytes``
+///    bytes of property names and values. A recursive schema is rejected
+///    because no bound on its documents exists.
 ///
 /// Everything else — combinators, `null`, type arrays, numeric and string
 /// bounds (`minimum`, `pattern`, …), non-object roots,
@@ -46,6 +48,19 @@ public enum ResponseFormatDecoder {
     /// Bounds compile time and the compiled tree against exponential `$ref`
     /// fan-out (a definition used four times by one used four times, …).
     static let maxSchemaNodes = 4096
+
+    /// The most enum and `const` values one compile may produce after `$ref`
+    /// expansion; each enum value and each `const` counts 1. The node budget
+    /// counts a 60,000-value enum as one node, but every reference to it
+    /// compiles the values again and the automaton encodes them again, so a
+    /// small request could otherwise expand into gigabytes.
+    static let maxSchemaLiterals = 65_536
+
+    /// The most UTF-8 bytes of property names, enum values and `const` values
+    /// one compile may produce after `$ref` expansion. A value count alone does
+    /// not bound size: one long name or value referenced many times is copied
+    /// once per reference.
+    static let maxSchemaBytes = 4 * 1_024 * 1_024
 
     /// Purely annotative keywords, accepted and ignored on every kind of schema.
     private static let annotationKeys: Set<String> = [
@@ -124,7 +139,7 @@ public enum ResponseFormatDecoder {
     }
 
     /// Per-compile state: the root's definition tables, the `$ref`s being
-    /// expanded on the current path (cycle detection), and the node budget.
+    /// expanded on the current path (cycle detection), and the size budgets.
     struct Context {
         let defs: [String: JSONValue]
         let definitions: [String: JSONValue]
@@ -132,6 +147,8 @@ public enum ResponseFormatDecoder {
         /// path, so one definition used at two sibling positions is fine.
         var expanding: [String] = []
         var nodes = 0
+        var literals = 0
+        var bytes = 0
 
         /// Count one schema node against ``maxSchemaNodes``.
         mutating func spend(at path: String) throws {
@@ -140,6 +157,27 @@ public enum ResponseFormatDecoder {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaNodes) nodes "
                         + "after '$ref' expansion, at property '\(path)')")
+            }
+        }
+
+        /// Count `count` enum or `const` values against ``maxSchemaLiterals``.
+        mutating func spendLiterals(_ count: Int, at path: String) throws {
+            literals += count
+            guard literals <= ResponseFormatDecoder.maxSchemaLiterals else {
+                throw ResponseFormatError.unsupportedFeature(
+                    "schema too large (more than \(ResponseFormatDecoder.maxSchemaLiterals) enum and const values "
+                        + "after '$ref' expansion, at property '\(path)')")
+            }
+        }
+
+        /// Count the UTF-8 bytes of a property name or value against
+        /// ``maxSchemaBytes``.
+        mutating func spendBytes(of text: String, at path: String) throws {
+            bytes += text.utf8.count
+            guard bytes <= ResponseFormatDecoder.maxSchemaBytes else {
+                throw ResponseFormatError.unsupportedFeature(
+                    "schema too large (more than \(ResponseFormatDecoder.maxSchemaBytes) bytes of property names "
+                        + "and enum and const values after '$ref' expansion, at property '\(path)')")
             }
         }
     }
@@ -220,6 +258,7 @@ public enum ResponseFormatDecoder {
         var compiled: [JSONSchemaObject.Property] = []
         for name in properties.keys.sorted() {
             let childPath = path.isEmpty ? name : "\(path).\(name)"
+            try context.spendBytes(of: name, at: childPath)
             // The runtime key matcher compares literal UTF-8 bytes, so a declared
             // key the model could never spell would deadlock a `required` object
             // into the no-legal-token path — reject it up front (M2).
@@ -301,6 +340,8 @@ public enum ResponseFormatDecoder {
             guard case .string(let value) = constValue else {
                 throw ResponseFormatError.unsupportedFeature("non-string 'const' on property '\(path)'")
             }
+            try context.spendLiterals(1, at: path)
+            try context.spendBytes(of: value, at: path)
             // Matched as a literal at runtime, like an enum value (M2).
             try requireLiteralMatchable(value, role: "const value on property '\(path)'")
             return .stringEnum([value])
@@ -312,7 +353,7 @@ public enum ResponseFormatDecoder {
         case .string("array")?:
             return try compileArray(schema, path: path, depth: depth + 1, context: &context)
         default:
-            return try compileScalar(schema, path: path)
+            return try compileScalar(schema, path: path, context: &context)
         }
     }
 
@@ -370,7 +411,11 @@ public enum ResponseFormatDecoder {
 
     /// Compile one scalar property's value constraint — the flat subset's
     /// original rules, check for check.
-    static func compileScalar(_ property: [String: JSONValue], path name: String) throws -> SchemaValueType {
+    static func compileScalar(
+        _ property: [String: JSONValue],
+        path name: String,
+        context: inout Context
+    ) throws -> SchemaValueType {
         // Allow-list gate (M1): reject any keyword we do not model — a value
         // constraint (`pattern`, `minLength`, `maximum`, `format`, …) or a
         // structural one (`properties`, combinators) must 400, never be
@@ -400,12 +445,14 @@ public enum ResponseFormatDecoder {
                 throw ResponseFormatError.unsupportedFeature(
                     "enum on non-string property '\(name)'")
             }
+            try context.spendLiterals(entries.count, at: name)
             var values: [String] = []
             for entry in entries {
                 guard case .string(let value) = entry else {
                     throw ResponseFormatError.unsupportedFeature(
                         "non-string enum value on property '\(name)'")
                 }
+                try context.spendBytes(of: value, at: name)
                 // Enum values are matched as literal bytes at runtime, so one the
                 // model could never spell would narrow (or, if the only choice,
                 // deadlock) the value — reject it up front (M2).

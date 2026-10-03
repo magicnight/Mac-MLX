@@ -582,6 +582,68 @@ struct ResponseFormatDecoderTests {
         #expect(elapsed < .seconds(2))
     }
 
+    /// A schema small on the wire can expand to a huge one: every `$ref` to a
+    /// large enum compiles the whole enum again, and the automaton later
+    /// encodes it again. 2,000 references to a 20,000-value enum are 4,001
+    /// nodes, under the node budget; the value budget turns them into a 400
+    /// after a few references. Mutation: without the value budget this
+    /// compiles (no 400) and takes seconds.
+    @Test
+    func boundsEnumValuesAfterRefExpansion() {
+        let values = (0..<20_000).map { JSONValue.string("v\($0)") }
+        var properties: [String: JSONValue] = [:]
+        for index in 0..<2_000 { properties["p\(index)"] = ref("#/$defs/E") }
+        let schema = root(
+            ["o": root(properties)],
+            extra: ["$defs": obj(["E": obj(["type": .string("string"), "enum": .array(values)])])])
+        let elapsed = ContinuousClock().measure {
+            expectUnsupported(schema: schema, containing: "schema too large")
+        }
+        #expect(elapsed < .seconds(1), "took \(elapsed)")
+    }
+
+    /// The value cap itself: one enum of 65,536 values compiles, one more value
+    /// does not.
+    @Test
+    func valueBudgetAdmitsExactlyItsCap() throws {
+        func schema(values count: Int) -> JSONValue {
+            root(["e": obj(["type": .string("string"), "enum": .array((0..<count).map { .string("v\($0)") })])])
+        }
+        _ = try compile(schema(values: ResponseFormatDecoder.maxSchemaLiterals))
+        expectUnsupported(schema: schema(values: ResponseFormatDecoder.maxSchemaLiterals + 1), containing: "enum and const values")
+    }
+
+    /// The byte cap itself: a property name of exactly the cap compiles, one
+    /// more byte does not.
+    @Test
+    func byteBudgetAdmitsExactlyItsCap() throws {
+        func schema(nameBytes count: Int) -> JSONValue {
+            root([String(repeating: "k", count: count): string])
+        }
+        _ = try compile(schema(nameBytes: ResponseFormatDecoder.maxSchemaBytes))
+        expectUnsupported(schema: schema(nameBytes: ResponseFormatDecoder.maxSchemaBytes + 1), containing: "bytes of property names")
+    }
+
+    /// The same expansion with long strings instead of many: 1,000 references
+    /// to a 64 KiB `const`, or to an object whose one key is 64 KiB, stay under
+    /// the node and value budgets, yet the automaton's program would copy the
+    /// string once per reference — 64 MB. The byte budget refuses both.
+    /// Mutation: without it both compile (no 400).
+    @Test
+    func boundsNameAndValueBytesAfterRefExpansion() {
+        let long = String(repeating: "a", count: 65_536)
+        var properties: [String: JSONValue] = [:]
+        for index in 0..<1_000 { properties["p\(index)"] = ref("#/$defs/E") }
+        let viaValue = root(["o": root(properties)], extra: ["$defs": obj(["E": obj(["const": .string(long)])])])
+        let viaKey = root(["o": root(properties)], extra: ["$defs": obj(["E": root([long: string])])])
+        for schema in [viaValue, viaKey] {
+            let elapsed = ContinuousClock().measure {
+                expectUnsupported(schema: schema, containing: "schema too large")
+            }
+            #expect(elapsed < .seconds(1), "took \(elapsed)")
+        }
+    }
+
     @Test
     func rejectsNonStringConst() {
         expectUnsupported(schema: root(["k": obj(["const": .int(3)])]), containing: "non-string 'const'")
