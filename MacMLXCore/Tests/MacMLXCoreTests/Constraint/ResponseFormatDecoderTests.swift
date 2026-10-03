@@ -629,8 +629,9 @@ struct ResponseFormatDecoderTests {
     /// large enum compiles the whole enum again, and the automaton later
     /// encodes it again. 2,000 references to a 20,000-value enum are 4,001
     /// nodes, under the node budget; the value budget turns them into a 400
-    /// after a few references. Mutation: without the value budget this
-    /// compiles (no 400) and takes seconds.
+    /// after a few references. Mutation: without the value budget the byte
+    /// budget still refuses this, later and with its own message; without
+    /// both budgets it compiles (no 400) and takes seconds.
     @Test
     func boundsEnumValuesAfterRefExpansion() {
         let values = (0..<20_000).map { JSONValue.string("v\($0)") }
@@ -640,7 +641,7 @@ struct ResponseFormatDecoderTests {
             ["o": root(properties)],
             extra: ["$defs": obj(["E": obj(["type": .string("string"), "enum": .array(values)])])])
         let elapsed = ContinuousClock().measure {
-            expectUnsupported(schema: schema, containing: "schema too large")
+            expectUnsupported(schema: schema, containing: "schema too large (more than 65536 enum and const values")
         }
         #expect(elapsed < .seconds(1), "took \(elapsed)")
     }
