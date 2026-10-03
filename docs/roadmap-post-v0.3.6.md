@@ -1,5 +1,8 @@
 # macMLX Roadmap — post v0.3.6
 
+> **Historical.** Superseded by the Roadmap section of `README.md`, which is
+> the project's single source of truth for what ships next.
+
 Written 2026-04-18 after the v0.3.6 release branch stabilised. Captures
 features and issues that were deferred, plus items that became feasible
 once App Sandbox was turned off.
