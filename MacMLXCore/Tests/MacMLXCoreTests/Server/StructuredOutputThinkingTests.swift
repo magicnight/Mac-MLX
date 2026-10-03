@@ -51,7 +51,7 @@ struct StructuredOutputThinkingTests {
                 Task { [weak self] in
                     guard let self else { continuation.finish(); return }
                     await self.capture(request)
-                    let chunks = await self.chunks
+                    let chunks = self.chunks
                     for piece in chunks.dropLast() {
                         continuation.yield(GenerateChunk(text: piece))
                     }

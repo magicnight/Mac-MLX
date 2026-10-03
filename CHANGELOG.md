@@ -41,7 +41,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   the model in answer mode instead of opening a think block it cannot close,
   and the reasoning splitter is bypassed entirely, so a think tag that happens
   to sit inside a JSON string value is left alone as data.
-
 - **A sorted quantized MoE product on a ragged K returned mostly garbage**
   on M5 hardware: at group size 32 with a hidden or MoE-intermediate size
   that is 32 mod 64, the NAX kernel bounded its K tail by the full tile and
