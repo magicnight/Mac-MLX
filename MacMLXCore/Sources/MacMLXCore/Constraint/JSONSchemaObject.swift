@@ -1,7 +1,8 @@
 // Copyright © 2026 macMLX. English comments only.
 
-/// A compiled top-level object schema — the whole of the supported JSON-schema
-/// subset (Track C — C2).
+/// A compiled object schema at any depth of the supported JSON-schema subset
+/// (Track C — C2): the root of a `response_format` schema, or a nested object
+/// inside it (``SchemaValueType/object(_:)``).
 ///
 /// Produced by ``ResponseFormatDecoder`` from an OpenAI
 /// `response_format: {"type":"json_schema", …}` body, and consumed at decode
@@ -14,8 +15,8 @@
 ///  - gives each present key a value of its declared ``SchemaValueType``.
 ///
 /// Keys may appear in any order (JSON objects are unordered), so the runtime
-/// automaton tracks the set of already-emitted keys rather than a fixed
-/// sequence.
+/// automaton tracks the set of already-emitted keys of each open object rather
+/// than a fixed sequence.
 public struct JSONSchemaObject: Equatable, Hashable, Sendable, Codable {
 
     /// One declared property: its wire name and value constraint.

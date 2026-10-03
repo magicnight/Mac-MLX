@@ -21,9 +21,9 @@ enum SchemaScalarState: Hashable, Sendable {
     case stringHighSurrogateBackslash
     /// Read the `\` after a high surrogate; only `u` is legal next.
     case stringHighSurrogateU
-    /// String enum: `candidates` are the enum values (as bytes) still
-    /// prefix-compatible with `accumulated`.
-    case enumBody(accumulated: [UInt8], candidates: [[UInt8]])
+    /// String enum of scalar node `node`: `candidates` are the indices of the
+    /// enum values whose first `position` bytes match what was read.
+    case enumBody(node: Int32, position: Int, candidates: PropertyMask)
     // Number (integer or fractional)
     case numberAfterMinus
     case numberAfterLeadingZero
@@ -58,16 +58,16 @@ enum SchemaScalarState: Hashable, Sendable {
     @usableFromInline static let trueBytes: [UInt8] = Array("true".utf8)
     @usableFromInline static let falseBytes: [UInt8] = Array("false".utf8)
 
-    /// The state after the first byte of a value of `type`, or `nil` when the
-    /// byte cannot start one.
+    /// The state after the first byte of a value of scalar node `node`, of
+    /// kind `kind`, or `nil` when the byte cannot start one.
     @usableFromInline
-    static func start(_ byte: UInt8, type: SchemaValueType) -> SchemaScalarState? {
-        switch type {
+    static func start(_ byte: UInt8, node: Int32, kind: SchemaProgram.ScalarKind) -> SchemaScalarState? {
+        switch kind {
         case .string:
             return byte == SchemaBytes.quote ? .stringBody : nil
         case .stringEnum(let values):
             guard byte == SchemaBytes.quote else { return nil }
-            return .enumBody(accumulated: [], candidates: values.map { Array($0.utf8) })
+            return .enumBody(node: node, position: 0, candidates: .all(count: values.count))
         case .number:
             if byte == SchemaBytes.minus { return .numberAfterMinus }
             if byte == SchemaBytes.zero { return .numberAfterLeadingZero }
@@ -85,9 +85,9 @@ enum SchemaScalarState: Hashable, Sendable {
         }
     }
 
-    /// Advance over one byte of the value.
+    /// Advance over one byte of the value. `program` holds the enum values.
     @usableFromInline
-    func step(_ byte: UInt8) -> Step {
+    func step(_ byte: UInt8, program: SchemaProgram) -> Step {
         switch self {
         case .stringBody:
             if byte == SchemaBytes.quote { return .completed }
@@ -115,14 +115,14 @@ enum SchemaScalarState: Hashable, Sendable {
             guard byte == SchemaBytes.lowerU else { return .rejected }
             return .consumed(.stringUnicode(digitsSeen: 0, value: 0, expectingLow: true))
 
-        case .enumBody(let accumulated, let candidates):
+        case .enumBody(let node, let position, let candidates):
+            guard case .stringEnum(let values) = program.scalars[Int(node)] else { return .rejected }
             if byte == SchemaBytes.quote {
-                return candidates.contains(accumulated) ? .completed : .rejected
+                return candidates.first(where: { values[$0].count == position }) != nil ? .completed : .rejected
             }
-            let position = accumulated.count
-            let survivors = candidates.filter { $0.count > position && $0[position] == byte }
+            let survivors = candidates.filtered { values[$0].count > position && values[$0][position] == byte }
             guard !survivors.isEmpty else { return .rejected }
-            return .consumed(.enumBody(accumulated: accumulated + [byte], candidates: survivors))
+            return .consumed(.enumBody(node: node, position: position + 1, candidates: survivors))
 
         case .numberAfterMinus:
             if byte == SchemaBytes.zero { return .consumed(.numberAfterLeadingZero) }

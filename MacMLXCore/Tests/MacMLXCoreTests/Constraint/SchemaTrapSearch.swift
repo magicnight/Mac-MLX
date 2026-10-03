@@ -35,9 +35,20 @@ enum SchemaTrapSearch {
     private static func collectBytes(of schema: JSONSchemaObject, into bytes: inout [UInt8]) {
         for property in schema.properties {
             bytes.append(contentsOf: property.name.utf8)
-            if case .stringEnum(let values) = property.type {
-                for value in values { bytes.append(contentsOf: value.utf8) }
-            }
+            collectBytes(of: property.type, into: &bytes)
+        }
+    }
+
+    private static func collectBytes(of type: SchemaValueType, into bytes: inout [UInt8]) {
+        switch type {
+        case .stringEnum(let values):
+            for value in values { bytes.append(contentsOf: value.utf8) }
+        case .object(let object):
+            collectBytes(of: object, into: &bytes)
+        case .array(let items, _, _):
+            collectBytes(of: items, into: &bytes)
+        case .string, .number, .integer, .boolean:
+            break
         }
     }
 

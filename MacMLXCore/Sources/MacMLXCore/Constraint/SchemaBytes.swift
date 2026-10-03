@@ -12,6 +12,8 @@ enum SchemaBytes {
     @usableFromInline static let comma: UInt8 = 0x2C
     @usableFromInline static let lBrace: UInt8 = 0x7B
     @usableFromInline static let rBrace: UInt8 = 0x7D
+    @usableFromInline static let lBracket: UInt8 = 0x5B
+    @usableFromInline static let rBracket: UInt8 = 0x5D
     @usableFromInline static let dot: UInt8 = 0x2E
     @usableFromInline static let plus: UInt8 = 0x2B
     @usableFromInline static let minus: UInt8 = 0x2D

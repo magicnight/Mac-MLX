@@ -4,51 +4,79 @@
 /// ``JSONSchemaObject`` (Track C — C2).
 ///
 /// Where ``JSONGrammarState`` accepts *any* well-formed JSON, this accepts only
-/// the flat object described by a compiled schema: keys drawn from the declared
-/// set (each at most once, all required ones present, in any order) and each
-/// value matching its declared ``SchemaValueType``. It is the runtime companion
-/// to ``ResponseFormatDecoder`` and, like ``JSONGrammarState``, is a pure value
-/// type — token classification is a non-mutating ``walk(_:)`` fold, MLX-free and
-/// unit-testable.
+/// documents of the compiled schema: in every object, keys drawn from that
+/// object's declared set (each at most once, all required ones present, in any
+/// order) and each value matching its declared ``SchemaValueType`` — nested
+/// objects and arrays included, every array within its item bounds. It is the
+/// runtime companion to ``ResponseFormatDecoder`` and, like
+/// ``JSONGrammarState``, is a pure value type — token classification is a
+/// non-mutating ``walk(_:)`` fold, MLX-free and unit-testable.
+///
+/// ## Shape
+/// A stack of open containers (``Frame``) plus one lexical ``Mode``. The schema
+/// itself lives in a shared, immutable ``SchemaProgram`` built once in
+/// ``init(schema:)``. The scalar in progress lives in the mode, never in a
+/// frame, so string and number bytes — most of any document — never touch the
+/// stack, and a walk copies at most the open frames, once.
+///
+/// ## No dead ends
+/// Every reachable state can still reach a complete document: `,` is legal
+/// only where another member or item can follow, the compiler guarantees
+/// `minItems <= maxItems` and that every required key is declared and
+/// spellable, and `\u` escapes are cut off as soon as they cannot complete.
 public struct SchemaConstraintState: Hashable, Sendable {
 
-    /// The structural position within the object.
+    /// One open container.
     @usableFromInline
-    enum Phase: Hashable, Sendable {
-        /// Before the object: whitespace then `{`.
-        case beforeObject
-        /// After `{` or after `,`. `afterComma` forbids the object close (no
-        /// trailing comma).
-        case expectKeyOrClose(afterComma: Bool)
-        /// Inside a key string, matching declared names not yet emitted.
-        case inKey(accumulated: [UInt8])
-        /// A complete key was read; the `:` separator is required.
-        case expectColon(key: String)
-        /// After `:`; whitespace then the first byte of the typed value.
-        case expectValue(key: String)
-        /// Inside a typed value.
-        case value(key: String, state: SchemaScalarState)
-        /// A value completed; whitespace, `,`, or the object close `}`.
-        case afterValue
-        /// The object closed with all required keys present — the accept state.
-        case done
+    enum Frame: Hashable, Sendable {
+        /// An object of node `node`. A member is marked `emitted` when its key's
+        /// closing quote is read.
+        case object(node: Int32, emitted: PropertyMask)
+        /// An array of node `node`; `count` items have been started.
+        case array(node: Int32, count: Int)
     }
 
-    @usableFromInline let schema: JSONSchemaObject
-    @usableFromInline var emitted: Set<String>
-    @usableFromInline var phase: Phase
+    /// The lexical position.
+    @usableFromInline
+    enum Mode: Hashable, Sendable {
+        /// Whitespace, then the first byte of a value of `node`: at the root,
+        /// after `:`, and after `,` in an array.
+        case expectValue(node: SchemaProgram.NodeRef)
+        /// Just after `[`: an item, or `]` when the array may be empty.
+        case arrayOpen
+        /// Just after `{` (`afterComma == false`) or after `,` in an object: a
+        /// key not yet emitted, or `}` (never right after a comma).
+        case objectOpen(afterComma: Bool)
+        /// Inside a key; `candidates` are the members not yet emitted whose
+        /// names match the first `position` bytes read.
+        case key(position: Int, candidates: PropertyMask)
+        /// A key was read; whitespace, `:`, then a value of `value`.
+        case colon(value: SchemaProgram.NodeRef)
+        /// Inside a scalar value.
+        case scalar(SchemaScalarState)
+        /// A value just completed in the innermost container: whitespace, `,`,
+        /// or that container's close. With an empty stack the root object has
+        /// closed — the accept state, where only whitespace may follow.
+        case afterValue
+    }
+
+    @usableFromInline let program: SchemaProgram
+    @usableFromInline var stack: ContiguousArray<Frame>
+    @usableFromInline var mode: Mode
 
     /// A fresh automaton positioned before the schema's object.
     public init(schema: JSONSchemaObject) {
-        self.schema = schema
-        self.emitted = []
-        self.phase = .beforeObject
+        let program = SchemaProgram(root: schema)
+        self.program = program
+        self.stack = []
+        self.stack.reserveCapacity(4)
+        self.mode = .expectValue(node: program.root)
     }
 
     /// Whether the schema object has been fully and validly produced — the
     /// accept state, and the only state in which EOS is permitted.
     @inlinable
-    public var isComplete: Bool { phase == .done }
+    public var isComplete: Bool { stack.isEmpty && mode == .afterValue }
 
     /// Advance over one byte, returning the resulting state or `nil` when the
     /// byte is illegal.
@@ -71,47 +99,95 @@ public struct SchemaConstraintState: Hashable, Sendable {
 
     /// A short description of the current structural position, for diagnostics
     /// (e.g. the constraint processor's "no legal token" log). Not a wire
-    /// format — the reflected `phase`/`emitted` values are for humans.
+    /// format — the reflected mode is for humans.
     public var diagnosticDescription: String {
-        "schema(phase: \(phase), emitted: \(emitted.sorted()), complete: \(isComplete))"
+        "schema(mode: \(mode), depth: \(stack.count), complete: \(isComplete))"
+    }
+
+    /// Two states are equal when they are at the same position of equal
+    /// schemas: the programs are compared by identity first, then by the schema
+    /// they were compiled from.
+    public static func == (lhs: SchemaConstraintState, rhs: SchemaConstraintState) -> Bool {
+        lhs.mode == rhs.mode && lhs.stack == rhs.stack
+            && (lhs.program === rhs.program || lhs.program.source == rhs.program.source)
+    }
+
+    /// Covers the position only, which is consistent with ``==``.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(mode)
+        hasher.combine(stack)
     }
 
     // MARK: - Transitions
 
     @usableFromInline
     mutating func applyInPlace(_ byte: UInt8) -> Bool {
-        switch phase {
-        case .beforeObject:
+        switch mode {
+        case .expectValue(let node):
             if SchemaBytes.isWhitespace(byte) { return true }
-            if byte == SchemaBytes.lBrace { phase = .expectKeyOrClose(afterComma: false); return true }
+            return startValue(byte, node: node)
+
+        case .arrayOpen:
+            if SchemaBytes.isWhitespace(byte) { return true }
+            guard case .array(let node, _)? = stack.last else { return false }
+            let array = program.arrays[Int(node)]
+            if byte == SchemaBytes.rBracket {
+                guard array.minItems == 0 else { return false }
+                return closeContainer()
+            }
+            return startValue(byte, node: array.item)
+
+        case .objectOpen(let afterComma):
+            if SchemaBytes.isWhitespace(byte) { return true }
+            guard case .object(let node, let emitted)? = stack.last else { return false }
+            let object = program.objects[Int(node)]
+            if byte == SchemaBytes.quote {
+                let remaining = object.all.subtracting(emitted)
+                guard !remaining.isEmpty else { return false }
+                mode = .key(position: 0, candidates: remaining)
+                return true
+            }
+            if byte == SchemaBytes.rBrace {
+                guard !afterComma, object.required.isSubset(of: emitted) else { return false }
+                return closeContainer()
+            }
             return false
 
-        case .expectKeyOrClose(let afterComma):
-            return expectKeyOrClose(byte, afterComma: afterComma)
+        case .key(let position, let candidates):
+            guard case .object(let node, var emitted)? = stack.last else { return false }
+            let keys = program.objects[Int(node)].keys
+            if byte == SchemaBytes.quote {
+                // Close the key only on an exact match with a remaining name.
+                guard let member = candidates.first(where: { keys[$0].count == position }) else { return false }
+                emitted.insert(member)
+                stack[stack.count - 1] = .object(node: node, emitted: emitted)
+                mode = .colon(value: program.objects[Int(node)].values[member])
+                return true
+            }
+            // Otherwise the byte must extend the key toward a remaining name.
+            let survivors = candidates.filtered { keys[$0].count > position && keys[$0][position] == byte }
+            guard !survivors.isEmpty else { return false }
+            mode = .key(position: position + 1, candidates: survivors)
+            return true
 
-        case .inKey(let accumulated):
-            return inKey(byte, accumulated: accumulated)
-
-        case .expectColon(let key):
+        case .colon(let value):
             if SchemaBytes.isWhitespace(byte) { return true }
-            if byte == SchemaBytes.colon { phase = .expectValue(key: key); return true }
-            return false
+            guard byte == SchemaBytes.colon else { return false }
+            mode = .expectValue(node: value)
+            return true
 
-        case .expectValue(let key):
-            if SchemaBytes.isWhitespace(byte) { return true }
-            return startValue(byte, key: key)
-
-        case .value(let key, let state):
-            switch state.step(byte) {
+        case .scalar(let scalar):
+            switch scalar.step(byte, program: program) {
             case .consumed(let next):
-                phase = .value(key: key, state: next)
+                mode = .scalar(next)
                 return true
             case .completed:
-                return finishValue(key)
+                mode = .afterValue
+                return true
             case .endedBefore:
-                // A number ended before this byte: emit the key, move to
-                // `afterValue`, and re-dispatch the byte there (one level only).
-                guard finishValue(key) else { return false }
+                // A number ended before this byte; the byte belongs to the
+                // container. Re-dispatch it once.
+                mode = .afterValue
                 return afterValue(byte)
             case .rejected:
                 return false
@@ -119,103 +195,84 @@ public struct SchemaConstraintState: Hashable, Sendable {
 
         case .afterValue:
             return afterValue(byte)
-
-        case .done:
-            return SchemaBytes.isWhitespace(byte)
         }
     }
 
+    /// Open a value of `node` from its first byte. An item of the innermost
+    /// array is counted first, and refused once the array holds `maxItems`
+    /// (which also covers `maxItems == 0` right after `[`).
     @usableFromInline
-    mutating func expectKeyOrClose(_ byte: UInt8, afterComma: Bool) -> Bool {
-        if SchemaBytes.isWhitespace(byte) { return true }
-        if byte == SchemaBytes.quote {
-            guard !remainingKeys.isEmpty else { return false }
-            phase = .inKey(accumulated: [])
+    mutating func startValue(_ byte: UInt8, node: SchemaProgram.NodeRef) -> Bool {
+        if case .array(let arrayNode, let count)? = stack.last {
+            if let maxItems = program.arrays[Int(arrayNode)].maxItems, count >= maxItems { return false }
+            stack[stack.count - 1] = .array(node: arrayNode, count: count + 1)
+        }
+        switch node {
+        case .object(let objectNode):
+            guard byte == SchemaBytes.lBrace else { return false }
+            stack.append(.object(node: objectNode, emitted: .empty))
+            mode = .objectOpen(afterComma: false)
+            return true
+        case .array(let arrayNode):
+            guard byte == SchemaBytes.lBracket else { return false }
+            stack.append(.array(node: arrayNode, count: 0))
+            mode = .arrayOpen
+            return true
+        case .scalar(let scalarNode):
+            let kind = program.scalars[Int(scalarNode)]
+            guard let scalar = SchemaScalarState.start(byte, node: scalarNode, kind: kind) else { return false }
+            mode = .scalar(scalar)
             return true
         }
-        if byte == SchemaBytes.rBrace {
-            guard !afterComma, requiredSatisfied else { return false }
-            phase = .done
-            return true
-        }
-        return false
     }
 
-    @usableFromInline
-    mutating func inKey(_ byte: UInt8, accumulated: [UInt8]) -> Bool {
-        if byte == SchemaBytes.quote {
-            // Close the key only if it exactly equals a remaining declared name.
-            guard let name = remainingKeys.first(where: { Array($0.utf8) == accumulated }) else {
-                return false
-            }
-            phase = .expectColon(key: name)
-            return true
-        }
-        // Otherwise the byte must extend the key toward some remaining name.
-        let position = accumulated.count
-        let stillViable = remainingKeys.contains { name in
-            let bytes = Array(name.utf8)
-            return bytes.count > position
-                && bytes[position] == byte
-                && Array(bytes[0..<position]) == accumulated
-        }
-        guard stillViable else { return false }
-        phase = .inKey(accumulated: accumulated + [byte])
-        return true
-    }
-
-    /// Enter the typed value machine for `key` from its first byte.
-    @usableFromInline
-    mutating func startValue(_ byte: UInt8, key: String) -> Bool {
-        guard let type = schema.property(named: key)?.type,
-              let state = SchemaScalarState.start(byte, type: type) else { return false }
-        phase = .value(key: key, state: state)
-        return true
-    }
-
-    /// Record `key` as emitted and move to `afterValue`. Always succeeds; typed
-    /// to return `Bool` so it composes in the transition expressions.
-    @usableFromInline
-    mutating func finishValue(_ key: String) -> Bool {
-        emitted.insert(key)
-        phase = .afterValue
-        return true
-    }
-
+    /// After a completed value: whitespace, `,`, or the innermost container's
+    /// close; nothing once the root has closed.
     @usableFromInline
     mutating func afterValue(_ byte: UInt8) -> Bool {
         if SchemaBytes.isWhitespace(byte) { return true }
-        if byte == SchemaBytes.comma {
-            // A comma promises another member. Once every declared key has been
-            // emitted there is none left to promise, and `expectKeyOrClose(
-            // afterComma: true)` would then admit nothing but whitespace — the
-            // model could never close the object and would run to max_tokens
-            // emitting blanks (seen on a real checkpoint). The only legal
-            // continuations here are whitespace and the close.
-            guard !remainingKeys.isEmpty else { return false }
-            phase = .expectKeyOrClose(afterComma: true)
-            return true
+        guard let top = stack.last else { return false }
+        switch top {
+        case .object(let node, let emitted):
+            let object = program.objects[Int(node)]
+            if byte == SchemaBytes.comma {
+                // A comma promises another member. With every declared key
+                // emitted there is none left to promise, and after the comma
+                // only whitespace would be legal: the model could never close
+                // the object and would run to max_tokens emitting blanks (seen
+                // on a real checkpoint).
+                guard !object.all.subtracting(emitted).isEmpty else { return false }
+                mode = .objectOpen(afterComma: true)
+                return true
+            }
+            if byte == SchemaBytes.rBrace {
+                guard object.required.isSubset(of: emitted) else { return false }
+                return closeContainer()
+            }
+            return false
+        case .array(let node, let count):
+            let array = program.arrays[Int(node)]
+            if byte == SchemaBytes.comma {
+                // The same promise for items: refused once the array is full,
+                // which is how `maxItems` is enforced byte by byte.
+                if let maxItems = array.maxItems, count >= maxItems { return false }
+                mode = .expectValue(node: array.item)
+                return true
+            }
+            if byte == SchemaBytes.rBracket {
+                guard count >= array.minItems else { return false }
+                return closeContainer()
+            }
+            return false
         }
-        if byte == SchemaBytes.rBrace {
-            guard requiredSatisfied else { return false }
-            phase = .done
-            return true
-        }
-        return false
     }
 
-    // MARK: - Schema helpers
-
-    /// Declared property names not yet emitted — the only keys a new member may
-    /// open, which also enforces "each key at most once".
+    /// Pop the innermost container; the value it held is complete. Always
+    /// succeeds; typed to return `Bool` so it composes in the transitions.
     @usableFromInline
-    var remainingKeys: [String] {
-        schema.properties.map { $0.name }.filter { !emitted.contains($0) }
-    }
-
-    /// Whether every required name has been emitted (checked at the object close).
-    @usableFromInline
-    var requiredSatisfied: Bool {
-        schema.required.allSatisfy { emitted.contains($0) }
+    mutating func closeContainer() -> Bool {
+        stack.removeLast()
+        mode = .afterValue
+        return true
     }
 }
