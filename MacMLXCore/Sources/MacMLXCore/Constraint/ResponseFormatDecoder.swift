@@ -22,8 +22,9 @@
 ///     - an array: an `items` schema and optional `minItems` / `maxItems`;
 ///     - a `$ref` to `#/$defs/<name>` or `#/definitions/<name>` of the root.
 ///
-///    `description`, `title`, `default`, `examples` and `$comment` are
-///    accepted and ignored anywhere; so is `x-order` on an object, and
+///    `description`, `title`, `default`, `examples`, `$comment`, `deprecated`,
+///    `readOnly` and `writeOnly` are accepted and ignored anywhere; so is
+///    `x-order` on an object, and
 ///    `$schema` / `$id` at the root. Property order never constrains key order
 ///    on the wire. A schema may hold at most ``maxSchemaDepth`` containers
 ///    open at once; after `$ref` expansion, at most ``maxSchemaNodes`` nodes,
@@ -62,9 +63,12 @@ public enum ResponseFormatDecoder {
     /// once per reference.
     static let maxSchemaBytes = 4 * 1_024 * 1_024
 
-    /// Purely annotative keywords, accepted and ignored on every kind of schema.
+    /// Purely annotative keywords, accepted and ignored on every kind of schema:
+    /// the JSON Schema annotation and metadata vocabulary, none of which
+    /// constrains a value.
     private static let annotationKeys: Set<String> = [
         "description", "title", "default", "examples", "$comment",
+        "deprecated", "readOnly", "writeOnly",
     ]
 
     /// The keywords a scalar property schema may carry besides annotations.

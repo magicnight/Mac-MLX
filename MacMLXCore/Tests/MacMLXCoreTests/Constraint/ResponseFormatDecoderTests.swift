@@ -370,6 +370,24 @@ struct ResponseFormatDecoderTests {
         #expect(try compile(annotated) == compile(bare))
     }
 
+    /// The metadata keywords `deprecated`, `readOnly` and `writeOnly` change
+    /// nothing either, at the root or on a property.
+    @Test
+    func ignoresMetadataKeywords() throws {
+        let metadata: [String: JSONValue] = [
+            "deprecated": .bool(true), "readOnly": .bool(false), "writeOnly": .bool(true),
+        ]
+        func annotated(_ schema: [String: JSONValue]) -> JSONValue {
+            .object(schema.merging(metadata) { current, _ in current })
+        }
+        let bare = root(["name": string, "tags": array(string)], required: ["name"])
+        let withMetadata = root(
+            ["name": annotated(["type": .string("string")]), "tags": annotated(["type": .string("array"), "items": string])],
+            required: ["name"],
+            extra: metadata)
+        #expect(try compile(withMetadata) == compile(bare))
+    }
+
     /// Apple's `@Guide(.constant(…))` emits `const` without a `type`.
     @Test
     func compilesStringConstAsAOneValueEnum() throws {
