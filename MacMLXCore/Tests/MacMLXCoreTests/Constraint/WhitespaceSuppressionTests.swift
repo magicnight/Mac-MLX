@@ -146,6 +146,10 @@ final class WhitespaceSuppressionMaskTests: XCTestCase {
         ) throws -> [Int] { [] }
     }
 
+    /// `topKCap: 1` so the greedy path's first pass covers one token and every
+    /// test also exercises the scan of the remaining vocabulary (and, under
+    /// suppression, its unsuppressed rescan) — with a three-token vocabulary
+    /// the default 256-token first pass would never reach those loops.
     private func processor(vocab: [String], greedy: Bool) -> JSONConstraintProcessor {
         JSONConstraintProcessor(
             format: .jsonSchema(JSONSchemaObject(properties: [.init(name: "a", type: .string)], required: ["a"])),
@@ -154,7 +158,29 @@ final class WhitespaceSuppressionMaskTests: XCTestCase {
             modelID: "test-whitespace-\(greedy)",
             tokenizer: ScriptedTokenizer(vocab: vocab),
             stopTokenIDs: [],
-            greedy: greedy)
+            greedy: greedy,
+            topKCap: 1)
+    }
+
+    /// Spaces sampled INSIDE a string value do not count toward the latch: the
+    /// state is consulted before the token advances it. The vocabulary offers
+    /// `}` after the value, so a tripped latch would have something to prefer
+    /// over the space (without that alternative the dead-end fallback would
+    /// let the space through and hide a wrongly tripped latch).
+    func testWhitespaceInsideAStringDoesNotCountTowardTheLatch() throws {
+        try requireMLXRuntimeOrSkip()
+        let vocab = [" ", "\"", "lo", "}"]
+        let logits: [Float] = [9.0, 1.0, 2.0, 3.0]
+        var processor = processor(vocab: vocab, greedy: true)
+        processor.state = try XCTUnwrap(processor.state.walk(Array("{\"a\":\"hel".utf8)))
+        _ = masked(processor, logits)   // resolves the table
+        for _ in 0..<3 { processor.didSample(token: MLXArray(Int32(0))) }   // three spaces, all data
+        processor.state = try XCTUnwrap(processor.state.walk(Array("lo\"".utf8)))
+        // Back at a structural position (after the value) whitespace is still
+        // the model's choice: the latch never tripped.
+        let values = masked(processor, logits)
+        XCTAssertGreaterThan(values[0], -Float.infinity, "the latch tripped on in-string spaces")
+        XCTAssertEqual(argMax(MLXArray(values), axis: -1).item(Int.self), 0)
     }
 
     private func masked(_ processor: JSONConstraintProcessor, _ logits: [Float]) -> [Float] {
@@ -191,6 +217,26 @@ final class WhitespaceSuppressionMaskTests: XCTestCase {
             XCTAssertEqual(after[0], -Float.infinity, "greedy=\(greedy): whitespace masked once the latch is on")
             XCTAssertGreaterThan(after[1], -Float.infinity)
             XCTAssertEqual(argMax(MLXArray(after), axis: -1).item(Int.self), 1)
+        }
+    }
+
+    /// The model's top token is illegal and whitespace is its second choice:
+    /// with the latch on, the scan of the vocabulary beyond the top-K must skip
+    /// the whitespace token and land on the key quote (third choice), on both
+    /// paths. (With `topKCap: 1` the quote is only reachable through that scan.)
+    func testRemainderScanSkipsWhitespaceOnceTheLatchIsOn() throws {
+        try requireMLXRuntimeOrSkip()
+        let vocab = ["\n", "\"", "a\":\"x\"}"]
+        for greedy in [true, false] {
+            var processor = processor(vocab: vocab, greedy: greedy)
+            let logits: [Float] = [5.0, 1.0, 9.0]   // illegal top token, then "\n", then the quote
+            processor.state = try XCTUnwrap(processor.state.walk(Array("{".utf8)))
+            _ = masked(processor, logits)   // resolves the table
+            for _ in 0..<3 { processor.didSample(token: MLXArray(Int32(0))) }
+            let values = masked(processor, logits)
+            XCTAssertEqual(values[0], -Float.infinity, "greedy=\(greedy): whitespace skipped in the remainder scan")
+            XCTAssertEqual(values[2], -Float.infinity, "greedy=\(greedy): the illegal top token stays masked")
+            XCTAssertEqual(argMax(MLXArray(values), axis: -1).item(Int.self), 1, "greedy=\(greedy): the quote wins")
         }
     }
 

@@ -46,23 +46,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   prompt, so it is withheld from requests that carry an `Origin` header
   (cross-origin browser callers, which the server otherwise answers without
   credentials); native clients see it.
-- **Nested JSON schemas in `response_format`.** Structured output now
-  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
-  of objects and arrays of arrays), `$ref` to the root's `$defs` or
-  `definitions`, and a string `const` — the shapes Apple's Foundation Models
-  client sends for nested `@Generable` types. `examples` and `$comment` are
-  accepted and ignored anywhere, like `description`, `title` and `default`;
-  `x-order` is accepted and ignored on object schemas only (the root and
-  nested objects), not on arrays, scalars or next to `$ref`. A schema may
-  nest at most 32 containers deep; after `$ref` expansion it may hold at most
-  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
-  values; `minItems` and `maxItems` may not exceed 65,536. A recursive schema
-  is a 400, since nothing would bound its documents. Still unsupported:
-  `null` and unions, `minimum`/`maximum`, `pattern`, non-object roots, and
-  non-ASCII keys or enum values (Apple's TripPlanner sample hits the last
-  one).
-
-### Fixed
 - **Structured output no longer runs away on whitespace.** JSON permits any
   amount of whitespace between tokens, so a constrained decode could spin:
   after `{` the automaton accepted spaces, tabs and newlines forever, and a

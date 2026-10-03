@@ -80,6 +80,12 @@ public struct TokenVocabularyTable: Sendable {
     @inlinable
     public func isWhitespaceOnly(_ id: Int) -> Bool {
         guard case .bytes(let bytes) = classification(of: id), !bytes.isEmpty else { return false }
-        return bytes.allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }
+        return bytes.allSatisfy(Self.isJSONWhitespace)
+    }
+
+    /// JSON's four whitespace bytes: space, tab, line feed, carriage return.
+    @inlinable
+    public static func isJSONWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
     }
 }

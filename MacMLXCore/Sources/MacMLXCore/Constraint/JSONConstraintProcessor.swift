@@ -137,7 +137,11 @@ public struct JSONConstraintProcessor: LogitProcessor {
         inner?.didSample(token: token)
         guard let table = box.table else { return }
         let id = token.item(Int.self)
-        whitespaceRun.record(whitespaceOnly: table.isWhitespaceOnly(id))
+        // Only whitespace at a structural position counts toward the latch: a
+        // run of spaces inside a string value is data, not a spin. The state is
+        // checked BEFORE this token advances it, which is the position the token
+        // was sampled at.
+        whitespaceRun.record(whitespaceOnly: !state.isInsideString && table.isWhitespaceOnly(id))
         switch table.classification(of: id) {
         case .eos, .unusable:
             // EOS terminates generation; an unusable token should never have
@@ -345,7 +349,7 @@ public struct JSONConstraintProcessor: LogitProcessor {
         case .unusable:
             return false
         case .bytes(let bytes):
-            if suppressingWhitespace, table.isWhitespaceOnly(id) { return false }
+            if suppressingWhitespace, bytes.allSatisfy(TokenVocabularyTable.isJSONWhitespace) { return false }
             return state.accepts(bytes)
         }
     }
