@@ -21,11 +21,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   nested objects), not on arrays, scalars or next to `$ref`. A schema may
   nest at most 32 containers deep; after `$ref` expansion it may hold at most
   4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
-  values; `minItems` and `maxItems` may not exceed 65,536. A recursive schema
-  is a 400, since nothing would bound its documents. Still unsupported:
-  `null` and unions, `minimum`/`maximum`, `pattern`, non-object roots, and
-  non-ASCII keys or enum values (Apple's TripPlanner sample hits the last
-  one).
+  values, and `minItems` may not exceed 65,536. A recursive schema is a 400,
+  since nothing would bound its documents. Still unsupported: `null` and
+  unions, `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII
+  keys or enum values (Apple's TripPlanner sample hits the last one).
 - **`stream_options.include_usage` on streaming chat completions.** When a
   client sets it, every chunk carries `usage: null` and one usage-only chunk —
   empty `choices`, the whole request's token counts — is sent before

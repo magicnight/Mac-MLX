@@ -527,21 +527,25 @@ struct ResponseFormatDecoderTests {
         expectInvalid(schema: root(["t": array(string, ["minItems": .string("3")])]), containing: "non-negative integer")
     }
 
-    /// `minItems` and `maxItems` are capped at 65,536: a minimum in the
-    /// billions would compile and then cut every generation off at
-    /// `max_tokens`.
+    /// `minItems` is capped at 65,536, a server limit: every document needs
+    /// that many items, so a minimum in the billions would compile and then cut
+    /// every generation off at `max_tokens`. `maxItems` is not capped: a large
+    /// maximum forces nothing and is enforced exactly.
     @Test
     func capsItemBounds() throws {
-        let cap = ResponseFormatDecoder.maxItemCount
+        let cap = ResponseFormatDecoder.maxMinItems
         let object = try compile(root([
             "a": array(string, ["minItems": .int(cap)]),
-            "b": array(string, ["maxItems": .int(cap)]),
+            "b": array(string, ["maxItems": .int(100_000)]),
+            "c": array(string, ["maxItems": .int(1_000_000_000)]),
         ]))
         #expect(object.property(named: "a")?.type == .array(items: .string, minItems: cap, maxItems: nil))
-        #expect(object.property(named: "b")?.type == .array(items: .string, minItems: 0, maxItems: cap))
-        expectInvalid(schema: root(["a": array(string, ["minItems": .int(cap + 1)])]), containing: "minItems on property 'a' must be at most 65536")
-        expectInvalid(schema: root(["b": array(string, ["maxItems": .int(cap + 1)])]), containing: "maxItems on property 'b' must be at most 65536")
-        expectInvalid(schema: root(["c": array(string, ["minItems": .int(1_000_000_000)])]), containing: "must be at most 65536")
+        #expect(object.property(named: "b")?.type == .array(items: .string, minItems: 0, maxItems: 100_000))
+        #expect(object.property(named: "c")?.type == .array(items: .string, minItems: 0, maxItems: 1_000_000_000))
+        expectUnsupported(
+            schema: root(["a": array(string, ["minItems": .int(cap + 1)])]),
+            containing: "schema too large (minItems 65537 on property 'a' is above the limit of 65536)")
+        expectUnsupported(schema: root(["d": array(string, ["minItems": .int(1_000_000_000)])]), containing: "schema too large")
     }
 
     @Test

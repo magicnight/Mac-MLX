@@ -64,10 +64,11 @@ public enum ResponseFormatDecoder {
     /// referenced many times is copied once per reference.
     static let maxSchemaBytes = 4 * 1_024 * 1_024
 
-    /// The largest `minItems` / `maxItems` accepted. Every document needs at
+    /// The largest `minItems` accepted, a server limit. Every document needs at
     /// least `minItems` items, so a minimum in the billions would compile and
-    /// then cut every generation off at `max_tokens`.
-    static let maxItemCount = 65_536
+    /// then cut every generation off at `max_tokens`. `maxItems` needs no cap:
+    /// a large maximum forces nothing and is enforced exactly.
+    static let maxMinItems = 65_536
 
     /// Purely annotative keywords, accepted and ignored on every kind of schema:
     /// the JSON Schema annotation and metadata vocabulary, none of which
@@ -419,6 +420,10 @@ public enum ResponseFormatDecoder {
             throw ResponseFormatError.invalidFormat("'items' on property '\(path)' must be a schema object")
         }
         let minItems = try itemCount(schema["minItems"], keyword: "minItems", path: path) ?? 0
+        guard minItems <= maxMinItems else {
+            throw ResponseFormatError.unsupportedFeature(
+                "schema too large (minItems \(minItems) on property '\(path)' is above the limit of \(maxMinItems))")
+        }
         let maxItems = try itemCount(schema["maxItems"], keyword: "maxItems", path: path)
         // `minItems > maxItems` admits no document: `]` could never close the
         // array, so the automaton would be stuck at its last item.
@@ -430,18 +435,13 @@ public enum ResponseFormatDecoder {
         return .array(items: item, minItems: minItems, maxItems: maxItems)
     }
 
-    /// A `minItems` / `maxItems` value: a non-negative integer no larger than
-    /// ``maxItemCount``, or `nil` when absent. (`JSONValue` already decodes
-    /// `3.0` and `1e2` as integers.)
+    /// A `minItems` / `maxItems` value: a non-negative integer, or `nil` when
+    /// absent. (`JSONValue` already decodes `3.0` and `1e2` as integers.)
     private static func itemCount(_ value: JSONValue?, keyword: String, path: String) throws -> Int? {
         guard let value else { return nil }
         guard case .int(let count) = value, count >= 0 else {
             throw ResponseFormatError.invalidFormat(
                 "\(keyword) on property '\(path)' must be a non-negative integer")
-        }
-        guard count <= maxItemCount else {
-            throw ResponseFormatError.invalidFormat(
-                "\(keyword) on property '\(path)' must be at most \(maxItemCount)")
         }
         return count
     }
