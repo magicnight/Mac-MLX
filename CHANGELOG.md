@@ -19,6 +19,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   hundred tokens. The trie now tears itself down with an explicit worklist;
   a test releases a 200,000-token chain on a cooperative thread.
 
+### Added
+- **`stream_options.include_usage` on streaming chat completions.** When a
+  client sets it, every chunk carries `usage: null` and one usage-only chunk —
+  empty `choices`, the whole request's token counts — is sent before
+  `[DONE]`, exactly the OpenAI contract. Apple's Foundation Models
+  `ChatCompletionsLanguageModel` asks for it. Honored on the batched path and
+  the legacy `/v1/completions` alias too; ignored on a non-streaming request,
+  whose body already carries usage.
+- **`max_completion_tokens` is honored** as the newer spelling of
+  `max_tokens`, and wins when both are sent, as mlx-lm's and vLLM's servers
+  do. Apple's client sends only the new one, so its response-length setting
+  used to fall back to the default.
+- **Prompt-cache hits are reported in usage.** The MLX engine now says how
+  much of the prompt the prompt cache served, 0 on a miss and on the paths
+  that never consult the cache: `prompt_tokens_details.cached_tokens` on
+  OpenAI-shaped responses, where `prompt_tokens` keeps including them, and
+  `cache_read_input_tokens` on `/v1/messages`, where — as Anthropic defines
+  it — `input_tokens` becomes the uncached remainder so that the two sum to
+  the prompt. The figure is an exact prefix oracle against every cached
+  prompt, so it is withheld from requests that carry an `Origin` header
+  (cross-origin browser callers, which the server otherwise answers without
+  credentials); native clients see it.
+
 ### Changed
 - **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
   are gone.** The fixes macMLX reported upstream — integer-keyed object
