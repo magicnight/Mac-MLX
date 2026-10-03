@@ -61,6 +61,23 @@ struct CLIForkPinTests {
             """)
     }
 
+    @Test("Core pins the mlx-audio-swift fork by revision")
+    func corePinsAudioForkByRevision() throws {
+        // No released mlx-audio-swift builds against mlx-swift-lm 3.32.3; the
+        // fork carries two compatibility commits. A `from:` here would let a
+        // resolve wander back to the unbuildable upstream tag.
+        let core = try Self.manifest("MacMLXCore/Package.swift")
+        let audioURL = "https://github.com/magicnight/mlx-audio-swift.git"
+        guard let range = core.range(of: audioURL) else {
+            Issue.record("MacMLXCore/Package.swift no longer declares \(audioURL)")
+            return
+        }
+        let after = core[range.upperBound...].prefix(200)
+        #expect(
+            after.contains("revision:"),
+            "the mlx-audio-swift fork must be pinned by revision, not a version range")
+    }
+
     @Test("the CLI and Core pin the same fork revision")
     func cliPinMatchesCorePin() throws {
         let cli = try Self.manifest("macmlx-cli/Package.swift")

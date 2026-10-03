@@ -148,7 +148,11 @@ struct OverlayRegistrationTests {
             """,
             matches: { $0 is SeedOssModel }),
 
-        // Hunyuan V1 Dense → macMLX `HunyuanV1DenseModel`.
+        // Hunyuan V1 Dense → macMLX `HunyuanV1DenseModel`. Since mlx-swift-lm
+        // 3.32.3 the stock registry also has a `hunyuan_v1_dense` entry
+        // (upstream's `HunyuanModel`); `registerAll` replaces it, and this case
+        // is the assertion that ours is the one the factory resolves. Retiring
+        // the overlay is a parity exercise, not a dependency-bump side effect.
         Case(
             modelType: "hunyuan_v1_dense",
             configJSON: """

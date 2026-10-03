@@ -7,8 +7,8 @@ import MLXLMCommon
 /// per-slot `AsyncThrowingStream<GenerateChunk, Error>` results.
 ///
 /// This is the v1-min increment of continuous batching — it proves per-row
-/// sampling, per-row stop, finished-row masking, and per-slot fan-out on top of
-/// A1's ``BatchPositionedCacheWrapper``. It deliberately does NOT do: ragged /
+/// sampling, per-row stop, finished-row masking, and per-slot fan-out over the
+/// model's own dense caches. It deliberately does NOT do: ragged /
 /// left-padded prompts (A2b), dynamic admission/eviction (A2c), or server
 /// integration (A2d).
 ///
@@ -18,7 +18,7 @@ import MLXLMCommon
 ///     so the stop/EOS/max-tokens/masking/fan-out logic is unit tested in CI with
 ///     a scripted stub.
 ///  2. **Production assembly** — ``make(model:tokenizer:eosTokenIds:cohort:globalMaxTokens:)``
-///     runs the ``batchPositioned(_:batch:)`` coverage gate, builds the real
+///     runs the dense-cache coverage gate, builds the real
 ///     ``ModelBatchStepEvaluator`` + `NaiveStreamingDetokenizer`-backed slots, and
 ///     returns the runner plus one stream per row.
 ///
@@ -146,7 +146,7 @@ final class BatchDecodeRunner {
     /// - Throws: ``BatchUnsupportedError/emptyCohort`` for an empty cohort,
     ///   ``BatchUnsupportedError/unequalPromptLengths(_:)`` for a ragged cohort
     ///   (A2b territory), or ``BatchUnsupportedError/cacheNotBatchable`` when
-    ///   ``batchPositioned(_:batch:)`` refuses the model's caches. On any throw,
+    ///   the model's caches are not plain dense caches. On any throw,
     ///   no streams are created and the caller must route the request(s) through
     ///   the sequential path.
     ///
@@ -158,6 +158,17 @@ final class BatchDecodeRunner {
     ///     EOS); the caller owns this policy.
     ///   - cohort: one ``BatchSlotConfig`` per row, all equal prompt length.
     ///   - globalMaxTokens: hard per-row token ceiling (default 4096).
+    /// Whether every cache is one of the two plain dense types the batched
+    /// step evaluator is proven against. A `CacheList` (hybrid models) reaches
+    /// its children through concrete-type subscripts and a `QuantizedKVCache`
+    /// reaches its real update through a capability probe; the batched path
+    /// performs neither, and both implement the plain `update` as a fatalError.
+    /// Refusing the whole batch when any cache is off-list keeps the failure
+    /// loud and early. Pinned by `BatchDecodeRunnerCacheGateTests`.
+    static func areDenseBatchableCaches(_ caches: [KVCache]) -> Bool {
+        caches.allSatisfy { $0 is KVCacheSimple || $0 is RotatingKVCache }
+    }
+
     static func make(
         model: any LanguageModel,
         tokenizer: any Tokenizer,
@@ -176,11 +187,12 @@ final class BatchDecodeRunner {
         // cache options (`maxKVSize`, `kvBits`, …) from `cohort`'s parameters —
         // the batched path has no consumer for per-row cache configuration
         // before A2d, and all rows must share one cache shape/kind to be
-        // batch-positioned below.
+        // decoded in lockstep below.
         //
-        // Coverage gate: refuse before allocating any streams if the model's
-        // caches cannot be safely batch-positioned.
-        guard let caches = batchPositioned(model.newCache(parameters: nil), batch: batch) else {
+        // Coverage gate: refuse before allocating any streams unless every
+        // cache passes `areDenseBatchableCaches`.
+        let caches = try model.newCache(parameters: nil)
+        guard Self.areDenseBatchableCaches(caches) else {
             throw BatchUnsupportedError.cacheNotBatchable
         }
 

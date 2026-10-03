@@ -9,6 +9,42 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
+  instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
+  the fork used to carry are in that base, so it now carries two:
+  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3. The
+  cross-thread evaluation abort that kept the fork on the old core is gone —
+  0.32.3 registers every stream globally — and `CrossThreadEvalTripwireTests`
+  now guards against regressing it rather than predicting it.
+- mlx-swift-lm moves to 3.32.3 with it. Prefill chunking is pinned to the
+  legacy `.remainder` stride rather than 3.32.3's new `.balanced` default,
+  which keeps the generic text and vision prefill boundaries where they were
+  (checked by reading, not by an output comparison, which this project cannot
+  run). Gemma3Text's prefill was reworked upstream on its own and is not
+  covered. Adopting `.balanced` is a separate, measured change.
+- mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
+  v0.1.3 plus two one-line compatibility commits) because no released
+  version builds against mlx-swift-lm 3.32.3.
+
+### Fixed
+- **A sorted quantized MoE product on a ragged K returned mostly garbage**
+  on M5 hardware: at group size 32 with a hidden or MoE-intermediate size
+  that is 32 mod 64, the NAX kernel bounded its K tail by the full tile and
+  zeroed the wrong axis, corrupting 92–97% of the output
+  (`ml-explore/mlx#4009`). Carried on the fork with a regression test.
+- **The quantized MoE gather path could not compile its kernel under JIT**
+  on M5 hardware: two kernel-name strings carried a trailing underscore the
+  instantiated kernels do not have (`mlx#4372`, the half of that fix an
+  earlier triage had excluded by title). Fixed by the new base.
+- Kernels now compile under the Metal 4.1 language version that core
+  v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
+
+### Removed
+- `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE
+  defect that core v0.32.0 fixed (`mlx#3498`). Its test file had scheduled
+  its own deletion for this move; a scalar-RoPE regression guard stays.
+
 ## [0.9.0] - 2026-08-28
 
 Audio arrives, reranking becomes a real cross-encoder, and the shipped app

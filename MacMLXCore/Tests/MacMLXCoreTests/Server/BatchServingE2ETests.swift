@@ -197,8 +197,7 @@ final class BatchServingE2ETests: XCTestCase {
         // Byte-for-byte equality is deliberately NOT asserted: legacy is B=1 while the
         // live cohort's batch size changes step-by-step (admission timing is
         // nondeterministic), and different B takes different matmul tiling paths — the
-        // legal batch-size kernel non-invariance documented on
-        // `BatchPositionedCacheWrapper` (same as vLLM/TGI). Greedy then flips at a
+        // legal batch-size kernel non-invariance (same as vLLM/TGI). Greedy then flips at a
         // near-tie token and both continuations stay coherent. What MUST hold instead,
         // and what actually catches cross-talk:
         //  1. a long shared prefix with the row's OWN oracle (mixed-up rows

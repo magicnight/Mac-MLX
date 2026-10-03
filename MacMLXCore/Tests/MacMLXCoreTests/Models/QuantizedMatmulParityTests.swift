@@ -3,22 +3,30 @@ import Foundation
 import MLX
 @testable import MacMLXCore
 
-/// Two upstream mlx quantized-matmul defects that our pinned fork predates.
-/// Both produce silently wrong numbers — no crash, no NaN guard — which is
-/// exactly the failure mode our fork's release scan
-/// (`scripts/scan-upstream-mlx-fixes.sh`) exists to stop shipping.
+/// Quantized-matmul defects that produced silently wrong numbers — no crash,
+/// no NaN guard — which is exactly the failure mode the fork's release scan
+/// (`scripts/scan-upstream-mlx-fixes.sh`) exists to stop shipping. Two kinds
+/// of guard live here.
 ///
+/// Regression guards for fixes now in the vendored core (v0.32.2), kept so a
+/// base that lost them would be caught:
 /// - `ml-explore/mlx#3497` — `qvm` mishandles a stride-0 batch dimension, the
 ///   shape GQA produces when a quantized KV cache is broadcast across repeat
 ///   groups. Not hardware-gated: upstream reproduced it on an M4 Pro.
-/// - `ml-explore/mlx#3631` — the NAX `qmm` edge-tile bounds are computed in
-///   `short`, which wraps past 32767. Reachable through an lm_head whose vocab
-///   is unaligned and larger than 2^15 — MiniCPM3-4B (73448) is one, and one
-///   we list as supported.
+/// - `ml-explore/mlx#3631` — the NAX `qmm` edge-tile bounds were computed in
+///   `short`, wrapping past 32767; reachable through an unaligned lm_head
+///   larger than 2^15 — MiniCPM3-4B (73448) is one we list as supported.
+/// - `ml-explore/mlx#4251` — `qvm_split_k` floored its grid and left the tail
+///   columns undispatched at group size 32.
 ///
-/// Both suites are ordinary matmul parity checks on hardware that does not take
-/// the affected path, so they are safe to run anywhere; it is Apple silicon
-/// with a quantized KV cache (#3497) and M5-class parts (#3631) that they pin.
+/// Guards for the two fixes the fork still carries ahead of its base — both in
+/// core v0.32.3 only, both on the sorted-RHS NAX MoE path: `mlx#3922` and
+/// `mlx#4009`. Each was run against the fork's unpatched base first and failed
+/// with its mechanism's fingerprint.
+///
+/// All are ordinary matmul parity checks on hardware that does not take the
+/// affected path, so they are safe to run anywhere; it is Apple silicon with
+/// a quantized KV cache (#3497) and M5-class parts (the rest) that they pin.
 @Suite(
     "Quantized matmul parity",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
@@ -268,6 +276,72 @@ struct QuantizedMatmulParityTests {
             gather_qmm. On NAX hardware this is ml-explore/mlx#3922 — the \
             remaining-row count narrows to short before the clamp, so past \
             32768 rows the early tiles never write.
+            """)
+    }
+
+    // MARK: - mlx#4009 — sorted gather_qmm on a ragged K
+
+    /// The sorted-RHS affine NAX kernel got its K tail wrong in two places when
+    /// K is not a multiple of the 64-wide tile: the activation tile for the last
+    /// block was bounded by the full `BK` rather than the K remainder, and the
+    /// weight loader's partial-tile zeroing tested the wrong axis, so with a
+    /// 32-row remainder it wiped half the output columns of a simdgroup instead
+    /// of the out-of-range K. Upstream measured 92–97% of output elements wrong
+    /// at K=160 on an M5 Max. ml-explore/mlx#4009; reported as mlx#3887.
+    ///
+    /// The window is narrower than it looks and easy to describe: K must be a
+    /// multiple of the group size but not of 64, which only group size 32
+    /// admits (K = 32, 96, 160, 224, …). `--q-group-size 32` is a common
+    /// conversion choice, and a checkpoint whose hidden or MoE-intermediate size
+    /// sits at 32 mod 64 then produces garbage that reads like a bad model, not
+    /// a bug. Against the fork's unpatched base this exact shape came back with
+    /// max |diff| 13.5; patched, it sits under the 1.0 bound below. Same dispatch as `#3922`: `gather_qmm_rhs` gates on NAX and
+    /// transpose but not on K alignment, so a ragged K really is sent here.
+    @Test("a sorted gather_qmm on a ragged K matches its dequantized reference")
+    func sortedGatherQMMRaggedKMatchesReference() {
+        let m = 64, k = 160, n = 64, experts = 2  // k % 64 == 32 is the seam
+        let groupSize = 32, bits = 4
+
+        MLXRandom.seed(7)
+        let weights = MLXRandom.normal([experts, n, k]).asType(.float16)
+        let (weightsQ, scales, biases) = MLX.quantized(
+            weights, groupSize: groupSize, bits: bits)
+        let dequantized = MLX.dequantized(
+            weightsQ, scales: scales, biases: biases,
+            groupSize: groupSize, bits: bits).asType(.float32)
+
+        let x = MLXRandom.normal([m, k], scale: 0.5).asType(.bfloat16)
+        // Sorted: the first half of the rows hit expert 0, the rest expert 1,
+        // which keeps the batch on the sorted-RHS path (B >= 16, B / E >= 4).
+        let rhsIndices = MLX.concatenated([
+            MLXArray.zeros([m / 2], type: Int32.self),
+            MLXArray.ones([m - m / 2], type: Int32.self),
+        ])
+
+        let underTest = MLX.gatherQuantizedMM(
+            x.expandedDimensions(axis: 1), weightsQ, scales: scales, biases: biases,
+            rhsIndices: rhsIndices, transpose: true,
+            groupSize: groupSize, bits: bits, sortedIndices: true)
+            .reshaped([m, n])
+
+        // Reference: each half against its own expert's dequantized weight.
+        let xf = x.asType(.float32)
+        let reference = MLX.concatenated([
+            MLX.matmul(xf[0 ..< (m / 2)], dequantized[0].transposed()),
+            MLX.matmul(xf[(m / 2)...], dequantized[1].transposed()),
+        ])
+        MLX.eval(underTest, reference)
+
+        let difference = maxAbsDiff(underTest, reference)
+        #expect(
+            difference < 1.0,
+            """
+            Sorted gather_qmm on a ragged K diverged from its dequantized \
+            reference (K=\(k), N=\(n), M=\(m), group size \(groupSize)): \
+            max |diff| \(difference). On NAX hardware this is \
+            ml-explore/mlx#4009 — the K tail is bounded by the full tile and \
+            the weight loader zeroes the wrong axis, so a 32-wide remainder \
+            corrupts most of the output.
             """)
     }
 }

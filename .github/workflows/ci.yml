@@ -218,7 +218,7 @@ jobs:
 
       - name: Build macMLX.app (Debug, no signing)
         run: |
-          # -skipPackagePluginValidation: mlx-swift 0.31.x ships a
+          # -skipPackagePluginValidation: mlx-swift 0.31.x and later ship a
           # "CudaBuild" SwiftPM build-tool plugin. xcodebuild otherwise
           # fails validating the (unsigned) plugin in CI. The plugin is
           # a no-op on Apple Silicon / Metal — CUDA never builds here.

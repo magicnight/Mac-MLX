@@ -89,8 +89,9 @@ public enum ModelOverlay {
         // Hunyuan V1 Dense (Tencent Hunyuan dense line, 0.5B–7B) — pure-Swift
         // port (see `Models/HunyuanV1Dense.swift`). A dense Llama-family decoder
         // whose twists are post-RoPE per-head q/k RMSNorm (`use_qk_norm`) and a
-        // DynamicNTKAlpha RoPE (base pre-scaled by `rope_scaling.alpha`); upstream
-        // mlx-swift-lm has no `hunyuan_v1_dense` type.
+        // DynamicNTKAlpha RoPE (base pre-scaled by `rope_scaling.alpha`). Upstream
+        // mlx-swift-lm 3.32.3 ships its own `hunyuan_v1_dense`; this registration
+        // replaces it on purpose (see the note in `Models/HunyuanV1Dense.swift`).
         await LLMTypeRegistry.shared.registerModelType("hunyuan_v1_dense") { data in
             let config = try JSONDecoder.json5()
                 .decode(HunyuanV1DenseConfiguration.self, from: data)

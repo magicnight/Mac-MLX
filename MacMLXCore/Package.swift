@@ -8,134 +8,70 @@ let package = Package(
         .library(name: "MacMLXCore", targets: ["MacMLXCore"]),
     ],
     dependencies: [
-        // CONTROLLED MINIMAL FORK (master plan §1.1 as revised 2026-07-10):
-        // upstream mlx-swift 0.31.6 plus THIRTEEN cherry-picks, all already in
-        // mlx-core but not yet vendored by any mlx-swift release (see
-        // ml-explore/mlx-swift#441). Most of them produce silently wrong
-        // numbers rather than an error, which is why the ones we could
-        // reproduce here carry a parity test rather than being left to surface
-        // on their own. Two are carried preventively — #3560 and #3960 — and
-        // say so:
-        //
-        //   - ml-explore/mlx#3498 — batched single-token RoPE fix.
-        //   - ml-explore/mlx#4043 — the Metal kernel cache looked itself up
-        //     with operator[] while holding only a shared lock, so a lookup
-        //     miss inserted into the map while other threads read it. We serve
-        //     concurrent requests, so two of them compiling different kernels
-        //     at once is ordinary traffic. The realistic outcomes include a
-        //     torn read handing back the wrong pipeline state — the wrong
-        //     kernel dispatched, not only a crash. This closes the hot path;
-        //     Device::clear_library still mutates the same map under a
-        //     different mutex, which nothing we call reaches.
-        //   - ml-explore/mlx#3810 — NAX split-K GEMM instantiated the JIT
-        //     kernel with the output dtype instead of the input dtype, so a
-        //     bf16 matmul read its inputs as float: out-of-bounds loads and
-        //     silent garbage, no crash and no NaN guard. Reachable on NAX
-        //     hardware for a non-float32 matmul with batch 1, M*N >= 2048^2,
-        //     K >= 10240 and K >= 3*max(M, N). Pinned by
-        //     NAXSplitKGemmParityTests.
-        //   - ml-explore/mlx#3497 — qvm mishandles a stride-0 batch dimension,
-        //     the shape GQA produces when a quantized KV cache is broadcast
-        //     across repeat groups. Only the non-transposed product (scores @
-        //     values) reaches it, and only for M >= 2, which is why ordinary
-        //     single-token decode never showed it and speculative decoding
-        //     does. Not hardware-gated.
-        //   - ml-explore/mlx#3631 — NAX qmm edge-tile bounds computed in
-        //     short(), wrapping past 32767, so an unaligned N above 2^15
-        //     leaves a column band corrupted. Reached through an lm_head whose
-        //     vocab is unaligned — MiniCPM3-4B's 73448 is one, and one we
-        //     list as supported.
-        //   - ml-explore/mlx#3560 — steel GEMM safe load read past the edge of
-        //     an unaligned tile. Carried preventively.
-        //   - ml-explore/mlx#3361 — the NAX attention kernel held its tile
-        //     positions in short, so a KV sequence past 32767 wrapped negative
-        //     and the mask was read from a negative offset. Reproduced here on
-        //     an M5 Max: cosine 0.0 and non-finite output at KV=40960, correct
-        //     at KV=8192. This is the flagship long-context path — the tiered
-        //     SSD KV cache exists precisely to reach these lengths. Pinned by
-        //     NAXAttentionAndAddMMParityTests.
-        //
-        //     Only the array-mask half was ever reachable. The causal half
-        //     overflows the same way but uses the positions solely in `r < c`,
-        //     where both sides shift by 65536 together and the comparison
-        //     survives — and they always do shift together, since that block
-        //     runs only near the diagonal. Measured: the causal case passes
-        //     against the pre-fix pin at KV=40960. Both halves are widened
-        //     anyway, to stay in step with upstream.
-        //   - ml-explore/mlx#3960 — sorted gather_mm derived the activation row
-        //     stride from a dimension that can be a singleton. Carried
-        //     preventively: MoE decode is the shape that would produce it, but
-        //     ensure_row_contiguous appears to normalise the stride before the
-        //     kernel sees it, and no triggering input has been constructed.
-        //   - ml-explore/mlx#3632 — gather_qmm_nax built its kernel name with
-        //     bk = 32 while the sibling qmm_nax uses 64. In an ahead-of-time
-        //     build that name is not exported and the lookup fails; mlx-swift
-        //     excludes nojit_kernels.cpp and instantiates on demand, so we
-        //     never hit the failure. Carried to keep the tiling in step with
-        //     upstream, not to fix a break we have.
+        // CONTROLLED MINIMAL FORK (master plan §1.1, rebased 2026-10-02):
+        // upstream mlx-swift 0.32.3, which vendors core v0.32.2, plus TWO
+        // cherry-picks that landed in core v0.32.3 and are not yet in any
+        // mlx-swift release. Both produce silently wrong numbers on NAX
+        // hardware and both are pinned by QuantizedMatmulParityTests:
         //
         //   - ml-explore/mlx#3922 — the sorted-RHS affine NAX kernel narrowed
         //     its remaining-row count to short before clamping it to the tile,
-        //     so past 32768 rows the intermediate wrapped and early tiles left
-        //     output rows unwritten. Reproduced here: 32 of 32769 rows came
-        //     back all-zero, which is exactly one tile height — the count is
-        //     the mechanism's fingerprint. One row per (token, expert) pair
-        //     means an 8K-token prompt through top-4 routing already sits on
-        //     the seam.
-        //   - ml-explore/mlx#4251 — qvm_split_k sized its grid with N / bn, a
-        //     floor, so a width that is not a multiple of the 64-wide tile
-        //     left its tail columns undispatched and therefore unwritten. Its
-        //     own non-split-K sibling in the same file already used the
-        //     ceiling. Reachable at group size 32, where N need only be a
-        //     multiple of 32: reproduced at N=96 with max |diff| 127.9.
-        //   - ml-explore/mlx#3167 — a kernel completing after process teardown
-        //     began could run its completion handler against freed state. Not
-        //     reproduced here — it needs a race window — but the mechanism is
-        //     ours: a SwiftUI app quitting while background MLX work is in
-        //     flight.
-        //   - ml-explore/mlx#3873 — the preamble generator filtered SDK headers
-        //     with grep -v "Xcode", which also matches a checkout living under
-        //     a directory named Xcode, silently dropping every project header.
-        //     Our DerivedData paths qualify. Not biting today, since we compile
-        //     the checked-in generated sources rather than regenerating, which
-        //     is precisely why it would have gone unnoticed.
+        //     so past 32768 rows early tiles left output rows unwritten.
+        //     Reproduced here: 32 of 32769 rows came back all-zero, exactly
+        //     one tile height. One row per (token, expert) pair means an
+        //     8K-token prompt through top-4 routing already sits on the seam.
+        //   - ml-explore/mlx#4009 — the same kernel got its K tail wrong when
+        //     K is not a multiple of the 64-wide tile: the activation tile was
+        //     bounded by the full tile rather than the remainder, and the
+        //     weight loader zeroed the wrong axis. Upstream measured 92–97% of
+        //     output elements wrong at K=160. Only group size 32 admits such a
+        //     K, so the window is a `--q-group-size 32` checkpoint whose hidden
+        //     or MoE-intermediate size is 32 mod 64; the result reads like a
+        //     bad model rather than a bug.
         //
-        // #3497, #3631, #3922 and #4251 are pinned by
-        // QuantizedMatmulParityTests, #3560 by SteelGemmSafeLoadParityTests.
+        // The twelve fixes the previous base (0.31.6, core v0.31.1) carried —
+        // #3498 #3810 #3497 #3631 #3560 #3632 #3960 #4043 #3361 #4251 #3167
+        // #3873 — are all in core v0.32.2, each checked by ancestry and, for
+        // the kernel-header ones, line by line in upstream's shipped generated
+        // copies. Their parity tests stay as regression guards:
+        // NAXSplitKGemmParityTests (#3810), NAXAttentionAndAddMMParityTests
+        // (#3361, and the addmm property that #3422 — now in the base — must
+        // keep), SteelGemmSafeLoadParityTests (#3560), and
+        // QuantizedMatmulParityTests (#3497, #3631, #4251).
         //
-        // Deliberately deferred: ml-explore/mlx#3963 widens Metal's implicit
-        // `thread` address space to explicit, which the compiler shipping from
-        // Xcode 27.0 Beta 4 onward requires. It is not a runtime concern — mlx
-        // requests LanguageVersion4_0 and our kernels compile — and CI, release
-        // and this machine are all pinned at Xcode 26.x. It is also 36 files
-        // touching 34 kernel headers, every one of which would need its
-        // stringified copy rewritten. Carry it before unpinning Xcode, not
-        // before.
+        // Two things this base fixed that the old one had and we had not
+        // noticed: mlx#4372's second half removed a trailing underscore from
+        // the "gather_qmm_t_nax_" kernel-name strings in quantized.cpp, a
+        // JIT-only lookup failure on the quantized MoE gather path that had
+        // been live since the fork was created (the PR was excluded by its
+        // title; the half we had read did not apply, the half we had not did).
+        // And mlx#3963 makes the kernels compile under the Metal 4.1 language
+        // version that core v0.32.2 requests on macOS 27 — the runtime JIT on
+        // the old base capped itself at 4.0 and never asked, which is why
+        // nothing broke, and also why a developer machine on Xcode 27 is the
+        // first place that path runs; CI and release pin Xcode 26.4.1.
         //
-        // Deliberately NOT carried: ml-explore/mlx#3422. Upstream's own summary
-        // lists what it does: split-K matmuls were being routed to the non-NAX
-        // version (a routing bug — correct results, slower kernel), tuning for
-        // the M5 Max, and "AddMM was completely broken on NAX". Only the last
-        // is a correctness bug, and it arrived with the NAXFrag refactor after
-        // v0.31.1: the epilogue bound its destination fragment by value and
-        // dropped the bias. Our tree predates the refactor and binds a
-        // reference, so it never had it.
+        // The stream model changed with this base. 0.32.3 creates every stream
+        // through mlx_stream_new_thread_unsafe and resolves the default from a
+        // task-local with a global fallback, so evaluating from a second OS
+        // thread no longer aborts (ml-explore/mlx-swift#457, closed upstream).
+        // CrossThreadEvalTripwireTests holds that line. BatchPositionedCacheWrapper,
+        // the shim over the batched single-token RoPE defect fixed by #3498,
+        // was deleted with this move as its own tests had scheduled.
         //
-        // The matmul.cpp half does apply cleanly — we have that code shape. It
-        // is left out because it is routing and tuning measured on a
-        // post-refactor tree, and there is no way to validate a retune here.
-        // Revisit if NAX split-K throughput ever matters. The addmm case in
-        // NAXAttentionAndAddMMParityTests holds the correctness property either
-        // way.
-        //
-        // The fork carries no API changes. Drop this override and return to
-        // the upstream package as soon as mlx-swift vendors core >= 0.32
-        // (the inverted tripwire in BatchPositionedCacheWrapperTests guards
-        // the switch-back). Pinned by revision so it can never drift.
+        // The fork carries no API changes; its .gitmodules points the mlx
+        // submodule at the magicnight mirror so the carried commits resolve.
+        // Drop this override and return to the upstream package as soon as an
+        // mlx-swift release vendors core >= v0.32.3. Pinned by revision so it
+        // can never drift; CLIForkPinTests, AppForkPinTests and the CI step
+        // that reads the app's resolved graph keep the three roots in step.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "eccbc24d03d33f4dc9a0e1585567218d6c42bff1"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
+            revision: "1026d239d831ac7ddd154c970bb6c1bff08c0e0c"),
+        // Minor-pinned: a minor bump of mlx-swift-lm raises its mlx-swift floor,
+        // which the fork's revision pin can satisfy at resolution but not at the
+        // source level. Move both together, never one.
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", .upToNextMinor(from: "3.32.3")),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.25.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
         // Use 1.3.x series: avoids 0.1.24's pin on swift-argument-parser 1.4.x
@@ -163,7 +99,18 @@ let package = Package(
         // NOTE: the package declares swift-tools-version 6.2 while this manifest
         // is 6.0. That is legal — a dependency may use a newer tools version than
         // its consumer; only the toolchain in use has to be new enough to parse it.
-        .package(url: "https://github.com/Blaizzy/mlx-audio-swift.git", from: "0.1.3"),
+        // mlx-audio-swift v0.1.3 plus two compatibility commits, carried on a
+        // fork because the package does not compile against mlx-swift-lm 3.32.3
+        // as released: that version added a complete `compile()` overload
+        // matrix to MLXLMCommon with `@Sendable` bodies (#589), which hijacks
+        // Parakeet's two bare `compile` calls, and made `newCache(parameters:)`
+        // throwing, which Marvis's non-throwing cache resets did not expect.
+        // Both patches are one-line qualifications; nothing else differs from
+        // the upstream tag. Drop the fork once upstream tags a release that
+        // builds against 3.32.x. Pinned by revision so it can never drift.
+        .package(
+            url: "https://github.com/magicnight/mlx-audio-swift.git",
+            revision: "d13853250a7e4eda66fe686d23f0d5cfd3cc86da"),
         // Already resolved transitively (mlx-audio-swift pins
         // `.upToNextMajor(from: "0.8.1")`, currently 0.9.0). Declared directly
         // with the SAME requirement — so no new version is introduced — purely

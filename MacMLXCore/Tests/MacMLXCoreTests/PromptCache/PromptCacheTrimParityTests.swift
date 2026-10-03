@@ -5,6 +5,10 @@ import MLXLMCommon
 import XCTest
 
 @testable import MacMLXCore
+// mlx-swift-lm 3.32.3 added its own `PromptCacheSnapshot` to MLXLMCommon; the
+// scoped import makes ours win the lookup here (the module name alone cannot,
+// because `enum MacMLXCore` shadows it inside this module's tests).
+import struct MacMLXCore.PromptCacheSnapshot
 
 /// Metal-gated (model-free) parity: prove that reusing a longer cached prefix —
 /// COPY it, TRIM it back to the shared length, then incrementally prefill the

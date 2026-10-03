@@ -9,7 +9,7 @@ import XCTest
 ///
 /// Qwen3.6 is NOT a new architecture port. Its `config.json` reports
 /// `model_type: "qwen3_5"` (dense) / `"qwen3_5_moe"` (MoE) — the exact same
-/// `model_type` strings Qwen3.5 already uses. mlx-swift-lm 3.31.4's
+/// `model_type` strings Qwen3.5 already uses. mlx-swift-lm 3.32.3's
 /// `Qwen35Model` / `Qwen35MoEModel` (registered in `LLMModelFactory` under
 /// those two keys) and macMLX's own format classifier
 /// (`ModelLibraryManager.knownVLMTypes`, which does NOT list bare `qwen3_5`)

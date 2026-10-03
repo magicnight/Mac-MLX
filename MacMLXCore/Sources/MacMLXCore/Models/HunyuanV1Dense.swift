@@ -9,8 +9,16 @@ import MLXNN
 //
 // A macMLX-owned model architecture (`model_type: hunyuan_v1_dense`) registered
 // into the stock mlx-swift-lm factory via `ModelOverlay` (no fork), following the
-// `SeedOss.swift` / `Mellum2.swift` precedent. Upstream mlx-swift-lm 3.31.4 has
-// no `hunyuan_v1_dense` type.
+// `SeedOss.swift` / `Mellum2.swift` precedent.
+//
+// Upstream mlx-swift-lm grew its own `hunyuan_v1_dense` in 3.32.3 (#347).
+// This overlay deliberately keeps shadowing it: `ModelOverlay.registerAll()`
+// runs after the stock registry is built and `registerModelType` replaces the
+// entry, so the type that loads is still this one — the one measured on a
+// real checkpoint for Track G. Retiring it in favour of upstream's is a
+// parity exercise of its own, not a side effect of a dependency bump;
+// `OverlayRegistrationTests` asserts which one wins so the shadowing stays
+// explicit.
 //
 // Hunyuan V1 Dense is a standard dense Llama-family decoder — GQA + SwiGLU MLP,
 // RMSNorm — with exactly two architecture-specific twists:

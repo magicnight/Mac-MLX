@@ -25,9 +25,10 @@ import XCTest
 ///
 /// ## What it proves
 ///  - **Cross-row identity (the A1 gate, through A2a):** a B=4 cohort of the SAME
-///    prompt yields four IDENTICAL greedy token trajectories. This re-proves the
-///    ``BatchPositionedCacheWrapper`` RoPE fix survives A2a's full sampling + stop
-///    + fan-out path (exact — same `.batch` kernel, identical rows).
+///    prompt yields four IDENTICAL greedy token trajectories. This re-proves
+///    batched single-token RoPE (ml-explore/mlx#3498, in the vendored core) holds
+///    through A2a's full sampling + stop + fan-out path (exact — same kernel,
+///    identical rows).
 ///  - **Per-slot parity (through the same path):** a B=2 cohort of two DIFFERENT
 ///    equal-length prompts — each slot's trajectory equals that prompt's
 ///    STANDALONE B=1 decode through the same runner. `B == 1` is just a
@@ -38,8 +39,8 @@ import XCTest
 ///
 /// A separate informational line compares against the STOCK scalar-path B=1
 /// decode (the production single-stream path). A late divergence there is the
-/// known, legal batch-size / kernel non-invariance (documented on
-/// ``BatchPositionedCacheWrapper``), so it is reported, not asserted.
+/// known, legal batch-size / kernel non-invariance (different `B` takes
+/// different matmul tiling), so it is reported, not asserted.
 final class BatchDecodeRunnerModelTests: XCTestCase {
 
     private enum ModelTestError: Error { case emptyPrompt }
@@ -102,8 +103,8 @@ final class BatchDecodeRunnerModelTests: XCTestCase {
 
             /// Reference greedy decode via the STOCK (scalar-offset) B=1 path —
             /// the production single-stream path, NOT the batch-positioned one.
-            func stockGreedy(_ promptTokens: [Int]) -> [Int] {
-                let cache = model.newCache(parameters: nil)
+            func stockGreedy(_ promptTokens: [Int]) throws -> [Int] {
+                let cache = try model.newCache(parameters: nil)
                 let promptArr = MLXArray(promptTokens, [1, promptTokens.count])
                 func lastArgmax(_ logits: MLXArray) -> Int {
                     let seqLen = logits.dim(1)
@@ -145,7 +146,7 @@ final class BatchDecodeRunnerModelTests: XCTestCase {
             let refA = try runCohort([promptA])[0]
             let refB = try runCohort([promptB])[0]
             let isolation = try runCohort([promptA, promptC])  // row 0 = A, batchmate swapped
-            let stockRefA = stockGreedy(promptA)
+            let stockRefA = try stockGreedy(promptA)
 
             return Trajectories(
                 b4Identical: b4,

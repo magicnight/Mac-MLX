@@ -79,7 +79,7 @@ public actor RerankEngine {
             cross = CrossEncoderModel(
                 bertConfiguration: bertConfig,
                 hiddenSize: fields.hiddenSize ?? 768)  // HF BERT-base default
-            try loadWeights(modelDirectory: dir, model: cross)
+            try await loadWeights(modelDirectory: dir, model: cross)
             loadedTokenizer = try await HuggingFaceTokenizerLoader().load(from: dir)
         } catch {
             reset()

@@ -105,13 +105,13 @@ final class BatchKVCacheModelTests: XCTestCase {
             /// Ragged batched greedy decode via a hand-written forward loop over
             /// `BatchKVCache`s. Returns per-row trajectories, or `nil` if this
             /// model's caches are not all dense (converter refused).
-            func raggedDecode(_ prompts: [[Int]]) -> [[Int]]? {
+            func raggedDecode(_ prompts: [[Int]]) throws -> [[Int]]? {
                 let padToken = prompts.first?.first ?? 0  // any valid, in-vocab id (masked out)
                 let (padded, leftPadding) = BatchPrefillAssembly.leftPad(
                     prompts: prompts, padToken: padToken)
                 guard
                     let caches = BatchCacheConverter.makeBatchCaches(
-                        from: model.newCache(parameters: nil), leftPadding: leftPadding)
+                        from: try model.newCache(parameters: nil), leftPadding: leftPadding)
                 else { return nil }
 
                 let batch = prompts.count
@@ -137,8 +137,8 @@ final class BatchKVCacheModelTests: XCTestCase {
             }
 
             /// Stock (scalar-offset) B=1 greedy reference — the production path.
-            func stockGreedy(_ prompt: [Int]) -> [Int] {
-                let cache = model.newCache(parameters: nil)
+            func stockGreedy(_ prompt: [Int]) throws -> [Int] {
+                let cache = try model.newCache(parameters: nil)
                 func lastArgmax(_ logits: MLXArray) -> Int {
                     let seqLen = logits.dim(1)
                     return logits[0..., (seqLen - 1)..., 0...].argMax(axis: -1).asArray(Int.self)[0]
@@ -154,16 +154,16 @@ final class BatchKVCacheModelTests: XCTestCase {
 
             let (_, leftPadding) = BatchPrefillAssembly.leftPad(
                 prompts: [promptShort, promptLong], padToken: 0)
-            guard let trajectories = raggedDecode([promptShort, promptLong]) else {
+            guard let trajectories = try raggedDecode([promptShort, promptLong]) else {
                 return nil  // non-dense model → caller skips
             }
             // Isolation: swap the batchmate; row 0 (promptShort) must be identical.
-            guard let isolation = raggedDecode([promptShort, promptOther]) else { return nil }
+            guard let isolation = try raggedDecode([promptShort, promptOther]) else { return nil }
 
             return RaggedResult(
                 trajectories: trajectories,
                 isolationRow0: isolation[0],
-                stockRefs: [stockGreedy(promptShort), stockGreedy(promptLong)],
+                stockRefs: try [stockGreedy(promptShort), stockGreedy(promptLong)],
                 leftPadding: leftPadding)
         }
 

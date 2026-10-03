@@ -18,10 +18,11 @@ import MLXLMCommon
 ///    processors hold a single-sequence `TokenRing`.
 ///
 /// ## RoPE correctness / regime
-/// `caches` are the ``batchPositioned(_:batch:)`` wrappers, so decode RoPE takes
-/// the per-row `.batch` array-offset kernel (A1's fix). A2a is an EQUAL-LENGTH,
-/// lockstep cohort: all rows share one advancing offset, which is exactly what
-/// A1's single-shared-offset wrapper replicates correctly. Masked (finished)
+/// `caches` are the model's own dense caches, so decode RoPE takes the scalar
+/// offset path; core v0.32.2 (ml-explore/mlx#3498) made that path correct for a
+/// `B > 1` single-token decode, which is why the per-row wrapper that used to
+/// sit here could be deleted. A2a is an EQUAL-LENGTH, lockstep cohort: all rows
+/// share one advancing offset. Masked (finished)
 /// rows keep being fed a pad token so the batch shape and the shared offset
 /// advance uniformly — the cohort never desynchronizes, keeping it inside A1's
 /// proven regime (ragged / per-row offsets are A2b).
@@ -40,7 +41,7 @@ final class ModelBatchStepEvaluator: BatchStepEvaluator {
 
     /// - Parameters:
     ///   - model: the resident language model (its forward reads `cache.ropeOffset`).
-    ///   - caches: batch-positioned caches from ``batchPositioned(_:batch:)``.
+    ///   - caches: the model's per-layer caches, all `KVCacheSimple`/`RotatingKVCache`.
     ///   - cohortParameters: per-row generation parameters (`B` entries); their
     ///     `.sampler()` / `.processor()` factories build the per-row sampling.
     init(model: any LanguageModel, caches: [KVCache], cohortParameters: [GenerateParameters]) {
