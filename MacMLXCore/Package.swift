@@ -93,8 +93,8 @@ let package = Package(
         // Command R7B) and #64 (`strip(arg)` argument handling, Hunyuan
         // `<answer>`) — are in 2.4.0; 2.4.0 also changed `Value.object`'s keys
         // and broke swift-transformers, and 2.4.1 restored String-keyed source
-        // compatibility, so 2.4.2 is the first release that is both fixed and
-        // compatible. Every checkpoint chat template now renders natively, with
+        // compatibility, and 2.4.2 is the floor swift-transformers 1.3.4
+        // declares. Every checkpoint chat template now renders natively, with
         // no built-in override.
         //
         // This declaration links Jinja into the render-parity TEST target only,

@@ -15,11 +15,11 @@ import XCTest
 /// the built-in and user-file precedence rules. Pure and ungated (no weights,
 /// no Metal).
 ///
-/// The SHIPPING `builtIns` map is EMPTY as of swift-jinja 2.4.0 (Seed-OSS and
+/// The SHIPPING `builtIns` map is EMPTY as of swift-jinja >= 2.4.2 (Seed-OSS and
 /// Command R7B render natively, so both built-ins were removed). To keep the
 /// built-in resolution branch covered, the built-in tests inject a synthetic
 /// `testBuiltIns` map through the `builtIns:` test seam — the same "injectable for
-/// tests" idiom as `fileManager`/`modelType`; `testShippingBuiltInsAreEmptyForFormerlyOverriddenType`
+/// tests" idiom as `fileManager`/`modelType`; `testShippingBuiltInsAreEmpty`
 /// pins that the default map ships empty.
 final class ChatTemplateOverrideTests: XCTestCase {
 

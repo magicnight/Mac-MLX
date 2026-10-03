@@ -76,10 +76,11 @@ def snapshot_dir() -> str:
 
 
 def source_revision(snap: str) -> str:
-    """The snapshot's revision (its directory name under `snapshots/`), or the
-    directory itself when an explicit path was given."""
+    """The snapshot's revision (its directory name under `snapshots/`), or
+    "unknown" when an explicit path outside the HF cache was given — never the
+    path itself, which would commit a local filesystem path into the fixture."""
     parent, name = os.path.split(os.path.normpath(snap))
-    return name if os.path.basename(parent) == "snapshots" else snap
+    return name if os.path.basename(parent) == "snapshots" else "unknown"
 
 
 # Representative message sets. Each exercises a distinct template path:

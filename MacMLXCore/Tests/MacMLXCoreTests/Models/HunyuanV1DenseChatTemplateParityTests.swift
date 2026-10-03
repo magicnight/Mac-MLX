@@ -28,7 +28,9 @@ import XCTest
 ///
 /// COVERAGE: the standard conversation path plus the `answer_history` case, which
 /// replays a non-last `<answer>`-tagged assistant turn to exercise the
-/// `strip('</answer>')` branch. (Seed-OSS's integer-keyed dict — huggingface/
+/// `strip('</answer>')` branch, and the two `answer_history_charset_*` cases
+/// whose payload edges fall inside the strip set, pinning Python's
+/// character-set strip semantics. (Seed-OSS's integer-keyed dict — huggingface/
 /// swift-jinja #62 — and Command R7B's literal `}}` — #63 — are likewise fixed in
 /// 2.4.0 and rendered natively by their own parity tests, so no model in the
 /// matrix needs a built-in override.)
