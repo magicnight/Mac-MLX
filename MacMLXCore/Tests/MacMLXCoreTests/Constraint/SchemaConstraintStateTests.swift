@@ -160,4 +160,25 @@ struct SchemaConstraintStateTests {
         #expect(!accepts("{\"a\":\"x\"}x", s))
         #expect(accepts("{\"a\":\"x\"}  ", s))    // trailing whitespace ok
     }
+
+    /// Seen on a real checkpoint: with every declared key emitted, a comma was
+    /// still accepted, after which only whitespace was legal — the model could
+    /// never close the object and ran to max_tokens emitting blanks.
+    @Test
+    func rejectsCommaOnceEveryKeyIsEmitted() {
+        let s = schema([("a", .string), ("b", .string)], required: ["a"])
+        #expect(accepts("{\"a\":\"x\",\"b\":\"y\"}", s))
+        #expect(!accepts("{\"a\":\"x\",\"b\":\"y\",}", s))
+
+        let afterLast = SchemaConstraintState(schema: s).walk(Array("{\"a\":\"x\",\"b\":\"y\"".utf8))
+        #expect(afterLast?.walk(Array(",".utf8)) == nil, "no key left to promise")
+        #expect(afterLast?.walk(Array(" ,".utf8)) == nil)
+        #expect(afterLast?.walk(Array(" }".utf8))?.isComplete == true)
+
+        // With a key still available the comma stays legal.
+        let afterFirst = SchemaConstraintState(schema: s).walk(Array("{\"a\":\"x\"".utf8))
+        #expect(afterFirst?.walk(Array(",".utf8)) != nil)
+        // ...and so does closing early, since only `a` is required.
+        #expect(afterFirst?.walk(Array("}".utf8))?.isComplete == true)
+    }
 }

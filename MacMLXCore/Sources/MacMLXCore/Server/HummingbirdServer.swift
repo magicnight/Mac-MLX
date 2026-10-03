@@ -1807,7 +1807,8 @@ public actor HummingbirdServer {
             messages: messages,
             systemPrompt: systemPrompt,
             parameters: params,
-            templateKwargs: await templateKwargs(for: chatReq.model),
+            templateKwargs: Self.templateKwargs(
+                await templateKwargs(for: chatReq.model), constrainedBy: responseFormat),
             tools: toolsToSend,
             draftModelID: chatReq.draft_model,
             numDraftTokens: chatReq.num_draft_tokens,
@@ -2489,6 +2490,24 @@ public actor HummingbirdServer {
         return kwargs
     }
 
+    /// The chat-template kwargs a request is rendered with. Under a
+    /// `response_format` constraint the answer is JSON from its first byte, so a
+    /// thinking-mode template (Qwen3's `enable_thinking`) would only open a
+    /// `<think>` block the model can never close; `enable_thinking` is forced
+    /// off so the model is put in answer mode — even over a per-model setting
+    /// that turned it on, which the constraint could not honour anyway. A
+    /// template without that switch ignores the key. Everything else configured
+    /// per model passes through unchanged; an unconstrained request is untouched.
+    static func templateKwargs(
+        _ configured: [String: JSONValue]?,
+        constrainedBy responseFormat: ResponseFormat?
+    ) -> [String: JSONValue]? {
+        guard responseFormat != nil else { return configured }
+        var kwargs = configured ?? [:]
+        kwargs["enable_thinking"] = .bool(false)
+        return kwargs
+    }
+
     private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
         // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
         // under it, and re-resolve the active engine (SRV-1). Release on
@@ -2692,7 +2711,16 @@ public actor HummingbirdServer {
             // does)? This decides whether the first streamed token is
             // reasoning even though the opening tag never appears in the
             // stream (issue #30).
-            let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            // A constrained generation (`response_format`) is JSON from its first
+            // byte — the automaton never admits `<think>` — so nothing in it is
+            // reasoning even when the rendered prompt opens a think block. Seeding
+            // true there streamed the whole JSON answer as reasoning_content.
+            let startInReasoning: Bool
+            if genRequest.responseFormat == nil {
+                startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            } else {
+                startInReasoning = false
+            }
             let stream = await engine.generate(genRequest)
             let stallTimeout = await server.stallTimeoutSeconds
             var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
@@ -3301,7 +3329,16 @@ public actor HummingbirdServer {
             // <think> block the model continues (qwen3)? Reasoning is dropped
             // for the Anthropic MVP, so this only affects which text counts as
             // the answer, never a separate surfaced block.
-            let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            // A constrained generation (`response_format`) is JSON from its first
+            // byte — the automaton never admits `<think>` — so nothing in it is
+            // reasoning even when the rendered prompt opens a think block. Seeding
+            // true there streamed the whole JSON answer as reasoning_content.
+            let startInReasoning: Bool
+            if genRequest.responseFormat == nil {
+                startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            } else {
+                startInReasoning = false
+            }
             let stream = await engine.generate(genRequest)
             let stallTimeout = await server.stallTimeoutSeconds
             var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)

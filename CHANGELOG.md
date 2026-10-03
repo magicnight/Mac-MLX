@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Structured output on thinking models.** Found by driving a live Qwen3.6
+  checkpoint through Apple's Foundation Models client. First, a streaming
+  `response_format` request returned its whole JSON answer as
+  `reasoning_content`: the stream was seeded as "inside a think block" because
+  the rendered prompt opens one, but a constrained generation is JSON from its
+  first byte and can never be reasoning. Second, once every declared key had
+  been emitted the schema automaton still accepted a comma, after which only
+  whitespace was legal, so the model could never close the object and ran to
+  `max_tokens` emitting blanks. A constrained request now also renders its
+  chat template with `enable_thinking` off, so a Qwen3-style template puts
+  the model in answer mode instead of opening a think block it cannot close.
+
 ### Changed
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
