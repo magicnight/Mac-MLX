@@ -10,12 +10,12 @@
 /// to ``ResponseFormatDecoder`` and, like ``JSONGrammarState``, is a pure value
 /// type — token classification is a non-mutating ``walk(_:)`` fold, MLX-free and
 /// unit-testable.
-public struct SchemaConstraintState: Equatable, Sendable {
+public struct SchemaConstraintState: Hashable, Sendable {
 
     /// Typed value sub-automaton. Constructed by ``Phase/expectValue`` when the
     /// first value byte arrives, torn down when the value completes.
     @usableFromInline
-    enum ValueState: Equatable, Sendable {
+    enum ValueState: Hashable, Sendable {
         // String
         case stringBody
         case stringEscape
@@ -51,7 +51,7 @@ public struct SchemaConstraintState: Equatable, Sendable {
 
     /// The structural position within the object.
     @usableFromInline
-    enum Phase: Equatable, Sendable {
+    enum Phase: Hashable, Sendable {
         /// Before the object: whitespace then `{`.
         case beforeObject
         /// After `{` or after `,`. `afterComma` forbids the object close (no
@@ -371,6 +371,12 @@ public struct SchemaConstraintState: Equatable, Sendable {
     /// RFC 8259, rejects unpaired surrogates): a high surrogate (D800–DBFF) must
     /// be followed by a `\u` low surrogate (DC00–DFFF); a lone low surrogate is
     /// rejected.
+    ///
+    /// The check is progressive: a digit is rejected as soon as no completion of
+    /// the escape could be legal. Checking only at the fourth digit left dead
+    /// prefixes (`\uDC`–`\uDF` outside a pair, `\uD83D\u00`) that the automaton
+    /// accepted but could not continue, so generation hit the no-legal-token path
+    /// and was cut off.
     @usableFromInline
     mutating func stringUnicodeValue(
         _ byte: UInt8, key: String, digitsSeen: Int, value: Int, expectingLow: Bool
@@ -378,6 +384,11 @@ public struct SchemaConstraintState: Equatable, Sendable {
         guard Self.isHexDigit(byte) else { return false }
         let newValue = value * 16 + Self.hexValue(byte)
         let seen = digitsSeen + 1
+        // The second half of a pair must start `D`, and its second digit must
+        // make it DC–DF; any other escape must not reach DC–DF, which could only
+        // end as a lone low surrogate.
+        if seen == 1, expectingLow, newValue != 0xD { return false }
+        if seen == 2, expectingLow != (0xDC...0xDF).contains(newValue) { return false }
         if seen < 4 {
             phase = .value(key: key, state: .stringUnicode(digitsSeen: seen, value: newValue, expectingLow: expectingLow))
             return true

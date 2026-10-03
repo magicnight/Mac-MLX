@@ -181,4 +181,67 @@ struct SchemaConstraintStateTests {
         // ...and so does closing early, since only `a` is required.
         #expect(afterFirst?.walk(Array("}".utf8))?.isComplete == true)
     }
+
+    // MARK: Surrogate escapes (C2)
+
+    /// A `\u` escape is cut off as soon as no completion of it could be legal.
+    /// The surrogate range used to be checked only at the fourth digit, so
+    /// `\uDC`–`\uDF` outside a pair and `\uD83D\u00` were accepted and then no
+    /// byte could follow: the no-legal-token path, and a truncated document.
+    @Test
+    func prunesDeadSurrogateEscapePrefixes() {
+        let s = schema([("msg", .string)])
+        let start = SchemaConstraintState(schema: s)
+        func walks(_ escape: String) -> Bool {
+            start.walk(Array("{\"msg\":\"\(escape)".utf8)) != nil
+        }
+        // Outside a pair, the second digit decides a lone low surrogate.
+        for escape in ["\\uDC", "\\uDD", "\\uDE", "\\uDF", "\\udc"] {
+            #expect(!walks(escape), "\(escape)")
+        }
+        // The second half of a pair must be DC–DF, decided by its first two digits.
+        #expect(!walks("\\uD83D\\u00"))
+        #expect(!walks("\\uD83D\\u0"))
+        #expect(!walks("\\uD83D\\uD8"))
+        // Not over-pruned: prefixes of legal escapes still walk.
+        #expect(walks("\\uD83D\\uD"))
+        #expect(walks("\\uD83D\\uDC"))
+        for escape in ["\\uD8", "\\uDB", "\\uD7", "\\uE0", "\\u00"] {
+            #expect(walks(escape), "\(escape)")
+        }
+        #expect(accepts("{\"msg\":\"\\uD83D\\uDE00\\uD7FF\\uE000\"}", s))
+    }
+
+    // MARK: No trap states
+
+    /// Every state reachable over a small alphabet can still reach a complete
+    /// document. A state that cannot is a trap: the processor finds no legal
+    /// token there and forces EOS on a truncated output. Breadth-first over at
+    /// most 40k states per schema, then backward co-reachability from the
+    /// complete states (see ``SchemaTrapSearch``). Fixed schemas cover the
+    /// shapes of known traps (a comma after the last key, a dead surrogate
+    /// escape); seeded schemas cover the rest.
+    @Test
+    func noReachableStateIsATrap() {
+        var schemas: [JSONSchemaObject] = [
+            schema([("a", .string)]),
+            schema([("a", .string)], required: ["a"]),
+            schema([("a", .string), ("ab", .integer), ("b", .number)], required: ["ab"]),
+            schema([("e", .stringEnum(["x", "xy"])), ("f", .boolean)], required: ["e", "f"]),
+            schema([("", .stringEnum([""])), ("n", .number)]),
+        ]
+        var generator = RandomSchemaGenerator(seed: 42)
+        for _ in 0..<12 {
+            schemas.append(generator.object())
+        }
+        for object in schemas {
+            let result = SchemaTrapSearch.run(
+                from: SchemaConstraintState(schema: object),
+                alphabet: SchemaTrapSearch.alphabet(for: object),
+                limit: 40_000)
+            #expect(
+                result.traps.isEmpty,
+                "\(result.traps.count) trap(s) in \(result.explored) states, first: \(result.traps.first?.diagnosticDescription ?? "-") for \(object)")
+        }
+    }
 }
