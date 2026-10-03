@@ -39,6 +39,11 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     let temperature: Double?
     let top_p: Double?
     let max_tokens: Int?
+    /// OpenAI's newer spelling of `max_tokens`. Apple's Foundation Models
+    /// client sends only this one (its `maximumResponseTokens`), so without it
+    /// that setting silently fell back to the 2048 default. `max_tokens` wins
+    /// when a client sends both.
+    let max_completion_tokens: Int?
     /// OpenAI `tools` — an array of `{"type":"function","function":{name,
     /// description,parameters}}` specs. Forwarded VERBATIM into
     /// `GenerateRequest.tools` (the chat template consumes exactly this shape,
@@ -95,10 +100,11 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// streaming request that sets it, every chunk carries `"usage": null` and
     /// one extra chunk — empty `choices`, populated `usage` — is sent before
     /// `[DONE]`. That is the exact OpenAI contract, and what Apple's
-    /// `ChatCompletionsLanguageModel` (Foundation Models) and Xcode 27's
-    /// local-model provider send and parse. Ignored on a non-streaming
-    /// request, whose body already carries `usage`. Unknown keys inside the
-    /// object are ignored, as OpenAI ignores them.
+    /// Foundation Models `ChatCompletionsLanguageModel` sends and parses. Two
+    /// deliberate leniencies: on a non-streaming request the field is ignored
+    /// (OpenAI rejects it; the body already carries `usage`, so rejecting
+    /// would break clients that worked before this field was read), and
+    /// unknown keys inside the object are ignored.
     let stream_options: StreamOptions?
 
     struct StreamOptions: Decodable, Sendable {
@@ -1655,6 +1661,7 @@ public actor HummingbirdServer {
                 temperature: legacy.temperature,
                 top_p: legacy.top_p,
                 max_tokens: legacy.max_tokens,
+                max_completion_tokens: nil,
                 // Legacy text-completions bodies carry no tools.
                 tools: nil,
                 tool_choice: nil,
@@ -1706,7 +1713,7 @@ public actor HummingbirdServer {
         let params = GenerationParameters(
             temperature: chatReq.temperature ?? 0.7,
             topP: chatReq.top_p ?? 0.95,
-            maxTokens: chatReq.max_tokens ?? 2048,
+            maxTokens: chatReq.max_tokens ?? chatReq.max_completion_tokens ?? 2048,
             stream: chatReq.stream ?? false,
             // Track E — the `GenerationParameters` initializer clamps every one of
             // these (see its clamp helpers), so a hostile/malformed value can't
@@ -1841,6 +1848,7 @@ public actor HummingbirdServer {
         // `stream_options.include_usage` only means something on a stream; a
         // non-streaming body already carries `usage`, so it is ignored there.
         let includeUsage = wantsStream && (chatReq.stream_options?.include_usage ?? false)
+        let exposeCacheFigures = Self.exposeCacheFigures(request)
 
         // A2d: route an eligible request to the continuous-batching path when a
         // seam is installed and accepts it. `submit` returning nil — no seam, a
@@ -1883,9 +1891,9 @@ public actor HummingbirdServer {
                 // to the batch responder's own `defer`. Neither responder marks
                 // `true` again — that would double-count.
                 if wantsStream {
-                    return batchStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream, includeUsage: includeUsage)
+                    return batchStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream, includeUsage: includeUsage, exposeCacheFigures: exposeCacheFigures)
                 } else {
-                    return try await batchNonStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream)
+                    return try await batchNonStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream, exposeCacheFigures: exposeCacheFigures)
                 }
             }
             // Submit declined (nil): undo the speculative mark before falling
@@ -1895,9 +1903,9 @@ public actor HummingbirdServer {
         }
 
         if wantsStream {
-            return try await streamingChatResponse(genRequest: genRequest, includeUsage: includeUsage)
+            return try await streamingChatResponse(genRequest: genRequest, includeUsage: includeUsage, exposeCacheFigures: exposeCacheFigures)
         } else {
-            return try await nonStreamingChatResponse(genRequest: genRequest)
+            return try await nonStreamingChatResponse(genRequest: genRequest, exposeCacheFigures: exposeCacheFigures)
         }
     }
 
@@ -2509,7 +2517,7 @@ public actor HummingbirdServer {
         return kwargs
     }
 
-    private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
+    private func nonStreamingChatResponse(genRequest: GenerateRequest, exposeCacheFigures: Bool) async throws -> Response {
         // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
         // under it, and re-resolve the active engine (SRV-1). Release on
         // ALL exit paths (success, catch, throw).
@@ -2566,7 +2574,7 @@ public actor HummingbirdServer {
                 case .chunk(let chunk):
                     fullText += chunk.text
                     if let usage = chunk.usage {
-                        capturedUsage = usage
+                        capturedUsage = usage.exposingCacheFigure(exposeCacheFigures)
                         completionTokens = usage.completionTokens
                     }
                     if let reason = chunk.finishReason {
@@ -2646,7 +2654,9 @@ public actor HummingbirdServer {
     ///   true every chunk carries `"usage": null` and a final usage-only chunk
     ///   (empty `choices`) precedes `[DONE]`; only on a normally completed
     ///   stream, never after an error or stall frame.
-    private func streamingChatResponse(genRequest: GenerateRequest, includeUsage: Bool) async throws -> Response {
+    /// - Parameter exposeCacheFigures: whether `prompt_tokens_details` may be
+    ///   reported to this caller (see `exposeCacheFigures(_:)`).
+    private func streamingChatResponse(genRequest: GenerateRequest, includeUsage: Bool, exposeCacheFigures: Bool) async throws -> Response {
         // A1: cheap pre-flight resolve check (no load, no lock) — reject
         // an unknown model with a real 404 before any streaming headers
         // are sent. The real (locked) resolve+load still happens inside
@@ -2734,7 +2744,7 @@ public actor HummingbirdServer {
                         // the number of SSE/NDJSON frames.
                         if let usage = chunk.usage {
                             completionTokens = usage.completionTokens
-                            terminalUsage = usage
+                            terminalUsage = usage.exposingCacheFigure(exposeCacheFigures)
                         }
                         if let speculativeDecoding = chunk.speculativeDecoding {
                             terminalSpeculativeDecoding = speculativeDecoding
@@ -2847,10 +2857,13 @@ public actor HummingbirdServer {
                 try? await writer.write(buf)
             }
 
-            if includeUsage, finishedNormally {
+            // Only after a normal finish AND a terminal chunk that carried usage:
+            // a stream that ended without one (engine torn down, task cancelled)
+            // gets no usage chunk rather than an invented 0/0/0.
+            if includeUsage, finishedNormally, let usage = terminalUsage {
                 try await writeUsageChunk(
                     &writer, id: completionID, created: timestamp, model: model,
-                    usage: openAIUsageObject(terminalUsage, speculativeDecoding: terminalSpeculativeDecoding))
+                    usage: openAIUsageObject(usage, speculativeDecoding: terminalSpeculativeDecoding))
             }
 
             var doneBuf = ByteBuffer()
@@ -2887,7 +2900,8 @@ public actor HummingbirdServer {
     private func batchNonStreamingChatResponse(
         genRequest: GenerateRequest,
         modelID: String,
-        stream: AsyncThrowingStream<GenerateChunk, Error>
+        stream: AsyncThrowingStream<GenerateChunk, Error>,
+        exposeCacheFigures: Bool
     ) async throws -> Response {
         // POOL-3: the "true" mark already happened in `handleChatCompletions`
         // BEFORE `submit` was called (MEDIUM#2 — admission is the start of
@@ -2916,7 +2930,7 @@ public actor HummingbirdServer {
                 case .chunk(let chunk):
                     fullText += chunk.text
                     if let usage = chunk.usage {
-                        capturedUsage = usage
+                        capturedUsage = usage.exposingCacheFigure(exposeCacheFigures)
                         completionTokens = usage.completionTokens
                     }
                     if let reason = chunk.finishReason {
@@ -2969,7 +2983,8 @@ public actor HummingbirdServer {
         genRequest: GenerateRequest,
         modelID: String,
         stream: AsyncThrowingStream<GenerateChunk, Error>,
-        includeUsage: Bool
+        includeUsage: Bool,
+        exposeCacheFigures: Bool
     ) -> Response {
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
@@ -3010,7 +3025,7 @@ public actor HummingbirdServer {
                     case .chunk(let chunk):
                         if let usage = chunk.usage {
                             completionTokens = usage.completionTokens
-                            terminalUsage = usage
+                            terminalUsage = usage.exposingCacheFigure(exposeCacheFigures)
                         }
                         let (reasoning, answer) = splitter.push(chunk.text)
                         var delta: [String: Any] = [:]
@@ -3054,10 +3069,10 @@ public actor HummingbirdServer {
                 try? await writer.write(buf)
             }
 
-            if includeUsage, finishedNormally {
+            if includeUsage, finishedNormally, let usage = terminalUsage {
                 try await writeUsageChunk(
                     &writer, id: completionID, created: timestamp, model: model,
-                    usage: openAIUsageObject(terminalUsage))
+                    usage: openAIUsageObject(usage))
             }
 
             var doneBuf = ByteBuffer()
@@ -3167,10 +3182,11 @@ public actor HummingbirdServer {
         // the generation lock — see `beginGeneration`. Missing model → 404,
         // load failure → 500, both mapped by the responder itself.
         let wantsStream = req.stream ?? false
+        let exposeCacheFigures = Self.exposeCacheFigures(request)
         if wantsStream {
-            return try await anthropicStreamingResponse(genRequest: genRequest)
+            return try await anthropicStreamingResponse(genRequest: genRequest, exposeCacheFigures: exposeCacheFigures)
         } else {
-            return try await anthropicNonStreamingResponse(genRequest: genRequest)
+            return try await anthropicNonStreamingResponse(genRequest: genRequest, exposeCacheFigures: exposeCacheFigures)
         }
     }
 
@@ -3178,7 +3194,7 @@ public actor HummingbirdServer {
     /// full generation, splits off reasoning (dropped in this MVP — only
     /// the answer is surfaced in `content[0]`), and emits Anthropic's
     /// message envelope.
-    private func anthropicNonStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
+    private func anthropicNonStreamingResponse(genRequest: GenerateRequest, exposeCacheFigures: Bool) async throws -> Response {
         // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
         // under it, and re-resolve the active engine (SRV-1). Release on
         // ALL exit paths (success, catch, throw).
@@ -3224,7 +3240,7 @@ public actor HummingbirdServer {
                     if let usage = chunk.usage {
                         promptTokens = usage.promptTokens
                         completionTokens = usage.completionTokens
-                        cachedPromptTokens = usage.cachedPromptTokens
+                        cachedPromptTokens = exposeCacheFigures ? usage.cachedPromptTokens : nil
                     }
                     if let reason = chunk.finishReason {
                         finishReason = reason
@@ -3292,7 +3308,7 @@ public actor HummingbirdServer {
     /// empty text block — in which case the `tool_use` block(s) open at index
     /// 0 instead of 1; see `textBlockOpened` below. The generation lock is
     /// held for the whole body and released in `defer`.
-    private func anthropicStreamingResponse(genRequest: GenerateRequest) async throws -> Response {
+    private func anthropicStreamingResponse(genRequest: GenerateRequest, exposeCacheFigures: Bool) async throws -> Response {
         // A1: cheap pre-flight resolve check (no load, no lock) — reject
         // an unknown model with a real 404 before any streaming headers
         // are sent. The real (locked) resolve+load still happens inside
@@ -3399,7 +3415,7 @@ public actor HummingbirdServer {
                         if let usage = chunk.usage {
                             completionTokens = usage.completionTokens
                             promptTokens = usage.promptTokens
-                            cachedPromptTokens = usage.cachedPromptTokens
+                            cachedPromptTokens = exposeCacheFigures ? usage.cachedPromptTokens : nil
                         }
                         let (_, answer) = splitter.push(chunk.text)
                         var text = answer
@@ -4812,21 +4828,19 @@ private func anthropicToolUseBlock(_ call: ToolCallRequest) -> [String: Any] {
     ]
 }
 
-// MARK: - OpenAI logprobs serialization (Track E)
+// MARK: - Usage serialization (OpenAI and Anthropic shapes)
 
-/// One OpenAI `choices[].logprobs` object:
-/// `{"content":[{token,logprob,bytes,top_logprobs:[{token,logprob,bytes}]}]}`.
-/// `content` is empty when logprobs were requested but no tokens were generated.
-/// Free function (not actor-isolated) so it also runs inside the streaming
-/// `ResponseBody` closure — mirrors `openAIToolCallObject`.
 /// The OpenAI `usage` object for one completion. `prompt_tokens_details.
-/// cached_tokens` is present only when the engine reported a prompt-cache
-/// figure (`TokenUsage.cachedPromptTokens`): the single-stream MLX path always
-/// does (0 on a miss), a path with no cache leaves it nil and the key is
-/// omitted — never fabricated. The `speculative_decoding` extension mirrors
+/// cached_tokens` is present whenever the engine reported a prompt-cache figure
+/// (`TokenUsage.cachedPromptTokens`): every production path does — the MLX
+/// engine reports its reuse count, 0 on a miss and on the paths that never
+/// consult the cache (VLM, speculative, kv_bits, batched rows) — so the key is
+/// absent only when no figure exists (a stub, or a caller the figure is
+/// withheld from; see `exposeCacheFigures(_:)`). The count is clamped to the
+/// prompt length; OpenAI's `prompt_tokens` INCLUDES the cached tokens, so no
+/// subtraction happens here. The `speculative_decoding` extension mirrors
 /// mlx-lm's Python server and is present only when the draft path ran. A nil
-/// `usage` (an engine that reported none) yields zeros, as the non-streaming
-/// responders always have.
+/// `usage` yields zeros, as the non-streaming responders always have.
 private func openAIUsageObject(
     _ usage: TokenUsage?,
     speculativeDecoding: SpeculativeDecodingUsage? = nil
@@ -4839,7 +4853,7 @@ private func openAIUsageObject(
         "total_tokens": promptTokens + completionTokens,
     ]
     if let cached = usage?.cachedPromptTokens {
-        object["prompt_tokens_details"] = ["cached_tokens": cached] as [String: Any]
+        object["prompt_tokens_details"] = ["cached_tokens": min(max(cached, 0), promptTokens)] as [String: Any]
     }
     if let speculativeDecoding {
         object["speculative_decoding"] = [
@@ -4850,22 +4864,27 @@ private func openAIUsageObject(
     return object
 }
 
-/// The Anthropic `usage` object. `cache_read_input_tokens` is present only when
-/// the engine reported a prompt-cache figure — the same rule as
-/// `openAIUsageObject`.
+/// The Anthropic `usage` object. Anthropic defines `input_tokens` as the
+/// UNCACHED remainder — the prompt is `input_tokens + cache_creation_input_tokens
+/// + cache_read_input_tokens`, and clients such as Claude Code sum them for the
+/// context meter — so when a cache figure is known it is taken OUT of
+/// `input_tokens` and reported as `cache_read_input_tokens`. Without a figure
+/// the object is what it always was: the full prompt in `input_tokens` and no
+/// cache key. `inputTokens` here is the full prompt length.
 private func anthropicUsageObject(
     inputTokens: Int,
     outputTokens: Int,
     cacheReadInputTokens: Int?
 ) -> [String: Any] {
-    var object: [String: Any] = [
-        "input_tokens": inputTokens,
-        "output_tokens": outputTokens,
-    ]
-    if let cacheReadInputTokens {
-        object["cache_read_input_tokens"] = cacheReadInputTokens
+    guard let cacheReadInputTokens else {
+        return ["input_tokens": inputTokens, "output_tokens": outputTokens]
     }
-    return object
+    let cached = min(max(cacheReadInputTokens, 0), inputTokens)
+    return [
+        "input_tokens": inputTokens - cached,
+        "output_tokens": outputTokens,
+        "cache_read_input_tokens": cached,
+    ]
 }
 
 /// B1: the usage-only chunk OpenAI sends before `[DONE]` when the request set
@@ -4892,6 +4911,35 @@ private func writeUsageChunk(
     try await writer.write(buf)
 }
 
+extension TokenUsage {
+    /// The same usage with the prompt-cache figure dropped unless `expose` is
+    /// true — the counts a caller may not learn the cache's shape from.
+    fileprivate func exposingCacheFigure(_ expose: Bool) -> TokenUsage {
+        expose ? self : TokenUsage(promptTokens: promptTokens, completionTokens: completionTokens)
+    }
+}
+
+extension HummingbirdServer {
+    /// Whether a request may learn how much of its prompt the prompt cache
+    /// served. The figure is an exact longest-common-prefix oracle against
+    /// every cached prompt — including the GUI's chats, which share the engine
+    /// — and the server answers cross-origin browser requests with no
+    /// credentials by default. A browser always sends `Origin` on a
+    /// cross-origin request, so the figure is withheld from any request that
+    /// carries one; native clients (Apple's Foundation Models client, Xcode,
+    /// Claude Code, curl) send none and are served in full.
+    static func exposeCacheFigures(_ request: Request) -> Bool {
+        request.headers[.origin] == nil
+    }
+}
+
+// MARK: - OpenAI logprobs serialization (Track E)
+
+/// One OpenAI `choices[].logprobs` object:
+/// `{"content":[{token,logprob,bytes,top_logprobs:[{token,logprob,bytes}]}]}`.
+/// `content` is empty when logprobs were requested but no tokens were generated.
+/// Free function (not actor-isolated) so it also runs inside the streaming
+/// `ResponseBody` closure — mirrors `openAIToolCallObject`.
 private func openAILogprobs(_ tokens: [TokenLogprob]) -> [String: Any] {
     let content: [[String: Any]] = tokens.map { token in
         [

@@ -61,9 +61,15 @@ Non-streaming response:
 ```
 
 `prompt_tokens_details.cached_tokens` is how many prompt tokens the prompt
-cache served (0 on a miss). It is present only when the engine reported a
-figure; the Anthropic `/v1/messages` shape carries the same number as
-`cache_read_input_tokens`.
+cache served (0 on a miss); `prompt_tokens` includes them, as OpenAI counts.
+The Anthropic `/v1/messages` shape reports the same figure as
+`cache_read_input_tokens` and, as Anthropic counts, takes it out of
+`input_tokens` — the two sum to the prompt. Both are withheld from a request
+that carries an `Origin` header (a cross-origin browser caller), because the
+figure is a prefix oracle against every cached prompt.
+
+`max_completion_tokens` is accepted as the newer spelling of `max_tokens`;
+`max_tokens` wins when both are present.
 
 ### GET /v1/models
 

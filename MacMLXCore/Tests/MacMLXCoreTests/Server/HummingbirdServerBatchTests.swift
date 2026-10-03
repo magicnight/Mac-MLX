@@ -328,8 +328,9 @@ struct HummingbirdServerBatchTests {
     /// B1 on the batched path: `stream_options.include_usage` ends the stream
     /// with a usage-only chunk (empty `choices`) carrying the seam's reported
     /// counts, every other chunk carries `usage: null`, and `[DONE]` still
-    /// comes last. The seam reports no cache figure, so no
-    /// `prompt_tokens_details` is invented.
+    /// comes last. This seam stub reports no cache figure, so the key is absent
+    /// here; the real batched slot always reports a known 0 (pinned by
+    /// `BatchDecodeCoreLogicTests`).
     @Test
     func streamingBatchRequestHonorsIncludeUsage() async throws {
         let seam = StubBatchServing()
