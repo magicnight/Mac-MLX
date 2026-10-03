@@ -74,4 +74,12 @@ public struct TokenVocabularyTable: Sendable {
         guard id >= 0, id < classifications.count else { return .unusable }
         return classifications[id]
     }
+
+    /// Whether token `id` decodes to nothing but JSON whitespace (space, tab,
+    /// line feed, carriage return). EOS and unusable tokens are not whitespace.
+    @inlinable
+    public func isWhitespaceOnly(_ id: Int) -> Bool {
+        guard case .bytes(let bytes) = classification(of: id), !bytes.isEmpty else { return false }
+        return bytes.allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }
+    }
 }

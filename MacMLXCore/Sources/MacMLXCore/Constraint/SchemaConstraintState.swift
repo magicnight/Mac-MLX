@@ -78,6 +78,18 @@ public struct SchemaConstraintState: Hashable, Sendable {
     @inlinable
     public var isComplete: Bool { stack.isEmpty && mode == .afterValue }
 
+    /// Whether the automaton is inside a string literal — a key (matched byte by
+    /// byte against the declared names), a string value or an enum literal —
+    /// where whitespace is data rather than formatting. The constraint
+    /// processor consults this before withholding whitespace.
+    public var isInsideString: Bool {
+        switch mode {
+        case .key: return true
+        case .scalar(let scalar): return scalar.isInsideString
+        default: return false
+        }
+    }
+
     /// Advance over one byte, returning the resulting state or `nil` when the
     /// byte is illegal.
     @inlinable

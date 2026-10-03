@@ -62,6 +62,10 @@ public struct JSONConstraintProcessor: LogitProcessor {
     private let greedy: Bool
     private let topKCap: Int
     private let box = TableBox()
+    /// Trips after a run of whitespace-only sampled tokens; while active, the
+    /// mask withholds whitespace at structural positions (see
+    /// ``WhitespaceRunLatch`` for why, and why it never releases).
+    private var whitespaceRun = WhitespaceRunLatch()
 
     /// - Parameters:
     ///   - format: the validated response format (C1 or C2).
@@ -109,9 +113,14 @@ public struct JSONConstraintProcessor: LogitProcessor {
         let processed = inner?.process(logits: logits) ?? logits
         let vocab = processed.dim(-1)
         let table = resolveTable(vocabularySize: vocab)
+        // Withhold whitespace only once the model has shown it is spinning on
+        // it, and never inside a string, where a space is data.
+        let suppressWhitespace = whitespaceRun.isActive && !state.isInsideString
 
         if greedy {
-            guard let best = bestLegalIndex(in: processed, table: table, vocab: vocab) else {
+            guard let best = bestLegalIndex(
+                in: processed, table: table, vocab: vocab, suppressWhitespace: suppressWhitespace)
+            else {
                 // No legal continuation exists (and EOS is itself illegal because
                 // the document is not yet complete). Force a clean end-of-stream
                 // instead of emitting unmasked logits — see ``forceTermination``.
@@ -120,13 +129,15 @@ public struct JSONConstraintProcessor: LogitProcessor {
             return applyMask(keepingOnly: best, to: processed, vocab: vocab)
         }
 
-        return applyFullMask(to: processed, table: table, vocab: vocab)
+        return applyFullMask(
+            to: processed, table: table, vocab: vocab, suppressWhitespace: suppressWhitespace)
     }
 
     public mutating func didSample(token: MLXArray) {
         inner?.didSample(token: token)
         guard let table = box.table else { return }
         let id = token.item(Int.self)
+        whitespaceRun.record(whitespaceOnly: table.isWhitespaceOnly(id))
         switch table.classification(of: id) {
         case .eos, .unusable:
             // EOS terminates generation; an unusable token should never have
@@ -154,7 +165,8 @@ public struct JSONConstraintProcessor: LogitProcessor {
     private func bestLegalIndex(
         in logits: MLXArray,
         table: TokenVocabularyTable,
-        vocab: Int
+        vocab: Int,
+        suppressWhitespace: Bool
     ) -> Int? {
         let flat = logits.reshaped([vocab])
 
@@ -166,7 +178,9 @@ public struct JSONConstraintProcessor: LogitProcessor {
         let argmax = argMax(flat, axis: -1)
         argmax.eval()
         let top1 = argmax.item(Int.self)
-        if Self.isLegal(top1, state: state, table: table) { return top1 }
+        if Self.isLegal(top1, state: state, table: table, suppressingWhitespace: suppressWhitespace) {
+            return top1
+        }
 
         // The top token was illegal (the model wanted non-JSON, or the grammar
         // forbids it here). Sort once and scan in descending-logit order: the
@@ -180,7 +194,10 @@ public struct JSONConstraintProcessor: LogitProcessor {
         // Descending-logit order of the top-K (`ascending` is ascending), fed to
         // the pure selector so production and the MLX-free tests share one rule.
         let topDescending = (0 ..< k).map { Int(top[k - 1 - $0]) }
-        if let id = Self.selectLegalToken(state: state, table: table, descendingLogitOrder: topDescending) {
+        if let id = Self.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: topDescending,
+            suppressingWhitespace: suppressWhitespace)
+        {
             return id
         }
 
@@ -188,13 +205,24 @@ public struct JSONConstraintProcessor: LogitProcessor {
         // place (avoid materializing a vocabulary-sized `[Int]` copy).
         ascending.eval()
         let all = ascending.asArray(Int32.self)
-        var i = vocab - k - 1
-        while i >= 0 {
-            let id = Int(all[i])
-            if Self.isLegal(id, state: state, table: table) { return id }
-            i -= 1
+        func scanRemainder(suppressing: Bool) -> Int? {
+            var i = vocab - k - 1
+            while i >= 0 {
+                let id = Int(all[i])
+                if Self.isLegal(id, state: state, table: table, suppressingWhitespace: suppressing) { return id }
+                i -= 1
+            }
+            return nil
         }
-        return nil
+        if let id = scanRemainder(suppressing: suppressWhitespace) { return id }
+        // Suppression must never manufacture a dead end: if whitespace was the
+        // only legal continuation this vocabulary offers, let it through.
+        guard suppressWhitespace else { return nil }
+        if Self.isLegal(top1, state: state, table: table) { return top1 }
+        if let id = Self.selectLegalToken(state: state, table: table, descendingLogitOrder: topDescending) {
+            return id
+        }
+        return scanRemainder(suppressing: false)
     }
 
     /// Keep exactly one token and forbid all others, built entirely on the GPU
@@ -221,16 +249,29 @@ public struct JSONConstraintProcessor: LogitProcessor {
     private func applyFullMask(
         to logits: MLXArray,
         table: TokenVocabularyTable,
-        vocab: Int
+        vocab: Int,
+        suppressWhitespace: Bool
     ) -> MLXArray {
         var mask = [Float](repeating: 0, count: vocab)
         var anyLegal = false
+        var withheldWhitespace: [Int] = []
         for id in 0..<vocab {
             if Self.isLegal(id, state: state, table: table) {
-                anyLegal = true
+                if suppressWhitespace, table.isWhitespaceOnly(id) {
+                    withheldWhitespace.append(id)
+                    mask[id] = -.infinity
+                } else {
+                    anyLegal = true
+                }
             } else {
                 mask[id] = -.infinity
             }
+        }
+        // Suppression must never manufacture a dead end: if whitespace was the
+        // only legal continuation this vocabulary offers, let it through.
+        if !anyLegal, !withheldWhitespace.isEmpty {
+            for id in withheldWhitespace { mask[id] = 0 }
+            anyLegal = true
         }
         // No legal continuation: force a clean end-of-stream rather than returning
         // an all -inf distribution (which would NaN the sampler) or the unmasked
@@ -283,21 +324,28 @@ public struct JSONConstraintProcessor: LogitProcessor {
     static func selectLegalToken(
         state: ConstraintState,
         table: TokenVocabularyTable,
-        descendingLogitOrder ids: [Int]
+        descendingLogitOrder ids: [Int],
+        suppressingWhitespace: Bool = false
     ) -> Int? {
-        ids.first { isLegal($0, state: state, table: table) }
+        ids.first { isLegal($0, state: state, table: table, suppressingWhitespace: suppressingWhitespace) }
     }
 
     /// Whether token `id` is a legal next token under `state`: a stop/EOS token
     /// only in an accepting (complete) state; an unusable token never; a byte
-    /// token iff the automaton accepts its exact bytes. Pure and MLX-free.
-    static func isLegal(_ id: Int, state: ConstraintState, table: TokenVocabularyTable) -> Bool {
+    /// token iff the automaton accepts its exact bytes. With
+    /// `suppressingWhitespace` a whitespace-only token is additionally refused
+    /// (the latched runaway guard; the caller has already checked the state is
+    /// not inside a string). Pure and MLX-free.
+    static func isLegal(
+        _ id: Int, state: ConstraintState, table: TokenVocabularyTable, suppressingWhitespace: Bool = false
+    ) -> Bool {
         switch table.classification(of: id) {
         case .eos:
             return state.isComplete
         case .unusable:
             return false
         case .bytes(let bytes):
+            if suppressingWhitespace, table.isWhitespaceOnly(id) { return false }
             return state.accepts(bytes)
         }
     }

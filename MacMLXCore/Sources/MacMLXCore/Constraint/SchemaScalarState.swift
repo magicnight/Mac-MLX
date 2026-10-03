@@ -24,6 +24,18 @@ enum SchemaScalarState: Hashable, Sendable {
     /// String enum of scalar node `node`: `candidates` are the indices of the
     /// enum values whose first `position` bytes match what was read.
     case enumBody(node: Int32, position: Int, candidates: PropertyMask)
+    /// Whether the value in progress is a string (or an enum literal), where
+    /// whitespace is data rather than formatting.
+    var isInsideString: Bool {
+        switch self {
+        case .stringBody, .stringEscape, .stringUnicode, .stringHighSurrogateBackslash,
+            .stringHighSurrogateU, .enumBody:
+            return true
+        default:
+            return false
+        }
+    }
+
     // Number (integer or fractional)
     case numberAfterMinus
     case numberAfterLeadingZero
