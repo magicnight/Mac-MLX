@@ -19,6 +19,28 @@ final class PromptTrie<Value> {
     private final class Node {
         var children: [Int: Node] = [:]
         var value: Value?
+
+        /// A stored sequence is a chain of one node per token, so letting ARC
+        /// release `children` on its own nests one `deinit` per token. A few
+        /// hundred levels overflow the 512 KiB stack of the cooperative-pool
+        /// thread the owning actor runs on (SIGBUS in this very `deinit`: that
+        /// is how `macmlx serve` died on SIGTERM and how the real-checkpoint
+        /// smokes died at teardown). Tear the subtree down with an explicit
+        /// worklist instead: every node's children are detached before the
+        /// node itself is released, so no release ever recurses.
+        deinit {
+            guard !children.isEmpty else { return }
+            var pending = Array(children.values)
+            children.removeAll()
+            while let node = pending.popLast() {
+                if !node.children.isEmpty {
+                    pending.append(contentsOf: node.children.values)
+                    node.children.removeAll()
+                }
+                // `node` is now a leaf; when it leaves scope its own deinit
+                // returns at the guard above.
+            }
+        }
     }
 
     private var roots: [String: Node] = [:]

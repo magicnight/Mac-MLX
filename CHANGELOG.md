@@ -23,23 +23,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   enum values (Apple's TripPlanner sample hits the last one).
 
 ### Fixed
+- **Releasing a prompt cache with a long cached sequence crashed the process.**
+  The prompt-cache trie stores one node per token, and letting the runtime
+  release that chain on its own nested one deallocation per token; a few
+  hundred levels overflowed the stack of the thread the cache actor runs on.
+  That is how `macmlx serve` died on SIGTERM after a chat, and how a model
+  swap or "Clear All KV Caches" could crash after a conversation of a few
+  hundred tokens. The trie now tears itself down with an explicit worklist;
+  a test releases a 200,000-token chain on a cooperative thread.
 - **A string escape could cut a structured-output document short.** The
   schema automaton checked the surrogate range of a `\u` escape only at its
   fourth digit, so `\uDC`–`\uDF` outside a pair and `\uD83D\u00` were
   accepted although no byte could follow them; generation then ended on a
   forced EOS with a truncated document. Such an escape is now refused at the
   first digit that rules out every completion.
-- **Structured output on thinking models.** Found by driving a live Qwen3.6
-  checkpoint through Apple's Foundation Models client. First, a streaming
-  `response_format` request returned its whole JSON answer as
-  `reasoning_content`: the stream was seeded as "inside a think block" because
-  the rendered prompt opens one, but a constrained generation is JSON from its
-  first byte and can never be reasoning. Second, once every declared key had
-  been emitted the schema automaton still accepted a comma, after which only
-  whitespace was legal, so the model could never close the object and ran to
-  `max_tokens` emitting blanks. A constrained request now also renders its
-  chat template with `enable_thinking` off, so a Qwen3-style template puts
-  the model in answer mode instead of opening a think block it cannot close.
 
 ### Changed
 - **`response_format` schemas: keywords nothing enforces are now a 400 at the
@@ -67,6 +64,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   version builds against mlx-swift-lm 3.32.3.
 
 ### Fixed
+- **Structured output on thinking models.** Found by driving a live Qwen3.6
+  checkpoint through Apple's Foundation Models client. First, a streaming
+  `response_format` request returned its whole JSON answer as
+  `reasoning_content`: the stream was seeded as "inside a think block" because
+  the rendered prompt opens one, but a constrained generation is JSON from its
+  first byte and can never be reasoning. Second, once every declared key had
+  been emitted the schema automaton still accepted a comma, after which only
+  whitespace was legal, so the model could never close the object and ran to
+  `max_tokens` emitting blanks. A constrained request now also renders its
+  chat template with `enable_thinking` off, so a Qwen3-style template puts
+  the model in answer mode instead of opening a think block it cannot close,
+  and the reasoning splitter is bypassed entirely, so a think tag that happens
+  to sit inside a JSON string value is left alone as data.
 - **A sorted quantized MoE product on a ragged K returned mostly garbage**
   on M5 hardware: at group size 32 with a hidden or MoE-intermediate size
   that is 32 mod 64, the NAX kernel bounded its K tail by the full tile and
