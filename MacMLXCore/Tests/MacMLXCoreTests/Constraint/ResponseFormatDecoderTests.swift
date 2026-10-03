@@ -546,6 +546,14 @@ struct ResponseFormatDecoderTests {
     @Test
     func rejectsNullAndUnions() {
         expectUnsupported(schema: root(["x": obj(["type": .array([.string("string"), .string("null")])])]), containing: "type arrays")
+        // On an object or array schema the type array is named too, not the
+        // first object or array keyword next to it.
+        expectUnsupported(
+            schema: root(["o": obj(["type": .array([.string("object"), .string("null")]), "properties": obj(["a": string])])]),
+            containing: "type arrays")
+        expectUnsupported(
+            schema: root(["l": obj(["type": .array([.string("array"), .string("null")]), "items": string])]),
+            containing: "type arrays")
         expectUnsupported(schema: root(["x": obj(["anyOf": .array([string, obj(["type": .string("null")])])])]), containing: "'anyOf'")
         expectUnsupported(schema: root(["x": obj(["type": .string("null")])]), containing: "property type 'null'")
     }

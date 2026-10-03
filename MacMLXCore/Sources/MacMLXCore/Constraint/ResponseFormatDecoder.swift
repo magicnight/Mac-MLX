@@ -347,6 +347,14 @@ public enum ResponseFormatDecoder {
             return .stringEnum([value])
         }
 
+        // A type array (a nullable union, say) is refused before the kind
+        // dispatch. Otherwise `["object","null"]` with `properties` would fall
+        // through to the scalar rules and be reported as an unknown
+        // `properties` keyword instead of what it is.
+        if case .array? = schema["type"] {
+            throw ResponseFormatError.unsupportedFeature("type arrays (e.g. nullable unions) on property '\(path)'")
+        }
+
         switch schema["type"] {
         case .string("object")?:
             return .object(try compileObject(schema, path: path, depth: depth + 1, isRoot: false, context: &context))
@@ -427,10 +435,6 @@ public enum ResponseFormatDecoder {
 
         guard let typeValue = property["type"] else {
             throw ResponseFormatError.invalidFormat("property '\(name)' is missing 'type'")
-        }
-        if case .array = typeValue {
-            throw ResponseFormatError.unsupportedFeature(
-                "type arrays (e.g. nullable unions) on property '\(name)'")
         }
         guard case .string(let type) = typeValue else {
             throw ResponseFormatError.invalidFormat("property '\(name)' type must be a string")
