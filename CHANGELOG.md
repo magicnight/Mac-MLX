@@ -14,13 +14,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
   of objects and arrays of arrays), `$ref` to the root's `$defs` or
   `definitions`, and a string `const` — the shapes Apple's Foundation Models
-  client sends for nested `@Generable` types. `examples`, `$comment` and
-  `x-order` are accepted and ignored, like `description`, `title` and
-  `default`. A schema may nest at most 32 containers deep and hold at most
-  4096 nodes after `$ref` expansion; a recursive schema is a 400, since
-  nothing would bound its documents. Still unsupported: `null` and unions,
-  `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII keys or
-  enum values (Apple's TripPlanner sample hits the last one).
+  client sends for nested `@Generable` types. `examples` and `$comment` are
+  accepted and ignored anywhere, like `description`, `title` and `default`;
+  `x-order` is accepted and ignored on object schemas only (the root and
+  nested objects), not on arrays, scalars or next to `$ref`. A schema may
+  nest at most 32 containers deep; after `$ref` expansion it may hold at most
+  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
+  values; `minItems` and `maxItems` may not exceed 65,536. A recursive schema
+  is a 400, since nothing would bound its documents. Still unsupported:
+  `null` and unions, `minimum`/`maximum`, `pattern`, non-object roots, and
+  non-ASCII keys or enum values (Apple's TripPlanner sample hits the last
+  one).
 
 ### Fixed
 - **Releasing a prompt cache with a long cached sequence crashed the process.**
@@ -45,7 +49,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   none of them. It now answers `unsupported schema feature: unsupported
   schema keyword '<name>' at the schema root`, as properties always have. A
   type array such as `["string","null"]` is now reported as an unsupported
-  feature rather than an invalid `response_format`.
+  feature rather than an invalid `response_format`, on object and array
+  schemas as on scalars. A flat root with more than 4,096 properties is now a
+  400 (`schema too large`). `deprecated`, `readOnly` and `writeOnly` are
+  accepted and ignored everywhere; on a property they used to be a 400.
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
   the fork used to carry are in that base, so it now carries two:
