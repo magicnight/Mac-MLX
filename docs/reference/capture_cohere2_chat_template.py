@@ -8,26 +8,26 @@
 """Capture chat-template RENDER-parity references for Cohere2 / Command R7B (Track G).
 
 Cohere2's architecture is numerically parity-proven at 1e-4 by
-`capture_cohere2.py` + `Cohere2ModelParityTests`. This follow-up produces the
-authoritative reference that proves macMLX's built-in chat-template override
-(`Cohere2ChatTemplate`) renders identically to the checkpoint's OWN `default`
-template on the standard conversation path.
+`capture_cohere2.py` + `Cohere2ModelParityTests`. This follow-up verifies that the
+checkpoint's OWN `default` chat template renders correctly under swift-jinja (the
+engine swift-transformers drives), so NO built-in chat-template override is needed.
 
-WHY AN OVERRIDE IS NEEDED: the Command R7B `chat_template` is a LIST of three
+WHY THIS ONCE NEEDED AN OVERRIDE: the Command R7B `chat_template` is a LIST of three
 NAMED templates (`default` / `tool_use` / `rag`); transformers selects `default`
 when neither `tools` nor `documents` is supplied. The `default` template embeds a
 large tool/RAG branch behind `{% if documents %}` (with helper macros), and
-swift-jinja 2.3.6 cannot PARSE that branch ("Unexpected token type:
-closeExpression"), so the whole template fails to compile even though the branch is
-off the standard path. macMLX therefore ships `Cohere2ChatTemplate`, which drops
-that (dead-for-`default`) branch and keeps the `{% else %}` standard-conversation
-branch byte-for-byte.
+swift-jinja 2.3.6 could not PARSE that branch ("Unexpected token type:
+closeExpression", a literal `}}` misparse), so the whole template failed to compile
+even though the branch is off the standard path. That once forced a built-in
+override; swift-jinja 2.4.0 fixes the parse (huggingface/swift-jinja #63, reported
+by macMLX), so the full `default` template compiles and the standard path renders
+natively.
 
 This script renders the ORIGINAL `default` template — the authoritative reference —
 for representative message sets, and stores the rendered prompt strings (plus the
 template) as a JSON fixture. The Swift test `Cohere2ChatTemplateParityTests` renders
-the macMLX OVERRIDE through swift-jinja and asserts byte-for-byte equality with
-these references, proving the override equivalent with NO model weights and NO Metal
+that same `default` template through swift-jinja and asserts byte-for-byte equality
+with these references, proving native rendering with NO model weights and NO Metal
 required. The STANDARD path uses only swift-jinja-supported constructs (`namespace`,
 slicing, boolean comparisons, `content.strip()` with no argument, string
 concatenation) and references neither `bos_token` nor `eos_token`.

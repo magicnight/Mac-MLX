@@ -9,6 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+
 ### Fixed
 - **Structured output no longer runs away on whitespace.** JSON permits any
   amount of whitespace between tokens, so a constrained decode could spin:
@@ -20,21 +21,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   structural positions for the rest of the generation; a space inside a
   string value stays data, and whitespace is still let through when it is
   the only thing the vocabulary allows.
-
-### Added
-- **Nested JSON schemas in `response_format`.** Structured output now
-  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
-  of objects and arrays of arrays), `$ref` to the root's `$defs` or
-  `definitions`, and a string `const` — the shapes Apple's Foundation Models
-  client sends for nested `@Generable` types. `examples`, `$comment` and
-  `x-order` are accepted and ignored, like `description`, `title` and
-  `default`. A schema may nest at most 32 containers deep and hold at most
-  4096 nodes after `$ref` expansion; a recursive schema is a 400, since
-  nothing would bound its documents. Still unsupported: `null` and unions,
-  `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII keys or
-  enum values (Apple's TripPlanner sample hits the last one).
-
-### Fixed
 - **Releasing a prompt cache with a long cached sequence crashed the process.**
   The prompt-cache trie stores one node per token, and letting the runtime
   release that chain on its own nested one deallocation per token; a few
@@ -49,33 +35,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   accepted although no byte could follow them; generation then ended on a
   forced EOS with a truncated document. Such an escape is now refused at the
   first digit that rules out every completion.
-
-### Changed
-- **`response_format` schemas: keywords nothing enforces are now a 400 at the
-  root too.** The root object used to accept `allOf`, `anyOf`,
-  `minProperties`, `patternProperties` and any other keyword and enforce
-  none of them. It now answers `unsupported schema feature: unsupported
-  schema keyword '<name>' at the schema root`, as properties always have. A
-  type array such as `["string","null"]` is now reported as an unsupported
-  feature rather than an invalid `response_format`.
-- **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
-  instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
-  the fork used to carry are in that base, so it now carries two:
-  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3. The
-  cross-thread evaluation abort that kept the fork on the old core is gone —
-  0.32.3 registers every stream globally — and `CrossThreadEvalTripwireTests`
-  now guards against regressing it rather than predicting it.
-- mlx-swift-lm moves to 3.32.3 with it. Prefill chunking is pinned to the
-  legacy `.remainder` stride rather than 3.32.3's new `.balanced` default,
-  which keeps the generic text and vision prefill boundaries where they were
-  (checked by reading, not by an output comparison, which this project cannot
-  run). Gemma3Text's prefill was reworked upstream on its own and is not
-  covered. Adopting `.balanced` is a separate, measured change.
-- mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
-  v0.1.3 plus two one-line compatibility commits) because no released
-  version builds against mlx-swift-lm 3.32.3.
-
-### Fixed
 - **Structured output on thinking models.** Found by driving a live Qwen3.6
   checkpoint through Apple's Foundation Models client. First, a streaming
   `response_format` request returned its whole JSON answer as
@@ -100,6 +59,89 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   earlier triage had excluded by title). Fixed by the new base.
 - Kernels now compile under the Metal 4.1 language version that core
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
+
+### Added
+- **Nested JSON schemas in `response_format`.** Structured output now
+  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
+  of objects and arrays of arrays), `$ref` to the root's `$defs` or
+  `definitions`, and a string `const` — the shapes Apple's Foundation Models
+  client sends for nested `@Generable` types. `examples` and `$comment` are
+  accepted and ignored anywhere, like `description`, `title` and `default`;
+  `x-order` is accepted and ignored on object schemas only (the root and
+  nested objects), not on arrays, scalars or next to `$ref`. A schema may
+  nest at most 32 containers deep; after `$ref` expansion it may hold at most
+  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
+  values; `minItems` and `maxItems` may not exceed 65,536. A recursive schema
+  is a 400, since nothing would bound its documents. Still unsupported:
+  `null` and unions, `minimum`/`maximum`, `pattern`, non-object roots, and
+  non-ASCII keys or enum values (Apple's TripPlanner sample hits the last
+  one).
+- **`stream_options.include_usage` on streaming chat completions.** When a
+  client sets it, every chunk carries `usage: null` and one usage-only chunk —
+  empty `choices`, the whole request's token counts — is sent before
+  `[DONE]`, exactly the OpenAI contract. Apple's Foundation Models
+  `ChatCompletionsLanguageModel` asks for it. Honored on the batched path and
+  the legacy `/v1/completions` alias too; ignored on a non-streaming request,
+  whose body already carries usage.
+- **`max_completion_tokens` is honored** as the newer spelling of
+  `max_tokens`, and wins when both are sent, as mlx-lm's and vLLM's servers
+  do. Apple's client sends only the new one, so its response-length setting
+  used to fall back to the default.
+- **Prompt-cache hits are reported in usage.** The MLX engine now says how
+  much of the prompt the prompt cache served, 0 on a miss and on the paths
+  that never consult the cache: `prompt_tokens_details.cached_tokens` on
+  OpenAI-shaped responses, where `prompt_tokens` keeps including them, and
+  `cache_read_input_tokens` on `/v1/messages`, where — as Anthropic defines
+  it — `input_tokens` becomes the uncached remainder so that the two sum to
+  the prompt. The figure is an exact prefix oracle against every cached
+  prompt, so it is withheld from requests that carry an `Origin` header
+  (cross-origin browser callers, which the server otherwise answers without
+  credentials); native clients see it.
+
+### Changed
+- **`response_format` schemas: keywords nothing enforces are now a 400 at the
+  root too.** The root object used to accept `allOf`, `anyOf`,
+  `minProperties`, `patternProperties` and any other keyword and enforce
+  none of them. It now answers `unsupported schema feature: unsupported
+  schema keyword '<name>' at the schema root`, as properties always have. A
+  type array such as `["string","null"]` is now reported as an unsupported
+  feature rather than an invalid `response_format`, on object and array
+  schemas as on scalars. A flat root with more than 4,096 properties is now a
+  400 (`schema too large`). `deprecated`, `readOnly` and `writeOnly` are
+  accepted and ignored everywhere; on a property they used to be a 400.
+- **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
+  are gone.** The fixes macMLX reported upstream — integer-keyed object
+  literals (Seed-OSS), a literal `}}` (Command R7B) and `strip(arg)`
+  argument handling (Hunyuan) — are in 2.4.0; 2.4.1 restored compatibility
+  with swift-transformers, and 2.4.2 is the floor swift-transformers 1.3.4
+  declares, so that floor moves to 1.3.4 to carry the requirement to every
+  build. Every checkpoint's own
+  template now renders natively; a per-model `macmlx.chat_template.jinja`
+  file still overrides it. Prompts change in three places users may notice:
+  `tojson` now emits Python `json.dumps`-style output (tool descriptions in
+  every tool-carrying prompt); templates that use `{#-`/`-#}` comments (Llama
+  3.1, gpt-oss) get their whitespace rendered as Jinja does; and a Hunyuan
+  history turn with `<answer>` tags is stripped the way Python strips it. For
+  Command R7B, a request that carries `tools` now renders the checkpoint's
+  `tool_use` template instead of having tools silently dropped; macMLX has no
+  parser for the Command-R action markup it asks for, so tool calling on that
+  model is not supported (see `docs/model-support.md`).
+- **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
+  instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
+  the fork used to carry are in that base, so it now carries two:
+  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3. The
+  cross-thread evaluation abort that kept the fork on the old core is gone —
+  0.32.3 registers every stream globally — and `CrossThreadEvalTripwireTests`
+  now guards against regressing it rather than predicting it.
+- mlx-swift-lm moves to 3.32.3 with it. Prefill chunking is pinned to the
+  legacy `.remainder` stride rather than 3.32.3's new `.balanced` default,
+  which keeps the generic text and vision prefill boundaries where they were
+  (checked by reading, not by an output comparison, which this project cannot
+  run). Gemma3Text's prefill was reworked upstream on its own and is not
+  covered. Adopting `.balanced` is a separate, measured change.
+- mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
+  v0.1.3 plus two one-line compatibility commits) because no released
+  version builds against mlx-swift-lm 3.32.3.
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE

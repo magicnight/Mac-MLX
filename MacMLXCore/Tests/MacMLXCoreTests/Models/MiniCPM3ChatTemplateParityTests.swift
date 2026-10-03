@@ -8,13 +8,12 @@ import XCTest
 
 /// Render-parity gate proving the MiniCPM3 checkpoint's OWN `chat_template` renders
 /// correctly under swift-jinja on the STANDARD conversation path, so NO built-in
-/// chat-template override is needed — the Hunyuan V1 Dense precedent, NOT the
-/// Cohere2 / Seed-OSS one.
+/// chat-template override is needed (none ships for any port any more).
 ///
 /// The checkpoint ships a heavy tool-use `chat_template` (recursive Jinja macros
 /// with `{% call %}`/`caller()`, `|items`, `|tojson`, `|title`, `is iterable`), but
 /// on the standard path (`tools = null`) those macros are DEFINED yet never
-/// invoked, and swift-jinja 2.3.6 parses and renders the whole template cleanly.
+/// invoked, and swift-jinja parses and renders the whole template cleanly.
 /// This test renders the SAME representative message sets through swift-jinja (the
 /// exact engine swift-transformers drives in production, configured identically
 /// with `lstripBlocks: true, trimBlocks: true`) and asserts byte-for-byte equality

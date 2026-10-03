@@ -169,7 +169,10 @@ final class BatchDecodeSlot {
                 finishReason: reason,
                 usage: TokenUsage(
                     promptTokens: promptTokens.count,
-                    completionTokens: generatedTokens.count
+                    completionTokens: generatedTokens.count,
+                    // A batched row prefills its whole prompt; it never reads
+                    // the prompt cache, so the cached figure is a known zero.
+                    cachedPromptTokens: 0
                 )
             )
         )

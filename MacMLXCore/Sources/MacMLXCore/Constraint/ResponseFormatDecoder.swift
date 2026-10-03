@@ -22,12 +22,15 @@
 ///     - an array: an `items` schema and optional `minItems` / `maxItems`;
 ///     - a `$ref` to `#/$defs/<name>` or `#/definitions/<name>` of the root.
 ///
-///    `description`, `title`, `default`, `examples` and `$comment` are
-///    accepted and ignored anywhere; so is `x-order` on an object, and
+///    `description`, `title`, `default`, `examples`, `$comment`, `deprecated`,
+///    `readOnly` and `writeOnly` are accepted and ignored anywhere; so is
+///    `x-order` on an object, and
 ///    `$schema` / `$id` at the root. Property order never constrains key order
 ///    on the wire. A schema may hold at most ``maxSchemaDepth`` containers
-///    open at once and ``maxSchemaNodes`` nodes after `$ref` expansion, and a
-///    recursive schema is rejected because no bound on its documents exists.
+///    open at once; after `$ref` expansion, at most ``maxSchemaNodes`` nodes,
+///    ``maxSchemaLiterals`` enum and `const` values and ``maxSchemaBytes``
+///    bytes of property names and values. A recursive schema is rejected
+///    because no bound on its documents exists.
 ///
 /// Everything else — combinators, `null`, type arrays, numeric and string
 /// bounds (`minimum`, `pattern`, …), non-object roots,
@@ -47,9 +50,30 @@ public enum ResponseFormatDecoder {
     /// fan-out (a definition used four times by one used four times, …).
     static let maxSchemaNodes = 4096
 
-    /// Purely annotative keywords, accepted and ignored on every kind of schema.
+    /// The most enum and `const` values one compile may produce after `$ref`
+    /// expansion; each enum value and each `const` counts 1. The node budget
+    /// counts a 60,000-value enum as one node, but every reference to it
+    /// compiles the values again and the automaton encodes them again, so a
+    /// small request could otherwise expand into gigabytes.
+    static let maxSchemaLiterals = 65_536
+
+    /// The most UTF-8 bytes of property names, enum values and `const` values
+    /// one compile may produce after `$ref` expansion. A value count alone does
+    /// not bound size: one long name or value referenced many times is copied
+    /// once per reference.
+    static let maxSchemaBytes = 4 * 1_024 * 1_024
+
+    /// The largest `minItems` / `maxItems` accepted. Every document needs at
+    /// least `minItems` items, so a minimum in the billions would compile and
+    /// then cut every generation off at `max_tokens`.
+    static let maxItemCount = 65_536
+
+    /// Purely annotative keywords, accepted and ignored on every kind of schema:
+    /// the JSON Schema annotation and metadata vocabulary, none of which
+    /// constrains a value.
     private static let annotationKeys: Set<String> = [
         "description", "title", "default", "examples", "$comment",
+        "deprecated", "readOnly", "writeOnly",
     ]
 
     /// The keywords a scalar property schema may carry besides annotations.
@@ -124,7 +148,7 @@ public enum ResponseFormatDecoder {
     }
 
     /// Per-compile state: the root's definition tables, the `$ref`s being
-    /// expanded on the current path (cycle detection), and the node budget.
+    /// expanded on the current path (cycle detection), and the size budgets.
     struct Context {
         let defs: [String: JSONValue]
         let definitions: [String: JSONValue]
@@ -132,6 +156,8 @@ public enum ResponseFormatDecoder {
         /// path, so one definition used at two sibling positions is fine.
         var expanding: [String] = []
         var nodes = 0
+        var literals = 0
+        var bytes = 0
 
         /// Count one schema node against ``maxSchemaNodes``.
         mutating func spend(at path: String) throws {
@@ -140,6 +166,27 @@ public enum ResponseFormatDecoder {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaNodes) nodes "
                         + "after '$ref' expansion, at property '\(path)')")
+            }
+        }
+
+        /// Count `count` enum or `const` values against ``maxSchemaLiterals``.
+        mutating func spendLiterals(_ count: Int, at path: String) throws {
+            literals += count
+            guard literals <= ResponseFormatDecoder.maxSchemaLiterals else {
+                throw ResponseFormatError.unsupportedFeature(
+                    "schema too large (more than \(ResponseFormatDecoder.maxSchemaLiterals) enum and const values "
+                        + "after '$ref' expansion, at property '\(path)')")
+            }
+        }
+
+        /// Count the UTF-8 bytes of a property name or value against
+        /// ``maxSchemaBytes``.
+        mutating func spendBytes(of text: String, at path: String) throws {
+            bytes += text.utf8.count
+            guard bytes <= ResponseFormatDecoder.maxSchemaBytes else {
+                throw ResponseFormatError.unsupportedFeature(
+                    "schema too large (more than \(ResponseFormatDecoder.maxSchemaBytes) bytes of property names "
+                        + "and enum and const values after '$ref' expansion, at property '\(path)')")
             }
         }
     }
@@ -220,6 +267,7 @@ public enum ResponseFormatDecoder {
         var compiled: [JSONSchemaObject.Property] = []
         for name in properties.keys.sorted() {
             let childPath = path.isEmpty ? name : "\(path).\(name)"
+            try context.spendBytes(of: name, at: childPath)
             // The runtime key matcher compares literal UTF-8 bytes, so a declared
             // key the model could never spell would deadlock a `required` object
             // into the no-legal-token path — reject it up front (M2).
@@ -301,9 +349,19 @@ public enum ResponseFormatDecoder {
             guard case .string(let value) = constValue else {
                 throw ResponseFormatError.unsupportedFeature("non-string 'const' on property '\(path)'")
             }
+            try context.spendLiterals(1, at: path)
+            try context.spendBytes(of: value, at: path)
             // Matched as a literal at runtime, like an enum value (M2).
             try requireLiteralMatchable(value, role: "const value on property '\(path)'")
             return .stringEnum([value])
+        }
+
+        // A type array (a nullable union, say) is refused before the kind
+        // dispatch. Otherwise `["object","null"]` with `properties` would fall
+        // through to the scalar rules and be reported as an unknown
+        // `properties` keyword instead of what it is.
+        if case .array? = schema["type"] {
+            throw ResponseFormatError.unsupportedFeature("type arrays (e.g. nullable unions) on property '\(path)'")
         }
 
         switch schema["type"] {
@@ -312,7 +370,7 @@ public enum ResponseFormatDecoder {
         case .string("array")?:
             return try compileArray(schema, path: path, depth: depth + 1, context: &context)
         default:
-            return try compileScalar(schema, path: path)
+            return try compileScalar(schema, path: path, context: &context)
         }
     }
 
@@ -357,20 +415,29 @@ public enum ResponseFormatDecoder {
         return .array(items: item, minItems: minItems, maxItems: maxItems)
     }
 
-    /// A `minItems` / `maxItems` value: a non-negative integer, or `nil` when
-    /// absent. (`JSONValue` already decodes `3.0` and `1e2` as integers.)
+    /// A `minItems` / `maxItems` value: a non-negative integer no larger than
+    /// ``maxItemCount``, or `nil` when absent. (`JSONValue` already decodes
+    /// `3.0` and `1e2` as integers.)
     private static func itemCount(_ value: JSONValue?, keyword: String, path: String) throws -> Int? {
         guard let value else { return nil }
         guard case .int(let count) = value, count >= 0 else {
             throw ResponseFormatError.invalidFormat(
                 "\(keyword) on property '\(path)' must be a non-negative integer")
         }
+        guard count <= maxItemCount else {
+            throw ResponseFormatError.invalidFormat(
+                "\(keyword) on property '\(path)' must be at most \(maxItemCount)")
+        }
         return count
     }
 
     /// Compile one scalar property's value constraint — the flat subset's
     /// original rules, check for check.
-    static func compileScalar(_ property: [String: JSONValue], path name: String) throws -> SchemaValueType {
+    static func compileScalar(
+        _ property: [String: JSONValue],
+        path name: String,
+        context: inout Context
+    ) throws -> SchemaValueType {
         // Allow-list gate (M1): reject any keyword we do not model — a value
         // constraint (`pattern`, `minLength`, `maximum`, `format`, …) or a
         // structural one (`properties`, combinators) must 400, never be
@@ -382,10 +449,6 @@ public enum ResponseFormatDecoder {
 
         guard let typeValue = property["type"] else {
             throw ResponseFormatError.invalidFormat("property '\(name)' is missing 'type'")
-        }
-        if case .array = typeValue {
-            throw ResponseFormatError.unsupportedFeature(
-                "type arrays (e.g. nullable unions) on property '\(name)'")
         }
         guard case .string(let type) = typeValue else {
             throw ResponseFormatError.invalidFormat("property '\(name)' type must be a string")
@@ -400,12 +463,14 @@ public enum ResponseFormatDecoder {
                 throw ResponseFormatError.unsupportedFeature(
                     "enum on non-string property '\(name)'")
             }
+            try context.spendLiterals(entries.count, at: name)
             var values: [String] = []
             for entry in entries {
                 guard case .string(let value) = entry else {
                     throw ResponseFormatError.unsupportedFeature(
                         "non-string enum value on property '\(name)'")
                 }
+                try context.spendBytes(of: value, at: name)
                 // Enum values are matched as literal bytes at runtime, so one the
                 // model could never spell would narrow (or, if the only choice,
                 // deadlock) the value — reject it up front (M2).

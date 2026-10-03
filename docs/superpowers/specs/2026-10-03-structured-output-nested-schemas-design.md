@@ -234,7 +234,7 @@ Automaton walks (`SchemaConstraintStateTests`):
 | N11 | Nested keys `a` / `ab` sharing a prefix, `ab` required; `{"o":{"a":1,"a"` → nil | candidates not narrowed or not checked against `emitted` |
 | N12 | Single-key schema `{"a":"x",` → nil; nested `{"o":{"k":true,` → nil | C1 guard removed |
 | N13 | `{"msg":"\uDD` → nil; `{"msg":"\uD83D\u00` → nil; `{"msg":"\uD83D\uD` → non-nil | C2 pruning removed, or over-pruned |
-| N14 | BFS trap property: fixed and seeded schemas, alphabet ``{}[],:" Ɖdc.-eEtrufalsn`` plus key/enum bytes, about 40k-state cap, backward co-reachability; assert 0 traps | either guard removed |
+| N14 | BFS trap property: fixed and seeded schemas; alphabet (`SchemaTrapSearch.alphabet(for:)`): `{}[],:"`, a space, the six ASCII characters `\u0189` (backslash, `u`, `0`, `1`, `8`, `9`, so `\u` escapes around the surrogate range can be spelled; not the character Ɖ), `dc.-eEtrufalsn`, plus every key and enum byte of the schema; about 40k-state cap, backward co-reachability; assert 0 traps | either guard removed |
 | N15 | Differential: seeded schemas × valid and mutated documents. Automaton equals the oracle (test helper `ReferenceSchemaValidator.swift`, ~170 lines). Every accepted document is also accepted by `JSONGrammarState`. About 500×12 documents in ~1 s. | any transition bug |
 | N16 | 70 properties (`p0`…`p69`, required `p65` and `p3`), a duplicate high-index key, all 70 present then `,` → nil; enum of 100 values | high-word mask bugs |
 | N17 | Golden tier 1–4 documents; TripPlanner (ASCII) document; enum mutation rejected | — |

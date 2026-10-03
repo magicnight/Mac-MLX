@@ -22,6 +22,7 @@ import Testing
 //   loadEndpointDrainsSeamBeforeLoad                : 19_880
 //   unloadEndpointDrainsSeamBeforeUnload            : 19_890
 //   concurrentSameModelDifferentPromptsNoCrossTalk  : 19_900
+//   streamingBatchRequestHonorsIncludeUsage         : 20_800
 
 @Suite("HummingbirdServerBatch")
 struct HummingbirdServerBatchTests {
@@ -322,6 +323,49 @@ struct HummingbirdServerBatchTests {
 
         #expect(response.statusCode == 200)
         #expect(streamedContent(data) == "batch:m", "the streamed content must be the seam's echo")
+    }
+
+    /// B1 on the batched path: `stream_options.include_usage` ends the stream
+    /// with a usage-only chunk (empty `choices`) carrying the seam's reported
+    /// counts, every other chunk carries `usage: null`, and `[DONE]` still
+    /// comes last. This seam stub reports no cache figure, so the key is absent
+    /// here; the real batched slot always reports a known 0 (pinned by
+    /// `BatchDecodeCoreLogicTests`).
+    @Test
+    func streamingBatchRequestHonorsIncludeUsage() async throws {
+        let seam = StubBatchServing()
+        let server = HummingbirdServer(
+            engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
+            batchServing: seam)
+        let port = try await server.start(preferredPort: 20_800)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        var body = chatBody("m", stream: true)
+        body["stream_options"] = ["include_usage": true]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let blocks = String(decoding: data, as: UTF8.self)
+            .split(separator: "\n")
+            .filter { $0.hasPrefix("data: ") }
+            .map { String($0.dropFirst("data: ".count)) }
+        #expect(blocks.last == "[DONE]")
+        let frames = try blocks.dropLast().map {
+            try #require(try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        let usageFrame = try #require(frames.last)
+        #expect((usageFrame["choices"] as? [Any])?.isEmpty == true)
+        let usage = try #require(usageFrame["usage"] as? [String: Any])
+        #expect(usage["prompt_tokens"] as? Int == 3)
+        #expect(usage["completion_tokens"] as? Int == 2)
+        #expect(usage["total_tokens"] as? Int == 5)
+        #expect(usage["prompt_tokens_details"] == nil)
+        for frame in frames.dropLast() {
+            #expect(frame["usage"] is NSNull)
+            #expect(!((frame["choices"] as? [Any]) ?? []).isEmpty)
+        }
+        #expect(streamedContent(data) == "batch:m", "the content frames are unchanged")
     }
 
     /// A cold-swap (a legacy request forcing a model change) must DRAIN the seam
