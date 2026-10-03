@@ -646,6 +646,34 @@ struct ResponseFormatDecoderTests {
         #expect(elapsed < .seconds(1), "took \(elapsed)")
     }
 
+    /// `required` entries are multiplied by `$ref` too: 1,300 references to an
+    /// object whose `required` repeats its one key 100,000 times are about
+    /// 3,900 nodes, no enum values and a few kilobytes of names, so every
+    /// other budget passes, yet the entries would be compiled 130 million
+    /// times. JSON Schema requires them to be unique, and the first repeat is
+    /// refused. The byte budget, which also charges `required` entries, would
+    /// refuse this request too, later and with its own message; both are kept.
+    /// Mutation: without the duplicate check this test goes red.
+    @Test
+    func refusesRepeatedRequiredEntriesUnderRefExpansion() {
+        let repeated = JSONValue.array(Array(repeating: .string("a"), count: 100_000))
+        var properties: [String: JSONValue] = [:]
+        for index in 0..<1_300 { properties["p\(index)"] = ref("#/$defs/D") }
+        let schema = root(
+            ["o": root(properties)],
+            extra: ["$defs": obj(["D": obj(["type": .string("object"), "properties": obj(["a": string]), "required": repeated])])])
+        let elapsed = ContinuousClock().measure {
+            expectInvalid(schema: schema, containing: "required property 'a' is listed more than once")
+        }
+        #expect(elapsed < .seconds(1), "took \(elapsed)")
+    }
+
+    @Test
+    func rejectsDuplicateRequiredEntry() {
+        let schema = root(["a": string, "b": string], required: ["a", "b", "a"])
+        expectInvalid(schema: schema, containing: "required property 'a' is listed more than once")
+    }
+
     /// The value cap itself: one enum of 65,536 values compiles, one more value
     /// does not.
     @Test
