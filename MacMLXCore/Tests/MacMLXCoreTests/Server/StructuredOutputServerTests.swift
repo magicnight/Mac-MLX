@@ -76,7 +76,7 @@ struct StructuredOutputServerTests {
     func acceptsNestedGenerableSchema() async throws {
         let (server, _) = try await loadedStubServer()
         let port = try await server.start(preferredPort: 19_940)
-        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/v1/chat/completions"))
 
         let fixture = try StructuredOutputFixtures.data("fm_generable_schemas_fixture")
         let schemas = try #require(try JSONSerialization.jsonObject(with: fixture) as? [String: Any])
@@ -103,7 +103,7 @@ struct StructuredOutputServerTests {
     func rejectsRecursiveSchemaWith400() async throws {
         let (server, _) = try await loadedStubServer()
         let port = try await server.start(preferredPort: 19_950)
-        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/v1/chat/completions"))
 
         let node: [String: Any] = [
             "type": "object",
