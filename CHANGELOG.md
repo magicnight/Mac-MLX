@@ -38,6 +38,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   version builds against mlx-swift-lm 3.32.3.
 
 ### Fixed
+- **Structured output on thinking models.** Found by driving a live Qwen3.6
+  checkpoint through Apple's Foundation Models client. First, a streaming
+  `response_format` request returned its whole JSON answer as
+  `reasoning_content`: the stream was seeded as "inside a think block" because
+  the rendered prompt opens one, but a constrained generation is JSON from its
+  first byte and can never be reasoning. Second, once every declared key had
+  been emitted the schema automaton still accepted a comma, after which only
+  whitespace was legal, so the model could never close the object and ran to
+  `max_tokens` emitting blanks. A constrained request now also renders its
+  chat template with `enable_thinking` off, so a Qwen3-style template puts
+  the model in answer mode instead of opening a think block it cannot close,
+  and the reasoning splitter is bypassed entirely, so a think tag that happens
+  to sit inside a JSON string value is left alone as data.
 - **A sorted quantized MoE product on a ragged K returned mostly garbage**
   on M5 hardware: at group size 32 with a hidden or MoE-intermediate size
   that is 32 mod 64, the NAX kernel bounded its K tail by the full tile and

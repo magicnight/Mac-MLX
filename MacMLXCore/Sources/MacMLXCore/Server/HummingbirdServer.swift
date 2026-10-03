@@ -1802,12 +1802,20 @@ public actor HummingbirdServer {
             }
         }
 
+        let configuredTemplateKwargs = await templateKwargs(for: chatReq.model)
+        if responseFormat != nil, configuredTemplateKwargs?["enable_thinking"] == .bool(true) {
+            await LogManager.shared.debug(
+                "response_format set: the per-model enable_thinking=true is overridden "
+                    + "to false for this request (a constrained answer cannot think)",
+                category: .inference)
+        }
         let genRequest = GenerateRequest(
             model: chatReq.model,
             messages: messages,
             systemPrompt: systemPrompt,
             parameters: params,
-            templateKwargs: await templateKwargs(for: chatReq.model),
+            templateKwargs: Self.effectiveTemplateKwargs(
+                configuredTemplateKwargs, constrainedBy: responseFormat),
             tools: toolsToSend,
             draftModelID: chatReq.draft_model,
             numDraftTokens: chatReq.num_draft_tokens,
@@ -2489,6 +2497,27 @@ public actor HummingbirdServer {
         return kwargs
     }
 
+    /// The chat-template kwargs a request is rendered with. Under a
+    /// `response_format` constraint the answer is JSON from its first byte, so a
+    /// thinking-mode template (Qwen3's `enable_thinking`) would only open a
+    /// `<think>` block the model can never close; `enable_thinking` is forced
+    /// off so the model is put in answer mode — even over a per-model setting
+    /// that turned it on, which the constraint could not honour anyway (the
+    /// caller logs that override). Only this switch is touched; a model whose
+    /// thinking is toggled some other way (`thinking`, `reasoning_effort`, …)
+    /// relies on the splitter bypass alone. A template without the switch
+    /// ignores the key. Everything else configured per model passes through
+    /// unchanged; an unconstrained request is untouched.
+    static func effectiveTemplateKwargs(
+        _ configured: [String: JSONValue]?,
+        constrainedBy responseFormat: ResponseFormat?
+    ) -> [String: JSONValue]? {
+        guard responseFormat != nil else { return configured }
+        var kwargs = configured ?? [:]
+        kwargs["enable_thinking"] = .bool(false)
+        return kwargs
+    }
+
     private func nonStreamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
         // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
         // under it, and re-resolve the active engine (SRV-1). Release on
@@ -2578,8 +2607,12 @@ public actor HummingbirdServer {
         // convention) so external agents can filter the chain-of-thought
         // instead of receiving bare `<think>…</think>` inside `content`
         // (issue #30). Non-reasoning models are untouched: `reasoning` is
-        // nil and `content` is the full text.
-        let (reasoning, answer) = MessageSegmenter.splitReasoning(fullText)
+        // nil and `content` is the full text. A constrained generation is the
+        // JSON answer entire, and a think tag inside a string value is data, so
+        // it is not split (see `streamingChatResponse`).
+        let (reasoning, answer): (String?, String) = genRequest.responseFormat == nil
+            ? MessageSegmenter.splitReasoning(fullText)
+            : (nil, fullText)
         var message: [String: Any] = ["role": "assistant", "content": answer]
         if let reasoning {
             message["reasoning_content"] = reasoning
@@ -2692,7 +2725,20 @@ public actor HummingbirdServer {
             // does)? This decides whether the first streamed token is
             // reasoning even though the opening tag never appears in the
             // stream (issue #30).
-            let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            // A constrained generation (`response_format`) is the JSON answer from
+            // its first byte: the automaton admits no text before or around the
+            // value, and a think tag INSIDE a JSON string value is data, not a
+            // boundary. So the splitter is bypassed entirely there. Seeding it
+            // true used to stream the whole answer as reasoning_content, and
+            // letting it run at all would strip or split a literal tag out of a
+            // string value.
+            let splitsReasoning = genRequest.responseFormat == nil
+            let startInReasoning: Bool
+            if splitsReasoning {
+                startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+            } else {
+                startInReasoning = false
+            }
             let stream = await engine.generate(genRequest)
             let stallTimeout = await server.stallTimeoutSeconds
             var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
@@ -2722,13 +2768,13 @@ public actor HummingbirdServer {
                         if wantsLogprobs, let logprobs = chunk.logprobs {
                             pendingStreamLogprobs.append(contentsOf: logprobs)
                         }
-                        let (reasoning, answer) = splitter.push(chunk.text)
+                        let (reasoning, answer) = splitsReasoning ? splitter.push(chunk.text) : ("", chunk.text)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
                         if !answer.isEmpty { delta["content"] = answer }
                         if chunk.finishReason != nil {
                             // Flush any buffered tail into this terminal chunk.
-                            let (rTail, aTail) = splitter.finish()
+                            let (rTail, aTail) = splitsReasoning ? splitter.finish() : ("", "")
                             let r = (delta["reasoning_content"] as? String ?? "") + rTail
                             let a = (delta["content"] as? String ?? "") + aTail
                             if !r.isEmpty { delta["reasoning_content"] = r }
@@ -3300,7 +3346,9 @@ public actor HummingbirdServer {
             // Seed the reasoning splitter — does the rendered prompt open a
             // <think> block the model continues (qwen3)? Reasoning is dropped
             // for the Anthropic MVP, so this only affects which text counts as
-            // the answer, never a separate surfaced block.
+            // the answer, never a separate surfaced block. (`/v1/messages`
+            // carries no `response_format`, so unlike the OpenAI path there is
+            // no constrained case to bypass the splitter for.)
             let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
             let stream = await engine.generate(genRequest)
             let stallTimeout = await server.stallTimeoutSeconds

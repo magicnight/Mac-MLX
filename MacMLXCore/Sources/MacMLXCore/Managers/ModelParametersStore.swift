@@ -47,7 +47,9 @@ public struct ModelParameters: Codable, Hashable, Sendable {
     /// Optional free-form chat-template kwargs (v0.5.1) forwarded to the
     /// Jinja chat template as `additionalContext` — e.g.
     /// `{"enable_thinking": true}` for Qwen3. `nil` means "no extra
-    /// context".
+    /// context". One exception: a request that carries a `response_format`
+    /// constraint renders with `enable_thinking` forced to `false` (a
+    /// constrained answer cannot think); every other key passes through.
     public var templateKwargs: [String: JSONValue]?
     /// Model id of a draft model to speculate with (Track F GUI over the
     /// D1 engine plumbing — see `GenerateRequest.draftModelID`). `nil`

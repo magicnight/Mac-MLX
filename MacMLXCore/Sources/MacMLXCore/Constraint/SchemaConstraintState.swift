@@ -347,7 +347,17 @@ public struct SchemaConstraintState: Equatable, Sendable {
     @usableFromInline
     mutating func afterValue(_ byte: UInt8) -> Bool {
         if Self.isWhitespace(byte) { return true }
-        if byte == Self.comma { phase = .expectKeyOrClose(afterComma: true); return true }
+        if byte == Self.comma {
+            // A comma promises another member. Once every declared key has been
+            // emitted there is none left to promise, and `expectKeyOrClose(
+            // afterComma: true)` would then admit nothing but whitespace — the
+            // model could never close the object and would run to max_tokens
+            // emitting blanks (seen on a real checkpoint). The only legal
+            // continuations here are whitespace and the close.
+            guard !remainingKeys.isEmpty else { return false }
+            phase = .expectKeyOrClose(afterComma: true)
+            return true
+        }
         if byte == Self.rBrace {
             guard requiredSatisfied else { return false }
             phase = .done
