@@ -527,6 +527,23 @@ struct ResponseFormatDecoderTests {
         expectInvalid(schema: root(["t": array(string, ["minItems": .string("3")])]), containing: "non-negative integer")
     }
 
+    /// `minItems` and `maxItems` are capped at 65,536: a minimum in the
+    /// billions would compile and then cut every generation off at
+    /// `max_tokens`.
+    @Test
+    func capsItemBounds() throws {
+        let cap = ResponseFormatDecoder.maxItemCount
+        let object = try compile(root([
+            "a": array(string, ["minItems": .int(cap)]),
+            "b": array(string, ["maxItems": .int(cap)]),
+        ]))
+        #expect(object.property(named: "a")?.type == .array(items: .string, minItems: cap, maxItems: nil))
+        #expect(object.property(named: "b")?.type == .array(items: .string, minItems: 0, maxItems: cap))
+        expectInvalid(schema: root(["a": array(string, ["minItems": .int(cap + 1)])]), containing: "minItems on property 'a' must be at most 65536")
+        expectInvalid(schema: root(["b": array(string, ["maxItems": .int(cap + 1)])]), containing: "maxItems on property 'b' must be at most 65536")
+        expectInvalid(schema: root(["c": array(string, ["minItems": .int(1_000_000_000)])]), containing: "must be at most 65536")
+    }
+
     @Test
     func rejectsUnsupportedArrayForms() {
         expectUnsupported(schema: root(["t": array(.array([string]))]), containing: "tuple-form")

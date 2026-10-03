@@ -63,6 +63,11 @@ public enum ResponseFormatDecoder {
     /// once per reference.
     static let maxSchemaBytes = 4 * 1_024 * 1_024
 
+    /// The largest `minItems` / `maxItems` accepted. Every document needs at
+    /// least `minItems` items, so a minimum in the billions would compile and
+    /// then cut every generation off at `max_tokens`.
+    static let maxItemCount = 65_536
+
     /// Purely annotative keywords, accepted and ignored on every kind of schema:
     /// the JSON Schema annotation and metadata vocabulary, none of which
     /// constrains a value.
@@ -410,13 +415,18 @@ public enum ResponseFormatDecoder {
         return .array(items: item, minItems: minItems, maxItems: maxItems)
     }
 
-    /// A `minItems` / `maxItems` value: a non-negative integer, or `nil` when
-    /// absent. (`JSONValue` already decodes `3.0` and `1e2` as integers.)
+    /// A `minItems` / `maxItems` value: a non-negative integer no larger than
+    /// ``maxItemCount``, or `nil` when absent. (`JSONValue` already decodes
+    /// `3.0` and `1e2` as integers.)
     private static func itemCount(_ value: JSONValue?, keyword: String, path: String) throws -> Int? {
         guard let value else { return nil }
         guard case .int(let count) = value, count >= 0 else {
             throw ResponseFormatError.invalidFormat(
                 "\(keyword) on property '\(path)' must be a non-negative integer")
+        }
+        guard count <= maxItemCount else {
+            throw ResponseFormatError.invalidFormat(
+                "\(keyword) on property '\(path)' must be at most \(maxItemCount)")
         }
         return count
     }
