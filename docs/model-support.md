@@ -47,6 +47,7 @@ just compatibility validation with real weights:
 | Model | `model_type` | Status |
 |---|---|---|
 | Qwen3.6 (27B dense / 35B-A3B MoE) | `qwen3_5` / `qwen3_5_moe` | ✅ Validated — 20.6 tok/s (27B 4-bit) |
-| ms-marco-MiniLM-L-6-v2 (`/v1/rerank`, BERT cross-encoder) | `bert` + `BertForSequenceClassification` | ✅ Validated — scores match the PyTorch fp32 reference to within 0.03 on the logit scale (worst 0.025 on a +8.85 logit, 0.3% relative; identical ordering) (`RerankEngineSmokeTests`, fixture captured by `docs/reference/capture_ms_marco_reranker.py`) |
-| Qwen3-Reranker-0.6B-4bit (`/v1/rerank`, Qwen3 causal reranker) | `qwen3` + `Qwen3ForCausalLM`, detected by the `rerank` in its name | ✅ Validated — ordering and 0...1 range on a real checkpoint; no Python reference exists for the 4-bit conversion |
-| Jina reranker v3 (`/v1/rerank`, listwise) | `JinaForRanking` | ⚠️ Not run — loads through the same `MLXRerankers` path, but no checkpoint was exercised here |
+| ms-marco-MiniLM-L-6-v2 (`/v1/rerank`, BERT cross-encoder) | `bert` + `BertForSequenceClassification` | ✅ Validated — logits match the PyTorch fp32 reference to 2e-6 with TF32 off, 0.025 under M5's default TF32 matmuls; identical ordering (`RerankEngineSmokeTests`, fixture captured by `docs/reference/capture_ms_marco_reranker.py` at a pinned revision) |
+| Qwen3-Reranker-0.6B-4bit (`/v1/rerank`, Qwen3 causal reranker) | `qwen3` + `Qwen3ForCausalLM`, detected by the `Qwen3-Reranker` name and its yes/no `1_LogitScore` | ✅ Validated — ordering and 0...1 range on a real checkpoint; no reference for the 4-bit conversion is captured in this repository |
+| BGE rerankers (`/v1/rerank`, XLM-RoBERTa cross-encoder) | `xlm-roberta` + `XLMRobertaForSequenceClassification` | ⚠️ Not run — same `MLXRerankers` encoder path as ms-marco but a different input processor; no checkpoint was exercised here |
+| Jina reranker v3 (`/v1/rerank`, listwise) | `JinaForRanking` | ⚠️ Not run — loads through the same `MLXRerankers` path, but no checkpoint was exercised here; v3.5 (sliding-window layers) is deliberately not detected |

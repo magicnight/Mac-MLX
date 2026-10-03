@@ -1,5 +1,10 @@
 {
  "model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+ "revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+ "versions": {
+  "torch": "2.14.1",
+  "transformers": "5.18.0"
+ },
  "query": "How many people live in Berlin?",
  "pairs": [
   {

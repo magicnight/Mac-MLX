@@ -115,6 +115,26 @@ struct RerankScoringTests {
         #expect(results.allSatisfy { $0.document == nil })
     }
 
+    /// Equal scores keep ascending index order, so a saturated sigmoid (two
+    /// distinct logits mapping to the same `Double`) still ranks
+    /// deterministically.
+    @Test
+    func rankAndTruncateBreaksTiesByAscendingIndex() {
+        let scores: [Double] = [1.0, 0.5, 1.0, 0.5]
+        #expect(rankAndTruncate(scores: scores).map { $0.index } == [0, 2, 1, 3])
+    }
+
+    /// `/v1/rerank` refuses a blank query or document before touching a
+    /// model; whitespace-only counts as blank, as upstream's own check does.
+    @Test
+    func rerankInputProblemNamesTheBlankField() {
+        #expect(HummingbirdServer.rerankInputProblem(query: "q", documents: ["a", "b"]) == nil)
+        #expect(HummingbirdServer.rerankInputProblem(query: "", documents: ["a"]) == "query must not be empty")
+        #expect(HummingbirdServer.rerankInputProblem(query: " \n", documents: ["a"]) == "query must not be empty")
+        #expect(HummingbirdServer.rerankInputProblem(query: "q", documents: ["a", "  ", "c"]) == "documents[1] must not be empty")
+        #expect(HummingbirdServer.rerankInputProblem(query: "q", documents: []) == nil)
+    }
+
     /// The reranker path hands `Double` scores straight through: the same
     /// helpers rank them and expose them unchanged as `relevance_score`.
     @Test

@@ -3931,6 +3931,16 @@ public actor HummingbirdServer {
             )
         }
 
+        // A blank query or document is the caller's mistake: `MLXRerankers`
+        // refuses either outright, and the v0.9.0 cross-encoder scored an
+        // empty document as `[CLS] q [SEP] [SEP]`, which was never a useful
+        // number. Reject it here, BEFORE resolving the model, so a bad request
+        // cannot trigger a multi-gigabyte cold load and the client gets a 400
+        // it will not retry rather than a 500 it will.
+        if let problem = Self.rerankInputProblem(query: req.query, documents: req.documents) {
+            return errorResponse(status: .badRequest, message: problem, code: "invalid_request_error")
+        }
+
         // Route by model kind. Resolve once here so the reranker branch can be
         // chosen BEFORE the embedder kind-gate (which would otherwise 400 a
         // reranker as "not an embedder").
@@ -4065,6 +4075,15 @@ public actor HummingbirdServer {
         do {
             scores = try await reranker.score(query: req.query, documents: req.documents)
             releaseGenerationLock()
+        } catch let error as RerankRequestError {
+            // The input, not the server: a listwise model given more
+            // documents than it takes, or an input the model refuses.
+            releaseGenerationLock()
+            return errorResponse(
+                status: .badRequest,
+                message: error.localizedDescription,
+                code: "invalid_request_error"
+            )
         } catch {
             releaseGenerationLock()
             return errorResponse(
@@ -4084,6 +4103,23 @@ public actor HummingbirdServer {
             "results": Self.rerankResultsJSON(results),
             "model": req.model,
         ])
+    }
+
+    /// Why a `/v1/rerank` body cannot be scored, or `nil` when it can: a
+    /// query or document that is empty or whitespace-only (the same rule
+    /// `MLXRerankers` applies). Pure and `nonisolated static` so it is
+    /// unit-testable without a server.
+    nonisolated static func rerankInputProblem(query: String, documents: [String]) -> String? {
+        func isBlank(_ text: String) -> Bool {
+            text.allSatisfy(\.isWhitespace)
+        }
+        if isBlank(query) {
+            return "query must not be empty"
+        }
+        if let index = documents.firstIndex(where: isBlank) {
+            return "documents[\(index)] must not be empty"
+        }
+        return nil
     }
 
     /// A single `/v1/rerank` result: rank-ordered document `index`, its

@@ -11,16 +11,20 @@ import Foundation
 /// either scorer.
 ///
 /// `scores[i]` is document `i`'s relevance; the result is `(index, score)`
-/// pairs sorted by descending score. `sorted(by:)` is not guaranteed stable,
-/// so ties may order arbitrarily (acceptable — equal scores are equally
-/// relevant). When `topN` is provided and in range the result is truncated to
-/// the top `topN`; a negative or out-of-range `topN` returns the full ranking.
+/// pairs sorted by descending score, ties in ascending index order so the
+/// output is deterministic (a sigmoid saturates in `Double` above a logit
+/// of about 30, so distinct logits can tie as scores). When `topN` is
+/// provided and in range the result is truncated to the top `topN`; a
+/// negative or out-of-range `topN` returns the full ranking.
 func rankAndTruncate<Score: Comparable>(
     scores: [Score], topN: Int? = nil
 ) -> [(index: Int, score: Score)] {
     let ranked = scores.enumerated()
         .map { (index: $0.offset, score: $0.element) }
-        .sorted { $0.score > $1.score }
+        .sorted { lhs, rhs in
+            if lhs.score == rhs.score { return lhs.index < rhs.index }
+            return lhs.score > rhs.score
+        }
     if let topN, topN >= 0, topN < ranked.count {
         return Array(ranked.prefix(topN))
     }

@@ -485,8 +485,9 @@ public actor ModelLibraryManager {
         // carries the same architecture suffix but is NOT a reranker. (The
         // `MLXRerankers` factory can score a multi-label head whose
         // `id2label` names a positive class such as `relevant` or `yes`;
-        // routing those is a follow-up — today they stay on the embedder
-        // path rather than being guessed at.)
+        // routing those is a follow-up — today they fall through to the
+        // embedder path, which is a known pre-existing misroute: a
+        // classification head embedded as if it were an encoder.)
         // Gate on the EFFECTIVE label count: `num_labels` when present, else
         // `id2label`'s entry count. Real rerankers (ms-marco-MiniLM,
         // bge-reranker) omit `num_labels` but declare a single-entry
@@ -510,9 +511,14 @@ public actor ModelLibraryManager {
         }
         // Jina reranker v3 declares itself through its architecture. Its
         // `model_type` is `qwen3`, so without this rule it would be served
-        // as a chat model and answer with nonsense.
+        // as a chat model and answer with nonsense. v3.5 interleaves
+        // sliding-window layers (`layer_types` / `use_sliding_window`),
+        // which upstream's Qwen3 model does not read — it would run every
+        // layer as full attention and score long listwise prompts wrongly
+        // without an error — so that shape is left alone.
         if let architectures = json["architectures"] as? [String],
-           architectures.contains("JinaForRanking") {
+           architectures.contains("JinaForRanking"),
+           !Self.declaresSlidingWindowLayers(json) {
             return .reranker
         }
         guard let modelType = (json["model_type"] as? String)?.lowercased() else {
@@ -521,13 +527,19 @@ public actor ModelLibraryManager {
         // Qwen3 causal rerankers (`Qwen/Qwen3-Reranker-*` and their
         // mlx-community conversions) ship a `config.json` byte-identical to a
         // Qwen3 chat model's — `model_type` `qwen3`, `Qwen3ForCausalLM` — so
-        // the only signal is the name. This is the same rule the
-        // `MLXRerankers` factory applies before it will load one; it is
-        // restricted to this exact config shape so "rerank" in the name of
-        // anything else changes nothing.
+        // the only signal is the name. `MLXRerankers` scores this family
+        // with the official prompt and yes/no logit margin, which is why the
+        // rule is NARROWER than upstream's own "name contains rerank": other
+        // Qwen3-based rerankers (zerank-2, ctxl-rerank-v2) carry the same
+        // config but a different protocol — a single true token, no `no`
+        // token — and would be scored silently wrong. So the repo name
+        // (not the org) must read `Qwen3-Reranker`, and when the checkpoint
+        // ships Sentence-Transformers' `1_LogitScore/config.json` it must
+        // declare both the true and the false token.
         if modelType == "qwen3",
            (json["architectures"] as? [String])?.contains("Qwen3ForCausalLM") == true,
-           modelName.range(of: "rerank", options: .caseInsensitive) != nil {
+           Self.isQwen3RerankerName(modelName),
+           Self.logitScoreDeclaresBothTokens(directory: directory) {
             return .reranker
         }
         if Self.knownVLMTypes.contains(modelType) {
@@ -537,6 +549,45 @@ public actor ModelLibraryManager {
             return .embedder
         }
         return .mlx
+    }
+
+    /// Whether `modelName` (a managed directory name or a Hub repo id) names
+    /// the official Qwen3-Reranker family: the repo part, with separators
+    /// removed and case folded, contains `qwen3reranker`. `Qwen3-Reranker-4B`,
+    /// `mlx-community/Qwen3-Reranker-0.6B-4bit` and `qwen3_reranker_8b` match;
+    /// `zerank-2-reranker`, `ctxl-rerank-v2-…` and `rerank-lab/Qwen3-8B` do not.
+    static func isQwen3RerankerName(_ modelName: String) -> Bool {
+        let repoPart = modelName.split(separator: "/").last.map(String.init) ?? modelName
+        let folded = repoPart.lowercased().filter { !"-_ ".contains($0) }
+        return folded.contains("qwen3reranker")
+    }
+
+    /// Sentence-Transformers rerankers describe their scoring head in
+    /// `1_LogitScore/config.json`. The official Qwen3-Reranker declares
+    /// `true_token_id` AND `false_token_id` (yes/no); a checkpoint whose
+    /// `false_token_id` is null uses a single-logit protocol `MLXRerankers`
+    /// cannot score. Returns `true` when the file is absent (mlx-community
+    /// conversions do not ship it) and `false` when it is present but does
+    /// not declare both tokens or cannot be parsed.
+    static func logitScoreDeclaresBothTokens(directory: URL) -> Bool {
+        let url = directory.appendingPathComponent("1_LogitScore").appendingPathComponent("config.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return json["true_token_id"] is Int && json["false_token_id"] is Int
+    }
+
+    /// Whether a config declares sliding-window attention layers, either
+    /// through `use_sliding_window` or a `layer_types` entry of
+    /// `sliding_attention` (the Jina reranker v3.5 shape).
+    static func declaresSlidingWindowLayers(_ json: [String: Any]) -> Bool {
+        if json["use_sliding_window"] as? Bool == true { return true }
+        if let layerTypes = json["layer_types"] as? [String],
+           layerTypes.contains("sliding_attention") {
+            return true
+        }
+        return false
     }
 
     /// Extracts a quantization string from a directory name.

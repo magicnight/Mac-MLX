@@ -189,17 +189,19 @@ public enum ModelFormat: String, Codable, Hashable, Sendable, CaseIterable {
     /// generation engine. Set by `ModelLibraryManager.upgradeFormat` after
     /// the initial `.mlx` file-listing detection.
     case embedder
-    /// Cross-encoder reranker (v0.7+). Same on-disk shape as `.mlx`
-    /// (config.json + tokenizer + `.safetensors`) and the SAME encoder
-    /// `model_type` (`bert`, `xlm-roberta`) as an `.embedder` — the two are
-    /// told apart NOT by `model_type` but by a `*ForSequenceClassification`
-    /// entry in `config.json`'s `architectures`, which denotes a single
-    /// relevance-logit head (see `ModelLibraryManager.upgradeFormat`). This
-    /// mirrors the `.mlxVLM` / `isOCR` pattern: an on-disk-identical family
-    /// gated onto a distinct serving path. Served by `RerankEngine` (a TRUE
-    /// cross-encoder joint scorer) via `/v1/rerank`, never by the generation
-    /// engine. A model classified `.embedder` remains the documented
-    /// bi-encoder cosine fallback for `/v1/rerank`.
+    /// Reranker (v0.7+; served by mlx-swift-lm's `MLXRerankers` since
+    /// v0.10). Same on-disk shape as `.mlx` (config.json + tokenizer +
+    /// `.safetensors`). Three shapes are recognized by
+    /// `ModelLibraryManager.upgradeFormat`: an encoder (`bert`, `xlm-roberta`,
+    /// …) whose `architectures` carry a single-logit `*ForSequenceClassification`
+    /// head — the SAME `model_type` as an `.embedder`, told apart only by that
+    /// head; a `qwen3` + `Qwen3ForCausalLM` checkpoint named `Qwen3-Reranker`
+    /// (byte-identical config to a chat model, so the name decides); and
+    /// `JinaForRanking` without sliding-window layers. This mirrors the
+    /// `.mlxVLM` / `isOCR` pattern: an on-disk-identical family gated onto a
+    /// distinct serving path. Served by `RerankEngine` via `/v1/rerank`,
+    /// never by the generation engine. A model classified `.embedder` remains
+    /// the documented bi-encoder cosine fallback for `/v1/rerank`.
     case reranker
     /// Speech-to-text model served by ``AudioEngine`` (v0.8+). Unlike every
     /// other case here it is NOT discovered from the managed model directory:

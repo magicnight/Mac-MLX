@@ -11,9 +11,11 @@ import MLXRerankers
 /// sequence-classification head (BERT / RoBERTa / XLM-RoBERTa, e.g.
 /// `cross-encoder/ms-marco-MiniLM-L-6-v2` and `BAAI/bge-reranker-*`), a Qwen3
 /// causal reranker (`Qwen3-Reranker-*`, scored by its yes/no logit margin), or
-/// Jina reranker v3 (`JinaForRanking`, listwise). Every `[query, document]`
-/// pair is scored jointly — the two share one forward pass — which is what makes
-/// this the accuracy-first path of `/v1/rerank`; the bi-encoder cosine
+/// Jina reranker v3 (`JinaForRanking`, listwise). The encoder and Qwen3 kinds
+/// score each `[query, document]` pair jointly — the two share one forward
+/// pass — and Jina scores the whole candidate list in one prompt; either way
+/// the document is read in the light of the query, which is what makes this
+/// the accuracy-first path of `/v1/rerank`. The bi-encoder cosine
 /// ``EmbeddingEngine`` path remains the documented fallback for `.embedder`
 /// models.
 ///
@@ -45,9 +47,12 @@ public actor RerankEngine {
     /// guard accepts a checkpoint only when its identifier contains "rerank"
     /// (or it declares `JinaForRanking`), which would refuse
     /// `cross-encoder/ms-marco-MiniLM-L-6-v2`. The decision that this directory
-    /// holds a reranker is made once, by `ModelLibraryManager.upgradeFormat`,
-    /// on the same evidence upstream uses plus the single-logit head check for
-    /// encoders; the engine trusts that classification.
+    /// holds a reranker is made once, by `ModelLibraryManager.upgradeFormat`:
+    /// a single-logit sequence-classification head for encoders, the
+    /// `Qwen3-Reranker` name plus its yes/no logit-score declaration for
+    /// Qwen3, or `JinaForRanking` without sliding-window layers — each at
+    /// least as strict as upstream's check. The engine trusts that
+    /// classification.
     ///
     /// - Throws: ``EngineError/modelLoadFailed(reason:)`` on any failure: an
     ///   unsupported architecture, a weight-key mismatch, a tokenizer that
@@ -79,14 +84,22 @@ public actor RerankEngine {
     /// 8,192 token slots per forward pass) and truncates inputs to the model's
     /// context.
     ///
-    /// - Throws: ``EngineError/modelNotLoaded`` before a load; upstream's
-    ///   `RerankerError` for an empty query or document, or a non-finite score.
+    /// - Throws: ``EngineError/modelNotLoaded`` before a load;
+    ///   ``RerankRequestError`` when `MLXRerankers` refuses the input itself
+    ///   (a blank query or document, more documents than a listwise model
+    ///   takes); upstream's `RerankerError` for anything else, such as a
+    ///   non-finite score.
     public func score(query: String, documents: [String]) async throws -> [Double] {
         guard let container else {
             throw EngineError.modelNotLoaded
         }
         if documents.isEmpty { return [] }
-        let response = try await container.scores(query: query, documents: documents)
+        let response: RerankResponse
+        do {
+            response = try await container.scores(query: query, documents: documents)
+        } catch let error as RerankerError {
+            throw RerankRequestError(error) ?? error
+        }
         // `scores` returns one result per document, in input order. Place
         // each by its declared index anyway, so a reordered response could
         // never be misattributed to the wrong document.
@@ -110,6 +123,44 @@ public actor RerankEngine {
         case .normalizedRelevance: "normalized relevance 0...1"
         case .cosineSimilarity: "cosine similarity"
         case .logit: "raw logit"
+        }
+    }
+}
+
+// MARK: - RerankRequestError
+
+/// A rerank request `MLXRerankers` refuses before it touches the model: the
+/// caller's input is at fault, not the server, so `/v1/rerank` answers 400
+/// rather than 500. Mirrors the request-shaped cases of upstream's
+/// `RerankerError`; every other case stays an upstream error.
+public enum RerankRequestError: LocalizedError, Equatable, Sendable {
+    case emptyQuery
+    case emptyDocument(index: Int)
+    case tooManyDocuments(actual: Int, maximum: Int)
+    case inputTooLong(actual: Int, maximum: Int)
+
+    init?(_ error: RerankerError) {
+        switch error {
+        case .emptyQuery: self = .emptyQuery
+        case .emptyDocument(let index): self = .emptyDocument(index: index)
+        case .tooManyDocuments(let actual, let maximum):
+            self = .tooManyDocuments(actual: actual, maximum: maximum)
+        case .inputTooLong(let actual, let maximum):
+            self = .inputTooLong(actual: actual, maximum: maximum)
+        default: return nil
+        }
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyQuery:
+            "query must not be empty"
+        case .emptyDocument(let index):
+            "documents[\(index)] must not be empty"
+        case .tooManyDocuments(let actual, let maximum):
+            "\(actual) documents sent, but this reranker scores at most \(maximum) per request"
+        case .inputTooLong(let actual, let maximum):
+            "input of \(actual) tokens exceeds the model's limit of \(maximum)"
         }
     }
 }

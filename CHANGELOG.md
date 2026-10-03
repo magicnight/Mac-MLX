@@ -9,30 +9,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
-- **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
-  BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
-  checkpoint is loaded through upstream's factory, which reads `config.json`
-  and picks the implementation. Three families come with it: encoder
-  cross-encoders with a sequence-classification head (BERT, RoBERTa and
-  XLM-RoBERTa — `cross-encoder/ms-marco-*`, `BAAI/bge-reranker-base` and
-  `bge-reranker-v2-m3`), Qwen3 causal rerankers (`Qwen3-Reranker-*`, scored by
-  their yes/no logit margin) and Jina reranker v3 (`JinaForRanking`,
-  listwise). Verified against real checkpoints this time: ms-marco-MiniLM-L-6-v2
-  matches the PyTorch fp32 reference to within 0.03 on the logit scale
-  (worst 0.025 on a +8.85 logit, identical ordering), and
-  Qwen3-Reranker-0.6B-4bit puts the documents that answer the question above
-  the ones that do not; Jina v3 loads through the same code but was not run.
-  Detection learned the two new shapes: `JinaForRanking` is a reranker
-  outright, and a `qwen3` + `Qwen3ForCausalLM` checkpoint — byte-identical in
-  config to a chat model — is a reranker when its name contains `rerank`,
-  the same rule upstream applies. `relevance_score` is unchanged for BERT
-  rerankers (the sigmoid of the single logit) and is the model's normalized
-  0...1 relevance for Qwen3; Jina v3 reports a cosine similarity. Pairs are
-  now micro-batched (16 pairs or 8,192 token slots per forward pass) and
-  inputs are truncated to the model's context instead of one padded batch
-  of everything.
-
 ### Added
 - **Nested JSON schemas in `response_format`.** Structured output now
   accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
@@ -119,6 +95,37 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Changed
+- **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
+  BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
+  checkpoint is loaded through upstream's factory, which reads `config.json`
+  and picks the implementation. Three families come with it: encoder
+  cross-encoders with a sequence-classification head (BERT, RoBERTa and
+  XLM-RoBERTa — the BERT-based `cross-encoder/ms-marco-MiniLM-*` and
+  TinyBERT checkpoints, `BAAI/bge-reranker-base` and `bge-reranker-v2-m3`),
+  Qwen3 causal rerankers (`Qwen3-Reranker-*`, scored by their yes/no logit
+  margin) and Jina reranker v3 (`JinaForRanking`, listwise). What was
+  actually run: ms-marco-MiniLM-L-6-v2 matches the PyTorch fp32 reference to
+  2e-6 on the logit scale with TF32 off, and to 0.025 under the TF32 matmuls
+  M5 enables by default; Qwen3-Reranker-0.6B-4bit puts the documents that
+  answer the question above the ones that do not (0.99 against 1e-5). Not
+  run: the XLM-RoBERTa path (BGE) and Jina v3 — both load through the same
+  code, neither met a checkpoint here. Detection learned the two new shapes,
+  narrower than upstream's own name test: `JinaForRanking` is a reranker
+  unless the config declares sliding-window layers (Jina v3.5, which
+  upstream's Qwen3 model would score wrongly without an error), and a
+  `qwen3` + `Qwen3ForCausalLM` checkpoint — byte-identical in config to a
+  chat model — is one only when its repo name reads `Qwen3-Reranker` and,
+  if it ships Sentence-Transformers' `1_LogitScore/config.json`, that file
+  declares both the true and the false token; `zerank-2-reranker` and
+  `ctxl-rerank-v2`, which carry a different protocol, stay chat-typed and
+  keep answering 400 on `/v1/rerank`. A directory so detected is no longer
+  loadable as a chat model. `relevance_score` is unchanged for BERT
+  rerankers (the sigmoid of the single logit) and is the model's normalized
+  0...1 relevance for Qwen3; Jina v3 reports a cosine similarity. Pairs are
+  micro-batched (16 pairs or 8,192 token slots per forward pass; Qwen3 input
+  is capped at 8,192 tokens) instead of one padded batch of everything, and a
+  blank query or document is now a 400 before any model loads — v0.9.0
+  scored an empty document as `[CLS] query [SEP] [SEP]`.
 - **`response_format` schemas: keywords nothing enforces are now a 400 at the
   root too.** The root object used to accept `allOf`, `anyOf`,
   `minProperties`, `patternProperties` and any other keyword and enforce

@@ -20,13 +20,19 @@ import XCTest
 ///     `docs/reference/capture_ms_marco_reranker.py` into
 ///     `Fixtures/rerank_ms_marco_reference.json`, on the logit scale.
 ///   • qwen3 — `mlx-community/Qwen3-Reranker-0.6B-4bit` (347 MB). Ordering and
-///     range only: there is no Python mlx-lm on this machine to capture a
-///     reference from, and a 4-bit conversion has no fp32 twin to match anyway.
+///     range only: no reference for the 4-bit conversion is captured in this
+///     repository (upstream's integration tests carry bf16 reference margins).
 ///
-/// Run (after `xcodebuild build-for-testing -scheme MacMLXCore -destination 'platform=macOS'`):
-///   TEST_RUNNER_MACMLX_RUN_RERANK_SMOKE=1 xcodebuild test-without-building \
-///     -scheme MacMLXCore -destination 'platform=macOS' \
+/// Precision: MLX runs fp32 matmuls as TF32 on M5 by default
+/// (`MLX_ENABLE_TF32`, default 1). Under TF32 the ms-marco logits land within
+/// 0.025 of PyTorch; with TF32 off they match to 2e-6. The parity test reads
+/// the variable and applies the matching gate, so run it with TF32 off for the
+/// strict comparison:
+///   TEST_RUNNER_MACMLX_RUN_RERANK_SMOKE=1 TEST_RUNNER_MLX_ENABLE_TF32=0 \
+///     xcodebuild test-without-building -scheme MacMLXCore \
+///     -destination 'platform=macOS' \
 ///     -only-testing:MacMLXCoreTests/RerankEngineSmokeTests
+/// (after `xcodebuild build-for-testing -scheme MacMLXCore -destination 'platform=macOS'`).
 final class RerankEngineSmokeTests: XCTestCase {
 
     private struct Checkpoint {
@@ -120,6 +126,7 @@ final class RerankEngineSmokeTests: XCTestCase {
 
     func testMsMarcoCrossEncoderMatchesThePyTorchReference() async throws {
         try requireGate()
+        try requireTrustworthyMetalOrSkip()
         let directory = try resolve(Self.encoder)
         let reference = try loadReference()
         XCTAssertEqual(reference.model, Self.encoder.hfRepo)
@@ -134,21 +141,24 @@ final class RerankEngineSmokeTests: XCTestCase {
         XCTAssertEqual(scores.count, reference.pairs.count)
 
         // Measured on 2026-10-03 (M5 Max, mlx-swift 0.32.3, mlx-swift-lm 3.32.3):
-        // worst |Δ| = 0.025 on the +8.85 logit, 0.0007 on the −11.07 one — a
-        // 0.3% relative drift that sits in upstream's BERT, not in this
-        // integration (fp32 weights, exact GELU). The tolerance is twice the
-        // measured worst; a wrong segment id, pooler or head would miss by
-        // whole logits.
+        // with TF32 off the worst |Δ| is 1.9e-6 — the integration is exact to
+        // fp32 rounding; with M5's default TF32 the fp32 matmuls lose mantissa
+        // and the worst |Δ| is 0.025 on the +8.85 logit. Gate accordingly: the
+        // project's 1e-4 parity bar when TF32 is off, twice the measured TF32
+        // drift otherwise. A wrong segment id, pooler or head would miss by
+        // whole logits under either.
+        let tf32Enabled = ProcessInfo.processInfo.environment["MLX_ENABLE_TF32"] != "0"
+        let tolerance = tf32Enabled ? 0.05 : 1e-4
         var worst = 0.0
         for (score, pair) in zip(scores, reference.pairs) {
             XCTAssert((0.0 ... 1.0).contains(score), "score out of range: \(score)")
             let difference = abs(logit(score) - pair.logit)
             worst = max(worst, difference)
             XCTAssertEqual(
-                logit(score), pair.logit, accuracy: 0.05,
+                logit(score), pair.logit, accuracy: tolerance,
                 "logit drift on: \(pair.document)")
         }
-        print("[rerank-smoke] ms-marco logits (mlx vs torch):",
+        print("[rerank-smoke] ms-marco logits (mlx vs torch, TF32 \(tf32Enabled ? "on" : "off")):",
               zip(scores, reference.pairs).map { "\(logit($0.0)) vs \($0.1.logit)" },
               "worst |Δ| = \(worst)")
 
@@ -208,7 +218,14 @@ final class RerankEngineSmokeTests: XCTestCase {
             "top_n": 2,
             "return_documents": true,
         ] as [String: Any])
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            await server.stop()
+            throw error
+        }
         await server.stop()
 
         let http = try XCTUnwrap(response as? HTTPURLResponse)
