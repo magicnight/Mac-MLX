@@ -12,6 +12,10 @@ import Testing
 ///   unconstrainedStreamStillHonorsThePromptSeed        : 20_310
 ///   constrainedRequestRendersWithThinkingOff           : 20_320
 ///   unconstrainedRequestKeepsItsKwargs                 : 20_330
+///   closingThinkTagInsideConstrainedStringIsData       : 20_370
+///   openingThinkTagInsideConstrainedStringIsData       : 20_380
+///   closingThinkTagInsideConstrainedStringNonStreaming : 20_390
+///   openingThinkTagInsideConstrainedStringNonStreaming : 20_400
 @Suite("StructuredOutputThinking")
 struct StructuredOutputThinkingTests {
 
@@ -24,6 +28,10 @@ struct StructuredOutputThinkingTests {
         private(set) var loadedModel: LocalModel?
         let version = "think-opening-1"
         private(set) var capturedRequest: GenerateRequest?
+        /// The text the stub streams, chunk by chunk; the last chunk is terminal.
+        private let chunks: [String]
+
+        init(chunks: [String] = ["{\"label\":", "\"positive\"}"]) { self.chunks = chunks }
 
         func load(_ model: LocalModel) async throws {
             status = .loading(model: model.id)
@@ -43,9 +51,12 @@ struct StructuredOutputThinkingTests {
                 Task { [weak self] in
                     guard let self else { continuation.finish(); return }
                     await self.capture(request)
-                    continuation.yield(GenerateChunk(text: "{\"label\":"))
+                    let chunks = await self.chunks
+                    for piece in chunks.dropLast() {
+                        continuation.yield(GenerateChunk(text: piece))
+                    }
                     continuation.yield(GenerateChunk(
-                        text: "\"positive\"}",
+                        text: chunks.last ?? "",
                         finishReason: .stop,
                         usage: TokenUsage(promptTokens: 1, completionTokens: 2)))
                     continuation.finish()
@@ -186,13 +197,72 @@ struct StructuredOutputThinkingTests {
     @Test
     func templateKwargsMerge() {
         let configured: [String: JSONValue] = ["foo": .int(1), "enable_thinking": .bool(true)]
-        #expect(HummingbirdServer.templateKwargs(configured, constrainedBy: nil) == configured)
-        #expect(HummingbirdServer.templateKwargs(nil, constrainedBy: nil) == nil)
+        #expect(HummingbirdServer.effectiveTemplateKwargs(configured, constrainedBy: nil) == configured)
+        #expect(HummingbirdServer.effectiveTemplateKwargs(nil, constrainedBy: nil) == nil)
         #expect(
-            HummingbirdServer.templateKwargs(nil, constrainedBy: .jsonObject)
+            HummingbirdServer.effectiveTemplateKwargs(nil, constrainedBy: .jsonObject)
                 == ["enable_thinking": .bool(false)])
         #expect(
-            HummingbirdServer.templateKwargs(configured, constrainedBy: .jsonObject)
+            HummingbirdServer.effectiveTemplateKwargs(configured, constrainedBy: .jsonObject)
                 == ["foo": .int(1), "enable_thinking": .bool(false)])
+    }
+
+    // MARK: Think tags inside a constrained string value are data
+
+    private static let closingTagRaw = "{\"notes\":\"step 1 done</think> final\"}"
+    private static let openingTagRaw = "{\"notes\":\"<think>plan\"}"
+
+    /// Under a constraint the splitter is bypassed entirely, so a closing tag
+    /// (which the splitter would strip) or an opening one (which would divert
+    /// the rest of the answer into reasoning) inside a JSON string value stays
+    /// in `content` untouched. One server per call: a fresh server on a port a
+    /// stopped one just vacated can inherit a stale keep-alive connection.
+    private func assertConstrainedStreamKeeps(_ raw: String, port: Int) async throws {
+        let split = raw.index(raw.startIndex, offsetBy: 12)
+        let server = try await loadedServer(
+            ThinkOpeningStubEngine(chunks: [String(raw[..<split]), String(raw[split...])]))
+        let boundPort = try await server.start(preferredPort: port)
+        let url = URL(string: "http://127.0.0.1:\(boundPort)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: body(stream: true, constrained: true))
+        await server.stop()
+        #expect(response.statusCode == 200)
+        let deltas = try deltas(data)
+        #expect(deltas.compactMap { $0["content"] as? String }.joined() == raw)
+        #expect(deltas.compactMap { $0["reasoning_content"] as? String }.joined().isEmpty)
+    }
+
+    private func assertConstrainedBodyKeeps(_ raw: String, port: Int) async throws {
+        let server = try await loadedServer(ThinkOpeningStubEngine(chunks: [raw]))
+        let boundPort = try await server.start(preferredPort: port)
+        let url = URL(string: "http://127.0.0.1:\(boundPort)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: body(stream: false, constrained: true))
+        await server.stop()
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let message = try #require((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])
+        #expect(message["content"] as? String == raw)
+        #expect(message["reasoning_content"] == nil)
+    }
+
+    @Test
+    func closingThinkTagInsideConstrainedStringIsData() async throws {
+        try await assertConstrainedStreamKeeps(Self.closingTagRaw, port: 20_370)
+    }
+
+    @Test
+    func openingThinkTagInsideConstrainedStringIsData() async throws {
+        try await assertConstrainedStreamKeeps(Self.openingTagRaw, port: 20_380)
+    }
+
+    /// The non-streaming path used to split the answer into invalid JSON plus a
+    /// `reasoning_content` tail.
+    @Test
+    func closingThinkTagInsideConstrainedStringNonStreaming() async throws {
+        try await assertConstrainedBodyKeeps(Self.closingTagRaw, port: 20_390)
+    }
+
+    @Test
+    func openingThinkTagInsideConstrainedStringNonStreaming() async throws {
+        try await assertConstrainedBodyKeeps(Self.openingTagRaw, port: 20_400)
     }
 }
