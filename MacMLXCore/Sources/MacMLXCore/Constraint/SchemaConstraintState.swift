@@ -116,10 +116,15 @@ public struct SchemaConstraintState: Hashable, Sendable {
         return "schema(mode: \(modeText), frames: [\(frames.joined(separator: ", "))], complete: \(isComplete))"
     }
 
-    /// The declared names of `members` in object node `node`.
-    private func names(_ members: PropertyMask, node: Int32) -> [String] {
+    /// The declared names of `members` in object node `node`: the first eight,
+    /// then a count, so a very wide object cannot turn one log line into
+    /// megabytes.
+    private func names(_ members: PropertyMask, node: Int32) -> String {
         let keys = program.objects[Int(node)].keys
-        return keys.indices.filter(members.contains).map { String(decoding: keys[$0], as: UTF8.self) }
+        let listed = keys.indices.filter(members.contains)
+        var shown = listed.prefix(8).map { "\"\(String(decoding: keys[$0], as: UTF8.self))\"" }
+        if listed.count > 8 { shown.append("… (+\(listed.count - 8))") }
+        return "[" + shown.joined(separator: ", ") + "]"
     }
 
     /// Two states are equal when they are at the same position of equal
