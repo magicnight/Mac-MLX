@@ -10,8 +10,7 @@ InternLM3's architecture is numerically parity-proven at 1e-4 by
 `capture_internlm3.py` + `InternLM3*ParityTests`. This follow-up verifies that the
 checkpoint's OWN `chat_template` (shipped inside `tokenizer_config.json`) renders
 correctly under swift-jinja (the engine swift-transformers drives), so NO built-in
-chat-template override is needed — the Hunyuan V1 Dense / MiniCPM3 precedent, NOT the
-Seed-OSS / Cohere2 one.
+chat-template override is needed (none ships for any port any more).
 
 InternLM3's template is a plain ChatML wrapper:
 
