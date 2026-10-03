@@ -22,7 +22,7 @@ import XCTest
 ///
 /// CHAT TEMPLATE: Seed-OSS's `chat_template.jinja` builds its thinking-budget
 /// lookup as a Jinja dict literal with INTEGER keys (`{0: 0, 512: 128, …}`),
-/// which swift-jinja 2.3.6 could not parse. swift-jinja 2.4.0 (fixing
+/// which swift-jinja 2.3.6 could not parse. swift-jinja >= 2.4.2 (2.4.0 fixed
 /// huggingface/swift-jinja #62, reported by macMLX) renders it natively, so no
 /// macMLX override is needed: template compilation inside generate's lazy
 /// input-prep succeeds on the checkpoint's own template and this smoke exercises
@@ -151,8 +151,8 @@ final class SeedOssSmokeTests: XCTestCase {
             "greedy continuation of 'Mercury, Venus, Earth,' must name the next planet "
                 + "for output to count as coherent — got: \(text)")
 
-        // Echo the generated continuation for the record (proves the built-in
-        // chat-template override yielded a real prompt end-to-end).
+        // Echo the generated continuation for the record (proves the checkpoint's
+        // own chat template yielded a real prompt end-to-end).
         print("SEED_OSS_SMOKE_TEXT<<<\(text)>>>")
 
         if let completionTokens, elapsed > 0 {

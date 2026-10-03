@@ -11,7 +11,7 @@ Hunyuan V1 Dense's architecture is numerically parity-proven at 1e-4 by
 `capture_hunyuan_v1_dense.py` + `HunyuanV1Dense*ParityTests`. This follow-up
 verifies that the checkpoint's own `chat_template.jinja` renders correctly under
 swift-jinja (the engine swift-transformers drives), so NO built-in chat-template
-override is needed — unlike Seed-OSS, whose integer-keyed dict forced one.
+override is needed.
 
 The Hunyuan template uses only constructs swift-jinja supports (namespace, the
 message loop, string concatenation, `in`, `loop.last`/`loop.index0`, and
@@ -20,8 +20,8 @@ swift-jinja rendered differently was
 `content.split('<answer>')[-1].strip('</answer>').strip()` (swift-jinja 2.3.6's
 `.strip()` ignored its argument and trimmed whitespace only), which sits behind
 `'<answer>' in content and not loop.last` — a HISTORICAL assistant turn that
-embeds `<answer>` tags. swift-jinja 2.4.0 fixes `strip(arg)` argument handling
-(huggingface/swift-jinja #64, reported by macMLX), so that branch now renders
+embeds `<answer>` tags. swift-jinja >= 2.4.2 (2.4.0 fixed `strip(arg)` argument
+handling, huggingface/swift-jinja #64, reported by macMLX) renders that branch
 byte-for-byte too; the `answer_history` case below exercises it and the Swift
 parity test asserts it.
 
@@ -50,23 +50,36 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 
 def snapshot_dir() -> str:
-    """Resolve the Hunyuan checkpoint dir: env override → HF cache snapshot."""
+    """Resolve the Hunyuan checkpoint dir: env override → the HF cache snapshot
+    that `refs/main` points to (not merely the first directory that sorts
+    first), so the fixture records which revision it came from."""
     env = os.environ.get("MACMLX_HUNYUAN_V1_MODEL_DIR")
     if env and os.path.exists(os.path.join(env, "config.json")):
         return env
     home = os.path.expanduser("~")
-    cache = os.path.join(
-        home,
-        ".cache/huggingface/hub/"
-        "models--mlx-community--Hunyuan-1.8B-Instruct-4bit/snapshots",
+    repo = os.path.join(
+        home, ".cache/huggingface/hub/models--mlx-community--Hunyuan-1.8B-Instruct-4bit"
     )
-    for d in sorted(glob.glob(os.path.join(cache, "*"))):
+    ref = os.path.join(repo, "refs", "main")
+    if os.path.exists(ref):
+        with open(ref, encoding="utf-8") as f:
+            d = os.path.join(repo, "snapshots", f.read().strip())
+        if os.path.exists(os.path.join(d, "config.json")):
+            return d
+    for d in sorted(glob.glob(os.path.join(repo, "snapshots", "*"))):
         if os.path.exists(os.path.join(d, "config.json")):
             return d
     raise SystemExit(
         "Hunyuan checkpoint not found. Set MACMLX_HUNYUAN_V1_MODEL_DIR or place it "
         "in the HuggingFace cache."
     )
+
+
+def source_revision(snap: str) -> str:
+    """The snapshot's revision (its directory name under `snapshots/`), or the
+    directory itself when an explicit path was given."""
+    parent, name = os.path.split(os.path.normpath(snap))
+    return name if os.path.basename(parent) == "snapshots" else snap
 
 
 # Representative message sets. Each exercises a distinct template path:
@@ -81,7 +94,15 @@ def snapshot_dir() -> str:
 #   • answer_history         — a NON-LAST assistant turn embedding <answer></answer>
 #                              tags, exercising the off-generation-path
 #                              `content.split('<answer>')[-1].strip('</answer>').strip()`
-#                              branch that swift-jinja 2.4.0 renders natively (#64).
+#                              branch that swift-jinja >= 2.4.2 renders natively (#64).
+#   • answer_history_charset — the same branch with payloads whose edges ARE in
+#                              the strip set: Python's strip(arg) removes any run
+#                              of those CHARACTERS from both ends, so
+#                              "<answer>Yes</answer>" yields "Y" and
+#                              "<answer>answer: 42</answer>" yields ": 42". A
+#                              literal-suffix or whitespace-only strip would
+#                              render these differently, which the plain case
+#                              above cannot tell apart.
 CASES = [
     {
         "name": "single_user",
@@ -146,6 +167,28 @@ CASES = [
                 "content": "Let me think about this.<answer>The capital of France is Paris.</answer>",
             },
             {"role": "user", "content": "And what about Germany?"},
+        ],
+        "add_generation_prompt": True,
+    },
+    {
+        # Payload edges inside the strip set ('<', '/', 'a', 'n', 's', 'w', 'e',
+        # 'r', '>'): "Yes" keeps only "Y". Distinguishes character-set strip
+        # semantics from a literal-suffix or whitespace-only implementation.
+        "name": "answer_history_charset_short",
+        "messages": [
+            {"role": "user", "content": "Is Paris the capital of France?"},
+            {"role": "assistant", "content": "Checking.<answer>Yes</answer>"},
+            {"role": "user", "content": "And Berlin for Germany?"},
+        ],
+        "add_generation_prompt": True,
+    },
+    {
+        # "answer: 42" loses its leading "answer" run and keeps ": 42".
+        "name": "answer_history_charset_prefix",
+        "messages": [
+            {"role": "user", "content": "What is six times seven?"},
+            {"role": "assistant", "content": "Easy.<answer>answer: 42</answer>"},
+            {"role": "user", "content": "And seven times eight?"},
         ],
         "add_generation_prompt": True,
     },
@@ -224,13 +267,16 @@ def main() -> None:
             "`template` through swift-jinja with the same bos_token/eos_token and "
             "asserts equality with each case's `expected`, proving swift-jinja "
             "renders the checkpoint template natively. Covers the standard "
-            "conversation path plus the `answer_history` case — a non-last "
-            "`<answer>`-tagged assistant turn exercising "
+            "conversation path plus the `answer_history*` cases — non-last "
+            "`<answer>`-tagged assistant turns exercising "
             "content.split('<answer>')[-1].strip('</answer>').strip(), which "
-            "swift-jinja 2.4.0 renders with Python strip(arg) semantics "
-            "(huggingface/swift-jinja #64)."
+            "swift-jinja >= 2.4.2 renders with Python strip(arg) CHARACTER-SET "
+            "semantics (huggingface/swift-jinja #64); the two `_charset_` cases "
+            "have payload edges inside the strip set so a literal-suffix or "
+            "whitespace-only strip would render them differently."
         ),
         "source_repo": "mlx-community/Hunyuan-1.8B-Instruct-4bit",
+        "source_revision": source_revision(snap),
         "template": original,
         "bos_token": bos,
         "eos_token": eos,

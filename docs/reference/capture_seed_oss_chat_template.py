@@ -13,9 +13,9 @@ checkpoint's own `chat_template.jinja` renders correctly under swift-jinja (the
 engine swift-transformers drives), so NO built-in chat-template override is
 needed. The template builds its thinking-budget table as a Jinja object literal
 with INTEGER keys, which swift-jinja 2.3.6 could not parse — that once forced a
-built-in override; swift-jinja 2.4.0 fixes integer object keys
-(huggingface/swift-jinja #62, reported by macMLX), so the stock template parses
-and renders natively.
+built-in override; swift-jinja >= 2.4.2 (2.4.0 fixed integer object keys,
+huggingface/swift-jinja #62, reported by macMLX) parses and renders the stock
+template natively.
 
 This script renders the checkpoint's ORIGINAL template for representative message
 sets and stores the rendered prompt strings (plus the template) as a JSON fixture.
@@ -65,7 +65,7 @@ def snapshot_dir() -> str:
 #   • system_user     — the leading-system branch + user/system message loop.
 #   • multi_turn      — assistant history (the `role == "assistant"` branch).
 #   • thinking_budget — the budget-engaged system block, i.e. the exact code path
-#                       whose reflection-interval lookup was rewritten.
+#                       the integer-keyed reflection-interval lookup lives in.
 CASES = [
     {
         "name": "system_user",
@@ -97,7 +97,7 @@ CASES = [
     },
 ]
 
-# The exact construct this override rewrites is the thinking-budget
+# The construct that once forced a built-in override is the thinking-budget
 # reflection-interval lookup: the upstream template does
 # `budget_reflections_v05 = {0:0, 512:128, 1024:256, 2048:512, 4096:512,
 # 8192:1024, 16384:1024}` then `dictsort` + "first tier whose key >=
@@ -105,9 +105,9 @@ CASES = [
 # boundary is swept ±1 to pin the < / <= edge exactly, plus 0 (its own
 # skip-thinking branch, no interval), a negative budget (the "no budget"
 # default branch, no interval), and one past-top value. This is the ORIGINAL
-# template's rendering for each — the Swift test asserts the OVERRIDE renders
-# identically, closing the loop so the boundary proof is against the real
-# reference rather than a hand-copied table.
+# template's rendering for each — the Swift test asserts swift-jinja renders the
+# checkpoint template identically, closing the loop so the boundary proof is
+# against the real reference rather than a hand-copied table.
 BOUNDARY_BUDGETS = [
     511, 512, 513,
     1023, 1024, 1025,

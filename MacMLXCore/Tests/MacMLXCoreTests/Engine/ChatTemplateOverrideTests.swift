@@ -27,9 +27,10 @@ final class ChatTemplateOverrideTests: XCTestCase {
 
     /// Synthetic built-in map for exercising the built-in resolution branch, which
     /// ships EMPTY (`ChatTemplateOverride.builtIns == [:]`) now that swift-jinja
-    /// 2.4.0 renders every previously-overridden checkpoint natively.
+    /// >= 2.4.2 renders every previously-overridden checkpoint natively. Keyed by a
+    /// made-up `model_type` so no test reads as if a real model still has one.
     private let testBuiltIns: [String: String] = [
-        "seed_oss": "{{ bos_token }}TEST BUILT-IN seed_oss{{ eos_token }}"
+        "test_model": "{{ bos_token }}TEST BUILT-IN test_model{{ eos_token }}"
     ]
 
     override func setUpWithError() throws {
@@ -71,41 +72,43 @@ final class ChatTemplateOverrideTests: XCTestCase {
         XCTAssertNil(ChatTemplateOverride.resolve(modelDirectory: tempDir))
     }
 
-    /// SHIPPING built-ins are empty: `seed_oss` and `cohere2` — whose built-ins
-    /// were removed once swift-jinja 2.4.0 rendered their checkpoint templates
-    /// natively — resolve to `nil` under the DEFAULT `builtIns`, so each
-    /// checkpoint's own template is used unchanged. Guards the removal itself.
-    func testShippingBuiltInsAreEmptyForFormerlyOverriddenType() throws {
+    /// SHIPPING built-ins are empty — the map itself, and `seed_oss` / `cohere2`,
+    /// whose built-ins were removed once swift-jinja >= 2.4.2 rendered their
+    /// checkpoint templates natively, resolve to `nil` under the DEFAULT
+    /// `builtIns`, so each checkpoint's own template is used unchanged. Guards the
+    /// removal itself.
+    func testShippingBuiltInsAreEmpty() throws {
+        XCTAssertTrue(ChatTemplateOverride.builtIns.isEmpty)
         try writeConfig(modelType: "seed_oss")
         XCTAssertNil(ChatTemplateOverride.resolve(modelDirectory: tempDir))
         try writeConfig(modelType: "cohere2")
         XCTAssertNil(ChatTemplateOverride.resolve(modelDirectory: tempDir))
     }
 
-    /// A `seed_oss` checkpoint (no user file) resolves to the INJECTED built-in
-    /// override. The shipping `builtIns` is empty (see
-    /// `testShippingBuiltInsAreEmptyForFormerlyOverriddenType`); this exercises the
-    /// resolution branch via the `builtIns:` test seam.
-    func testBuiltInOverrideForSeedOss() throws {
-        try writeConfig(modelType: "seed_oss")
+    /// A checkpoint whose `model_type` is registered (no user file) resolves to
+    /// the INJECTED built-in override. The shipping `builtIns` is empty (see
+    /// `testShippingBuiltInsAreEmpty`); this exercises the resolution branch via
+    /// the `builtIns:` test seam.
+    func testBuiltInOverrideForRegisteredType() throws {
+        try writeConfig(modelType: "test_model")
         let resolved = try XCTUnwrap(
             ChatTemplateOverride.resolve(modelDirectory: tempDir, builtIns: testBuiltIns))
-        XCTAssertEqual(resolved.template, testBuiltIns["seed_oss"])
-        XCTAssertEqual(resolved.source, "built-in seed_oss")
+        XCTAssertEqual(resolved.template, testBuiltIns["test_model"])
+        XCTAssertEqual(resolved.source, "built-in test_model")
     }
 
     /// `model_type` matching is case-insensitive (`ModelConfigInfo` lowercases).
     func testBuiltInOverrideMatchesCaseInsensitively() throws {
-        try writeConfig(modelType: "SEED_OSS")
+        try writeConfig(modelType: "TEST_MODEL")
         let resolved = try XCTUnwrap(
             ChatTemplateOverride.resolve(modelDirectory: tempDir, builtIns: testBuiltIns))
-        XCTAssertEqual(resolved.template, testBuiltIns["seed_oss"])
+        XCTAssertEqual(resolved.template, testBuiltIns["test_model"])
     }
 
     /// A user file `macmlx.chat_template.jinja` takes precedence over a built-in
     /// override for the same `model_type` (built-in injected via the test seam).
     func testUserFileOverridesBuiltIn() throws {
-        try writeConfig(modelType: "seed_oss")
+        try writeConfig(modelType: "test_model")
         let custom = "{{ bos_token }}custom user template{{ eos_token }}"
         try writeUserOverride(custom)
         let resolved = try XCTUnwrap(
@@ -129,12 +132,12 @@ final class ChatTemplateOverrideTests: XCTestCase {
     /// rather than silently forcing an empty template. Here it falls through to
     /// the injected built-in.
     func testEmptyUserFileIsIgnored() throws {
-        try writeConfig(modelType: "seed_oss")
+        try writeConfig(modelType: "test_model")
         try writeUserOverride("")
         let resolved = try XCTUnwrap(
             ChatTemplateOverride.resolve(modelDirectory: tempDir, builtIns: testBuiltIns))
-        XCTAssertEqual(resolved.template, testBuiltIns["seed_oss"])
-        XCTAssertEqual(resolved.source, "built-in seed_oss")
+        XCTAssertEqual(resolved.template, testBuiltIns["test_model"])
+        XCTAssertEqual(resolved.source, "built-in test_model")
     }
 
     // MARK: - resolveDetailed: "never silent" diagnostics for a broken user file
@@ -155,7 +158,7 @@ final class ChatTemplateOverrideTests: XCTestCase {
     /// `skippedUserFileReason` reports why) and resolution falls back to the
     /// built-in for this `model_type`.
     func testUserFileNonUTF8IsSkippedWithDiagnosis() throws {
-        try writeConfig(modelType: "seed_oss")
+        try writeConfig(modelType: "test_model")
         // 0xFF and 0xFE are never valid UTF-8 lead bytes, so this cannot decode.
         let invalidUTF8 = Data([0xFF, 0xFE, 0x00])
         try invalidUTF8.write(to: tempDir.appendingPathComponent(ChatTemplateOverride.userOverrideFilename))
@@ -163,14 +166,14 @@ final class ChatTemplateOverrideTests: XCTestCase {
         let resolution = ChatTemplateOverride.resolveDetailed(
             modelDirectory: tempDir, builtIns: testBuiltIns)
         XCTAssertEqual(resolution.skippedUserFileReason, "not valid UTF-8")
-        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["seed_oss"])
-        XCTAssertEqual(resolution.resolved?.source, "built-in seed_oss")
+        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["test_model"])
+        XCTAssertEqual(resolution.resolved?.source, "built-in test_model")
     }
 
     /// A user file that exists but has no read permission is skipped and
     /// diagnosed as `"unreadable"`, falling back to the built-in.
     func testUserFileUnreadablePermsIsSkippedWithDiagnosis() throws {
-        try writeConfig(modelType: "seed_oss")
+        try writeConfig(modelType: "test_model")
         let userFile = tempDir.appendingPathComponent(ChatTemplateOverride.userOverrideFilename)
         try "{{ bos_token }}unreadable{{ eos_token }}".write(
             to: userFile, atomically: true, encoding: .utf8)
@@ -190,33 +193,33 @@ final class ChatTemplateOverrideTests: XCTestCase {
         let resolution = ChatTemplateOverride.resolveDetailed(
             modelDirectory: tempDir, builtIns: testBuiltIns)
         XCTAssertEqual(resolution.skippedUserFileReason, "unreadable")
-        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["seed_oss"])
-        XCTAssertEqual(resolution.resolved?.source, "built-in seed_oss")
+        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["test_model"])
+        XCTAssertEqual(resolution.resolved?.source, "built-in test_model")
     }
 
     /// `resolveDetailed` reports `"empty"` for an empty user file (the counterpart
     /// to `testEmptyUserFileIsIgnored`, which only checks the `resolve` value).
     func testUserFileEmptyIsSkippedWithDiagnosis() throws {
-        try writeConfig(modelType: "seed_oss")
+        try writeConfig(modelType: "test_model")
         try writeUserOverride("")
 
         let resolution = ChatTemplateOverride.resolveDetailed(
             modelDirectory: tempDir, builtIns: testBuiltIns)
         XCTAssertEqual(resolution.skippedUserFileReason, "empty")
-        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["seed_oss"])
+        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["test_model"])
     }
 
     /// A whitespace-only file is as unusable as a zero-byte one: accepting it
     /// would render a blank prompt with no diagnostic. It must take the same
     /// "empty" skip path as a truly empty file.
     func testUserFileWhitespaceOnlyIsSkippedWithDiagnosis() throws {
-        try writeConfig(modelType: "seed_oss")
+        try writeConfig(modelType: "test_model")
         try writeUserOverride("  \n\t\n  ")
 
         let resolution = ChatTemplateOverride.resolveDetailed(
             modelDirectory: tempDir, builtIns: testBuiltIns)
         XCTAssertEqual(resolution.skippedUserFileReason, "empty")
-        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["seed_oss"])
+        XCTAssertEqual(resolution.resolved?.template, testBuiltIns["test_model"])
     }
 
     /// When a broken user file's `model_type` has no built-in either, resolution

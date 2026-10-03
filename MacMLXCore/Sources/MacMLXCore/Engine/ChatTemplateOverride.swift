@@ -26,11 +26,12 @@ enum ChatTemplateOverride {
 
     /// Built-in template overrides keyed by lowercased `model_type`.
     ///
-    /// Currently EMPTY. swift-jinja 2.4.0 — which fixes huggingface/swift-jinja
-    /// #62 (integer-keyed object literals), #63 (literal `}}`), and #64
-    /// (`strip(arg)` argument handling), all reported by macMLX — renders the
-    /// Seed-OSS and Command R7B (Cohere2) checkpoint templates natively, so both
-    /// former built-ins were removed. The mechanism is retained for a future
+    /// Currently EMPTY. swift-jinja >= 2.4.2 — 2.4.0 fixed huggingface/swift-jinja
+    /// #62 (integer-keyed object literals), #63 (literal `}}`) and #64
+    /// (`strip(arg)` argument handling), all reported by macMLX, and 2.4.2 is the
+    /// first release that is also source-compatible with swift-transformers —
+    /// renders the Seed-OSS and Command R7B (Cohere2) checkpoint templates
+    /// natively, so both former built-ins were removed. The mechanism is retained for a future
     /// model whose own `chat_template` swift-jinja still cannot handle, and the
     /// user-file layer (see ``resolve``) stays available regardless.
     ///

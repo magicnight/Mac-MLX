@@ -10,6 +10,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
+  are gone.** The fixes macMLX reported upstream — integer-keyed object
+  literals (Seed-OSS), a literal `}}` (Command R7B) and `strip(arg)`
+  argument handling (Hunyuan) — are in 2.4.0, and 2.4.2 is the first release
+  that is also compatible with swift-transformers, whose floor moves to
+  1.3.4 to carry that requirement to every build. Every checkpoint's own
+  template now renders natively; a per-model `macmlx.chat_template.jinja`
+  file still overrides it. Prompts change in three places users may notice:
+  `tojson` now emits Python `json.dumps`-style output (tool descriptions in
+  every tool-carrying prompt); templates that use `{#-`/`-#}` comments (Llama
+  3.1, gpt-oss) get their whitespace rendered as Jinja does; and a Hunyuan
+  history turn with `<answer>` tags is stripped the way Python strips it. For
+  Command R7B, a request that carries `tools` now renders the checkpoint's
+  `tool_use` template instead of having tools silently dropped; macMLX has no
+  parser for the Command-R action markup it asks for, so tool calling on that
+  model is not supported (see `docs/model-support.md`).
+
+### Changed
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
   the fork used to carry are in that base, so it now carries two:
