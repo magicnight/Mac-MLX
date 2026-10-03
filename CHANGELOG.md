@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Releasing a prompt cache with a long cached sequence crashed the process.**
+  The prompt-cache trie stores one node per token, and letting the runtime
+  release that chain on its own nested one deallocation per token; a few
+  hundred levels overflowed the stack of the thread the cache actor runs on.
+  That is how `macmlx serve` died on SIGTERM after a chat, and how a model
+  swap or "Clear All KV Caches" could crash after a conversation of a few
+  hundred tokens. The trie now tears itself down with an explicit worklist;
+  a test releases a 200,000-token chain on a cooperative thread.
+
 ### Changed
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
