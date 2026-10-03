@@ -138,6 +138,8 @@ final class BatchDecodeCoreLogicTests: XCTestCase {
             XCTAssertEqual(outcome.finishReason, .length, "row \(row) terminal reason")
             XCTAssertEqual(outcome.usage?.completionTokens, 4, "row \(row) completion count")
             XCTAssertEqual(outcome.usage?.promptTokens, 3, "row \(row) prompt count")
+            // A batched row never consults the prompt cache: a known zero, not nil.
+            XCTAssertEqual(outcome.usage?.cachedPromptTokens, 0, "row \(row) cached count")
         }
     }
 

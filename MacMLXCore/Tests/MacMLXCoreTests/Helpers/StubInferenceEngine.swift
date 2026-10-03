@@ -8,9 +8,16 @@ public actor StubInferenceEngine: InferenceEngine {
     public private(set) var status: EngineStatus = .idle
     public private(set) var loadedModel: LocalModel?
     public let version = "stub-1"
+    /// What the terminal chunk reports as `TokenUsage.promptTokens` /
+    /// `.cachedPromptTokens`; a nil cache figure (the default) models an engine
+    /// that reported none.
+    private let promptTokens: Int
+    private let cachedPromptTokens: Int?
 
-    public init(engineID: EngineID) {
+    public init(engineID: EngineID, promptTokens: Int = 1, cachedPromptTokens: Int? = nil) {
         self.engineID = engineID
+        self.promptTokens = promptTokens
+        self.cachedPromptTokens = cachedPromptTokens
     }
 
     public func load(_ model: LocalModel) async throws {
@@ -27,12 +34,16 @@ public actor StubInferenceEngine: InferenceEngine {
     public nonisolated func generate(
         _ request: GenerateRequest
     ) -> AsyncThrowingStream<GenerateChunk, Error> {
-        AsyncThrowingStream { continuation in
+        let promptTokens = self.promptTokens
+        let cachedPromptTokens = self.cachedPromptTokens
+        return AsyncThrowingStream { continuation in
             continuation.yield(GenerateChunk(text: "stub-"))
             continuation.yield(GenerateChunk(
                 text: "response",
                 finishReason: .stop,
-                usage: TokenUsage(promptTokens: 1, completionTokens: 2)
+                usage: TokenUsage(
+                    promptTokens: promptTokens, completionTokens: 2,
+                    cachedPromptTokens: cachedPromptTokens)
             ))
             continuation.finish()
         }

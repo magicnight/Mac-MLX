@@ -1952,7 +1952,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             // their reported counts unchanged.
             usage = TokenUsage(
                 promptTokens: info.promptTokenCount + reusedPromptTokens,
-                completionTokens: info.generationTokenCount
+                completionTokens: info.generationTokenCount,
+                // The same reused count, reported on its own so a client can
+                // see how much of the prompt the cache served (0 on a MISS and
+                // on the paths that never consult the cache).
+                cachedPromptTokens: reusedPromptTokens
             )
         } else {
             infoReason = .stop

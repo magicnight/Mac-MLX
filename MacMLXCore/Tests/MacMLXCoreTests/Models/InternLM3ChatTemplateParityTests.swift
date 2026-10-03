@@ -8,8 +8,7 @@ import XCTest
 
 /// Render-parity gate proving InternLM3 needs NO built-in chat-template override: the
 /// checkpoint's OWN `chat_template` (shipped in `tokenizer_config.json`) renders
-/// byte-for-byte under swift-jinja — the Hunyuan V1 Dense / MiniCPM3 precedent, NOT
-/// the Seed-OSS / Cohere2 one.
+/// byte-for-byte under swift-jinja, as every port's does now.
 ///
 /// InternLM3's template is plain ChatML — `{{ bos_token }}` then, per message,
 /// `<|im_start|>role\ncontent<|im_end|>\n`, then an optional `<|im_start|>assistant\n`
