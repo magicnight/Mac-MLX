@@ -204,4 +204,38 @@ final class PromptTrieTests: XCTestCase {
         // Model A still resolves.
         XCTAssertEqual(trie.search(model: "A", tokens: [1, 2]).exact, [1, 2])
     }
+
+    // MARK: - Teardown
+
+    /// A stored sequence is a chain of one node per token, so releasing a trie
+    /// used to nest one `deinit` per token: a few hundred levels overflowed the
+    /// 512 KiB stack of the cooperative-pool thread the owning actor runs on,
+    /// which is how `macmlx serve` died on SIGTERM and the Track G smokes died
+    /// at teardown (SIGBUS in `PromptTrie.Node.deinit`). The teardown is now
+    /// an explicit worklist. This test releases a 200,000-token chain on a
+    /// cooperative thread; the only way it fails is by killing the runner.
+    func testDeepChainTearsDownWithoutRecursion() async {
+        let depth = 200_000
+        let built = await Task.detached(priority: .userInitiated) { () -> Int in
+            let trie = PromptTrie<Int>()
+            trie.add(model: "M", tokens: Array(0..<depth), value: 1)
+            // A side branch off the deep chain, so the worklist has to fan out
+            // as well as descend.
+            trie.add(model: "M", tokens: Array(0..<(depth / 2)) + [-1, -2, -3], value: 2)
+            let found = trie.search(model: "M", tokens: Array(0..<depth)).exact?.count ?? 0
+            return found
+            // `trie` is released here, on the cooperative thread.
+        }.value
+        XCTAssertEqual(built, depth)
+
+        // Dropping a whole subtree through `pop` pruning and through replacing
+        // the trie (the `clearAll` shape) must be just as safe.
+        let replaced = await Task.detached { () -> Bool in
+            var trie = PromptTrie<Int>()
+            trie.add(model: "M", tokens: Array(0..<depth), value: 1)
+            trie = PromptTrie<Int>()
+            return trie.search(model: "M", tokens: [0]).commonPrefix == 0
+        }.value
+        XCTAssertTrue(replaced)
+    }
 }

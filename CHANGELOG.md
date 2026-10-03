@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Releasing a prompt cache with a long cached sequence crashed the process.**
+  The prompt-cache trie stores one node per token, and letting the runtime
+  release that chain on its own nested one deallocation per token; a few
+  hundred levels overflowed the stack of the thread the cache actor runs on.
+  That is how `macmlx serve` died on SIGTERM after a chat, and how a model
+  swap or "Clear All KV Caches" could crash after a conversation of a few
+  hundred tokens. The trie now tears itself down with an explicit worklist;
+  a test releases a 200,000-token chain on a cooperative thread.
+
 ### Changed
 - **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
   are gone.** The fixes macMLX reported upstream — integer-keyed object
