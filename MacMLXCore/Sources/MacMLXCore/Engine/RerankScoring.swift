@@ -4,17 +4,20 @@ import Foundation
 
 /// Rank per-document scores descending and truncate to `topN`.
 ///
-/// The ranking core shared by BOTH `/v1/rerank` paths — the true
-/// cross-encoder (``RerankEngine`` raw logits) and the bi-encoder cosine
-/// fallback (`rerankByCosine`) — so they order and truncate identically and
-/// this logic is unit-testable in isolation from either scorer.
+/// The ranking core shared by BOTH `/v1/rerank` paths — the reranker
+/// (``RerankEngine``'s `Double` scores from `MLXRerankers`) and the
+/// bi-encoder cosine fallback (`rerankByCosine`, `Float`) — so they order and
+/// truncate identically and this logic is unit-testable in isolation from
+/// either scorer.
 ///
 /// `scores[i]` is document `i`'s relevance; the result is `(index, score)`
 /// pairs sorted by descending score. `sorted(by:)` is not guaranteed stable,
 /// so ties may order arbitrarily (acceptable — equal scores are equally
 /// relevant). When `topN` is provided and in range the result is truncated to
 /// the top `topN`; a negative or out-of-range `topN` returns the full ranking.
-func rankAndTruncate(scores: [Float], topN: Int? = nil) -> [(index: Int, score: Float)] {
+func rankAndTruncate<Score: Comparable>(
+    scores: [Score], topN: Int? = nil
+) -> [(index: Int, score: Score)] {
     let ranked = scores.enumerated()
         .map { (index: $0.offset, score: $0.element) }
         .sorted { $0.score > $1.score }
@@ -22,16 +25,6 @@ func rankAndTruncate(scores: [Float], topN: Int? = nil) -> [(index: Int, score: 
         return Array(ranked.prefix(topN))
     }
     return ranked
-}
-
-/// Logistic sigmoid mapping a raw cross-encoder relevance logit to `(0, 1)`.
-///
-/// Exposed as the API `relevance_score` for the cross-encoder path so callers
-/// get a bounded, Cohere/Jina-style score. Being strictly monotonic, it NEVER
-/// reorders what `rankAndTruncate` produced from the raw logits — it only
-/// rescales for display. Computed in `Double` for endpoint JSON.
-func rerankSigmoid(_ logit: Float) -> Double {
-    1.0 / (1.0 + Foundation.exp(-Double(logit)))
 }
 
 // MARK: - Bi-encoder rerank scoring
@@ -65,9 +58,8 @@ func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
 ///
 /// NOTE: This is a bi-encoder *approximation* of reranking — it reuses the
 /// embedding model + cosine similarity, scoring the query and each document
-/// independently. A true cross-encoder reranker (which scores every
-/// query-document pair jointly) is a from-scratch follow-up; no MLX checkout
-/// currently ships one.
+/// independently. Joint scoring is what ``RerankEngine`` does for `.reranker`
+/// checkpoints; this path stays for `.embedder` models.
 func rerankByCosine(
     query: [Float],
     documents: [[Float]],

@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
+  BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
+  checkpoint is loaded through upstream's factory, which reads `config.json`
+  and picks the implementation. Three families come with it: encoder
+  cross-encoders with a sequence-classification head (BERT, RoBERTa and
+  XLM-RoBERTa — `cross-encoder/ms-marco-*`, `BAAI/bge-reranker-base` and
+  `bge-reranker-v2-m3`), Qwen3 causal rerankers (`Qwen3-Reranker-*`, scored by
+  their yes/no logit margin) and Jina reranker v3 (`JinaForRanking`,
+  listwise). Verified against real checkpoints this time: ms-marco-MiniLM-L-6-v2
+  matches the PyTorch fp32 reference to within 0.03 on the logit scale
+  (worst 0.025 on a +8.85 logit, identical ordering), and
+  Qwen3-Reranker-0.6B-4bit puts the documents that answer the question above
+  the ones that do not; Jina v3 loads through the same code but was not run.
+  Detection learned the two new shapes: `JinaForRanking` is a reranker
+  outright, and a `qwen3` + `Qwen3ForCausalLM` checkpoint — byte-identical in
+  config to a chat model — is a reranker when its name contains `rerank`,
+  the same rule upstream applies. `relevance_score` is unchanged for BERT
+  rerankers (the sigmoid of the single logit) and is the model's normalized
+  0...1 relevance for Qwen3; Jina v3 reports a cosine similarity. Pairs are
+  now micro-batched (16 pairs or 8,192 token slots per forward pass) and
+  inputs are truncated to the model's context instead of one padded batch
+  of everything.
 
 ### Added
 - **Nested JSON schemas in `response_format`.** Structured output now

@@ -95,39 +95,38 @@ struct RerankScoringTests {
         // Out-of-range / negative topN returns the full ranking.
         #expect(rankAndTruncate(scores: scores, topN: 99).count == 3)
         #expect(rankAndTruncate(scores: scores, topN: -1).count == 3)
-        #expect(rankAndTruncate(scores: [], topN: 3).isEmpty)
-    }
-
-    // MARK: - rerankSigmoid
-
-    @Test
-    func sigmoidIsHalfAtZeroMonotonicAndBounded() {
-        #expect(abs(rerankSigmoid(0) - 0.5) < 1e-9)
-        // Strictly monotonic — never reorders the raw-logit ranking.
-        #expect(rerankSigmoid(-1) < rerankSigmoid(0))
-        #expect(rerankSigmoid(0) < rerankSigmoid(1))
-        // Saturating but bounded to [0, 1]. (At large magnitudes Double rounds
-        // the tails to exactly 1.0 / 0.0, so assert `<=` / `>=` at ±50 and use
-        // ±10 for the strictly-open interior bound.)
-        #expect(rerankSigmoid(50) <= 1.0 && rerankSigmoid(10) > 0.99)
-        #expect(rerankSigmoid(-50) >= 0.0 && rerankSigmoid(-10) < 0.01)
-        #expect(rerankSigmoid(10) < 1.0 && rerankSigmoid(-10) > 0.0)
+        #expect(rankAndTruncate(scores: [Float](), topN: 3).isEmpty)
     }
 
     // MARK: - HummingbirdServer.rerankResults (endpoint result shaping)
 
     @Test
     func rerankResultsAppliesScoreTransformAndPreservesRankOrder() {
-        // A ranked (index, rawScore) list as rankAndTruncate would produce.
-        let ranked: [(index: Int, score: Float)] = [(index: 2, score: 0.0), (index: 0, score: -1.0)]
+        // A ranked (index, rawScore) list as rankAndTruncate would produce,
+        // on the cosine path's Float scores with the Double(_) widening.
+        let ranked: [(index: Int, score: Float)] = [(index: 2, score: 0.25), (index: 0, score: -1.0)]
         let results = HummingbirdServer.rerankResults(
             ranked: ranked, documents: ["a", "b", "c"],
-            returnDocuments: false, scoreTransform: rerankSigmoid)
+            returnDocuments: false, scoreTransform: { Double($0) })
         #expect(results.map { $0.index } == [2, 0])
-        #expect(abs(results[0].relevanceScore - 0.5) < 1e-9)  // sigmoid(0)
-        #expect(results[1].relevanceScore < 0.5)              // sigmoid(-1)
+        #expect(abs(results[0].relevanceScore - 0.25) < 1e-9)
+        #expect(results[1].relevanceScore == -1.0)
         // Documents omitted when not requested.
         #expect(results.allSatisfy { $0.document == nil })
+    }
+
+    /// The reranker path hands `Double` scores straight through: the same
+    /// helpers rank them and expose them unchanged as `relevance_score`.
+    @Test
+    func rankAndTruncateAndRerankResultsWorkOnDoubleScores() {
+        let scores: [Double] = [0.000013, 0.999856, 0.999931]
+        let ranked = rankAndTruncate(scores: scores, topN: 2)
+        #expect(ranked.map { $0.index } == [2, 1])
+        let results = HummingbirdServer.rerankResults(
+            ranked: ranked, documents: ["a", "b", "c"],
+            returnDocuments: true, scoreTransform: { $0 })
+        #expect(results.map { $0.relevanceScore } == [0.999931, 0.999856])
+        #expect(results.map { $0.document } == ["c", "b"])
     }
 
     @Test

@@ -66,6 +66,84 @@ struct ModelLibraryManagerRerankerTests {
         #expect(models[0].format == .mlx)
     }
 
+    // MARK: - Qwen3 causal rerankers (name rule) and Jina reranker v3
+
+    /// `Qwen3-Reranker-*` ships a `config.json` identical to a Qwen3 chat
+    /// model's, so — exactly like the `MLXRerankers` factory — the name is the
+    /// signal: `qwen3` + `Qwen3ForCausalLM` + "rerank" in the name.
+    @Test
+    func qwen3CausalLMNamedRerankerDetectedAsReranker() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "Qwen3-Reranker-0.6B-4bit", modelType: "qwen3",
+            architectures: ["Qwen3ForCausalLM"])
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models[0].format == .reranker)
+    }
+
+    @Test
+    func qwen3RerankNameRuleIsCaseInsensitive() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "qwen3-RERANK-tiny", modelType: "qwen3",
+            architectures: ["Qwen3ForCausalLM"])
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models[0].format == .reranker)
+    }
+
+    /// The name rule is scoped to the Qwen3 causal shape: "rerank" in the
+    /// name of a plain BERT encoder changes nothing (it needs the
+    /// classification head), and a Qwen3 config without `Qwen3ForCausalLM`
+    /// stays a chat model even when named like a reranker.
+    @Test
+    func rerankInTheNameAloneDoesNotReclassifyOtherShapes() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "bge-reranker-lookalike", modelType: "bert",
+            architectures: ["BertModel"])
+        try writeModel(
+            in: temp.url, name: "qwen3-reranker-no-arch", modelType: "qwen3",
+            architectures: nil)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        let byName = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0.format) })
+        #expect(byName["bge-reranker-lookalike"] == .embedder)
+        #expect(byName["qwen3-reranker-no-arch"] == .mlx)
+    }
+
+    /// Jina reranker v3 declares `JinaForRanking`; its `model_type` is `qwen3`,
+    /// and nothing in its name is required.
+    @Test
+    func jinaForRankingDetectedAsRerankerRegardlessOfName() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "jina-v3", modelType: "qwen3",
+            architectures: ["JinaForRanking"])
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models[0].format == .reranker)
+    }
+
+    /// In the HuggingFace cache the directory is `snapshots/<sha>`, which
+    /// carries no name; the repo id (`models--mlx-community--Qwen3-Reranker-…`)
+    /// must drive the Qwen3 rule there.
+    @Test
+    func qwen3RerankerInHuggingFaceCacheDetectedByRepoID() async throws {
+        let temp = try RerankerTempDir()
+        let snapshot = temp.url
+            .appendingPathComponent("models--mlx-community--Qwen3-Reranker-0.6B-4bit")
+            .appendingPathComponent("snapshots")
+            .appendingPathComponent("5f32454")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: snapshot.appendingPathComponent("tokenizer.json"))
+        try Data("\u{00}".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+        let config: [String: Any] = ["model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]]
+        try JSONSerialization.data(withJSONObject: config)
+            .write(to: snapshot.appendingPathComponent("config.json"))
+        let models = await ModelLibraryManager().scanHuggingFaceCache(directories: [temp.url])
+        #expect(models.count == 1)
+        #expect(models.first?.id == "mlx-community/Qwen3-Reranker-0.6B-4bit")
+        #expect(models.first?.format == .reranker)
+    }
+
     @Test
     func lastArchitectureDecidesReranker() async throws {
         // HF lists the concrete task head last; a trailing

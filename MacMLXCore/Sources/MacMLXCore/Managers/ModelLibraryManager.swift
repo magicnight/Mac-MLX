@@ -54,10 +54,11 @@ public actor ModelLibraryManager {
 
             switch format {
             case .mlx:
-                // Peek `config.json` `model_type` — upgrade `.mlx` to
+                // Peek `config.json` — upgrade `.mlx` to `.reranker`,
                 // `.mlxVLM` (vision-language) or `.embedder` (text
-                // embedding) when the directory's model_type says so.
-                let upgradedFormat = upgradeFormat(directory: itemURL)
+                // embedding) when its contents (and, for Qwen3 rerankers,
+                // the directory name) say so.
+                let upgradedFormat = upgradeFormat(directory: itemURL, modelName: dirName)
                 let model = buildLocalModel(
                     dirName: dirName,
                     dirURL: itemURL,
@@ -166,7 +167,7 @@ public actor ModelLibraryManager {
                 let fileNames = fileURLs.map { $0.lastPathComponent }
                 guard ModelFormat.detect(in: fileNames) == .mlx else { continue }
 
-                let upgradedFormat = upgradeFormat(directory: snapshotDir)
+                let upgradedFormat = upgradeFormat(directory: snapshotDir, modelName: repoID)
                 let model = buildLocalModel(
                     dirName: repoID,
                     dirURL: snapshotDir,
@@ -450,16 +451,20 @@ public actor ModelLibraryManager {
         "nomic_bert",
     ]
 
-    /// Peek `config.json`'s `model_type` and upgrade `.mlx` to a more
-    /// specific format: `.mlxVLM` for a known vision-language family, or
-    /// `.embedder` for a known text-embedding family. Vision-language wins
-    /// when a `model_type` appears in both registries (e.g. `gemma3`).
-    /// Returns `.mlx` when the type matches neither.
+    /// Peek `config.json` and upgrade `.mlx` to a more specific format:
+    /// `.reranker` for a reranker checkpoint, `.mlxVLM` for a known
+    /// vision-language family, or `.embedder` for a known text-embedding
+    /// family. Vision-language wins when a `model_type` appears in both
+    /// registries (e.g. `gemma3`). Returns `.mlx` when nothing matches.
+    ///
+    /// `modelName` is the managed directory name or the Hub repo id — the
+    /// identifier a user sees — and is consulted only by the Qwen3 reranker
+    /// rule below, whose config is indistinguishable from a chat model's.
     ///
     /// Best-effort: any read or parse failure (missing file, malformed
     /// JSON, missing `model_type` key) falls back to `.mlx` — the scan
     /// must not blow up because of one unparseable config.
-    private func upgradeFormat(directory: URL) -> ModelFormat {
+    private func upgradeFormat(directory: URL, modelName: String) -> ModelFormat {
         let configURL = directory.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -477,11 +482,11 @@ public actor ModelLibraryManager {
         //
         // A `*ForSequenceClassification` architecture alone is NOT sufficient:
         // a genuine multi-class classifier (e.g. a 5-label sentiment BERT)
-        // carries the same architecture suffix but is NOT a reranker.
-        // `RerankEngine` always builds a single-logit `Linear(hidden, 1)`
-        // head, so a multi-label checkpoint's real `classifier.weight`
-        // (`[N, hidden]`, `N > 1`) would fail `verify: [.all]` with a
-        // cryptic load error rather than being cleanly routed elsewhere.
+        // carries the same architecture suffix but is NOT a reranker. (The
+        // `MLXRerankers` factory can score a multi-label head whose
+        // `id2label` names a positive class such as `relevant` or `yes`;
+        // routing those is a follow-up — today they stay on the embedder
+        // path rather than being guessed at.)
         // Gate on the EFFECTIVE label count: `num_labels` when present, else
         // `id2label`'s entry count. Real rerankers (ms-marco-MiniLM,
         // bge-reranker) omit `num_labels` but declare a single-entry
@@ -503,8 +508,27 @@ public actor ModelLibraryManager {
             // checks below (typically lands as `.embedder`, since reranker
             // and embedder checkpoints share `model_type`).
         }
+        // Jina reranker v3 declares itself through its architecture. Its
+        // `model_type` is `qwen3`, so without this rule it would be served
+        // as a chat model and answer with nonsense.
+        if let architectures = json["architectures"] as? [String],
+           architectures.contains("JinaForRanking") {
+            return .reranker
+        }
         guard let modelType = (json["model_type"] as? String)?.lowercased() else {
             return .mlx
+        }
+        // Qwen3 causal rerankers (`Qwen/Qwen3-Reranker-*` and their
+        // mlx-community conversions) ship a `config.json` byte-identical to a
+        // Qwen3 chat model's — `model_type` `qwen3`, `Qwen3ForCausalLM` — so
+        // the only signal is the name. This is the same rule the
+        // `MLXRerankers` factory applies before it will load one; it is
+        // restricted to this exact config shape so "rerank" in the name of
+        // anything else changes nothing.
+        if modelType == "qwen3",
+           (json["architectures"] as? [String])?.contains("Qwen3ForCausalLM") == true,
+           modelName.range(of: "rerank", options: .caseInsensitive) != nil {
+            return .reranker
         }
         if Self.knownVLMTypes.contains(modelType) {
             return .mlxVLM
