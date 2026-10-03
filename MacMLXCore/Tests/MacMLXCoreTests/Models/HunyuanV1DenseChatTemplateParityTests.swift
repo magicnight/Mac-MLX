@@ -8,28 +8,30 @@ import XCTest
 
 /// Render-parity gate proving Hunyuan V1 Dense needs NO built-in chat-template
 /// override: the checkpoint's OWN `chat_template.jinja` renders byte-for-byte
-/// under swift-jinja on the standard conversation path.
+/// under swift-jinja, on both the standard conversation path AND the historical
+/// `<answer>`-stripping branch.
 ///
-/// Unlike Seed-OSS (whose integer-keyed thinking-budget dict swift-jinja cannot
-/// parse, forcing `SeedOssChatTemplate`), the Hunyuan template uses only
-/// swift-jinja-supported constructs on the generation path — `namespace`, the
-/// message loop, string concatenation, `in`, `loop.last`, and tokenizer-injected
-/// `bos_token`/`eos_token`. This test renders the UNMODIFIED template (loaded from
-/// the fixture, exactly as it ships) via swift-jinja — the same engine
-/// swift-transformers drives in production, configured identically with
-/// `lstripBlocks: true, trimBlocks: true` — and asserts equality against renders
-/// captured from the ORIGINAL template by
+/// The Hunyuan template uses `namespace`, the message loop, string concatenation,
+/// `in`, `loop.last`, and tokenizer-injected `bos_token`/`eos_token` — all
+/// swift-jinja constructs. The one construct that once rendered differently,
+/// `content.split('<answer>')[-1].strip('</answer>').strip()` behind `'<answer>'
+/// in content and not loop.last` (a HISTORICAL assistant turn embedding `<answer>`
+/// tags), was blocked by swift-jinja 2.3.6's argument-ignoring `.strip()`;
+/// swift-jinja 2.4.0 fixes `strip(arg)` (huggingface/swift-jinja #64, reported by
+/// macMLX), so it now renders identically too. This test renders the UNMODIFIED
+/// template (loaded from the fixture, exactly as it ships) via swift-jinja — the
+/// same engine swift-transformers drives in production, configured identically
+/// with `lstripBlocks: true, trimBlocks: true` — and asserts equality against
+/// renders captured from the ORIGINAL template by
 /// `docs/reference/capture_hunyuan_v1_dense_chat_template.py` (jinja2,
 /// cross-checked == transformers `apply_chat_template`).
 ///
-/// SCOPE: the one construct swift-jinja renders differently —
-/// `content.split('<answer>')[-1].strip('</answer>').strip()`, where swift-jinja's
-/// `.strip()` trims whitespace only and ignores its `'</answer>'` argument — sits
-/// behind `'<answer>' in content and not loop.last`, i.e. a HISTORICAL assistant
-/// turn embedding `<answer>` tags. That branch is off the generation path; the
-/// fixture deliberately does not exercise it, so the standard path is proven
-/// byte-for-byte identical. A conversation replaying `<answer>`-tagged assistant
-/// history would diverge — if that ever matters, add a built-in override then.
+/// COVERAGE: the standard conversation path plus the `answer_history` case, which
+/// replays a non-last `<answer>`-tagged assistant turn to exercise the
+/// `strip('</answer>')` branch. (Seed-OSS's integer-keyed dict — huggingface/
+/// swift-jinja #62 — and Command R7B's literal `}}` — #63 — are likewise fixed in
+/// 2.4.0 and rendered natively by their own parity tests, so no model in the
+/// matrix needs a built-in override.)
 ///
 /// UNGATED — needs no model weights and no Metal, so it runs under both bare
 /// `swift test` and xcodebuild.
