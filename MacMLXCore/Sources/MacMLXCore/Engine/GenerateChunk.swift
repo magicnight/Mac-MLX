@@ -55,10 +55,18 @@ public enum FinishReason: String, Codable, Hashable, Sendable, CaseIterable {
 public struct TokenUsage: Codable, Hashable, Sendable {
     public let promptTokens: Int
     public let completionTokens: Int
+    /// How many of `promptTokens` were served from the prompt cache instead of
+    /// being prefilled — OpenAI `prompt_tokens_details.cached_tokens`, Anthropic
+    /// `cache_read_input_tokens`. `0` is a real miss; `nil` means the path that
+    /// produced this usage reported no figure, and the server then omits the
+    /// key rather than invent a zero. Default nil keeps existing call sites and
+    /// the synthesised `Codable` (which omits an absent key) compatible.
+    public let cachedPromptTokens: Int?
 
-    public init(promptTokens: Int, completionTokens: Int) {
+    public init(promptTokens: Int, completionTokens: Int, cachedPromptTokens: Int? = nil) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
+        self.cachedPromptTokens = cachedPromptTokens
     }
 
     public var totalTokens: Int { promptTokens + completionTokens }

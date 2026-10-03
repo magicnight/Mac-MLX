@@ -91,6 +91,19 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// (nil/absent ⇒ base model; an explicit change reloads the model with the
     /// new adapter). See `GenerateRequest.adapters`.
     let adapters: String?
+    /// OpenAI `stream_options`. Only `include_usage` is modelled: on a
+    /// streaming request that sets it, every chunk carries `"usage": null` and
+    /// one extra chunk — empty `choices`, populated `usage` — is sent before
+    /// `[DONE]`. That is the exact OpenAI contract, and what Apple's
+    /// `ChatCompletionsLanguageModel` (Foundation Models) and Xcode 27's
+    /// local-model provider send and parse. Ignored on a non-streaming
+    /// request, whose body already carries `usage`. Unknown keys inside the
+    /// object are ignored, as OpenAI ignores them.
+    let stream_options: StreamOptions?
+
+    struct StreamOptions: Decodable, Sendable {
+        let include_usage: Bool?
+    }
 }
 
 /// One OpenAI `tool_calls[]` entry on a replayed assistant turn:
@@ -142,6 +155,9 @@ private struct LegacyCompletionRequest: Decodable, Sendable {
     let kv_group_size: Int?
     let quantized_kv_start: Int?
     let adapters: String?
+    /// See `ChatCompletionRequest.stream_options` — honored on the legacy route
+    /// too, since it streams through the same responder.
+    let stream_options: ChatCompletionRequest.StreamOptions?
 }
 
 /// OpenAI multimodal content payload. Either a plain string (text-only
@@ -1655,7 +1671,8 @@ public actor HummingbirdServer {
                 kv_bits: legacy.kv_bits,
                 kv_group_size: legacy.kv_group_size,
                 quantized_kv_start: legacy.quantized_kv_start,
-                adapters: legacy.adapters
+                adapters: legacy.adapters,
+                stream_options: legacy.stream_options
             )
         }
 
@@ -1821,6 +1838,9 @@ public actor HummingbirdServer {
         // (acquire → swap → re-resolve engine, all under the lock) instead
         // of us doing it here, unlocked, ahead of time.
         let wantsStream = chatReq.stream ?? false
+        // `stream_options.include_usage` only means something on a stream; a
+        // non-streaming body already carries `usage`, so it is ignored there.
+        let includeUsage = wantsStream && (chatReq.stream_options?.include_usage ?? false)
 
         // A2d: route an eligible request to the continuous-batching path when a
         // seam is installed and accepts it. `submit` returning nil — no seam, a
@@ -1863,7 +1883,7 @@ public actor HummingbirdServer {
                 // to the batch responder's own `defer`. Neither responder marks
                 // `true` again — that would double-count.
                 if wantsStream {
-                    return batchStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream)
+                    return batchStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream, includeUsage: includeUsage)
                 } else {
                     return try await batchNonStreamingChatResponse(genRequest: genRequest, modelID: batchModelID, stream: batchStream)
                 }
@@ -1875,7 +1895,7 @@ public actor HummingbirdServer {
         }
 
         if wantsStream {
-            return try await streamingChatResponse(genRequest: genRequest)
+            return try await streamingChatResponse(genRequest: genRequest, includeUsage: includeUsage)
         } else {
             return try await nonStreamingChatResponse(genRequest: genRequest)
         }
@@ -2514,8 +2534,10 @@ public actor HummingbirdServer {
         let box = ChunkIteratorBox(stream)
         var fullText = ""
         var finishReason = "stop"
-        var promptTokens = 0
         var completionTokens = 0
+        // The terminal chunk's usage, kept whole so the cached-prompt figure
+        // travels with the counts (see `openAIUsageObject`).
+        var capturedUsage: TokenUsage?
         // Tool calls the model requested this turn (v0.5). Populated from the
         // terminal chunk when generation ends in `.toolCalls`; empty otherwise.
         var capturedToolCalls: [ToolCallRequest] = []
@@ -2544,7 +2566,7 @@ public actor HummingbirdServer {
                 case .chunk(let chunk):
                     fullText += chunk.text
                     if let usage = chunk.usage {
-                        promptTokens = usage.promptTokens
+                        capturedUsage = usage
                         completionTokens = usage.completionTokens
                     }
                     if let reason = chunk.finishReason {
@@ -2596,21 +2618,7 @@ public actor HummingbirdServer {
             }
         }
 
-        var usage: [String: Any] = [
-            "prompt_tokens": promptTokens,
-            "completion_tokens": completionTokens,
-            "total_tokens": promptTokens + completionTokens,
-        ]
-        // Non-standard OpenAI extension (D1), mirroring mlx-lm's Python
-        // server: accepted/proposed draft-token counts for this turn. Only
-        // present when speculative decoding actually ran — see
-        // `capturedSpeculativeDecoding`'s doc comment above.
-        if let speculativeDecoding = capturedSpeculativeDecoding {
-            usage["speculative_decoding"] = [
-                "proposed_tokens": speculativeDecoding.proposedTokens,
-                "accepted_tokens": speculativeDecoding.acceptedTokens,
-            ] as [String: Any]
-        }
+        let usage = openAIUsageObject(capturedUsage, speculativeDecoding: capturedSpeculativeDecoding)
 
         var choice: [String: Any] = [
             "index": 0,
@@ -2634,7 +2642,11 @@ public actor HummingbirdServer {
         return try jsonResponseAny(body)
     }
 
-    private func streamingChatResponse(genRequest: GenerateRequest) async throws -> Response {
+    /// - Parameter includeUsage: OpenAI `stream_options.include_usage` — when
+    ///   true every chunk carries `"usage": null` and a final usage-only chunk
+    ///   (empty `choices`) precedes `[DONE]`; only on a normally completed
+    ///   stream, never after an error or stall frame.
+    private func streamingChatResponse(genRequest: GenerateRequest, includeUsage: Bool) async throws -> Response {
         // A1: cheap pre-flight resolve check (no load, no lock) — reject
         // an unknown model with a real 404 before any streaming headers
         // are sent. The real (locked) resolve+load still happens inside
@@ -2660,6 +2672,11 @@ public actor HummingbirdServer {
 
         let responseBody = ResponseBody { writer in
             var completionTokens = 0
+            // B1: the terminal chunk's usage and speculative telemetry, for the
+            // usage-only chunk emitted before `[DONE]` when the client asked.
+            var terminalUsage: TokenUsage?
+            var terminalSpeculativeDecoding: SpeculativeDecodingUsage?
+            var finishedNormally = false
             // Track E: per-token logprobs not yet attached to an emitted frame (a
             // chunk fully buffered as a partial reasoning tag carries its logprobs
             // forward until the next frame flushes).
@@ -2701,6 +2718,7 @@ public actor HummingbirdServer {
                 loop: while true {
                     switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
                     case .finished:
+                        finishedNormally = true
                         break loop
                     case .stalled:
                         // SRV-4: no chunk for `stallTimeoutSeconds` — emit an
@@ -2714,7 +2732,13 @@ public actor HummingbirdServer {
                         // P3-4: accumulate the engine's real completion-token
                         // count (delivered on the terminal chunk's usage), not
                         // the number of SSE/NDJSON frames.
-                        if let usage = chunk.usage { completionTokens = usage.completionTokens }
+                        if let usage = chunk.usage {
+                            completionTokens = usage.completionTokens
+                            terminalUsage = usage
+                        }
+                        if let speculativeDecoding = chunk.speculativeDecoding {
+                            terminalSpeculativeDecoding = speculativeDecoding
+                        }
                         // Track E: accumulate this chunk's logprobs BEFORE any
                         // `continue` (a fully-buffered partial-tag chunk still
                         // carries logprobs for its tokens), attached to the next
@@ -2772,13 +2796,14 @@ public actor HummingbirdServer {
                                 pendingStreamLogprobs.removeAll()
                             }
                             for frameChoice in toolFrames {
-                                let payload: [String: Any] = [
+                                var payload: [String: Any] = [
                                     "id": completionID,
                                     "object": "chat.completion.chunk",
                                     "created": timestamp,
                                     "model": model,
                                     "choices": [frameChoice],
                                 ]
+                                if includeUsage { payload["usage"] = NSNull() }
                                 let jsonData = try JSONSerialization.data(withJSONObject: payload)
                                 let jsonStr = String(decoding: jsonData, as: UTF8.self)
                                 var buf = ByteBuffer()
@@ -2797,13 +2822,14 @@ public actor HummingbirdServer {
                             choice["logprobs"] = openAILogprobs(pendingStreamLogprobs)
                             pendingStreamLogprobs.removeAll()
                         }
-                        let payload: [String: Any] = [
+                        var payload: [String: Any] = [
                             "id": completionID,
                             "object": "chat.completion.chunk",
                             "created": timestamp,
                             "model": model,
                             "choices": [choice],
                         ]
+                        if includeUsage { payload["usage"] = NSNull() }
                         let jsonData = try JSONSerialization.data(withJSONObject: payload)
                         let jsonStr = String(decoding: jsonData, as: UTF8.self)
                         let sseChunk = "data: \(jsonStr)\n\n"
@@ -2819,6 +2845,12 @@ public actor HummingbirdServer {
                 var buf = ByteBuffer()
                 buf.writeString(errPayload)
                 try? await writer.write(buf)
+            }
+
+            if includeUsage, finishedNormally {
+                try await writeUsageChunk(
+                    &writer, id: completionID, created: timestamp, model: model,
+                    usage: openAIUsageObject(terminalUsage, speculativeDecoding: terminalSpeculativeDecoding))
             }
 
             var doneBuf = ByteBuffer()
@@ -2866,8 +2898,8 @@ public actor HummingbirdServer {
         let box = ChunkIteratorBox(stream)
         var fullText = ""
         var finishReason = "stop"
-        var promptTokens = 0
         var completionTokens = 0
+        var capturedUsage: TokenUsage?
         do {
             loop: while true {
                 switch try await nextGenerationStep(box, stallTimeout: stallTimeoutSeconds) {
@@ -2884,7 +2916,7 @@ public actor HummingbirdServer {
                 case .chunk(let chunk):
                     fullText += chunk.text
                     if let usage = chunk.usage {
-                        promptTokens = usage.promptTokens
+                        capturedUsage = usage
                         completionTokens = usage.completionTokens
                     }
                     if let reason = chunk.finishReason {
@@ -2909,11 +2941,7 @@ public actor HummingbirdServer {
         if let reasoning {
             message["reasoning_content"] = reasoning
         }
-        let usage: [String: Any] = [
-            "prompt_tokens": promptTokens,
-            "completion_tokens": completionTokens,
-            "total_tokens": promptTokens + completionTokens,
-        ]
+        let usage = openAIUsageObject(capturedUsage)
         let body: [String: Any] = [
             "id": completionID,
             "object": "chat.completion",
@@ -2940,7 +2968,8 @@ public actor HummingbirdServer {
     private func batchStreamingChatResponse(
         genRequest: GenerateRequest,
         modelID: String,
-        stream: AsyncThrowingStream<GenerateChunk, Error>
+        stream: AsyncThrowingStream<GenerateChunk, Error>,
+        includeUsage: Bool
     ) -> Response {
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
@@ -2949,6 +2978,8 @@ public actor HummingbirdServer {
 
         let responseBody = ResponseBody { writer in
             var completionTokens = 0
+            var terminalUsage: TokenUsage?
+            var finishedNormally = false
 
             // POOL-3: the "true" mark already happened in `handleChatCompletions`
             // BEFORE `submit` was called (MEDIUM#2). Only the "false" mark
@@ -2966,6 +2997,7 @@ public actor HummingbirdServer {
                 loop: while true {
                     switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
                     case .finished:
+                        finishedNormally = true
                         break loop
                     case .stalled:
                         // SRV-4: no chunk for the stall timeout — emit an in-band
@@ -2976,7 +3008,10 @@ public actor HummingbirdServer {
                         try? await writer.write(buf)
                         break loop
                     case .chunk(let chunk):
-                        if let usage = chunk.usage { completionTokens = usage.completionTokens }
+                        if let usage = chunk.usage {
+                            completionTokens = usage.completionTokens
+                            terminalUsage = usage
+                        }
                         let (reasoning, answer) = splitter.push(chunk.text)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
@@ -2996,13 +3031,14 @@ public actor HummingbirdServer {
                         if let reason = chunk.finishReason {
                             choice["finish_reason"] = reason.rawValue
                         }
-                        let payload: [String: Any] = [
+                        var payload: [String: Any] = [
                             "id": completionID,
                             "object": "chat.completion.chunk",
                             "created": timestamp,
                             "model": model,
                             "choices": [choice],
                         ]
+                        if includeUsage { payload["usage"] = NSNull() }
                         let jsonData = try JSONSerialization.data(withJSONObject: payload)
                         let jsonStr = String(decoding: jsonData, as: UTF8.self)
                         var buf = ByteBuffer()
@@ -3016,6 +3052,12 @@ public actor HummingbirdServer {
                 var buf = ByteBuffer()
                 buf.writeString(errPayload)
                 try? await writer.write(buf)
+            }
+
+            if includeUsage, finishedNormally {
+                try await writeUsageChunk(
+                    &writer, id: completionID, created: timestamp, model: model,
+                    usage: openAIUsageObject(terminalUsage))
             }
 
             var doneBuf = ByteBuffer()
@@ -3161,6 +3203,7 @@ public actor HummingbirdServer {
         var finishReason: FinishReason?
         var promptTokens = 0
         var completionTokens = 0
+        var cachedPromptTokens: Int?
         // Tool calls the model requested this turn. Populated from the terminal
         // chunk when generation ends in `.toolCalls`; empty otherwise.
         var capturedToolCalls: [ToolCallRequest] = []
@@ -3181,6 +3224,7 @@ public actor HummingbirdServer {
                     if let usage = chunk.usage {
                         promptTokens = usage.promptTokens
                         completionTokens = usage.completionTokens
+                        cachedPromptTokens = usage.cachedPromptTokens
                     }
                     if let reason = chunk.finishReason {
                         finishReason = reason
@@ -3229,10 +3273,9 @@ public actor HummingbirdServer {
             "model": genRequest.model,
             "stop_reason": anthropicStopReason(finishReason),
             "stop_sequence": NSNull(),
-            "usage": [
-                "input_tokens": promptTokens,
-                "output_tokens": completionTokens,
-            ] as [String: Any],
+            "usage": anthropicUsageObject(
+                inputTokens: promptTokens, outputTokens: completionTokens,
+                cacheReadInputTokens: cachedPromptTokens),
         ]
         return try jsonResponseAny(body)
     }
@@ -3268,6 +3311,7 @@ public actor HummingbirdServer {
         let responseBody = ResponseBody { writer in
             var completionTokens = 0
             var promptTokens = 0
+            var cachedPromptTokens: Int?
             var finishReason: FinishReason?
             // Tool calls the model requested this turn — emitted as `tool_use`
             // content blocks after the text block closes. Empty unless the
@@ -3355,6 +3399,7 @@ public actor HummingbirdServer {
                         if let usage = chunk.usage {
                             completionTokens = usage.completionTokens
                             promptTokens = usage.promptTokens
+                            cachedPromptTokens = usage.cachedPromptTokens
                         }
                         let (_, answer) = splitter.push(chunk.text)
                         var text = answer
@@ -3462,10 +3507,9 @@ public actor HummingbirdServer {
                     "stop_reason": anthropicStopReason(finishReason),
                     "stop_sequence": NSNull(),
                 ] as [String: Any],
-                "usage": [
-                    "input_tokens": promptTokens,
-                    "output_tokens": completionTokens,
-                ] as [String: Any],
+                "usage": anthropicUsageObject(
+                    inputTokens: promptTokens, outputTokens: completionTokens,
+                    cacheReadInputTokens: cachedPromptTokens),
             ])
 
             // 6. message_stop
@@ -4775,6 +4819,79 @@ private func anthropicToolUseBlock(_ call: ToolCallRequest) -> [String: Any] {
 /// `content` is empty when logprobs were requested but no tokens were generated.
 /// Free function (not actor-isolated) so it also runs inside the streaming
 /// `ResponseBody` closure — mirrors `openAIToolCallObject`.
+/// The OpenAI `usage` object for one completion. `prompt_tokens_details.
+/// cached_tokens` is present only when the engine reported a prompt-cache
+/// figure (`TokenUsage.cachedPromptTokens`): the single-stream MLX path always
+/// does (0 on a miss), a path with no cache leaves it nil and the key is
+/// omitted — never fabricated. The `speculative_decoding` extension mirrors
+/// mlx-lm's Python server and is present only when the draft path ran. A nil
+/// `usage` (an engine that reported none) yields zeros, as the non-streaming
+/// responders always have.
+private func openAIUsageObject(
+    _ usage: TokenUsage?,
+    speculativeDecoding: SpeculativeDecodingUsage? = nil
+) -> [String: Any] {
+    let promptTokens = usage?.promptTokens ?? 0
+    let completionTokens = usage?.completionTokens ?? 0
+    var object: [String: Any] = [
+        "prompt_tokens": promptTokens,
+        "completion_tokens": completionTokens,
+        "total_tokens": promptTokens + completionTokens,
+    ]
+    if let cached = usage?.cachedPromptTokens {
+        object["prompt_tokens_details"] = ["cached_tokens": cached] as [String: Any]
+    }
+    if let speculativeDecoding {
+        object["speculative_decoding"] = [
+            "proposed_tokens": speculativeDecoding.proposedTokens,
+            "accepted_tokens": speculativeDecoding.acceptedTokens,
+        ] as [String: Any]
+    }
+    return object
+}
+
+/// The Anthropic `usage` object. `cache_read_input_tokens` is present only when
+/// the engine reported a prompt-cache figure — the same rule as
+/// `openAIUsageObject`.
+private func anthropicUsageObject(
+    inputTokens: Int,
+    outputTokens: Int,
+    cacheReadInputTokens: Int?
+) -> [String: Any] {
+    var object: [String: Any] = [
+        "input_tokens": inputTokens,
+        "output_tokens": outputTokens,
+    ]
+    if let cacheReadInputTokens {
+        object["cache_read_input_tokens"] = cacheReadInputTokens
+    }
+    return object
+}
+
+/// B1: the usage-only chunk OpenAI sends before `[DONE]` when the request set
+/// `stream_options.include_usage` — same envelope as every other chunk, an
+/// EMPTY `choices` array, and the whole request's `usage`.
+private func writeUsageChunk(
+    _ writer: inout any ResponseBodyWriter,
+    id: String,
+    created: Int,
+    model: String,
+    usage: [String: Any]
+) async throws {
+    let payload: [String: Any] = [
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [] as [[String: Any]],
+        "usage": usage,
+    ]
+    let jsonData = try JSONSerialization.data(withJSONObject: payload)
+    var buf = ByteBuffer()
+    buf.writeString("data: \(String(decoding: jsonData, as: UTF8.self))\n\n")
+    try await writer.write(buf)
+}
+
 private func openAILogprobs(_ tokens: [TokenLogprob]) -> [String: Any] {
     let content: [[String: Any]] = tokens.map { token in
         [

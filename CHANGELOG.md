@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`stream_options.include_usage` on streaming chat completions.** When a
+  client sets it, every chunk carries `usage: null` and one usage-only chunk —
+  empty `choices`, the whole request's token counts — is sent before
+  `[DONE]`, exactly the OpenAI contract. Apple's Foundation Models
+  `ChatCompletionsLanguageModel` and Xcode 27's local-model provider both ask
+  for it. Honored on the batched path and the legacy `/v1/completions`
+  alias too; ignored on a non-streaming request, whose body already carries
+  usage.
+- **Prompt-cache hits are reported in usage.** The MLX engine now says how
+  much of the prompt the prompt cache served: `prompt_tokens_details.cached_tokens`
+  on OpenAI-shaped responses and `cache_read_input_tokens` on `/v1/messages`.
+  A path with no figure omits the key rather than inventing a zero.
+
 ### Changed
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes

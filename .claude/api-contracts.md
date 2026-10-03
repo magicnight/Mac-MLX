@@ -23,14 +23,19 @@ Request:
     {"role": "user", "content": "Hello"}
   ],
   "stream": true,
+  "stream_options": {"include_usage": true},
   "temperature": 0.7,
   "max_tokens": 2048
 }
 ```
 
-Streaming response (SSE):
+Streaming response (SSE). Without `stream_options.include_usage` no chunk
+carries a `usage` key; with it, every chunk carries `"usage": null` and one
+usage-only chunk (empty `choices`) precedes `[DONE]`:
 ```
-data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hi"},"index":0}]}
+data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hi"},"index":0}],"usage":null}
+
+data: {"id":"...","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"prompt_tokens_details":{"cached_tokens":10}}}
 
 data: [DONE]
 ```
@@ -49,10 +54,16 @@ Non-streaming response:
   "usage": {
     "prompt_tokens": 12,
     "completion_tokens": 8,
-    "total_tokens": 20
+    "total_tokens": 20,
+    "prompt_tokens_details": {"cached_tokens": 10}
   }
 }
 ```
+
+`prompt_tokens_details.cached_tokens` is how many prompt tokens the prompt
+cache served (0 on a miss). It is present only when the engine reported a
+figure; the Anthropic `/v1/messages` shape carries the same number as
+`cache_read_input_tokens`.
 
 ### GET /v1/models
 
