@@ -7,11 +7,15 @@ Native macOS LLM inference desktop app for Apple Silicon.
 Inspired by Swama's Swift-native approach, oMLX's feature depth,
 and LM Studio's product experience — wrapped in a first-class SwiftUI GUI.
 
-**Core differentiator: the only MLX tool whose inference engine itself is
-native Swift running in-process — native GUI + elegant CLI/TUI over one shared
-Swift core, zero Python runtime anywhere.** (Since oMLX v0.4.0 ships a native
-SwiftUI shell too, but over a Python core; "only native GUI" is no longer true
-and must not be claimed.)
+**Core differentiator: the whole product over one in-process Swift MLX core —
+native SwiftUI GUI, CLI/TUI, an always-on OpenAI/Anthropic/Ollama-compatible
+server, model library, benchmark, the tiered SSD KV cache and audio — in one
+dependency-free DMG with zero Python anywhere.** Two claims must NOT be made:
+"only native GUI" (oMLX v0.4+ ships a SwiftUI shell, over a Python core), and
+"only Swift in-process MLX engine" (Swama is Swift-native, and Apple's own
+`MLXFoundationModels`, tagged in mlx-swift-lm 3.32.3, makes in-process Swift
+MLX inference a first-party library capability). The defensible claim is the
+combination, not the engine.
 
 ## Target Users
 
@@ -24,7 +28,7 @@ and must not be claimed.)
 | Tool | Strength | Gap we fill |
 |------|---------|-------------|
 | Swama | Swift-native inference, no GUI | We add GUI + TUI |
-| oMLX | Feature depth | We add native GUI, better UX |
+| oMLX | Feature depth, Python core | Zero-Python single DMG, native chat app, CLI/TUI |
 | LM Studio | Product polish | We add MLX-native, not GGUF |
 | Ollama | CLI simplicity | We add GUI + MLX engine |
 | SwiftLM | 100B+ MoE performance | We add all UX layers on top |
@@ -45,8 +49,8 @@ Both share `MacMLXCore` Swift package (inference, models, settings, HTTP server)
 ### Core
 - Language: **Swift 6** (strict concurrency)
 - Inference default: **mlx-swift-lm** (Apple official SPM package, in-process)
-- Inference optional: **SwiftLM** binary (100B+ MoE, subprocess)
-- Inference optional: **mlx-lm Python** (max compatibility, subprocess)
+- Inference optional: **SwiftLM** binary (100B+ MoE, subprocess) — not shipped, reopenable (#12)
+- Inference optional: **mlx-lm Python** (max compatibility, subprocess) — not shipped, reopenable (#13)
 - HTTP server: **Hummingbird** (Swift native, OpenAI-compatible API)
 - Auto-update: **Sparkle 2.x** (EdDSA signed)
 - Logging: **Pulse** (Swift) + **Rich** (Python engine side)
@@ -60,7 +64,7 @@ Both share `MacMLXCore` Swift package (inference, models, settings, HTTP server)
 - TUI framework: **SwiftTUI** (rensbreur/SwiftTUI)
 - Distribution: **Homebrew tap** + bundled with DMG
 
-### Python Engine (optional)
+### Python Engine (optional, not shipped)
 - Runtime: **Python 3.13** (managed by uv)
 - Package manager: **uv** (never pip)
 - Linter: **ruff**
@@ -100,10 +104,14 @@ Feature specs:
 - Benchmark　　　　 → `.claude/features/benchmark.md`
 - CLI + TUI　　　　 → `.claude/features/cli-tui.md`
 
-## v0.1 Scope
+## Scope
 
-Only implement items marked `v0.1` in each feature file.
-Everything else: add `// TODO: v0.2` comment and skip.
+The project is past v0.9. The **Roadmap** section of `README.md` is the single
+source of truth for what ships next, and `CHANGELOG.md` for what shipped. The
+`.claude/features/*.md` files are the v0.1 design baseline: their `v0.1`
+markers are historical, so never down-scope work to them and never add
+`// TODO: v0.2` markers. Plan documents under `docs/superpowers/` are working
+notes, not commitments.
 
 ## Universal Coding Rules
 
