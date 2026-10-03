@@ -9,17 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-- **Releasing a prompt cache with a long cached sequence crashed the process.**
-  The prompt-cache trie stores one node per token, and letting the runtime
-  release that chain on its own nested one deallocation per token; a few
-  hundred levels overflowed the stack of the thread the cache actor runs on.
-  That is how `macmlx serve` died on SIGTERM after a chat, and how a model
-  swap or "Clear All KV Caches" could crash after a conversation of a few
-  hundred tokens. The trie now tears itself down with an explicit worklist;
-  a test releases a 200,000-token chain on a cooperative thread.
 
 ### Added
+- **Nested JSON schemas in `response_format`.** Structured output now
+  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
+  of objects and arrays of arrays), `$ref` to the root's `$defs` or
+  `definitions`, and a string `const` — the shapes Apple's Foundation Models
+  client sends for nested `@Generable` types. `examples` and `$comment` are
+  accepted and ignored anywhere, like `description`, `title` and `default`;
+  `x-order` is accepted and ignored on object schemas only (the root and
+  nested objects), not on arrays, scalars or next to `$ref`. A schema may
+  nest at most 32 containers deep; after `$ref` expansion it may hold at most
+  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
+  values, and `minItems` may not exceed 65,536. A recursive schema is a 400,
+  since nothing would bound its documents. Still unsupported: `null` and
+  unions, `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII
+  keys or enum values (Apple's TripPlanner sample hits the last one).
 - **`stream_options.include_usage` on streaming chat completions.** When a
   client sets it, every chunk carries `usage: null` and one usage-only chunk —
   empty `choices`, the whole request's token counts — is sent before
@@ -42,7 +47,61 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (cross-origin browser callers, which the server otherwise answers without
   credentials); native clients see it.
 
+### Fixed
+- **Releasing a prompt cache with a long cached sequence crashed the process.**
+  The prompt-cache trie stores one node per token, and letting the runtime
+  release that chain on its own nested one deallocation per token; a few
+  hundred levels overflowed the stack of the thread the cache actor runs on.
+  That is how `macmlx serve` died on SIGTERM after a chat, and how a model
+  swap or "Clear All KV Caches" could crash after a conversation of a few
+  hundred tokens. The trie now tears itself down with an explicit worklist;
+  a test releases a 200,000-token chain on a cooperative thread.
+- **A string escape could cut a structured-output document short.** The
+  schema automaton checked the surrogate range of a `\u` escape only at its
+  fourth digit, so `\uDC`–`\uDF` outside a pair and `\uD83D\u00` were
+  accepted although no byte could follow them; generation then ended on a
+  forced EOS with a truncated document. Such an escape is now refused at the
+  first digit that rules out every completion.
+- **Structured output on thinking models.** Found by driving a live Qwen3.6
+  checkpoint through Apple's Foundation Models client. First, a streaming
+  `response_format` request returned its whole JSON answer as
+  `reasoning_content`: the stream was seeded as "inside a think block" because
+  the rendered prompt opens one, but a constrained generation is JSON from its
+  first byte and can never be reasoning. Second, once every declared key had
+  been emitted the schema automaton still accepted a comma, after which only
+  whitespace was legal, so the model could never close the object and ran to
+  `max_tokens` emitting blanks. A constrained request now also renders its
+  chat template with `enable_thinking` off, so a Qwen3-style template puts
+  the model in answer mode instead of opening a think block it cannot close,
+  and the reasoning splitter is bypassed entirely, so a think tag that happens
+  to sit inside a JSON string value is left alone as data.
+- **A sorted quantized MoE product on a ragged K returned mostly garbage**
+  on M5 hardware: at group size 32 with a hidden or MoE-intermediate size
+  that is 32 mod 64, the NAX kernel bounded its K tail by the full tile and
+  zeroed the wrong axis, corrupting 92–97% of the output
+  (`ml-explore/mlx#4009`). Carried on the fork with a regression test.
+- **The quantized MoE gather path could not compile its kernel under JIT**
+  on M5 hardware: two kernel-name strings carried a trailing underscore the
+  instantiated kernels do not have (`mlx#4372`, the half of that fix an
+  earlier triage had excluded by title). Fixed by the new base.
+- Kernels now compile under the Metal 4.1 language version that core
+  v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
+
 ### Changed
+- **`response_format` schemas: keywords nothing enforces are now a 400 at the
+  root too.** The root object used to accept `allOf`, `anyOf`,
+  `minProperties`, `patternProperties` and any other keyword and enforce
+  none of them. It now answers `unsupported schema feature: unsupported
+  schema keyword '<name>' at the schema root`, as properties always have. A
+  type array such as `["string","null"]` is now reported as an unsupported
+  feature rather than an invalid `response_format`, on object and array
+  schemas as on scalars. A flat root with more than 4,096 properties is now a
+  400 (`schema too large`), and so is a flat enum of more than 65,536 values
+  or a schema with more than 4 MiB of property names and values; all of these
+  used to be accepted. A `required` list that names a property twice is now a
+  400 (JSON Schema requires its entries to be unique). `deprecated`,
+  `readOnly` and `writeOnly` are accepted and ignored everywhere; on a
+  property they used to be a 400.
 - **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
   are gone.** The fixes macMLX reported upstream — integer-keyed object
   literals (Seed-OSS), a literal `}}` (Command R7B) and `strip(arg)`
@@ -76,32 +135,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
   v0.1.3 plus two one-line compatibility commits) because no released
   version builds against mlx-swift-lm 3.32.3.
-
-### Fixed
-- **Structured output on thinking models.** Found by driving a live Qwen3.6
-  checkpoint through Apple's Foundation Models client. First, a streaming
-  `response_format` request returned its whole JSON answer as
-  `reasoning_content`: the stream was seeded as "inside a think block" because
-  the rendered prompt opens one, but a constrained generation is JSON from its
-  first byte and can never be reasoning. Second, once every declared key had
-  been emitted the schema automaton still accepted a comma, after which only
-  whitespace was legal, so the model could never close the object and ran to
-  `max_tokens` emitting blanks. A constrained request now also renders its
-  chat template with `enable_thinking` off, so a Qwen3-style template puts
-  the model in answer mode instead of opening a think block it cannot close,
-  and the reasoning splitter is bypassed entirely, so a think tag that happens
-  to sit inside a JSON string value is left alone as data.
-- **A sorted quantized MoE product on a ragged K returned mostly garbage**
-  on M5 hardware: at group size 32 with a hidden or MoE-intermediate size
-  that is 32 mod 64, the NAX kernel bounded its K tail by the full tile and
-  zeroed the wrong axis, corrupting 92–97% of the output
-  (`ml-explore/mlx#4009`). Carried on the fork with a regression test.
-- **The quantized MoE gather path could not compile its kernel under JIT**
-  on M5 hardware: two kernel-name strings carried a trailing underscore the
-  instantiated kernels do not have (`mlx#4372`, the half of that fix an
-  earlier triage had excluded by title). Fixed by the new base.
-- Kernels now compile under the Metal 4.1 language version that core
-  v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE

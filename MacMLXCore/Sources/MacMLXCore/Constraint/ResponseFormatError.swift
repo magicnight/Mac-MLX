@@ -5,13 +5,15 @@
 /// ``description`` is the client-facing message.
 public enum ResponseFormatError: Error, Equatable, Sendable, CustomStringConvertible {
     /// A structurally valid request that asks for a feature outside the
-    /// supported subset (nested objects/arrays, combinators, non-object roots,
-    /// …). Reported verbatim so a client learns exactly what to drop — never
-    /// silently downgraded.
+    /// supported subset (combinators, `null` and type arrays, numeric or string
+    /// bounds, recursive or over-deep schemas, non-object roots, an unknown
+    /// keyword, …). Reported verbatim, with the property path, so a client
+    /// learns exactly what to drop — never silently downgraded.
     case unsupportedFeature(String)
 
     /// A malformed `response_format` (wrong JSON shapes, an undeclared required
-    /// property, an empty enum, …).
+    /// property, an empty enum, a `$ref` that resolves to nothing, `minItems`
+    /// above `maxItems`, …).
     case invalidFormat(String)
 
     public var description: String {

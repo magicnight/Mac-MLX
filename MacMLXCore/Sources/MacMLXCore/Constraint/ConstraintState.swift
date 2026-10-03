@@ -15,8 +15,9 @@ public enum ConstraintState: Sendable {
     ///
     /// - Parameters:
     ///   - format: the validated constraint.
-    ///   - maxDepth: nesting cap for the generic JSON automaton (ignored by the
-    ///     flat-object schema automaton).
+    ///   - maxDepth: nesting cap for the generic JSON automaton. The schema
+    ///     automaton ignores it: its nesting is bounded by the compiled schema
+    ///     (``ResponseFormatDecoder`` caps that at 32 open containers).
     public static func initial(for format: ResponseFormat, maxDepth: Int = 64) -> ConstraintState {
         switch format {
         case .jsonObject:

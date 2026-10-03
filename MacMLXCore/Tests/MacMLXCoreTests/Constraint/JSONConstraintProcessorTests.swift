@@ -126,6 +126,90 @@ struct JSONConstraintProcessorDecisionTests {
         #expect(JSONConstraintProcessor.selectLegalToken(
             state: atValue, table: table, descendingLogitOrder: [0, 2, 1]) == 1)
     }
+
+    // MARK: schema (C2) decisions — nested objects and arrays
+
+    private func schemaState(_ object: JSONSchemaObject, after prefix: String) throws -> ConstraintState {
+        try #require(ConstraintState.schema(SchemaConstraintState(schema: object)).walk(Array(prefix.utf8)))
+    }
+
+    private func tags(minItems: Int, maxItems: Int?) -> JSONSchemaObject {
+        JSONSchemaObject(
+            properties: [.init(name: "tags", type: .array(items: .string, minItems: minItems, maxItems: maxItems))],
+            required: [])
+    }
+
+    /// A full array refuses a comma, even when the comma token ranks first;
+    /// the token that closes the array wins. The comma token ends at the comma,
+    /// so only the comma guard can refuse it (a token that also opened the
+    /// next item would be refused by the item-start bound as well).
+    @Test
+    func fullArrayRefusesAnotherItem() throws {
+        let state = try schemaState(tags(minItems: 0, maxItems: 1), after: "{\"tags\":[\"a")
+        let table = table(["\",", "\"]", "\"]}"])
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 1, 2]) == 1)
+    }
+
+    /// Below `minItems` the array cannot close; another item wins.
+    @Test
+    func arrayBelowMinimumRefusesToClose() throws {
+        let state = try schemaState(tags(minItems: 2, maxItems: nil), after: "{\"tags\":[\"a")
+        let table = table(["\"]", "\",\""])
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 1]) == 1)
+    }
+
+    /// With the only key emitted, a comma is refused and the close wins (C1).
+    @Test
+    func singleKeyObjectRefusesAComma() throws {
+        let object = JSONSchemaObject(properties: [.init(name: "a", type: .string)], required: [])
+        let state = try schemaState(object, after: "{\"a\":\"x")
+        let table = table(["\",", "\"}"])
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 1]) == 1)
+    }
+
+    /// EOS is legal only once the root object has closed, not when an inner
+    /// object does.
+    @Test
+    func stopTokenWaitsForTheRootToClose() throws {
+        let inner = JSONSchemaObject(properties: [.init(name: "k", type: .boolean)], required: [])
+        let object = JSONSchemaObject(properties: [.init(name: "o", type: .object(inner))], required: [])
+        let table = table(["}", "</s>"], stop: [1])
+        let innerClosed = try schemaState(object, after: "{\"o\":{\"k\":true}")
+        #expect(!innerClosed.isComplete)
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: innerClosed, table: table, descendingLogitOrder: [1, 0]) == 0)
+        let rootClosed = try schemaState(object, after: "{\"o\":{\"k\":true}}")
+        #expect(rootClosed.isComplete)
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: rootClosed, table: table, descendingLogitOrder: [1, 0]) == 1)
+    }
+
+    /// A full array where the vocabulary offers only another item or garbage:
+    /// no legal token, which is the processor's forced-EOS path.
+    @Test
+    func fullArrayWithNoLegalTokenSelectsNothing() throws {
+        let state = try schemaState(tags(minItems: 0, maxItems: 1), after: "{\"tags\":[\"a\"")
+        let table = table([",\"", "x"])
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 1]) == nil)
+    }
+
+    /// An object item counts against `maxItems` when its `{` opens it, so a
+    /// second item is refused after the first closes.
+    @Test
+    func objectItemsCountAgainstMaxItems() throws {
+        let item = JSONSchemaObject(properties: [.init(name: "id", type: .integer)], required: ["id"])
+        let object = JSONSchemaObject(
+            properties: [.init(name: "items", type: .array(items: .object(item), minItems: 1, maxItems: 1))],
+            required: [])
+        let state = try schemaState(object, after: "{\"items\":[{\"id\":1")
+        let table = table(["},{", "}]}"])
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 1]) == 1)
+    }
 }
 
 // MARK: - JSONConstraintProcessor MLXArray masking (gated, local-only)

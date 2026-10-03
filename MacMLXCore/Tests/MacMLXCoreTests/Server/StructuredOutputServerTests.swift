@@ -70,6 +70,71 @@ struct StructuredOutputServerTests {
         #expect(message.contains("nested object"))
     }
 
+    /// A nested schema as Apple's framework emits it (`$defs`, `$ref`, an
+    /// integer array, `x-order`, `required: []`) is accepted.
+    @Test
+    func acceptsNestedGenerableSchema() async throws {
+        let (server, _) = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_940)
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/v1/chat/completions"))
+
+        let fixture = try StructuredOutputFixtures.data("fm_generable_schemas_fixture")
+        let schemas = try #require(try JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        let explicit = try #require(schemas["Explicit"])
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "hi"]],
+            "stream": false,
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": ["name": "Explicit", "strict": true, "schema": explicit],
+            ],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["object"] as? String == "chat.completion")
+    }
+
+    /// A recursive schema has no bounded documents: a 400 that says so.
+    @Test
+    func rejectsRecursiveSchemaWith400() async throws {
+        let (server, _) = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_950)
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/v1/chat/completions"))
+
+        let node: [String: Any] = [
+            "type": "object",
+            "properties": ["next": ["$ref": "#/$defs/Node"]],
+        ]
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "hi"]],
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "List",
+                    "schema": [
+                        "type": "object",
+                        "properties": ["head": ["$ref": "#/$defs/Node"]],
+                        "$defs": ["Node": node],
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as [String: Any],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+        let message = try #require(error["message"] as? String)
+        #expect(message.contains("unsupported schema feature"))
+        #expect(message.contains("recursive schema"))
+    }
+
     @Test
     func acceptsJsonObjectResponseFormat() async throws {
         let (server, _) = try await loadedStubServer()

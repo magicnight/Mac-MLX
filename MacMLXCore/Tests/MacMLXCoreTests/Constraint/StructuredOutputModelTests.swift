@@ -27,6 +27,9 @@ import XCTest
 ///  - **C2** — under a small object schema (2 typed fields + a string enum),
 ///    the output parses AND conforms: only declared keys, required present,
 ///    values of the declared types, enum value in range.
+///  - **C2 nested** — under Apple's TripPlanner schema (nested objects,
+///    arrays with exact counts, `$ref`), compiled by the decoder, the output
+///    satisfies the independent reference validator.
 ///  - **Throughput** — constrained vs unconstrained tok/s is printed for the
 ///    record (target < 15% loss on the greedy fast path; informational).
 ///  - **Real vocabulary** — the per-model token table + grammar mask classify a
@@ -151,6 +154,41 @@ final class StructuredOutputModelTests: XCTestCase {
         if let role = object["role"] as? String {
             XCTAssertTrue(["admin", "user", "guest"].contains(role), "'role' out of enum in \(object)")
         }
+    }
+
+    // MARK: - C2: nested schema
+
+    /// Apple's TripPlanner `Itinerary` schema, compiled by the decoder (minus
+    /// its one non-ASCII enum value): root `$defs`, `$ref` as array items,
+    /// exact item counts and an enum two arrays deep. The output must satisfy
+    /// the independent ``ReferenceSchemaValidator``, not just parse.
+    func testC2NestedConformsToSchema() async throws {
+        let (modelID, directory) = try gateAndResolveModel()
+        let schema = try StructuredOutputFixtures.compile(StructuredOutputFixtures.asciiItinerary())
+        let engine = MLXSwiftEngine()
+        try await engine.load(localModel(id: modelID, directory: directory))
+
+        let request = GenerateRequest(
+            model: modelID,
+            messages: [ChatMessage(
+                role: .user,
+                content: "Plan a three-day trip to Mount Fuji for someone who loves food and hiking. "
+                    + "Give it a title, a description and a rationale, and three days, each with a title, "
+                    + "a subtitle, a destination and three activities."
+            )],
+            parameters: GenerationParameters(temperature: 0, topP: 1.0, maxTokens: 2048, stream: true),
+            templateKwargs: ["enable_thinking": .bool(false)],
+            responseFormat: .jsonSchema(schema)
+        )
+        let (text, tokens) = try await run(engine, request)
+        print("STRUCTURED_NESTED model=\(modelID) completion_tokens=\(tokens.map(String.init) ?? "?") output=\(text)")
+
+        XCTAssertTrue(
+            ReferenceSchemaValidator.validate(Array(text.utf8), schema),
+            "output does not conform to the itinerary schema: \(text)")
+        XCTAssertNoThrow(
+            try JSONSerialization.jsonObject(with: Data(text.utf8)),
+            "output must parse with JSONSerialization: \(text)")
     }
 
     // MARK: - Throughput (informational)
