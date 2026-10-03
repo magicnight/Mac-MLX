@@ -139,12 +139,14 @@ struct JSONConstraintProcessorDecisionTests {
             required: [])
     }
 
-    /// A full array refuses the token that would open another item, even when
-    /// it ranks first; the token that closes the array wins.
+    /// A full array refuses a comma, even when the comma token ranks first;
+    /// the token that closes the array wins. The comma token ends at the comma,
+    /// so only the comma guard can refuse it (a token that also opened the
+    /// next item would be refused by the item-start bound as well).
     @Test
     func fullArrayRefusesAnotherItem() throws {
         let state = try schemaState(tags(minItems: 0, maxItems: 1), after: "{\"tags\":[\"a")
-        let table = table(["\",\"", "\"]", "\"]}"])
+        let table = table(["\",", "\"]", "\"]}"])
         #expect(JSONConstraintProcessor.selectLegalToken(
             state: state, table: table, descendingLogitOrder: [0, 1, 2]) == 1)
     }

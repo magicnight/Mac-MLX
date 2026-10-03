@@ -496,6 +496,57 @@ struct SchemaConstraintStateTests {
         #expect(!accepts(document.replacingOccurrences(of: "\"rationale\":\"R\",", with: ""), trip))
     }
 
+    // MARK: Hand-built schemas
+
+    /// Shapes only a hand-built schema can have (the decoder rejects both)
+    /// keep their old meaning: a name declared twice keeps its first
+    /// declaration, and a required name that is not declared can never be
+    /// satisfied, so the object never closes.
+    @Test
+    func handBuiltSchemaEdgeCases() {
+        let duplicate = schema([("a", .string), ("a", .integer)])
+        #expect(accepts("{\"a\":\"x\"}", duplicate))
+        #expect(!accepts("{\"a\":1}", duplicate))
+        #expect(!accepts("{\"a\":\"x\",\"a\":\"y\"}", duplicate))
+        #expect(!accepts("{\"a\":\"x\",\"a\":1}", duplicate))
+
+        let undeclared = schema([("a", .string)], required: ["zzz"])
+        #expect(walk("{", undeclared) != nil)
+        #expect(walk("{}", undeclared) == nil)
+        #expect(walk("{\"a\":\"x\"}", undeclared) == nil)
+    }
+
+    /// The member set behind emitted keys and candidates. Its `==` and hash
+    /// must be semantic (no trailing empty word), or equal positions would
+    /// compare unequal.
+    @Test
+    func propertyMaskSetAlgebra() {
+        func mask(_ members: [Int]) -> PropertyMask {
+            var result = PropertyMask()
+            for member in members { result.insert(member) }
+            return result
+        }
+        let mixed = mask([0, 63, 64, 127, 128, 200])
+        for member in [0, 63, 64, 127, 128, 200] { #expect(mixed.contains(member)) }
+        for member in [1, 62, 65, 126, 129, 199, 201, 1_000] { #expect(!mixed.contains(member)) }
+        #expect(mixed.first(where: { $0 > 63 }) == 64)
+        #expect(mixed.first(where: { $0 > 200 }) == nil)
+        #expect(mixed.filtered { $0 >= 128 } == mask([128, 200]))
+
+        let lowOnly = mixed.subtracting(mask([64, 127, 128, 200]))
+        #expect(lowOnly == mask([0, 63]))
+        #expect(lowOnly.high.isEmpty)
+        #expect(lowOnly.hashValue == mask([0, 63]).hashValue)
+        #expect(mixed.subtracting(mixed).isEmpty)
+
+        #expect(mask([3, 65]).isSubset(of: mask([3, 65, 100])))
+        #expect(!mask([3, 66]).isSubset(of: mask([3, 65, 100])))
+        #expect(PropertyMask.all(count: 0).isEmpty)
+        #expect(PropertyMask.all(count: 64) == mask(Array(0..<64)))
+        #expect(PropertyMask.all(count: 130) == mask(Array(0..<130)))
+        #expect(!PropertyMask.all(count: 65).contains(65))
+    }
+
     // MARK: Equality
 
     /// States are equal at the same position of equal schemas, even when the
