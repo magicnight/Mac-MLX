@@ -68,8 +68,8 @@ The Anthropic `/v1/messages` shape reports the same figure as
 that carries an `Origin` header (a cross-origin browser caller), because the
 figure is a prefix oracle against every cached prompt.
 
-`max_completion_tokens` is accepted as the newer spelling of `max_tokens`;
-`max_tokens` wins when both are present.
+`max_completion_tokens` is accepted as the newer spelling of `max_tokens` and
+wins when both are present (the precedence mlx-lm's and vLLM's servers use).
 
 ### GET /v1/models
 

@@ -90,7 +90,7 @@ struct StreamOptionsUsageTests {
     /// With `include_usage`, the stream ends with one usage-only chunk — empty
     /// `choices`, the whole request's `usage` — immediately before `[DONE]`,
     /// and every other chunk carries `usage: null`. An unknown key inside
-    /// `stream_options` is ignored, as OpenAI ignores it. The stub reports no
+    /// `stream_options` is ignored (a deliberate leniency). The stub reports no
     /// cache figure, so `prompt_tokens_details` must be absent rather than a
     /// fabricated zero.
     @Test
@@ -468,11 +468,22 @@ struct StreamOptionsUsageTests {
 
         let messagesURL = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
         let (anthropic, anthropicResponse) = try await postRaw(messagesURL, jsonObject: anthropicBody(stream: false), headers: origin)
-        await server.stop()
         #expect(anthropicResponse.statusCode == 200)
         let anthropicUsage = try #require((try JSONSerialization.jsonObject(with: anthropic) as? [String: Any])?["usage"] as? [String: Any])
         #expect(anthropicUsage["input_tokens"] as? Int == 10, "the full prompt, since nothing is split out")
         #expect(anthropicUsage["cache_read_input_tokens"] == nil)
+
+        let (anthropicStreamed, anthropicStreamedResponse) = try await postRaw(
+            messagesURL, jsonObject: anthropicBody(stream: true), headers: origin)
+        await server.stop()
+        #expect(anthropicStreamedResponse.statusCode == 200)
+        let deltaBlock = try #require(
+            String(decoding: anthropicStreamed, as: UTF8.self)
+                .components(separatedBy: "\n\n").first { $0.hasPrefix("event: message_delta") })
+        let deltaPayload = try #require(deltaBlock.components(separatedBy: "data: ").last)
+        let deltaUsage = try #require(try jsonObject(deltaPayload)["usage"] as? [String: Any])
+        #expect(deltaUsage["input_tokens"] as? Int == 10)
+        #expect(deltaUsage["cache_read_input_tokens"] == nil)
     }
 
     // MARK: max_completion_tokens
@@ -513,8 +524,9 @@ struct StreamOptionsUsageTests {
         func healthCheck() async -> Bool { true }
     }
 
-    /// `max_completion_tokens` (what Apple's client sends) sets the budget;
-    /// `max_tokens` wins when both are present.
+    /// `max_completion_tokens` (what Apple's client sends) sets the budget and
+    /// wins over the deprecated `max_tokens` when both are present — the
+    /// precedence mlx-lm's and vLLM's servers use.
     @Test
     func maxCompletionTokensIsHonored() async throws {
         let engine = CapturingStubEngine()
@@ -533,6 +545,6 @@ struct StreamOptionsUsageTests {
         _ = try await postRaw(url, jsonObject: both)
         await server.stop()
 
-        #expect(await engine.capturedMaxTokens == [7, 9])
+        #expect(await engine.capturedMaxTokens == [7, 7])
     }
 }

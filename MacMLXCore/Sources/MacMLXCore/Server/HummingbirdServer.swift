@@ -39,10 +39,11 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     let temperature: Double?
     let top_p: Double?
     let max_tokens: Int?
-    /// OpenAI's newer spelling of `max_tokens`. Apple's Foundation Models
-    /// client sends only this one (its `maximumResponseTokens`), so without it
-    /// that setting silently fell back to the 2048 default. `max_tokens` wins
-    /// when a client sends both.
+    /// OpenAI's newer spelling of `max_tokens` (which OpenAI now marks
+    /// deprecated). Apple's Foundation Models client sends only this one (its
+    /// `maximumResponseTokens`), so without it that setting silently fell back
+    /// to the 2048 default. When a client sends both, this one wins — the same
+    /// precedence as mlx-lm's and vLLM's servers.
     let max_completion_tokens: Int?
     /// OpenAI `tools` — an array of `{"type":"function","function":{name,
     /// description,parameters}}` specs. Forwarded VERBATIM into
@@ -1713,7 +1714,7 @@ public actor HummingbirdServer {
         let params = GenerationParameters(
             temperature: chatReq.temperature ?? 0.7,
             topP: chatReq.top_p ?? 0.95,
-            maxTokens: chatReq.max_tokens ?? chatReq.max_completion_tokens ?? 2048,
+            maxTokens: chatReq.max_completion_tokens ?? chatReq.max_tokens ?? 2048,
             stream: chatReq.stream ?? false,
             // Track E — the `GenerationParameters` initializer clamps every one of
             // these (see its clamp helpers), so a hostile/malformed value can't
@@ -4832,11 +4833,12 @@ private func anthropicToolUseBlock(_ call: ToolCallRequest) -> [String: Any] {
 
 /// The OpenAI `usage` object for one completion. `prompt_tokens_details.
 /// cached_tokens` is present whenever the engine reported a prompt-cache figure
-/// (`TokenUsage.cachedPromptTokens`): every production path does — the MLX
-/// engine reports its reuse count, 0 on a miss and on the paths that never
-/// consult the cache (VLM, speculative, kv_bits, batched rows) — so the key is
-/// absent only when no figure exists (a stub, or a caller the figure is
-/// withheld from; see `exposeCacheFigures(_:)`). The count is clamped to the
+/// (`TokenUsage.cachedPromptTokens`): the MLX engine reports its reuse count
+/// whenever generation produced a completion record — 0 on a miss and on the
+/// paths that never consult the cache (VLM, speculative, kv_bits, adapter
+/// bypass, batched rows) — so the key is absent only when no figure exists (the
+/// engine's no-record fallback, a stub, or a caller the figure is withheld
+/// from; see `exposeCacheFigures(_:)`). The count is clamped to the
 /// prompt length; OpenAI's `prompt_tokens` INCLUDES the cached tokens, so no
 /// subtraction happens here. The `speculative_decoding` extension mirrors
 /// mlx-lm's Python server and is present only when the draft path ran. A nil

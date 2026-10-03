@@ -18,8 +18,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   the legacy `/v1/completions` alias too; ignored on a non-streaming request,
   whose body already carries usage.
 - **`max_completion_tokens` is honored** as the newer spelling of
-  `max_tokens` (which wins if both are sent). Apple's client sends only the
-  new one, so its response-length setting used to fall back to the default.
+  `max_tokens`, and wins when both are sent, as mlx-lm's and vLLM's servers
+  do. Apple's client sends only the new one, so its response-length setting
+  used to fall back to the default.
 - **Prompt-cache hits are reported in usage.** The MLX engine now says how
   much of the prompt the prompt cache served, 0 on a miss and on the paths
   that never consult the cache: `prompt_tokens_details.cached_tokens` on
