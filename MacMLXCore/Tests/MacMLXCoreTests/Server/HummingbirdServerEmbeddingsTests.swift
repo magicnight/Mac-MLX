@@ -20,6 +20,8 @@ import Testing
 //   rerankNonEmbedderModelReturns400            : 19_660
 //   rerankRerankerModelRoutesToRerankerLoad     : 19_670
 //   rerankReturnDocumentsFieldDecodes           : 19_680
+//   rerankBlankDocumentIsRejectedBeforeTheLoad  : 19_720
+//   rerankBlankQueryIsRejectedOnTheEmbedderPathToo : 19_730
 
 @Suite("HummingbirdServer embeddings/rerank")
 struct HummingbirdServerEmbeddingsTests {
@@ -210,6 +212,48 @@ struct HummingbirdServerEmbeddingsTests {
         // A 400 here would mean it was wrongly rejected as a non-embedder.
         #expect(response.statusCode == 500)
         #expect(errorCode(data) == "load_failed")
+    }
+
+    /// A blank document is rejected with a 400 BEFORE the reranker is loaded:
+    /// the bogus directory has no weights, so reaching the load would have
+    /// produced the 500 `load_failed` of the routing test above instead.
+    @Test
+    func rerankBlankDocumentIsRejectedBeforeTheLoad() async throws {
+        let server = serverResolving("cross-encoder-model", format: .reranker)
+        let port = try await server.start(preferredPort: 19_720)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
+
+        let (data, response) = try await postRaw(url, jsonObject: [
+            "model": "cross-encoder-model",
+            "query": "what is the capital of france",
+            "documents": ["paris is the capital", "   "],
+        ])
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(errorCode(data) == "invalid_request_error")
+        let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+            .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
+        #expect(message == "documents[1] must not be empty")
+    }
+
+    /// Same for a blank query, on the embedder path, so both branches of
+    /// `/v1/rerank` share one input contract.
+    @Test
+    func rerankBlankQueryIsRejectedOnTheEmbedderPathToo() async throws {
+        let server = serverResolving("bge-small", format: .embedder)
+        let port = try await server.start(preferredPort: 19_730)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
+
+        let (data, response) = try await postRaw(url, jsonObject: [
+            "model": "bge-small",
+            "query": "",
+            "documents": ["paris is the capital"],
+        ])
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(errorCode(data) == "invalid_request_error")
     }
 
     /// The new optional `return_documents` field must decode. A 404 (not a 400)

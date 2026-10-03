@@ -311,8 +311,8 @@ private struct EmbeddingsRequest: Decodable, Sendable {
     let encoding_format: String?
 }
 
-/// `/v1/rerank` request body (Cohere/Jina-style shape). Scored by a TRUE
-/// cross-encoder when `model` is a `.reranker`, or the bi-encoder cosine
+/// `/v1/rerank` request body (Cohere/Jina-style shape). Scored jointly by
+/// `RerankEngine` when `model` is a `.reranker`, or by the bi-encoder cosine
 /// fallback when it's an `.embedder` — see `handleRerank`.
 private struct RerankRequest: Decodable, Sendable {
     let model: String
@@ -977,10 +977,11 @@ public actor HummingbirdServer {
 
     /// Lazily-created cross-encoder reranker for `/v1/rerank` (v0.7). A
     /// sibling to `embeddingEngine`: when a rerank request names a
-    /// `.reranker` model, `handleRerank` routes to this TRUE cross-encoder
-    /// instead of the bi-encoder cosine fallback. Cold-swapped by
-    /// `ensureRerankerLoaded` when a different reranker is requested. Single
-    /// engine, no pool — matching the embedder MVP (see `RerankEngine`).
+    /// `.reranker` model, `handleRerank` routes to this joint scorer (backed
+    /// by mlx-swift-lm's `MLXRerankers`) instead of the bi-encoder cosine
+    /// fallback. Cold-swapped by `ensureRerankerLoaded` when a different
+    /// reranker is requested. Single engine, no pool — matching the embedder
+    /// MVP (see `RerankEngine`).
     private var rerankEngine: RerankEngine?
 
     /// Lazily-created speech engine for `/v1/audio/transcriptions` +
@@ -3791,8 +3792,8 @@ public actor HummingbirdServer {
     /// differing only in the engine type — and in that `target` arrives
     /// PRE-RESOLVED and already known `.reranker` (the format routing lives in
     /// `handleRerank`, so there's no inline kind-gate here). Throws
-    /// `ModelSwapError.loadFailed` when the load itself fails (e.g. a
-    /// weight-key mismatch under `verify: [.all]`, or a missing config).
+    /// `ModelSwapError.loadFailed` when the load itself fails (an unsupported
+    /// architecture, a weight-key mismatch, or a missing config).
     private func ensureRerankerLoaded(_ target: LocalModel) async throws {
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
             return
@@ -3893,16 +3894,19 @@ public actor HummingbirdServer {
 
     /// `POST /v1/rerank` — ranks `documents` against `query`, routed by the
     /// resolved model's kind:
-    /// - `.reranker` → a TRUE cross-encoder (`RerankEngine`) that scores each
-    ///   `[query, document]` pair jointly (one forward pass over both spans).
+    /// - `.reranker` → `RerankEngine` (mlx-swift-lm's `MLXRerankers`), which
+    ///   scores each `[query, document]` pair jointly: an encoder cross-encoder
+    ///   with a classification head, a Qwen3 yes/no reranker, or Jina
+    ///   reranker v3.
     /// - `.embedder` → the bi-encoder cosine fallback (embed independently,
     ///   compare vectors — the documented approximation, kept for no-regression).
     /// - anything else → 400; unknown id → 404.
     ///
     /// Returns `{ results:[{index, relevance_score[, document]}], model }`,
-    /// ordered by descending relevance. `relevance_score` is `sigmoid(logit)`
-    /// (bounded 0..1) for the cross-encoder and raw cosine for the fallback;
-    /// ranking is by the raw score in both, so the sigmoid never reorders.
+    /// ordered by descending relevance. `relevance_score` is the reranker's
+    /// own score as `MLXRerankers` defines it — a normalized relevance in
+    /// 0...1 for encoder (sigmoid of the single logit) and Qwen3 rerankers, a
+    /// cosine similarity for Jina v3 — and raw cosine for the fallback.
     private func handleRerank(
         request: Request,
         context: BasicRequestContext
@@ -3925,6 +3929,16 @@ public actor HummingbirdServer {
                 message: "Invalid JSON: \(error.localizedDescription)",
                 code: "invalid_request_error"
             )
+        }
+
+        // A blank query or document is the caller's mistake: `MLXRerankers`
+        // refuses either outright, and the v0.9.0 cross-encoder scored an
+        // empty document as `[CLS] q [SEP] [SEP]`, which was never a useful
+        // number. Reject it here, BEFORE resolving the model, so a bad request
+        // cannot trigger a multi-gigabyte cold load and the client gets a 400
+        // it will not retry rather than a 500 it will.
+        if let problem = Self.rerankInputProblem(query: req.query, documents: req.documents) {
+            return errorResponse(status: .badRequest, message: problem, code: "invalid_request_error")
         }
 
         // Route by model kind. Resolve once here so the reranker branch can be
@@ -4015,10 +4029,10 @@ public actor HummingbirdServer {
         ])
     }
 
-    /// The TRUE cross-encoder branch of `/v1/rerank` — cold-swaps the
-    /// `.reranker` model resident, scores every `[query, doc]` pair jointly,
-    /// then ranks by raw logit and exposes `sigmoid(logit)` as
-    /// `relevance_score`. Mirrors the cosine branch's lock discipline
+    /// The reranker branch of `/v1/rerank` — cold-swaps the `.reranker`
+    /// model resident, scores every `[query, doc]` pair jointly through
+    /// `RerankEngine`, then ranks by the returned scores, which are already
+    /// the exposed `relevance_score`. Mirrors the cosine branch's lock discipline
     /// (acquire → score → release; a throw on acquire means the lock is not
     /// held, so no release on that path).
     private func rerankWithCrossEncoder(
@@ -4057,10 +4071,19 @@ public actor HummingbirdServer {
                 code: "cancelled"
             )
         }
-        let scores: [Float]
+        let scores: [Double]
         do {
             scores = try await reranker.score(query: req.query, documents: req.documents)
             releaseGenerationLock()
+        } catch let error as RerankRequestError {
+            // The input, not the server: a listwise model given more
+            // documents than it takes, or an input the model refuses.
+            releaseGenerationLock()
+            return errorResponse(
+                status: .badRequest,
+                message: error.localizedDescription,
+                code: "invalid_request_error"
+            )
         } catch {
             releaseGenerationLock()
             return errorResponse(
@@ -4074,12 +4097,32 @@ public actor HummingbirdServer {
         let results = Self.rerankResults(
             ranked: ranked, documents: req.documents,
             returnDocuments: req.return_documents == true,
-            scoreTransform: rerankSigmoid
+            scoreTransform: { $0 }
         )
         return try jsonResponseAny([
             "results": Self.rerankResultsJSON(results),
             "model": req.model,
         ])
+    }
+
+    /// Why a `/v1/rerank` body cannot be scored, or `nil` when it can: a
+    /// query or document that is empty or whitespace-only. The blank test is
+    /// the very expression `MLXRerankers` validates with
+    /// (`trimmingCharacters(in: .whitespacesAndNewlines).isEmpty`), so
+    /// whatever upstream would refuse after a load is refused here before
+    /// one. Pure and `nonisolated static` so it is unit-testable without a
+    /// server.
+    nonisolated static func rerankInputProblem(query: String, documents: [String]) -> String? {
+        func isBlank(_ text: String) -> Bool {
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if isBlank(query) {
+            return "query must not be empty"
+        }
+        if let index = documents.firstIndex(where: isBlank) {
+            return "documents[\(index)] must not be empty"
+        }
+        return nil
     }
 
     /// A single `/v1/rerank` result: rank-ordered document `index`, its
@@ -4091,13 +4134,14 @@ public actor HummingbirdServer {
     /// (typed tuples, no `Any`, no live server / loaded model) so the
     /// ordering, score transform, and `return_documents` wiring are
     /// unit-testable in isolation. `scoreTransform` maps each raw score to the
-    /// API `relevance_score` (`Double(_)` identity for cosine, `rerankSigmoid`
-    /// for the cross-encoder). Out-of-range indices simply omit the document.
-    nonisolated static func rerankResults(
-        ranked: [(index: Int, score: Float)],
+    /// API `relevance_score` (`Double(_)` for the cosine path's `Float`,
+    /// identity for the reranker's `Double`). Out-of-range indices simply omit
+    /// the document.
+    nonisolated static func rerankResults<Score>(
+        ranked: [(index: Int, score: Score)],
         documents: [String],
         returnDocuments: Bool,
-        scoreTransform: (Float) -> Double
+        scoreTransform: (Score) -> Double
     ) -> [RerankResult] {
         ranked.map { entry in
             let document =

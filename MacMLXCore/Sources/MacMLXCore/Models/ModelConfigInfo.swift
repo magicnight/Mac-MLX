@@ -43,10 +43,8 @@ public struct ModelConfigInfo: Sendable, Equatable {
     /// The second reranker-detection signal, alongside `architectures`: a
     /// GENUINE multi-class classifier (e.g. a 5-label sentiment BERT) also
     /// carries a `*ForSequenceClassification` architecture but must NOT be
-    /// mistaken for a single-logit reranker — `RerankEngine` always builds
-    /// `Linear(hidden, 1)`, so a checkpoint whose real `classifier.weight` is
-    /// `[N, hidden]` (`N > 1`) would fail `verify: [.all]` with a cryptic
-    /// load error instead of a clear "not a reranker" classification.
+    /// mistaken for a single-logit reranker (`ModelLibraryManager.upgradeFormat`
+    /// routes only single-logit heads to `RerankEngine`).
     public let numLabels: Int?
     /// The number of entries in `config.json`'s `id2label` map, if present.
     /// A second, independent source for the same single-vs-multi-label
