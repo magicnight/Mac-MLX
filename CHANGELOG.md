@@ -9,7 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Nested JSON schemas in `response_format`.** Structured output now
+  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
+  of objects and arrays of arrays), `$ref` to the root's `$defs` or
+  `definitions`, and a string `const` — the shapes Apple's Foundation Models
+  client sends for nested `@Generable` types. `examples`, `$comment` and
+  `x-order` are accepted and ignored, like `description`, `title` and
+  `default`. A schema may nest at most 32 containers deep and hold at most
+  4096 nodes after `$ref` expansion; a recursive schema is a 400, since
+  nothing would bound its documents. Still unsupported: `null` and unions,
+  `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII keys or
+  enum values (Apple's TripPlanner sample hits the last one).
+
 ### Fixed
+- **A string escape could cut a structured-output document short.** The
+  schema automaton checked the surrogate range of a `\u` escape only at its
+  fourth digit, so `\uDC`–`\uDF` outside a pair and `\uD83D\u00` were
+  accepted although no byte could follow them; generation then ended on a
+  forced EOS with a truncated document. Such an escape is now refused at the
+  first digit that rules out every completion.
 - **Structured output on thinking models.** Found by driving a live Qwen3.6
   checkpoint through Apple's Foundation Models client. First, a streaming
   `response_format` request returned its whole JSON answer as
@@ -23,6 +42,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   the model in answer mode instead of opening a think block it cannot close.
 
 ### Changed
+- **`response_format` schemas: keywords nothing enforces are now a 400 at the
+  root too.** The root object used to accept `allOf`, `anyOf`,
+  `minProperties`, `patternProperties` and any other keyword and enforce
+  none of them. It now answers `unsupported schema feature: unsupported
+  schema keyword '<name>' at the schema root`, as properties always have. A
+  type array such as `["string","null"]` is now reported as an unsupported
+  feature rather than an invalid `response_format`.
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
   the fork used to carry are in that base, so it now carries two:
