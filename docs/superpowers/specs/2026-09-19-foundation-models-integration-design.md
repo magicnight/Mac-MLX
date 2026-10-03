@@ -1,7 +1,7 @@
 # Foundation Models integration design
 
 **Date:** 2026-09-19
-**Status:** design, not yet implemented
+**Status:** design, not yet implemented — see the 2026-10-03 addendum at the end
 **Target:** macOS 27 (`FoundationModels` provider APIs); macMLX's own baseline stays macOS 14
 
 ## What this is for
@@ -59,9 +59,10 @@ a `LanguageModel` with a settable `url`, `additionalHeaders`, and
 
 **Apple also ships an MLX provider.** `ml-explore/mlx-swift-lm` main contains
 `Libraries/MLXFoundationModels/MLXLanguageModel.swift` and
-`Libraries/MLXGuidedGeneration`. It is **not** in a tagged release — the latest
-release is 3.31.4 (2026-06-30), which is what macMLX pins, and the pinned
-checkout does not contain the module.
+`Libraries/MLXGuidedGeneration`. When this was written it was **not** in a
+tagged release — the latest was 3.31.4 (2026-06-30), which macMLX pinned, and
+that checkout did not contain the module. That changed on 2026-09-30; see the
+addendum.
 
 ## The prerequisite correction this forces
 
@@ -420,3 +421,36 @@ has expired: this machine now has only Xcode 27.0. CI and release still pin
 different Metal compilers. Whether the Xcode 27 compiler actually rejects the
 kernels has not been tested. This is not part of this design; it needs its own
 investigation.
+
+---
+
+## Addendum 2026-10-03
+
+Three facts moved after this was written.
+
+- **`MLXFoundationModels` is in a tagged release.** mlx-swift-lm 3.32.3
+  (2026-09-30) ships the `MLXFoundationModels` product behind the default-on
+  `FoundationModelsIntegration` trait, and macMLX pins 3.32.3 since the fork
+  rebase (PR #120). The "once it lands in a tagged release" trigger in "The
+  prerequisite correction this forces" has fired: CLAUDE.md's differentiator
+  wording was changed in the same tidy as this addendum. Open question 3 is
+  live now rather than later, and the answer stands — B earns its place by
+  giving an app the server's model management, continuous batching, tiered
+  cache and model library — but the positioning must say so against
+  `MLXFoundationModels`, not against a vacuum.
+- **The `mlx#3963` consequence is closed.** PR #120 moved the fork to a core
+  (v0.32.2) that contains it, and MacMLXCore's full Metal test suite ran on
+  this machine under Xcode 27's Metal 4.1 path. "Consequence to handle
+  separately" needs no further investigation.
+- **Open question 1 has a partial answer.** A protocol stub on `:8123` showed
+  what Apple's `ChatCompletionsLanguageModel` sends: `stream_options` with
+  `include_usage`, `tools: []` with `tool_choice: "auto"`, and a `json_schema`
+  `response_format` with `strict: true` and an `x-order` extension. Xcode 27's
+  local-model provider discovers models with `GET /v1/models?` (trailing `?`,
+  which Hummingbird routes correctly) and must be given a base URL without a
+  `/v1` suffix. Two confirmed gaps on our side: the streaming path emits no
+  usage frame, and `ResponseFormatDecoder`'s property allow-list (`type`,
+  `enum`, `description`, `title`, `default`) rejects `items` and `$ref`, so any
+  schema with an array or a nested object gets a 400. The end-to-end probe
+  against a running macMLX server with a loaded model has not been completed;
+  it remains the first implementation step of B.
