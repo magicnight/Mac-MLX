@@ -40,6 +40,18 @@ enum SchemaScalarState: Hashable, Sendable {
     /// `true` / `false`: the first `matched` bytes of the literal have been read.
     case literal(isTrue: Bool, matched: Int)
 
+    /// Whether the value in progress is a string (or an enum literal), where
+    /// whitespace is data rather than formatting.
+    var isInsideString: Bool {
+        switch self {
+        case .stringBody, .stringEscape, .stringUnicode, .stringHighSurrogateBackslash,
+            .stringHighSurrogateU, .enumBody:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// How one byte relates to the value in progress.
     @usableFromInline
     enum Step: Sendable {

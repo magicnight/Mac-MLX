@@ -46,8 +46,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   prompt, so it is withheld from requests that carry an `Origin` header
   (cross-origin browser callers, which the server otherwise answers without
   credentials); native clients see it.
-
-### Fixed
+- **Structured output no longer runs away on whitespace.** JSON permits any
+  amount of whitespace between tokens, so a constrained decode could spin:
+  after `{` the automaton accepted spaces, tabs and newlines forever, and a
+  model whose preferred continuation was masked kept sampling them until
+  `max_tokens` — a 200 with an empty document (seen on a real checkpoint
+  through Apple's Foundation Models client). After three consecutive
+  whitespace-only tokens the constraint processor now withholds whitespace at
+  structural positions for the rest of the generation; a space inside a
+  string value stays data, and whitespace is still let through when it is
+  the only thing the vocabulary allows.
 - **Releasing a prompt cache with a long cached sequence crashed the process.**
   The prompt-cache trie stores one node per token, and letting the runtime
   release that chain on its own nested one deallocation per token; a few

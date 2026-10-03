@@ -37,6 +37,16 @@ public enum ConstraintState: Sendable {
         }
     }
 
+    /// Whether the automaton is inside a string literal, where whitespace is
+    /// data and must never be withheld (see `JSONConstraintProcessor`).
+    @inlinable
+    public var isInsideString: Bool {
+        switch self {
+        case .json(let state): return state.isInsideString
+        case .schema(let state): return state.isInsideString
+        }
+    }
+
     /// Walk a byte sequence, returning the resulting state or `nil` if any byte
     /// is illegal from here.
     @inlinable

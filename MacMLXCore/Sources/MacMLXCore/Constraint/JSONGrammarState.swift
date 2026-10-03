@@ -145,6 +145,18 @@ public struct JSONGrammarState: Equatable, Sendable {
         }
     }
 
+    /// Whether the automaton is inside a string literal (a key or a value,
+    /// including mid-escape), where whitespace is data rather than formatting.
+    /// The constraint processor consults this before withholding whitespace.
+    public var isInsideString: Bool {
+        switch mode {
+        case .string, .stringEscape, .stringUnicode, .stringHighSurrogateBackslash, .stringHighSurrogateU:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// A short description of the current lexical position, for diagnostics
     /// (e.g. the constraint processor's "no legal token" log). Not a wire
     /// format — the reflected `mode`/stack values are for humans reading logs.
