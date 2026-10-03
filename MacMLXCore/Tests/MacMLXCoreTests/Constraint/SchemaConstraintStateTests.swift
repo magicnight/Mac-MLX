@@ -547,6 +547,21 @@ struct SchemaConstraintStateTests {
         #expect(!PropertyMask.all(count: 65).contains(65))
     }
 
+    // MARK: Diagnostics
+
+    /// The log line a cut-off generation leaves names keys, not bit masks: the
+    /// candidates of the key being read and each open object's emitted keys.
+    @Test
+    func diagnosticDescriptionNamesKeys() throws {
+        let s = schema([("o", nested([("a", .integer), ("ab", .integer), ("b", .integer)]))])
+        let text = try #require(walk("{\"o\":{\"b\":1,\"a", s)).diagnosticDescription
+        #expect(text.contains("candidates: [\"a\", \"ab\"]"), "\(text)")
+        #expect(text.contains("frames: [object(emitted: [\"o\"]), object(emitted: [\"b\"])]"), "\(text)")
+        #expect(!text.contains("PropertyMask"), "\(text)")
+        let inArray = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 0, maxItems: nil))])))
+        #expect(inArray.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: 2)") == true)
+    }
+
     // MARK: Equality
 
     /// States are equal at the same position of equal schemas, even when the

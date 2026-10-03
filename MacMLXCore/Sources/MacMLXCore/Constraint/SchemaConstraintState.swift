@@ -98,10 +98,28 @@ public struct SchemaConstraintState: Hashable, Sendable {
     }
 
     /// A short description of the current structural position, for diagnostics
-    /// (e.g. the constraint processor's "no legal token" log). Not a wire
-    /// format — the reflected mode is for humans.
+    /// (e.g. the constraint processor's "no legal token" log, often the only
+    /// trace a cut-off generation leaves). Not a wire format: keys appear by
+    /// name — a key's remaining candidates and each open object's emitted keys
+    /// — and the rest of the mode is reflected.
     public var diagnosticDescription: String {
-        "schema(mode: \(mode), depth: \(stack.count), complete: \(isComplete))"
+        let frames = stack.map { frame -> String in
+            switch frame {
+            case .object(let node, let emitted): return "object(emitted: \(names(emitted, node: node)))"
+            case .array(_, let count): return "array(count: \(count))"
+            }
+        }
+        var modeText = "\(mode)"
+        if case .key(let position, let candidates) = mode, case .object(let node, _)? = stack.last {
+            modeText = "key(position: \(position), candidates: \(names(candidates, node: node)))"
+        }
+        return "schema(mode: \(modeText), frames: [\(frames.joined(separator: ", "))], complete: \(isComplete))"
+    }
+
+    /// The declared names of `members` in object node `node`.
+    private func names(_ members: PropertyMask, node: Int32) -> [String] {
+        let keys = program.objects[Int(node)].keys
+        return keys.indices.filter(members.contains).map { String(decoding: keys[$0], as: UTF8.self) }
     }
 
     /// Two states are equal when they are at the same position of equal
