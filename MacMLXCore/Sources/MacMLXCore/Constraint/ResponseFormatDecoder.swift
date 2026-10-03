@@ -29,8 +29,9 @@
 ///    on the wire. A schema may hold at most ``maxSchemaDepth`` containers
 ///    open at once; after `$ref` expansion, at most ``maxSchemaNodes`` nodes,
 ///    ``maxSchemaLiterals`` enum and `const` values and ``maxSchemaBytes``
-///    bytes of property names and values. A recursive schema is rejected
-///    because no bound on its documents exists.
+///    bytes of property names (declared and `required`) and values. A
+///    recursive schema is rejected because no bound on its documents exists,
+///    and a `required` list may not repeat a name.
 ///
 /// Everything else — combinators, `null`, type arrays, numeric and string
 /// bounds (`minimum`, `pattern`, …), non-object roots,
@@ -57,16 +58,17 @@ public enum ResponseFormatDecoder {
     /// small request could otherwise expand into gigabytes.
     static let maxSchemaLiterals = 65_536
 
-    /// The most UTF-8 bytes of property names, enum values and `const` values
-    /// one compile may produce after `$ref` expansion. A value count alone does
-    /// not bound size: one long name or value referenced many times is copied
-    /// once per reference.
+    /// The most UTF-8 bytes of property names, `required` entries, enum values
+    /// and `const` values one compile may produce after `$ref` expansion. A
+    /// value count alone does not bound size: one long name or value
+    /// referenced many times is copied once per reference.
     static let maxSchemaBytes = 4 * 1_024 * 1_024
 
-    /// The largest `minItems` / `maxItems` accepted. Every document needs at
+    /// The largest `minItems` accepted, a server limit. Every document needs at
     /// least `minItems` items, so a minimum in the billions would compile and
-    /// then cut every generation off at `max_tokens`.
-    static let maxItemCount = 65_536
+    /// then cut every generation off at `max_tokens`. `maxItems` needs no cap:
+    /// a large maximum forces nothing and is enforced exactly.
+    static let maxMinItems = 65_536
 
     /// Purely annotative keywords, accepted and ignored on every kind of schema:
     /// the JSON Schema annotation and metadata vocabulary, none of which
@@ -179,8 +181,8 @@ public enum ResponseFormatDecoder {
             }
         }
 
-        /// Count the UTF-8 bytes of a property name or value against
-        /// ``maxSchemaBytes``.
+        /// Count the UTF-8 bytes of a property name, `required` entry or value
+        /// against ``maxSchemaBytes``.
         mutating func spendBytes(of text: String, at path: String) throws {
             bytes += text.utf8.count
             guard bytes <= ResponseFormatDecoder.maxSchemaBytes else {
@@ -285,11 +287,25 @@ public enum ResponseFormatDecoder {
             guard case .array(let entries) = requiredValue else {
                 throw ResponseFormatError.invalidFormat("\(owner).required must be an array")
             }
+            let declared = Set(compiled.map(\.name))
+            var listed = Set<String>()
             for entry in entries {
                 guard case .string(let name) = entry else {
                     throw ResponseFormatError.invalidFormat("\(owner).required entries must be strings")
                 }
-                guard compiled.contains(where: { $0.name == name }) else {
+                // A `$ref` repeats this list once per reference, like the names.
+                try context.spendBytes(of: name, at: path.isEmpty ? name : "\(path).\(name)")
+                // JSON Schema requires unique entries. Refusing the first repeat,
+                // with every entry declared, keeps this loop to one pass over the
+                // declared properties however long the list is or however many
+                // times a `$ref` compiles it.
+                guard listed.insert(name).inserted else {
+                    throw ResponseFormatError.invalidFormat(
+                        isRoot
+                            ? "required property '\(name)' is listed more than once"
+                            : "required property '\(name)' is listed more than once in '\(path)'")
+                }
+                guard declared.contains(name) else {
                     throw ResponseFormatError.invalidFormat(
                         isRoot
                             ? "required property '\(name)' is not declared in properties"
@@ -404,6 +420,10 @@ public enum ResponseFormatDecoder {
             throw ResponseFormatError.invalidFormat("'items' on property '\(path)' must be a schema object")
         }
         let minItems = try itemCount(schema["minItems"], keyword: "minItems", path: path) ?? 0
+        guard minItems <= maxMinItems else {
+            throw ResponseFormatError.unsupportedFeature(
+                "schema too large (minItems \(minItems) on property '\(path)' is above the limit of \(maxMinItems))")
+        }
         let maxItems = try itemCount(schema["maxItems"], keyword: "maxItems", path: path)
         // `minItems > maxItems` admits no document: `]` could never close the
         // array, so the automaton would be stuck at its last item.
@@ -415,18 +435,13 @@ public enum ResponseFormatDecoder {
         return .array(items: item, minItems: minItems, maxItems: maxItems)
     }
 
-    /// A `minItems` / `maxItems` value: a non-negative integer no larger than
-    /// ``maxItemCount``, or `nil` when absent. (`JSONValue` already decodes
-    /// `3.0` and `1e2` as integers.)
+    /// A `minItems` / `maxItems` value: a non-negative integer, or `nil` when
+    /// absent. (`JSONValue` already decodes `3.0` and `1e2` as integers.)
     private static func itemCount(_ value: JSONValue?, keyword: String, path: String) throws -> Int? {
         guard let value else { return nil }
         guard case .int(let count) = value, count >= 0 else {
             throw ResponseFormatError.invalidFormat(
                 "\(keyword) on property '\(path)' must be a non-negative integer")
-        }
-        guard count <= maxItemCount else {
-            throw ResponseFormatError.invalidFormat(
-                "\(keyword) on property '\(path)' must be at most \(maxItemCount)")
         }
         return count
     }

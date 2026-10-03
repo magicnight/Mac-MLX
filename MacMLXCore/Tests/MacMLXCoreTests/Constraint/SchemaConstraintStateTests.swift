@@ -560,6 +560,15 @@ struct SchemaConstraintStateTests {
         #expect(!text.contains("PropertyMask"), "\(text)")
         let inArray = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 0, maxItems: nil))])))
         #expect(inArray.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: 2)") == true)
+
+        // A wide object lists eight names and counts the rest.
+        let wide = schema((0..<70).map { ("p\($0)", SchemaValueType.integer) })
+        let atKey = try #require(walk("{\"", wide)).diagnosticDescription
+        #expect(atKey.contains("candidates: [\"p0\", \"p1\", \"p2\", \"p3\", \"p4\", \"p5\", \"p6\", \"p7\", … (+62)]"), "\(atKey)")
+        #expect(!atKey.contains("\"p8\""), "\(atKey)")
+        let tenEmitted = (0..<10).map { "\"p\($0)\":1" }.joined(separator: ",")
+        let afterTen = try #require(walk("{" + tenEmitted, wide)).diagnosticDescription
+        #expect(afterTen.contains("object(emitted: [\"p0\", \"p1\", \"p2\", \"p3\", \"p4\", \"p5\", \"p6\", \"p7\", … (+2)])"), "\(afterTen)")
     }
 
     // MARK: Equality

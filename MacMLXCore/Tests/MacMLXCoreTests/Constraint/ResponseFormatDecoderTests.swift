@@ -527,21 +527,25 @@ struct ResponseFormatDecoderTests {
         expectInvalid(schema: root(["t": array(string, ["minItems": .string("3")])]), containing: "non-negative integer")
     }
 
-    /// `minItems` and `maxItems` are capped at 65,536: a minimum in the
-    /// billions would compile and then cut every generation off at
-    /// `max_tokens`.
+    /// `minItems` is capped at 65,536, a server limit: every document needs
+    /// that many items, so a minimum in the billions would compile and then cut
+    /// every generation off at `max_tokens`. `maxItems` is not capped: a large
+    /// maximum forces nothing and is enforced exactly.
     @Test
     func capsItemBounds() throws {
-        let cap = ResponseFormatDecoder.maxItemCount
+        let cap = ResponseFormatDecoder.maxMinItems
         let object = try compile(root([
             "a": array(string, ["minItems": .int(cap)]),
-            "b": array(string, ["maxItems": .int(cap)]),
+            "b": array(string, ["maxItems": .int(100_000)]),
+            "c": array(string, ["maxItems": .int(1_000_000_000)]),
         ]))
         #expect(object.property(named: "a")?.type == .array(items: .string, minItems: cap, maxItems: nil))
-        #expect(object.property(named: "b")?.type == .array(items: .string, minItems: 0, maxItems: cap))
-        expectInvalid(schema: root(["a": array(string, ["minItems": .int(cap + 1)])]), containing: "minItems on property 'a' must be at most 65536")
-        expectInvalid(schema: root(["b": array(string, ["maxItems": .int(cap + 1)])]), containing: "maxItems on property 'b' must be at most 65536")
-        expectInvalid(schema: root(["c": array(string, ["minItems": .int(1_000_000_000)])]), containing: "must be at most 65536")
+        #expect(object.property(named: "b")?.type == .array(items: .string, minItems: 0, maxItems: 100_000))
+        #expect(object.property(named: "c")?.type == .array(items: .string, minItems: 0, maxItems: 1_000_000_000))
+        expectUnsupported(
+            schema: root(["a": array(string, ["minItems": .int(cap + 1)])]),
+            containing: "schema too large (minItems 65537 on property 'a' is above the limit of 65536)")
+        expectUnsupported(schema: root(["d": array(string, ["minItems": .int(1_000_000_000)])]), containing: "schema too large")
     }
 
     @Test
@@ -646,6 +650,34 @@ struct ResponseFormatDecoderTests {
         #expect(elapsed < .seconds(1), "took \(elapsed)")
     }
 
+    /// `required` entries are multiplied by `$ref` too: 1,300 references to an
+    /// object whose `required` repeats its one key 100,000 times are about
+    /// 3,900 nodes, no enum values and a few kilobytes of names, so every
+    /// other budget passes, yet the entries would be compiled 130 million
+    /// times. JSON Schema requires them to be unique, and the first repeat is
+    /// refused. The byte budget, which also charges `required` entries, would
+    /// refuse this request too, later and with its own message; both are kept.
+    /// Mutation: without the duplicate check this test goes red.
+    @Test
+    func refusesRepeatedRequiredEntriesUnderRefExpansion() {
+        let repeated = JSONValue.array(Array(repeating: .string("a"), count: 100_000))
+        var properties: [String: JSONValue] = [:]
+        for index in 0..<1_300 { properties["p\(index)"] = ref("#/$defs/D") }
+        let schema = root(
+            ["o": root(properties)],
+            extra: ["$defs": obj(["D": obj(["type": .string("object"), "properties": obj(["a": string]), "required": repeated])])])
+        let elapsed = ContinuousClock().measure {
+            expectInvalid(schema: schema, containing: "required property 'a' is listed more than once")
+        }
+        #expect(elapsed < .seconds(1), "took \(elapsed)")
+    }
+
+    @Test
+    func rejectsDuplicateRequiredEntry() {
+        let schema = root(["a": string, "b": string], required: ["a", "b", "a"])
+        expectInvalid(schema: schema, containing: "required property 'a' is listed more than once")
+    }
+
     /// The value cap itself: one enum of 65,536 values compiles, one more value
     /// does not.
     @Test
@@ -669,23 +701,42 @@ struct ResponseFormatDecoderTests {
     }
 
     /// The same expansion with long strings instead of many: 1,000 references
-    /// to a 64 KiB `const`, or to an object whose one key is 64 KiB, stay under
-    /// the node and value budgets, yet the automaton's program would copy the
-    /// string once per reference — 64 MB. The byte budget refuses both.
-    /// Mutation: without it both compile (no 400).
+    /// to a 64 KiB `const`, to an object whose one key is 64 KiB, or to an enum
+    /// of 30 values of 60 KiB stay under the node and value budgets (the enum
+    /// is 30,000 values in all), yet the automaton's program would copy the
+    /// strings once per reference — 64 MB, 64 MB and 1.8 GB. The byte budget
+    /// refuses all three. Mutation: without the charge on a name, a `const` or
+    /// an enum value, that variant compiles (no 400).
     @Test
     func boundsNameAndValueBytesAfterRefExpansion() {
         let long = String(repeating: "a", count: 65_536)
         var properties: [String: JSONValue] = [:]
         for index in 0..<1_000 { properties["p\(index)"] = ref("#/$defs/E") }
-        let viaValue = root(["o": root(properties)], extra: ["$defs": obj(["E": obj(["const": .string(long)])])])
-        let viaKey = root(["o": root(properties)], extra: ["$defs": obj(["E": root([long: string])])])
-        for schema in [viaValue, viaKey] {
+        let enumValues = (0..<30).map { JSONValue.string(String(repeating: "e", count: 61_440) + "\($0)") }
+        let variants: [(String, JSONValue)] = [
+            ("const", root(["o": root(properties)], extra: ["$defs": obj(["E": obj(["const": .string(long)])])])),
+            ("key", root(["o": root(properties)], extra: ["$defs": obj(["E": root([long: string])])])),
+            ("enum", root(
+                ["o": root(properties)],
+                extra: ["$defs": obj(["E": obj(["type": .string("string"), "enum": .array(enumValues)])])])),
+        ]
+        for (name, schema) in variants {
             let elapsed = ContinuousClock().measure {
-                expectUnsupported(schema: schema, containing: "schema too large")
+                expectUnsupported(schema: schema, containing: "bytes of property names")
             }
-            #expect(elapsed < .seconds(1), "took \(elapsed)")
+            #expect(elapsed < .seconds(1), "\(name): took \(elapsed)")
         }
+    }
+
+    /// `required` entries are charged too: a property name just over half the
+    /// byte cap compiles while it is optional and is refused once it is also
+    /// required, because the name is then counted twice. Mutation: without the
+    /// charge on `required` entries the second schema compiles.
+    @Test
+    func requiredEntriesCountAgainstTheByteBudget() throws {
+        let name = String(repeating: "k", count: ResponseFormatDecoder.maxSchemaBytes / 2 + 1)
+        _ = try compile(root([name: string]))
+        expectUnsupported(schema: root([name: string], required: [name]), containing: "bytes of property names")
     }
 
     @Test

@@ -10,6 +10,58 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 
+### Added
+- **Nested JSON schemas in `response_format`.** Structured output now
+  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
+  of objects and arrays of arrays), `$ref` to the root's `$defs` or
+  `definitions`, and a string `const` — the shapes Apple's Foundation Models
+  client sends for nested `@Generable` types. `examples` and `$comment` are
+  accepted and ignored anywhere, like `description`, `title` and `default`;
+  `x-order` is accepted and ignored on object schemas only (the root and
+  nested objects), not on arrays, scalars or next to `$ref`. A schema may
+  nest at most 32 containers deep; after `$ref` expansion it may hold at most
+  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
+  values, and `minItems` may not exceed 65,536. A recursive schema is a 400,
+  since nothing would bound its documents. Still unsupported: `null` and
+  unions, `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII
+  keys or enum values (Apple's TripPlanner sample hits the last one).
+- **`stream_options.include_usage` on streaming chat completions.** When a
+  client sets it, every chunk carries `usage: null` and one usage-only chunk —
+  empty `choices`, the whole request's token counts — is sent before
+  `[DONE]`, exactly the OpenAI contract. Apple's Foundation Models
+  `ChatCompletionsLanguageModel` asks for it. Honored on the batched path and
+  the legacy `/v1/completions` alias too; ignored on a non-streaming request,
+  whose body already carries usage.
+- **`max_completion_tokens` is honored** as the newer spelling of
+  `max_tokens`, and wins when both are sent, as mlx-lm's and vLLM's servers
+  do. Apple's client sends only the new one, so its response-length setting
+  used to fall back to the default.
+- **Prompt-cache hits are reported in usage.** The MLX engine now says how
+  much of the prompt the prompt cache served, 0 on a miss and on the paths
+  that never consult the cache: `prompt_tokens_details.cached_tokens` on
+  OpenAI-shaped responses, where `prompt_tokens` keeps including them, and
+  `cache_read_input_tokens` on `/v1/messages`, where — as Anthropic defines
+  it — `input_tokens` becomes the uncached remainder so that the two sum to
+  the prompt. The figure is an exact prefix oracle against every cached
+  prompt, so it is withheld from requests that carry an `Origin` header
+  (cross-origin browser callers, which the server otherwise answers without
+  credentials); native clients see it.
+- **Nested JSON schemas in `response_format`.** Structured output now
+  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
+  of objects and arrays of arrays), `$ref` to the root's `$defs` or
+  `definitions`, and a string `const` — the shapes Apple's Foundation Models
+  client sends for nested `@Generable` types. `examples` and `$comment` are
+  accepted and ignored anywhere, like `description`, `title` and `default`;
+  `x-order` is accepted and ignored on object schemas only (the root and
+  nested objects), not on arrays, scalars or next to `$ref`. A schema may
+  nest at most 32 containers deep; after `$ref` expansion it may hold at most
+  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
+  values; `minItems` and `maxItems` may not exceed 65,536. A recursive schema
+  is a 400, since nothing would bound its documents. Still unsupported:
+  `null` and unions, `minimum`/`maximum`, `pattern`, non-object roots, and
+  non-ASCII keys or enum values (Apple's TripPlanner sample hits the last
+  one).
+
 ### Fixed
 - **Structured output no longer runs away on whitespace.** JSON permits any
   amount of whitespace between tokens, so a constrained decode could spin:
@@ -60,44 +112,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Kernels now compile under the Metal 4.1 language version that core
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
-### Added
-- **Nested JSON schemas in `response_format`.** Structured output now
-  accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
-  of objects and arrays of arrays), `$ref` to the root's `$defs` or
-  `definitions`, and a string `const` — the shapes Apple's Foundation Models
-  client sends for nested `@Generable` types. `examples` and `$comment` are
-  accepted and ignored anywhere, like `description`, `title` and `default`;
-  `x-order` is accepted and ignored on object schemas only (the root and
-  nested objects), not on arrays, scalars or next to `$ref`. A schema may
-  nest at most 32 containers deep; after `$ref` expansion it may hold at most
-  4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
-  values; `minItems` and `maxItems` may not exceed 65,536. A recursive schema
-  is a 400, since nothing would bound its documents. Still unsupported:
-  `null` and unions, `minimum`/`maximum`, `pattern`, non-object roots, and
-  non-ASCII keys or enum values (Apple's TripPlanner sample hits the last
-  one).
-- **`stream_options.include_usage` on streaming chat completions.** When a
-  client sets it, every chunk carries `usage: null` and one usage-only chunk —
-  empty `choices`, the whole request's token counts — is sent before
-  `[DONE]`, exactly the OpenAI contract. Apple's Foundation Models
-  `ChatCompletionsLanguageModel` asks for it. Honored on the batched path and
-  the legacy `/v1/completions` alias too; ignored on a non-streaming request,
-  whose body already carries usage.
-- **`max_completion_tokens` is honored** as the newer spelling of
-  `max_tokens`, and wins when both are sent, as mlx-lm's and vLLM's servers
-  do. Apple's client sends only the new one, so its response-length setting
-  used to fall back to the default.
-- **Prompt-cache hits are reported in usage.** The MLX engine now says how
-  much of the prompt the prompt cache served, 0 on a miss and on the paths
-  that never consult the cache: `prompt_tokens_details.cached_tokens` on
-  OpenAI-shaped responses, where `prompt_tokens` keeps including them, and
-  `cache_read_input_tokens` on `/v1/messages`, where — as Anthropic defines
-  it — `input_tokens` becomes the uncached remainder so that the two sum to
-  the prompt. The figure is an exact prefix oracle against every cached
-  prompt, so it is withheld from requests that carry an `Origin` header
-  (cross-origin browser callers, which the server otherwise answers without
-  credentials); native clients see it.
-
 ### Changed
 - **`response_format` schemas: keywords nothing enforces are now a 400 at the
   root too.** The root object used to accept `allOf`, `anyOf`,
@@ -107,8 +121,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   type array such as `["string","null"]` is now reported as an unsupported
   feature rather than an invalid `response_format`, on object and array
   schemas as on scalars. A flat root with more than 4,096 properties is now a
-  400 (`schema too large`). `deprecated`, `readOnly` and `writeOnly` are
-  accepted and ignored everywhere; on a property they used to be a 400.
+  400 (`schema too large`), and so is a flat enum of more than 65,536 values
+  or a schema with more than 4 MiB of property names and values; all of these
+  used to be accepted. A `required` list that names a property twice is now a
+  400 (JSON Schema requires its entries to be unique). `deprecated`,
+  `readOnly` and `writeOnly` are accepted and ignored everywhere; on a
+  property they used to be a 400.
 - **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
   are gone.** The fixes macMLX reported upstream — integer-keyed object
   literals (Seed-OSS), a literal `}}` (Command R7B) and `strip(arg)`
