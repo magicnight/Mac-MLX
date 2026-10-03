@@ -96,8 +96,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   type array such as `["string","null"]` is now reported as an unsupported
   feature rather than an invalid `response_format`, on object and array
   schemas as on scalars. A flat root with more than 4,096 properties is now a
-  400 (`schema too large`). `deprecated`, `readOnly` and `writeOnly` are
-  accepted and ignored everywhere; on a property they used to be a 400.
+  400 (`schema too large`), and so is a flat enum of more than 65,536 values
+  or a schema with more than 4 MiB of property names and values; all of these
+  used to be accepted. A `required` list that names a property twice is now a
+  400 (JSON Schema requires its entries to be unique). `deprecated`,
+  `readOnly` and `writeOnly` are accepted and ignored everywhere; on a
+  property they used to be a 400.
 - **swift-jinja moves to 2.5.1 and the two built-in chat-template overrides
   are gone.** The fixes macMLX reported upstream — integer-keyed object
   literals (Seed-OSS), a literal `}}` (Command R7B) and `strip(arg)`
