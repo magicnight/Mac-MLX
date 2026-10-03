@@ -450,6 +450,52 @@ struct SchemaConstraintStateTests {
         }
     }
 
+    // MARK: Real schemas
+
+    /// Upstream mlx-swift-lm's constrained-decoding goldens (tiers 1–4, up to
+    /// five nested containers): each golden document is accepted, by the
+    /// reference validator and the generic JSON automaton too.
+    @Test
+    func acceptsUpstreamGoldenDocuments() throws {
+        for tier in 1...4 {
+            let golden = try StructuredOutputFixtures.golden(tier: tier)
+            let object = try StructuredOutputFixtures.compile(golden.schema)
+            let document = Array(golden.document.utf8)
+            #expect(accepts(golden.document, object), "tier \(tier)")
+            #expect(ReferenceSchemaValidator.validate(document, object), "tier \(tier)")
+            #expect(JSONGrammarState().walk(document)?.isComplete == true, "tier \(tier)")
+        }
+        // Tier 4's activities hold exactly three items.
+        let tier4 = try StructuredOutputFixtures.golden(tier: 4)
+        let object = try StructuredOutputFixtures.compile(tier4.schema)
+        let short = tier4.document.replacingOccurrences(
+            of: ",{\"type\":\"X\",\"title\":\"T\",\"description\":\"D\"}]", with: "]")
+        #expect(short != tier4.document)
+        #expect(!accepts(short, object))
+    }
+
+    /// Apple's TripPlanner `Itinerary` schema (without its one non-ASCII enum
+    /// value): `$defs`, `$ref` as `items`, exact array counts, and an enum
+    /// nested two arrays deep.
+    @Test
+    func acceptsATripPlannerItinerary() throws {
+        let trip = try StructuredOutputFixtures.compile(StructuredOutputFixtures.asciiItinerary())
+        let day = { (last: String) in
+            "{\"title\":\"T\",\"subtitle\":\"S\",\"destination\":\"D\",\"activities\":["
+                + "{\"type\":\"sightseeing\",\"title\":\"T\",\"description\":\"D\"},"
+                + "{\"type\":\"shopping\",\"title\":\"T\",\"description\":\"D\"},"
+                + "{\"type\":\"\(last)\",\"title\":\"T\",\"description\":\"D\"}]}"
+        }
+        let document = "{\"title\":\"T\",\"destinationName\":\"Mount Fuji\",\"description\":\"E\",\"rationale\":\"R\","
+            + "\"days\":[\(day("foodAndDining")),\(day("foodAndDining")),\(day("hotelAndLodging"))]}"
+        #expect(accepts(document, trip))
+        #expect(ReferenceSchemaValidator.validate(Array(document.utf8), trip))
+        #expect(!accepts(document.replacingOccurrences(of: "\"shopping\"", with: "\"golf\""), trip))
+        #expect(!accepts(document.replacingOccurrences(of: "\"Mount Fuji\"", with: "\"Mount Doom\""), trip))
+        #expect(!accepts(document.replacingOccurrences(of: ",\(day("hotelAndLodging"))", with: ""), trip))
+        #expect(!accepts(document.replacingOccurrences(of: "\"rationale\":\"R\",", with: ""), trip))
+    }
+
     // MARK: Equality
 
     /// States are equal at the same position of equal schemas, even when the
