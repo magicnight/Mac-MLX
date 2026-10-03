@@ -4106,12 +4106,15 @@ public actor HummingbirdServer {
     }
 
     /// Why a `/v1/rerank` body cannot be scored, or `nil` when it can: a
-    /// query or document that is empty or whitespace-only (the same rule
-    /// `MLXRerankers` applies). Pure and `nonisolated static` so it is
-    /// unit-testable without a server.
+    /// query or document that is empty or whitespace-only. The blank test is
+    /// the very expression `MLXRerankers` validates with
+    /// (`trimmingCharacters(in: .whitespacesAndNewlines).isEmpty`), so
+    /// whatever upstream would refuse after a load is refused here before
+    /// one. Pure and `nonisolated static` so it is unit-testable without a
+    /// server.
     nonisolated static func rerankInputProblem(query: String, documents: [String]) -> String? {
         func isBlank(_ text: String) -> Bool {
-            text.allSatisfy(\.isWhitespace)
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if isBlank(query) {
             return "query must not be empty"

@@ -189,14 +189,16 @@ public enum ModelFormat: String, Codable, Hashable, Sendable, CaseIterable {
     /// generation engine. Set by `ModelLibraryManager.upgradeFormat` after
     /// the initial `.mlx` file-listing detection.
     case embedder
-    /// Reranker (v0.7+; served by mlx-swift-lm's `MLXRerankers` since
-    /// v0.10). Same on-disk shape as `.mlx` (config.json + tokenizer +
-    /// `.safetensors`). Three shapes are recognized by
-    /// `ModelLibraryManager.upgradeFormat`: an encoder (`bert`, `xlm-roberta`,
-    /// …) whose `architectures` carry a single-logit `*ForSequenceClassification`
-    /// head — the SAME `model_type` as an `.embedder`, told apart only by that
-    /// head; a `qwen3` + `Qwen3ForCausalLM` checkpoint named `Qwen3-Reranker`
-    /// (byte-identical config to a chat model, so the name decides); and
+    /// Reranker (v0.7+; served by mlx-swift-lm's `MLXRerankers` since the
+    /// hand-written cross-encoder was retired). Same on-disk shape as `.mlx`
+    /// (config.json + tokenizer + `.safetensors`). Three shapes are recognized
+    /// by `ModelLibraryManager.upgradeFormat`: an encoder (`bert`,
+    /// `xlm-roberta`, …) whose `architectures` carry a single-logit
+    /// `*ForSequenceClassification` head — the SAME `model_type` as an
+    /// `.embedder`, told apart only by that head; a `qwen3` +
+    /// `Qwen3ForCausalLM` checkpoint named `Qwen3-Reranker` (byte-identical
+    /// config to a chat model, so the name decides, and a shipped
+    /// `1_LogitScore/config.json` must declare both yes and no tokens); and
     /// `JinaForRanking` without sliding-window layers. This mirrors the
     /// `.mlxVLM` / `isOCR` pattern: an on-disk-identical family gated onto a
     /// distinct serving path. Served by `RerankEngine` via `/v1/rerank`,

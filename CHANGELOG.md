@@ -107,9 +107,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   actually run: ms-marco-MiniLM-L-6-v2 matches the PyTorch fp32 reference to
   2e-6 on the logit scale with TF32 off, and to 0.025 under the TF32 matmuls
   M5 enables by default; Qwen3-Reranker-0.6B-4bit puts the documents that
-  answer the question above the ones that do not (0.99 against 1e-5). Not
-  run: the XLM-RoBERTa path (BGE) and Jina v3 — both load through the same
-  code, neither met a checkpoint here. Detection learned the two new shapes,
+  answer the question above the ones that do not (0.99 against 5e-5 and
+  9e-6). Not run: the XLM-RoBERTa path (BGE) and Jina v3 — both are served
+  by the same code path, neither met a checkpoint here. Detection learned the two new shapes,
   narrower than upstream's own name test: `JinaForRanking` is a reranker
   unless the config declares sliding-window layers (Jina v3.5, which
   upstream's Qwen3 model would score wrongly without an error), and a
@@ -124,8 +124,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   0...1 relevance for Qwen3; Jina v3 reports a cosine similarity. Pairs are
   micro-batched (16 pairs or 8,192 token slots per forward pass; Qwen3 input
   is capped at 8,192 tokens) instead of one padded batch of everything, and a
-  blank query or document is now a 400 before any model loads — v0.9.0
-  scored an empty document as `[CLS] query [SEP] [SEP]`.
+  blank query or document is now a 400 before the model is even resolved —
+  v0.9.0 scored an empty document as `[CLS] query [SEP] [SEP]`.
 - **`response_format` schemas: keywords nothing enforces are now a 400 at the
   root too.** The root object used to accept `allOf`, `anyOf`,
   `minProperties`, `patternProperties` and any other keyword and enforce

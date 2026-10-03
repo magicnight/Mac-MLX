@@ -20,6 +20,8 @@ import Testing
 //   rerankNonEmbedderModelReturns400            : 19_660
 //   rerankRerankerModelRoutesToRerankerLoad     : 19_670
 //   rerankReturnDocumentsFieldDecodes           : 19_680
+//   rerankBlankDocumentIsRejectedBeforeTheLoad  : 19_720
+//   rerankBlankQueryIsRejectedOnTheEmbedderPathToo : 19_730
 
 @Suite("HummingbirdServer embeddings/rerank")
 struct HummingbirdServerEmbeddingsTests {
@@ -218,7 +220,7 @@ struct HummingbirdServerEmbeddingsTests {
     @Test
     func rerankBlankDocumentIsRejectedBeforeTheLoad() async throws {
         let server = serverResolving("cross-encoder-model", format: .reranker)
-        let port = try await server.start(preferredPort: 19_700)
+        let port = try await server.start(preferredPort: 19_720)
         let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
 
         let (data, response) = try await postRaw(url, jsonObject: [
@@ -240,7 +242,7 @@ struct HummingbirdServerEmbeddingsTests {
     @Test
     func rerankBlankQueryIsRejectedOnTheEmbedderPathToo() async throws {
         let server = serverResolving("bge-small", format: .embedder)
-        let port = try await server.start(preferredPort: 19_710)
+        let port = try await server.start(preferredPort: 19_730)
         let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
 
         let (data, response) = try await postRaw(url, jsonObject: [

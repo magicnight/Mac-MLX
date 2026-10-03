@@ -1,3 +1,4 @@
+import MLXLMCommon
 import Testing
 import Foundation
 @testable import MacMLXCore
@@ -133,6 +134,25 @@ struct RerankScoringTests {
         #expect(HummingbirdServer.rerankInputProblem(query: " \n", documents: ["a"]) == "query must not be empty")
         #expect(HummingbirdServer.rerankInputProblem(query: "q", documents: ["a", "  ", "c"]) == "documents[1] must not be empty")
         #expect(HummingbirdServer.rerankInputProblem(query: "q", documents: []) == nil)
+    }
+
+    /// Upstream's request-shaped errors become ``RerankRequestError`` (a 400
+    /// at the endpoint); its model-side errors do not (they stay a 500).
+    @Test
+    func rerankRequestErrorMapsOnlyTheRequestShapedUpstreamCases() {
+        #expect(RerankRequestError(RerankerError.emptyQuery) == .emptyQuery)
+        #expect(RerankRequestError(RerankerError.emptyDocument(index: 2)) == .emptyDocument(index: 2))
+        #expect(
+            RerankRequestError(RerankerError.tooManyDocuments(actual: 65, maximum: 64))
+                == .tooManyDocuments(actual: 65, maximum: 64))
+        #expect(
+            RerankRequestError(RerankerError.inputTooLong(actual: 9000, maximum: 8192))
+                == .inputTooLong(actual: 9000, maximum: 8192))
+        #expect(RerankRequestError(RerankerError.nonFiniteScore(index: 0, score: .nan)) == nil)
+        #expect(RerankRequestError(RerankerError.invalidLogitShape([1, 2, 3])) == nil)
+        #expect(
+            RerankRequestError.tooManyDocuments(actual: 65, maximum: 64).errorDescription
+                == "65 documents sent, but this reranker scores at most 64 per request")
     }
 
     /// The reranker path hands `Double` scores straight through: the same
