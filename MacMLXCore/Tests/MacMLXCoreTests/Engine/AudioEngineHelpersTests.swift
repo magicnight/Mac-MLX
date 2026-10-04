@@ -155,20 +155,171 @@ struct AudioEngineHelpersTests {
         #expect(await engine.loadedTTSModelID == nil)
     }
 
+    /// The model-bound entry points — the ones the server and the app call —
+    /// reject a malformed id exactly as the loaders do, before any network
+    /// call, and leave nothing resident.
     @Test
-    func transcribingBeforeLoadingThrowsModelNotLoaded() async throws {
+    func theModelBoundEntryPointsRejectAMalformedIDLocally() async throws {
         let engine = AudioEngine()
-        await #expect(throws: EngineError.modelNotLoaded) {
-            _ = try await engine.transcribe(audioURL: URL(filePath: "/dev/null"))
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {
+            _ = try await engine.transcribe(
+                model: "not-a-repo-id", audioURL: URL(filePath: "/dev/null"))
+        }
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {
+            try await engine.prepareSTT(model: "not-a-repo-id")
+        }
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("../escape", kind: "TTS"))) {
+            _ = try await engine.synthesize(model: "../escape", text: "hello")
+        }
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("../escape", kind: "TTS"))) {
+            try await engine.prepareTTS(model: "../escape")
+        }
+        #expect(await engine.loadedSTTModelID == nil)
+        #expect(await engine.loadedTTSModelID == nil)
+    }
+
+    // MARK: Fetching before the lock
+
+    /// Two requests for one model that is not on disk share a single fetch:
+    /// upstream clears a directory it finds incomplete, so two downloads of
+    /// one repo would delete each other's files. A different repo fetches on
+    /// its own, and once a fetch has finished the next prepare fetches again
+    /// (nothing remembers "on disk"; upstream's own check is cheap). No timing
+    /// is involved: the fake fetch is held at a gate until the test has seen
+    /// the second caller join it.
+    @Test
+    func concurrentPreparesForOneRepoShareASingleFetch() async throws {
+        let log = FetchLog()
+        let gate = Gate()
+        let fetcher = AudioSnapshotFetcher()
+        let engine = AudioEngine(
+            fetch: { modelID in
+                await log.record(modelID)
+                await gate.wait()
+            },
+            fetcher: fetcher)
+
+        let first = Task { try await engine.prepareSTT(model: "openai/whisper-tiny") }
+        try await poll { await log.entries == ["openai/whisper-tiny"] }
+        let second = Task { try await engine.prepareSTT(model: "openai/whisper-tiny") }
+        let other = Task { try await engine.prepareTTS(model: "mlx-community/Kokoro-82M-4bit") }
+        try await poll { await fetcher.joins == 1 }
+        try await poll { await log.entries.count == 2 }
+        await gate.open()
+        try await first.value
+        try await second.value
+        try await other.value
+        let entries = await log.entries
+        #expect(entries.sorted() == ["mlx-community/Kokoro-82M-4bit", "openai/whisper-tiny"])
+
+        try await engine.prepareSTT(model: "openai/whisper-tiny")
+        let after = await log.entries
+        #expect(after.count == 3)
+    }
+
+    /// Poll `condition` until it holds, up to 60 s — generous for a starved CI
+    /// runner; a correct engine satisfies every condition in milliseconds.
+    private func poll(_ condition: @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(60)
+        while ContinuousClock.now < deadline {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw PollTimeout()
+    }
+
+    private struct PollTimeout: Error {}
+
+    /// Parks callers until opened. Built on continuations rather than a sleep
+    /// loop so a cancelled task waits like any other instead of spinning.
+    private actor Gate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func open() {
+            isOpen = true
+            for waiter in waiters { waiter.resume() }
+            waiters.removeAll()
+        }
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { waiters.append($0) }
         }
     }
 
+    // MARK: Cancellation
+
+    /// A caller whose task was cancelled — the app's superseded request —
+    /// stops at the next checkpoint: before the load here, so it neither
+    /// downloads nor holds a second copy of a model (a call superseded while
+    /// its load is already running stops before the forward pass instead). A
+    /// local TTS directory stands in for a real model: the id passes
+    /// validation, and had the load run it would have failed on the bogus
+    /// `config.json` without touching the network.
     @Test
-    func synthesizingBeforeLoadingThrowsModelNotLoaded() async throws {
+    func aCancelledCallerStopsBeforeTheLoad() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "macmlx-cancel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("{}".utf8).write(to: directory.appending(path: "config.json"))
+
         let engine = AudioEngine()
-        await #expect(throws: EngineError.modelNotLoaded) {
-            _ = try await engine.synthesize(text: "hello")
+        let gate = Gate()
+        let call = Task {
+            await gate.wait()
+            return try await engine.synthesize(model: directory.path, text: "hello")
         }
+        call.cancel()
+        await gate.open()
+        await #expect(throws: CancellationError.self) { _ = try await call.value }
+        #expect(await engine.loadedTTSModelID == nil)
+    }
+
+    /// The transcription path has the same checkpoints. A malformed id stands
+    /// in for a model: with the check in place the pre-cancelled call throws
+    /// `CancellationError` before validation, and without it validation would
+    /// reject the id instead — two outcomes that cannot be confused, and no
+    /// network either way.
+    @Test
+    func aCancelledTranscriptionStopsBeforeTheLoad() async throws {
+        let engine = AudioEngine()
+        let gate = Gate()
+        let call = Task {
+            await gate.wait()
+            return try await engine.transcribe(
+                model: "not-a-repo-id", audioURL: URL(filePath: "/dev/null"))
+        }
+        call.cancel()
+        await gate.open()
+        await #expect(throws: CancellationError.self) { _ = try await call.value }
+        #expect(await engine.loadedSTTModelID == nil)
+    }
+
+    /// What the Hub throws becomes `modelLoadFailed` — the case the server
+    /// reports as 500 `load_failed` — and nothing becomes resident.
+    @Test
+    func aFailedFetchIsALoadFailure() async throws {
+        struct HubDown: Error {}
+        let engine = AudioEngine(fetch: { _ in throw HubDown() })
+        do {
+            try await engine.prepareSTT(model: "openai/whisper-tiny")
+            Issue.record("the fetch failure should have propagated")
+        } catch let error as EngineError {
+            guard case .modelLoadFailed = error else {
+                Issue.record("expected modelLoadFailed, got \(error)")
+                return
+            }
+        }
+        #expect(await engine.loadedSTTModelID == nil)
+    }
+
+    private actor FetchLog {
+        private(set) var entries: [String] = []
+        func record(_ modelID: String) { entries.append(modelID) }
     }
 
     @Test
@@ -180,7 +331,7 @@ struct AudioEngineHelpersTests {
         // `invalidAudioModelID` to 400 and everything else to 500, so throwing
         // `modelLoadFailed` here would silently turn a client typo back into a
         // retryable "internal error". See
-        // `HummingbirdServer.audioModelLoadFailure`.
+        // `HummingbirdServer.audioFailure`.
         let engine = AudioEngine()
         await #expect(throws: EngineError.invalidAudioModelID(
             reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {

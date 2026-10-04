@@ -984,11 +984,12 @@ public actor HummingbirdServer {
     /// MVP (see `RerankEngine`).
     private var rerankEngine: RerankEngine?
 
-    /// Lazily-created speech engine for `/v1/audio/transcriptions` +
-    /// `/v1/audio/speech` (v0.9 W1a). A third sibling to `embeddingEngine` /
-    /// `rerankEngine`, holding its own STT and TTS models and cold-swapping
-    /// each independently — see `AudioEngine`. Single engine, no pool.
-    private var audioEngine: AudioEngine?
+    /// Lazily-created speech backend for `/v1/audio/transcriptions` +
+    /// `/v1/audio/speech` (v0.9 W1a): an `AudioEngine` in production, a third
+    /// sibling to `embeddingEngine` / `rerankEngine` that holds its own STT and
+    /// TTS models and cold-swaps each independently. Single engine, no pool.
+    /// Typed as the protocol so a test can script it (`useAudioBackend(_:)`).
+    private var audioBackend: (any AudioBackend)?
 
     /// Binary generation lock. MLX model state (tokenizer, KV cache,
     /// MLX allocator) is not safe to share across concurrent
@@ -1052,6 +1053,12 @@ public actor HummingbirdServer {
         let waiter = generationWaiters.remove(at: idx)
         waiter.continuation.resume(throwing: CancellationError())
     }
+
+    /// Whether the generation lock is currently owned. `false` also means no
+    /// waiter is parked (a release with waiters hands ownership on and keeps
+    /// this `true`). Read by the server tests to pin the lock contract without
+    /// racing an acquire against a timer, which a starved CI runner loses.
+    var generationLockIsHeld: Bool { generationLocked }
 
     /// Release the generation lock and hand off to the next live waiter.
     func releaseGenerationLock() {
@@ -4236,14 +4243,26 @@ public actor HummingbirdServer {
     /// bounding it keeps a single request from monopolising the engine.
     private static let speechInputCharacterLimit = 4096
 
-    /// Lazily create the shared audio engine. Unlike the embedder/reranker
-    /// there is no cold-swap gate here: `AudioEngine` owns its own STT and TTS
-    /// residency and swaps each independently.
-    private func ensureAudioEngine() -> AudioEngine {
-        if let audioEngine { return audioEngine }
-        let engine = AudioEngine()
-        audioEngine = engine
-        return engine
+    /// Lazily create the shared audio backend. The cold-swap gate is the one
+    /// the embedder/reranker use: each handler holds the generation lock
+    /// across the load *and* the inference, so a swap never runs beside a
+    /// generation and no other request can replace the model in between; the
+    /// backend runs the request on the model its own load produced, so the
+    /// reply can never come from a model another request swapped in; and a
+    /// swap drains MLX's buffer cache between the two models (#130). One
+    /// difference: audio models are fetched from the Hub on first use, and
+    /// that fetch (`prepareSTT` / `prepareTTS`) runs BEFORE the lock — a first
+    /// download can take minutes, and nothing else should queue behind it.
+    private func ensureAudioBackend() -> any AudioBackend {
+        if let audioBackend { return audioBackend }
+        let backend = AudioEngine()
+        audioBackend = backend
+        return backend
+    }
+
+    /// Test seam: substitute the audio backend before the first audio request.
+    func useAudioBackend(_ backend: any AudioBackend) {
+        audioBackend = backend
     }
 
     /// `POST /v1/audio/transcriptions` — OpenAI-compatible speech-to-text.
@@ -4343,6 +4362,31 @@ public actor HummingbirdServer {
         }
         let language = form.value("language").flatMap { $0.isEmpty ? nil : $0 }
 
+        // A malformed id is a client mistake the engine rejects without loading
+        // anything; answer it here, before staging the upload and before
+        // queuing for the generation lock — like the lookup errors on
+        // `/v1/embeddings`.
+        do {
+            try AudioEngine.validateSTTModelID(model)
+        } catch {
+            let failure = Self.audioFailure(error, model: model, operation: "Transcription")
+            return errorResponse(
+                status: failure.status, message: failure.message, code: failure.code)
+        }
+
+        // Fetch the model's files now, OUTSIDE the lock: a first download can
+        // take minutes and nothing else should queue behind it, and a repo the
+        // Hub cannot deliver (typo, gated, offline) fails here without the
+        // lock ever being touched. Only the load itself runs under it.
+        let backend = ensureAudioBackend()
+        do {
+            try await backend.prepareSTT(model: model)
+        } catch {
+            let failure = Self.audioFailure(error, model: model, operation: "Transcription")
+            return errorResponse(
+                status: failure.status, message: failure.message, code: failure.code)
+        }
+
         // AVFoundation reads from a file, so the upload has to land on disk.
         // The extension is a decode hint; keep the client's when it is a plain
         // token, drop it otherwise rather than inventing one.
@@ -4359,17 +4403,11 @@ public actor HummingbirdServer {
         }
         defer { try? FileManager.default.removeItem(at: audioURL) }
 
-        let engine = ensureAudioEngine()
-        do {
-            try await engine.loadSTT(model)
-        } catch {
-            let failure = Self.audioModelLoadFailure(error, model: model)
-            return errorResponse(
-                status: failure.status, message: failure.message, code: failure.code)
-        }
-
-        // Same lock discipline as /v1/embeddings: a throw on acquire means the
-        // lock is NOT held, so that path must not release.
+        // Same lock discipline as /v1/embeddings. The lock is taken BEFORE the
+        // load: a cold swap never runs beside a generation, and no other
+        // request can swap the model between this load and this forward pass.
+        // A throw on acquire means the lock is NOT held, so that path must not
+        // release.
         do {
             try await acquireGenerationLock()
         } catch {
@@ -4380,15 +4418,14 @@ public actor HummingbirdServer {
         }
         let transcription: AudioEngine.Transcription
         do {
-            transcription = try await engine.transcribe(
-                audioURL: audioURL, language: language, temperature: temperature)
+            transcription = try await backend.transcribe(
+                model: model, audioURL: audioURL, language: language, temperature: temperature)
             releaseGenerationLock()
         } catch {
             releaseGenerationLock()
+            let failure = Self.audioFailure(error, model: model, operation: "Transcription")
             return errorResponse(
-                status: .internalServerError,
-                message: "Transcription failed: \(error.localizedDescription)",
-                code: "audio_failed")
+                status: failure.status, message: failure.message, code: failure.code)
         }
 
         if format == .text {
@@ -4486,11 +4523,21 @@ public actor HummingbirdServer {
             }
         }
 
-        let engine = ensureAudioEngine()
         do {
-            try await engine.loadTTS(model)
+            try AudioEngine.validateTTSModelID(model)
         } catch {
-            let failure = Self.audioModelLoadFailure(error, model: model)
+            let failure = Self.audioFailure(error, model: model, operation: "Speech synthesis")
+            return errorResponse(
+                status: failure.status, message: failure.message, code: failure.code)
+        }
+
+        // Fetch outside the lock, then lock before the load, as on
+        // /v1/audio/transcriptions.
+        let backend = ensureAudioBackend()
+        do {
+            try await backend.prepareTTS(model: model)
+        } catch {
+            let failure = Self.audioFailure(error, model: model, operation: "Speech synthesis")
             return errorResponse(
                 status: failure.status, message: failure.message, code: failure.code)
         }
@@ -4505,14 +4552,14 @@ public actor HummingbirdServer {
         }
         let speech: AudioEngine.Speech
         do {
-            speech = try await engine.synthesize(text: input, voice: voice)
+            speech = try await backend.synthesize(
+                model: model, text: input, voice: voice, language: nil)
             releaseGenerationLock()
         } catch {
             releaseGenerationLock()
+            let failure = Self.audioFailure(error, model: model, operation: "Speech synthesis")
             return errorResponse(
-                status: .internalServerError,
-                message: "Speech synthesis failed: \(error.localizedDescription)",
-                code: "audio_failed")
+                status: failure.status, message: failure.message, code: failure.code)
         }
 
         let bytes: Data
@@ -4679,8 +4726,9 @@ public actor HummingbirdServer {
         error is NIOTooManyBytesError
     }
 
-    /// Map a failure from `AudioEngine.loadSTT` / `loadTTS` onto a wire status,
-    /// message, and error code.
+    /// Map a failure from the audio backend onto a wire status, message, and
+    /// error code. `operation` names the request in the message
+    /// ("Transcription", "Speech synthesis").
     ///
     /// `AudioEngine` validates the requested repo id locally, before any
     /// network call, and raises ``EngineError/invalidAudioModelID(reason:)``
@@ -4689,23 +4737,42 @@ public actor HummingbirdServer {
     /// typo behind "internal error" AND invites client SDKs, which retry 5xx by
     /// default, to replay a request that is guaranteed to fail forever — so it
     /// becomes a 400 whose message is the engine's hint verbatim (it already
-    /// names the id and the expected `owner/name` shape). Everything else — an
-    /// unreachable Hub, missing weights, an architecture upstream cannot
-    /// build — really did fail server-side and stays 500 `load_failed`.
+    /// names the id and the expected `owner/name` shape). A fetch or load that
+    /// really did fail server-side — an unreachable Hub, missing weights, an
+    /// architecture upstream cannot build — is 500 `load_failed`; a request
+    /// whose task was cancelled while the backend ran is 500 `cancelled`, the
+    /// code a cancellation while waiting for the lock already uses; and
+    /// anything the forward pass throws is 500 `audio_failed`. The backend's
+    /// error cases tell the phases apart.
     ///
     /// `nonisolated static` and pure so both handlers share one classification
     /// and it is unit-testable with no server and no checkpoint.
-    nonisolated static func audioModelLoadFailure(
+    nonisolated static func audioFailure(
         _ error: any Error,
-        model: String
+        model: String,
+        operation: String
     ) -> (status: HTTPResponse.Status, message: String, code: String) {
-        if let engineError = error as? EngineError, case .invalidAudioModelID = engineError {
-            return (.badRequest, error.localizedDescription, "invalid_request_error")
+        if error is CancellationError {
+            return (.internalServerError, "\(operation) cancelled", "cancelled")
+        }
+        if let engineError = error as? EngineError {
+            switch engineError {
+            case .invalidAudioModelID:
+                return (.badRequest, error.localizedDescription, "invalid_request_error")
+            case .modelLoadFailed:
+                return (
+                    .internalServerError,
+                    "Failed to load \(model): \(error.localizedDescription)",
+                    "load_failed"
+                )
+            default:
+                break
+            }
         }
         return (
             .internalServerError,
-            "Failed to load \(model): \(error.localizedDescription)",
-            "load_failed"
+            "\(operation) failed: \(error.localizedDescription)",
+            "audio_failed"
         )
     }
 

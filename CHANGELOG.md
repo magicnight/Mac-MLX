@@ -95,6 +95,36 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **`/v1/audio/transcriptions` and `/v1/audio/speech` loaded their model
+  outside the generation lock, and could answer with another request's
+  model.** Each handler loaded (and cold-swapped) first, queued for the lock
+  second, and then ran on whatever model was resident when the lock came
+  free. So a load ran beside an LLM generation, and while one request was
+  parked at the lock a second one could replace the model: the first then
+  transcribed or spoke with the wrong model, or found the slot empty and got
+  a 500. Since v0.9.0. Both handlers now fetch the model's files first,
+  outside the lock — a first download can take minutes, and nothing else
+  should queue behind it — then take the lock, load, run on the model their
+  own load produced, and release. A repo the Hub cannot deliver (a typo, a
+  gated repo, no network) fails with a 500 before the lock is touched; a
+  malformed id is still a 400, answered without waiting for the lock. A swap
+  also drains MLX's buffer cache between dropping one model and loading the
+  next, as the embedder and reranker swaps do. The app's transcription and
+  playback go through the same model-bound call: they cancel a superseded
+  request and start the next at once, and the superseded one can still be
+  inside the engine; a superseded request now stops at the next checkpoint,
+  before it loads or, if its load was already running, before it runs,
+  though two syntheses can still overlap on the app's engine, which has no
+  lock of its own yet. Known gap: the fetch covers what upstream's own first
+  step downloads, so whatever a loader fetches on its own now happens under
+  the lock, since the load does — six upstream speech-to-text families
+  (voxtral, cohere, canary, wav2vec2/mms, lasr, moonshine) ignore the cache
+  directory they are given and download a second full copy into the shared
+  Hugging Face cache, and Whisper fetches tokenizer files from the matching
+  `openai/whisper-*` repo when its snapshot lacks them; in v0.9.0 those
+  downloads ran outside the lock, with everything else. Kokoro's first
+  synthesis fetches its grapheme-to-phoneme model, under the lock as in
+  v0.9.0, since synthesis always ran there.
 - **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
   model swap could be answered by the other model.** After confirming its
   model was resident the handler read the shared engine slot again, and a
