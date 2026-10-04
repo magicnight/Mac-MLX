@@ -57,8 +57,29 @@ struct TokenizerBridge: MLXLMCommon.Tokenizer, @unchecked Sendable {
         self.chatTemplateOverride = chatTemplateOverride
     }
 
+    /// `addSpecialTokens: false` MUST mean no special tokens. swift-transformers
+    /// 1.3.4's `RobertaProcessing.postProcess` ignores the flag and always wraps
+    /// the tokens in `<s> … </s>` (its `BertProcessing` and `TemplateProcessing`
+    /// honour it). mlx-swift-lm's pair encoders rely on the flag: they encode
+    /// the query and the document bare and add the special tokens themselves,
+    /// so a RoBERTa-tokenizer reranker received `<s><s> q </s></s> </s><s> d
+    /// </s></s>` and scored a different input — top-1 flipped on
+    /// `cross-encoder/nli-MiniLM2-L6-H768` against the PyTorch reference, with
+    /// no error anywhere. When no special tokens are wanted, bypass the
+    /// post-processor: tokenize, then map tokens to ids. For the post-processors
+    /// that do honour the flag this is the same sequence they would return
+    /// (checked against 16 local tokenizers: byte-level BPE, SentencePiece
+    /// BPE, WordPiece and Unigram). The `?? unknown` is unreachable in
+    /// practice — every tokenizer model's `convertTokenToId` already falls
+    /// back to its unknown id, so a `nil` here means the model has none —
+    /// and is spelled out so a vocabulary gap degrades to an unknown token
+    /// rather than the library's force-unwrap trap.
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
+        guard !addSpecialTokens else {
+            return upstream.encode(text: text, addSpecialTokens: true)
+        }
+        let unknown = upstream.unknownTokenId ?? 0
+        return upstream.tokenize(text: text).map { upstream.convertTokenToId($0) ?? unknown }
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {

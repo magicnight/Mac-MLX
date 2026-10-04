@@ -48,12 +48,15 @@ public actor RerankEngine {
     /// (or it declares `JinaForRanking`), which would refuse
     /// `cross-encoder/ms-marco-MiniLM-L-6-v2`. The decision that this directory
     /// holds a reranker is made once, by `ModelLibraryManager.upgradeFormat`:
-    /// a single-logit sequence-classification head for encoders, the
+    /// a sequence-classification head upstream can score (one label, or a
+    /// positive class it recognizes) on a bert / roberta / xlm-roberta
+    /// encoder, the
     /// `Qwen3-Reranker` name plus its yes/no logit-score declaration for
     /// Qwen3, or `JinaForRanking` without sliding-window layers. For the
     /// Qwen3 and Jina families that is stricter than upstream's own test;
-    /// for encoders it replaces the name test with the head check, which is
-    /// what lets ms-marco through. The engine trusts that classification.
+    /// for encoders it replaces the name test with the head check — which is
+    /// what lets ms-marco through — and accepts fewer multi-label heads than
+    /// upstream would score. The engine trusts that classification.
     ///
     /// - Throws: ``EngineError/modelLoadFailed(reason:)`` on any failure: an
     ///   unsupported architecture, a weight-key mismatch, a tokenizer that

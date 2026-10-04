@@ -192,10 +192,12 @@ public enum ModelFormat: String, Codable, Hashable, Sendable, CaseIterable {
     /// Reranker (v0.7+; served by mlx-swift-lm's `MLXRerankers` since the
     /// hand-written cross-encoder was retired). Same on-disk shape as `.mlx`
     /// (config.json + tokenizer + `.safetensors`). Three shapes are recognized
-    /// by `ModelLibraryManager.upgradeFormat`: an encoder (`bert`,
-    /// `xlm-roberta`, …) whose `architectures` carry a single-logit
-    /// `*ForSequenceClassification` head — the SAME `model_type` as an
-    /// `.embedder`, told apart only by that head; a `qwen3` +
+    /// by `ModelLibraryManager.upgradeFormat`: a `bert` / `roberta` /
+    /// `xlm-roberta` encoder whose `architectures` carry a
+    /// `*ForSequenceClassification` head with one label or a recognizable
+    /// positive class — the SAME `model_type` as an `.embedder`, told apart
+    /// only by that head (a classification head is never an embedder; one
+    /// upstream cannot score stays plain `.mlx`); a `qwen3` +
     /// `Qwen3ForCausalLM` checkpoint named `Qwen3-Reranker` (byte-identical
     /// config to a chat model, so the name decides, and a shipped
     /// `1_LogitScore/config.json` must declare both yes and no tokens); and

@@ -1,0 +1,93 @@
+{
+ "version": "1.0",
+ "truncation": null,
+ "padding": null,
+ "added_tokens": [
+  {
+   "id": 0,
+   "content": "<s>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 1,
+   "content": "<pad>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 2,
+   "content": "</s>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 3,
+   "content": "<unk>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  }
+ ],
+ "normalizer": null,
+ "pre_tokenizer": {
+  "type": "ByteLevel",
+  "add_prefix_space": false,
+  "trim_offsets": true,
+  "use_regex": true
+ },
+ "post_processor": {
+  "type": "RobertaProcessing",
+  "sep": [
+   "</s>",
+   2
+  ],
+  "cls": [
+   "<s>",
+   0
+  ],
+  "trim_offsets": true,
+  "add_prefix_space": false
+ },
+ "decoder": {
+  "type": "ByteLevel",
+  "add_prefix_space": true,
+  "trim_offsets": true,
+  "use_regex": true
+ },
+ "model": {
+  "type": "BPE",
+  "dropout": null,
+  "unk_token": "<unk>",
+  "continuing_subword_prefix": "",
+  "end_of_word_suffix": "",
+  "fuse_unk": false,
+  "byte_fallback": false,
+  "vocab": {
+   "<s>": 0,
+   "<pad>": 1,
+   "</s>": 2,
+   "<unk>": 3,
+   "h": 4,
+   "i": 5,
+   "hi": 6,
+   "\u0120": 7,
+   "\u0120hi": 8
+  },
+  "merges": [
+   "h i",
+   "\u0120 hi"
+  ]
+ }
+}
