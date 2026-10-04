@@ -3727,22 +3727,6 @@ public actor HummingbirdServer {
 
     // MARK: - Embeddings / rerank (v0.5.2)
 
-    /// Thrown by `ensureEmbedderLoaded` when a request resolves to a real
-    /// model that isn't an embedder (v0.5.2 follow-up). Kept distinct from
-    /// `ModelSwapError` so the generation cold-swap's error mapping stays
-    /// untouched; `ensureEmbedderOr404` maps it to a 400 `model_not_embedder`.
-    private enum EmbedderKindError: Error {
-        case notAnEmbedder(id: String, format: String)
-    }
-
-    /// Make sure `embeddingEngine` has `requestedID` resident. Resolves the
-    /// model the same way `ensureModelLoaded` does (direct id/displayName,
-    /// then user-facing alias), creating + loading a fresh `EmbeddingEngine`
-    /// on a cold miss and swapping when a different embedder is requested.
-    /// Throws `.modelNotFound` when the id isn't on disk, `.loadFailed` when
-    /// the load itself fails, and `EmbedderKindError.notAnEmbedder` when the
-    /// resolved model isn't an embedder (so /v1/embeddings + /v1/rerank can't
-    /// be pointed at a chat model and return meaningless vectors).
     /// Resolve a request's `model` id to a `LocalModel` the same way the
     /// generation cold-swap does: direct id/displayName first, then a
     /// user-facing alias. Returns `nil` when nothing on disk matches. Shared
@@ -3759,32 +3743,61 @@ public actor HummingbirdServer {
         return nil
     }
 
-    private func ensureEmbedderLoaded(_ requestedID: String) async throws {
-        // Same resolution order as the generation cold-swap.
-        guard let target = await resolveModel(requestedID) else {
-            throw ModelSwapError.modelNotFound(id: requestedID)
-        }
-
-        // P3-8: gate on model kind. A chat/VLM model resolves fine but the
-        // embedder would produce meaningless vectors — reject it up front with
-        // a clear 400 (mapped in `ensureEmbedderOr404`) rather than embedding
-        // against the wrong model. `.embedder` is set by
-        // `ModelLibraryManager.upgradeFormat` after the file-listing scan.
-        guard target.format == .embedder else {
-            throw EmbedderKindError.notAnEmbedder(id: requestedID, format: target.format.rawValue)
-        }
-
+    /// Make sure `embeddingEngine` has `target` resident, creating + loading a
+    /// fresh `EmbeddingEngine` on a cold miss and swapping when a different
+    /// embedder is requested. `target` arrives resolved and already known to
+    /// be an `.embedder`: the handler does the lookup (404) and the kind gate
+    /// (400) BEFORE taking the generation lock, so those answers never queue
+    /// behind a running generation and the lock-held stretch is just the
+    /// swap. Throws `ModelSwapError.loadFailed` when the load itself fails.
+    ///
+    /// Callers hold the generation lock (SRV-2 extended to the auxiliary
+    /// engines): swaps serialize with each other and with generation, so a
+    /// request never finds the slot being emptied by another swap, no two
+    /// requests load at once, and a queued request has not yet taken a
+    /// reference to the engine it will replace.
+    ///
+    /// Returns the engine the caller must use for THIS request. Callers never
+    /// re-read `embeddingEngine` afterwards: the `await` on
+    /// `current.loadedModel` is a suspension point, and a handler that re-read
+    /// the slot after it could pick up an engine another request had just
+    /// assigned — the wrong model, answered under the requested model's name
+    /// (the pre-#133 shape, since v0.5.3). The returned instance is the one
+    /// whose `loadedModel` was checked or that this call loaded.
+    private func ensureEmbedderLoaded(_ target: LocalModel) async throws -> EmbeddingEngine {
         if let current = embeddingEngine, await current.loadedModel?.id == target.id {
-            return
+            return current
         }
 
+        // Release the resident embedder BEFORE the replacement allocates and
+        // hand MLX's cached buffers back in between — the pool's POOL-5 order
+        // (it has in-flight dedup and never evicts an engine in use on top;
+        // here the generation lock gives both). Otherwise both models are
+        // resident for the duration of the load and the peak is their sum
+        // (#130). A failed load leaves no embedder resident; the next request
+        // for the previous one simply reloads it.
+        let releasedResident = embeddingEngine != nil
+        if releasedResident {
+            embeddingEngine = nil
+            EngineMemory.releaseCachedBuffers()
+        }
         let newEngine = EmbeddingEngine()
         do {
             try await newEngine.load(target)
         } catch {
-            throw ModelSwapError.loadFailed(id: requestedID, reason: error.localizedDescription)
+            // Drain what a part-way failure may have allocated, but only when
+            // this call already released a resident engine: that engine ran
+            // on Metal, so MLX is up. A load that fails before touching MLX
+            // (missing config, unsupported architecture) must never be the
+            // first thing to initialize Metal — the SPM test job has no
+            // metallib and drives exactly that path with bogus directories.
+            if releasedResident {
+                EngineMemory.releaseCachedBuffers()
+            }
+            throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
         embeddingEngine = newEngine
+        return newEngine
     }
 
     /// Make sure `rerankEngine` has `target` resident, cold-swapping when a
@@ -3794,17 +3807,38 @@ public actor HummingbirdServer {
     /// `handleRerank`, so there's no inline kind-gate here). Throws
     /// `ModelSwapError.loadFailed` when the load itself fails (an unsupported
     /// architecture, a weight-key mismatch, or a missing config).
-    private func ensureRerankerLoaded(_ target: LocalModel) async throws {
+    ///
+    /// The resident reranker is released BEFORE the replacement loads, and
+    /// MLX's buffer cache is drained in between. Rerankers are no longer a
+    /// 100 MB BERT: a Qwen3-Reranker-4B in bf16 is 7.5 GB resident, and with
+    /// the old load-then-assign order a swap held both copies (peak 14.98 GB
+    /// against 7.66 GB for one, measured in #130). A failed load leaves no
+    /// reranker resident; the next request for the previous one reloads it.
+    ///
+    /// Callers hold the generation lock, and use the returned engine for THIS
+    /// request rather than re-reading the slot — see `ensureEmbedderLoaded`.
+    private func ensureRerankerLoaded(_ target: LocalModel) async throws -> RerankEngine {
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
-            return
+            return current
+        }
+        let releasedResident = rerankEngine != nil
+        if releasedResident {
+            rerankEngine = nil
+            EngineMemory.releaseCachedBuffers()
         }
         let newEngine = RerankEngine()
         do {
             try await newEngine.load(target)
         } catch {
+            // Same rule as `ensureEmbedderLoaded`: drain only when Metal is
+            // known to be up.
+            if releasedResident {
+                EngineMemory.releaseCachedBuffers()
+            }
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
         rerankEngine = newEngine
+        return newEngine
     }
 
     /// `POST /v1/embeddings` — OpenAI-compatible text embeddings. Cold-swaps
@@ -3835,14 +3869,26 @@ public actor HummingbirdServer {
             )
         }
 
-        if let failure = await ensureEmbedderOr404(req.model) {
-            return failure
-        }
-        guard let embedder = embeddingEngine else {
+        // Lookup and kind gate BEFORE the lock, so an unknown or wrong-kind
+        // model is answered at once even while a generation runs. Same
+        // resolution order as the generation cold-swap (id, then alias).
+        guard let target = await resolveModel(req.model) else {
             return errorResponse(
-                status: .internalServerError,
-                message: "Embedder not loaded",
-                code: "load_failed"
+                status: .notFound,
+                message: "Model not found: \(req.model). Download an embedder (e.g. `bge-small-en-v1.5`) and check `macmlx list`.",
+                code: "model_not_found"
+            )
+        }
+        // P3-8: a chat/VLM model resolves fine but the embedder would produce
+        // meaningless vectors — reject it up front with a clear 400 rather than
+        // embedding against the wrong model. `.embedder` is set by
+        // `ModelLibraryManager.upgradeFormat` after the file-listing scan.
+        guard target.format == .embedder else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Model \(req.model) is not an embedding model (kind: \(target.format.rawValue)). "
+                    + "Use an embedder (e.g. `bge-small-en-v1.5`) for /v1/embeddings and /v1/rerank.",
+                code: "model_not_embedder"
             )
         }
 
@@ -3850,6 +3896,10 @@ public actor HummingbirdServer {
         // allocator state that isn't safe to share concurrently. The acquire
         // throws only on cancellation (v0.5.3 cancellation-aware waiters);
         // a throw means the lock is NOT held, so no release on that path.
+        // The cold swap runs under the lock too (SRV-2, as for the chat
+        // model): swaps serialize with each other and with generation, and a
+        // request that arrives during a swap waits here instead of loading
+        // its own copy or holding on to the engine being replaced.
         do {
             try await acquireGenerationLock()
         } catch {
@@ -3858,6 +3908,13 @@ public actor HummingbirdServer {
                 message: "Cancelled while waiting for the generation lock",
                 code: "cancelled"
             )
+        }
+        let embedder: EmbeddingEngine
+        do {
+            embedder = try await ensureEmbedderLoaded(target)
+        } catch {
+            releaseGenerationLock()
+            return loadFailureResponse(error, id: req.model)
         }
         let vectors: [[Float]]
         do {
@@ -3967,20 +4024,9 @@ public actor HummingbirdServer {
         }
 
         // `.embedder` → bi-encoder cosine fallback (documented approximation).
-        // Reuse the proven embedder cold-swap; `target` is already `.embedder`
-        // so this only loads (or reports a load failure), never 404s/400s here.
-        if let failure = await ensureEmbedderOr404(req.model) {
-            return failure
-        }
-        guard let embedder = embeddingEngine else {
-            return errorResponse(
-                status: .internalServerError,
-                message: "Embedder not loaded",
-                code: "load_failed"
-            )
-        }
-
-        // Same lock discipline as /v1/embeddings: throw = not held = no release.
+        // `target` is already resolved and known to be `.embedder`, so under
+        // the lock this only loads (or reports a load failure). Same lock
+        // discipline as /v1/embeddings: throw = not held = no release.
         do {
             try await acquireGenerationLock()
         } catch {
@@ -3989,6 +4035,13 @@ public actor HummingbirdServer {
                 message: "Cancelled while waiting for the generation lock",
                 code: "cancelled"
             )
+        }
+        let embedder: EmbeddingEngine
+        do {
+            embedder = try await ensureEmbedderLoaded(target)
+        } catch {
+            releaseGenerationLock()
+            return loadFailureResponse(error, id: req.model)
         }
         let embeddings: [[Float]]
         do {
@@ -4038,30 +4091,7 @@ public actor HummingbirdServer {
     private func rerankWithCrossEncoder(
         req: RerankRequest, target: LocalModel
     ) async throws -> Response {
-        do {
-            try await ensureRerankerLoaded(target)
-        } catch let err as ModelSwapError {
-            if case .loadFailed(let id, let reason) = err {
-                return errorResponse(
-                    status: .internalServerError,
-                    message: "Failed to load \(id): \(reason)",
-                    code: "load_failed"
-                )
-            }
-            return errorResponse(
-                status: .internalServerError, message: err.localizedDescription, code: "load_failed"
-            )
-        } catch {
-            return errorResponse(
-                status: .internalServerError, message: error.localizedDescription, code: "load_failed"
-            )
-        }
-        guard let reranker = rerankEngine else {
-            return errorResponse(
-                status: .internalServerError, message: "Reranker not loaded", code: "load_failed"
-            )
-        }
-
+        // Lock first, swap second (SRV-2): see the embeddings handler.
         do {
             try await acquireGenerationLock()
         } catch {
@@ -4070,6 +4100,13 @@ public actor HummingbirdServer {
                 message: "Cancelled while waiting for the generation lock",
                 code: "cancelled"
             )
+        }
+        let reranker: RerankEngine
+        do {
+            reranker = try await ensureRerankerLoaded(target)
+        } catch {
+            releaseGenerationLock()
+            return loadFailureResponse(error, id: target.id)
         }
         let scores: [Double]
         do {
@@ -4168,48 +4205,21 @@ public actor HummingbirdServer {
         }
     }
 
-    /// Shared cold-swap-or-error for the embeddings/rerank handlers. Returns
-    /// a ready-made error `Response` (404 for an unknown model, 400 when the
-    /// model isn't an embedder, 500 for a load failure) on failure, or `nil`
-    /// once the embedder is resident.
-    private func ensureEmbedderOr404(_ modelID: String) async -> Response? {
-        do {
-            try await ensureEmbedderLoaded(modelID)
-            return nil
-        } catch let err as EmbedderKindError {
-            switch err {
-            case .notAnEmbedder(let id, let format):
-                // P3-8: resolved to a real model, but not an embedder — 400 so
-                // callers don't get meaningless vectors from a chat/VLM model.
-                return errorResponse(
-                    status: .badRequest,
-                    message: "Model \(id) is not an embedding model (kind: \(format)). "
-                        + "Use an embedder (e.g. `bge-small-en-v1.5`) for /v1/embeddings and /v1/rerank.",
-                    code: "model_not_embedder"
-                )
-            }
-        } catch let err as ModelSwapError {
-            switch err {
-            case .modelNotFound(let id):
-                return errorResponse(
-                    status: .notFound,
-                    message: "Model not found: \(id). Download an embedder (e.g. `bge-small-en-v1.5`) and check `macmlx list`.",
-                    code: "model_not_found"
-                )
-            case .loadFailed(let id, let reason):
-                return errorResponse(
-                    status: .internalServerError,
-                    message: "Failed to load \(id): \(reason)",
-                    code: "load_failed"
-                )
-            }
-        } catch {
+    /// The 500 for an auxiliary engine whose load failed, shared by the
+    /// embeddings handler and both branches of `/v1/rerank`.
+    private func loadFailureResponse(_ error: any Error, id: String) -> Response {
+        if case .loadFailed(let failedID, let reason) = error as? ModelSwapError {
             return errorResponse(
                 status: .internalServerError,
-                message: error.localizedDescription,
+                message: "Failed to load \(failedID): \(reason)",
                 code: "load_failed"
             )
         }
+        return errorResponse(
+            status: .internalServerError,
+            message: "Failed to load \(id): \(error.localizedDescription)",
+            code: "load_failed"
+        )
     }
 
     // MARK: - Audio: transcriptions + speech (v0.9 W1a)

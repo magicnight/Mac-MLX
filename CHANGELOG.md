@@ -95,6 +95,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
+  model swap could be answered by the other model.** After confirming its
+  model was resident the handler read the shared engine slot again, and a
+  swap that finished in between handed it the other model's engine; the
+  reply still named the requested model. Present since the embedder path of
+  v0.5.3 and the cross-encoder path of v0.9.0. Each request now keeps the
+  engine it confirmed or loaded, and the swap itself runs under the
+  generation lock, as the chat model's does.
 - **RoBERTa-tokenizer rerankers scored a different input than the one they
   were given.** swift-transformers' `RobertaProcessing` ignores
   `addSpecialTokens: false` and always wraps the tokens in `<s> … </s>`;
@@ -112,6 +120,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `TemplateProcessing`, which honours the flag, and were not affected.
 
 ### Changed
+- **Swapping the reranker or the embedder releases the resident model before
+  loading the replacement, and drains MLX's buffer cache in between (#130).**
+  The old order loaded the new engine first, so both models were resident for
+  the whole load: a second Qwen3-Reranker-4B (bf16) took the peak to 14.98 GB
+  against 7.66 GB for one copy, and with Qwen3-Reranker-0.6B-4bit under two
+  ids a swap peaked at 639 MB, two 320 MB copies. With the change the same
+  0.6B probe never rises above its first request's 591 MB, and after a swap
+  to ms-marco 5 MB stays in MLX's cache instead of 932 MB; the 4B run was not
+  repeated. Swaps now happen under the generation lock, so requests that
+  arrive during one wait for it instead of loading their own copy or holding
+  on to the model being replaced; a chat request on the server's
+  single-stream path waits behind a swap for the load's duration (about a
+  second for a 4B reranker from the page cache). A swap whose load fails
+  leaves no reranker or embedder resident; the next request for the previous
+  model reloads it. The two engines still
+  sit outside the model pool's byte budget; that part of #130 stays open.
 - **A sequence-classification head is classified by what `MLXRerankers` can
   do with it, and is never an embedder (#131).** A `*ForSequenceClassification`
   checkpoint whose `model_type` is `bert`, `roberta` or `xlm-roberta` is a
