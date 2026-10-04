@@ -102,7 +102,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   reply still named the requested model. Present since the embedder path of
   v0.5.3 and the cross-encoder path of v0.9.0. Each request now keeps the
   engine it confirmed or loaded, and the swap itself runs under the
-  generation lock, as the chat model's always has.
+  generation lock, as the chat model's does.
 
 ### Changed
 - **Swapping the reranker or the embedder releases the resident model before
@@ -115,9 +115,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   to ms-marco 5 MB stays in MLX's cache instead of 932 MB; the 4B run was not
   repeated. Swaps now happen under the generation lock, so requests that
   arrive during one wait for it instead of loading their own copy or holding
-  on to the model being replaced; a chat generation waits behind a swap for
-  the load's duration (about a second for a 4B reranker from the page
-  cache). A swap whose load fails leaves no reranker or embedder resident;
+  on to the model being replaced; a chat request on the server's
+  single-stream path waits behind a swap for the load's duration (about a
+  second for a 4B reranker from the page cache). A swap whose load fails leaves no reranker or embedder resident;
   the next request for the previous model reloads it. The two engines still
   sit outside the model pool's byte budget; that part of #130 stays open.
 - **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written

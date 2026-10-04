@@ -217,7 +217,7 @@ final class RerankEngineSmokeTests: XCTestCase {
         let table = [msA.id: msA, msB.id: msB, qwen.id: qwen]
         let server = HummingbirdServer(
             engine: StubInferenceEngine(engineID: .mlxSwift), modelResolver: { table[$0] })
-        let port = try await server.start(preferredPort: 19_700)
+        let port = try await server.start(preferredPort: 19_780)
         let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/v1/rerank"))
         func rerank(_ id: String) async throws -> Int {
             var request = URLRequest(url: url)

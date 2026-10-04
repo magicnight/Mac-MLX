@@ -22,6 +22,9 @@ import Testing
 //   rerankReturnDocumentsFieldDecodes           : 19_680
 //   rerankBlankDocumentIsRejectedBeforeTheLoad  : 19_720
 //   rerankBlankQueryIsRejectedOnTheEmbedderPathToo : 19_730
+//   rerankSwapWaitsForTheGenerationLockAndReleasesItOnFailure : 19_750
+//   embeddingsSwapWaitsForTheGenerationLockAndReleasesItOnFailure : 19_760
+//   embeddingsLookupAndKindErrorsDoNotWaitForTheLock : 19_770
 
 @Suite("HummingbirdServer embeddings/rerank")
 struct HummingbirdServerEmbeddingsTests {
@@ -254,6 +257,131 @@ struct HummingbirdServerEmbeddingsTests {
 
         #expect(response.statusCode == 400)
         #expect(errorCode(data) == "invalid_request_error")
+    }
+
+    // MARK: - Swaps under the generation lock (#130 / #133)
+
+    /// A completion flag a request task raises when its response arrives.
+    /// `Task.value` cannot be raced inside a task group (awaiting it is not
+    /// cancellable, so the group would wait on a request parked behind the
+    /// lock), hence a flag plus a sleep.
+    private actor Done {
+        private(set) var isSet = false
+        func set() { isSet = true }
+    }
+
+    /// Post `body`, raising `done` when the response arrives.
+    private func post(_ url: URL, _ body: [String: any Sendable], raising done: Done) -> Task<(Data, HTTPURLResponse), any Error> {
+        Task {
+            let result = try await postRaw(url, jsonObject: body)
+            await done.set()
+            return result
+        }
+    }
+
+    /// A later acquire must succeed promptly, which proves every path that took
+    /// the lock also released it (srv3b's race).
+    private func lockIsFree(_ server: HummingbirdServer) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { (try? await server.acquireGenerationLock()) != nil }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// SRV-2 for the auxiliary engines: a `/v1/rerank` request that needs a
+    /// swap waits for the generation lock (it is parked while a "generation"
+    /// holds it), and a swap whose load fails releases the lock again. The
+    /// bogus directory makes the load fail before any MLX work, so this runs
+    /// under bare `swift test`. A regression here is a server-wide deadlock
+    /// (every later generation queues behind a lock nobody releases).
+    @Test
+    func rerankSwapWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
+        let server = serverResolving("cross-encoder-model", format: .reranker)
+        let port = try await server.start(preferredPort: 19_750)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
+
+        try await server.acquireGenerationLock()   // a generation holds the lock
+        let done = Done()
+        let pending = post(url, ["model": "cross-encoder-model", "query": "q", "documents": ["d"]], raising: done)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let answeredWhileLocked = await done.isSet
+        #expect(!answeredWhileLocked, "the swap must queue behind the generation lock, not run beside a generation")
+
+        await server.releaseGenerationLock()
+        let (data, response) = try await pending.value
+        #expect(response.statusCode == 500)
+        #expect(errorCode(data) == "load_failed")
+
+        let free = await lockIsFree(server)
+        #expect(free, "the failed swap must release the generation lock")
+        if free { await server.releaseGenerationLock() }
+        await server.stop()
+    }
+
+    /// Same contract on `/v1/embeddings`.
+    @Test
+    func embeddingsSwapWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
+        let server = serverResolving("bge-small", format: .embedder)
+        let port = try await server.start(preferredPort: 19_760)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/embeddings")!
+
+        try await server.acquireGenerationLock()
+        let done = Done()
+        let pending = post(url, ["model": "bge-small", "input": "hello"], raising: done)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let answeredWhileLocked = await done.isSet
+        #expect(!answeredWhileLocked, "the swap must queue behind the generation lock")
+
+        await server.releaseGenerationLock()
+        let (data, response) = try await pending.value
+        #expect(response.statusCode == 500)
+        #expect(errorCode(data) == "load_failed")
+
+        let free = await lockIsFree(server)
+        #expect(free, "the failed swap must release the generation lock")
+        if free { await server.releaseGenerationLock() }
+        await server.stop()
+    }
+
+    /// Lookup and kind errors are answered before the lock: an unknown model
+    /// (404) and a chat model (400) come back at once even while a generation
+    /// holds the lock, and neither touches it.
+    @Test
+    func embeddingsLookupAndKindErrorsDoNotWaitForTheLock() async throws {
+        let server = serverResolving("chat-model", format: .mlx)
+        let port = try await server.start(preferredPort: 19_770)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/embeddings")!
+
+        try await server.acquireGenerationLock()
+        let unknownDone = Done()
+        let unknown = post(url, ["model": "nope", "input": "hello"], raising: unknownDone)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        let unknownAnswered = await unknownDone.isSet
+        #expect(unknownAnswered, "a 404 must not queue behind a generation")
+
+        let kindDone = Done()
+        let wrongKind = post(url, ["model": "chat-model", "input": "hello"], raising: kindDone)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        let kindAnswered = await kindDone.isSet
+        #expect(kindAnswered, "a 400 must not queue behind a generation")
+
+        // Release before awaiting the results, so a regression (the request
+        // parked behind the lock) cannot hang the test; the flags above are
+        // the assertion.
+        await server.releaseGenerationLock()
+        let (unknownData, unknownResponse) = try await unknown.value
+        #expect(unknownResponse.statusCode == 404)
+        #expect(errorCode(unknownData) == "model_not_found")
+        let (kindData, kindResponse) = try await wrongKind.value
+        #expect(kindResponse.statusCode == 400)
+        #expect(errorCode(kindData) == "model_not_embedder")
+        await server.stop()
     }
 
     /// The new optional `return_documents` field must decode. A 404 (not a 400)

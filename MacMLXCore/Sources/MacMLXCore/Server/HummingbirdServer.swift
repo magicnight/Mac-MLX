@@ -3727,13 +3727,6 @@ public actor HummingbirdServer {
 
     // MARK: - Embeddings / rerank (v0.5.2)
 
-    /// Thrown by `ensureEmbedderLoaded` when a request resolves to a real
-    /// model that isn't an embedder (v0.5.2 follow-up). Kept distinct from
-    /// `ModelSwapError` so the generation cold-swap's error mapping stays
-    /// untouched; `ensureEmbedderOr404` maps it to a 400 `model_not_embedder`.
-    private enum EmbedderKindError: Error {
-        case notAnEmbedder(id: String, format: String)
-    }
 
     /// Resolve a request's `model` id to a `LocalModel` the same way the
     /// generation cold-swap does: direct id/displayName first, then a
@@ -3751,14 +3744,13 @@ public actor HummingbirdServer {
         return nil
     }
 
-    /// Make sure `embeddingEngine` has `requestedID` resident. Resolves the
-    /// model the same way `ensureModelLoaded` does (direct id/displayName,
-    /// then user-facing alias), creating + loading a fresh `EmbeddingEngine`
-    /// on a cold miss and swapping when a different embedder is requested.
-    /// Throws `.modelNotFound` when the id isn't on disk, `.loadFailed` when
-    /// the load itself fails, and `EmbedderKindError.notAnEmbedder` when the
-    /// resolved model isn't an embedder (so /v1/embeddings + /v1/rerank can't
-    /// be pointed at a chat model and return meaningless vectors).
+    /// Make sure `embeddingEngine` has `target` resident, creating + loading a
+    /// fresh `EmbeddingEngine` on a cold miss and swapping when a different
+    /// embedder is requested. `target` arrives resolved and already known to
+    /// be an `.embedder`: the handler does the lookup (404) and the kind gate
+    /// (400) BEFORE taking the generation lock, so those answers never queue
+    /// behind a running generation and the lock-held stretch is just the
+    /// swap. Throws `ModelSwapError.loadFailed` when the load itself fails.
     ///
     /// Callers hold the generation lock (SRV-2 extended to the auxiliary
     /// engines): swaps serialize with each other and with generation, so a
@@ -3773,21 +3765,7 @@ public actor HummingbirdServer {
     /// assigned — the wrong model, answered under the requested model's name
     /// (the pre-#133 shape, since v0.5.3). The returned instance is the one
     /// whose `loadedModel` was checked or that this call loaded.
-    private func ensureEmbedderLoaded(_ requestedID: String) async throws -> EmbeddingEngine {
-        // Same resolution order as the generation cold-swap.
-        guard let target = await resolveModel(requestedID) else {
-            throw ModelSwapError.modelNotFound(id: requestedID)
-        }
-
-        // P3-8: gate on model kind. A chat/VLM model resolves fine but the
-        // embedder would produce meaningless vectors — reject it up front with
-        // a clear 400 (mapped in `ensureEmbedderOr404`) rather than embedding
-        // against the wrong model. `.embedder` is set by
-        // `ModelLibraryManager.upgradeFormat` after the file-listing scan.
-        guard target.format == .embedder else {
-            throw EmbedderKindError.notAnEmbedder(id: requestedID, format: target.format.rawValue)
-        }
-
+    private func ensureEmbedderLoaded(_ target: LocalModel) async throws -> EmbeddingEngine {
         if let current = embeddingEngine, await current.loadedModel?.id == target.id {
             return current
         }
@@ -3799,7 +3777,8 @@ public actor HummingbirdServer {
         // resident for the duration of the load and the peak is their sum
         // (#130). A failed load leaves no embedder resident; the next request
         // for the previous one simply reloads it.
-        if embeddingEngine != nil {
+        let releasedResident = embeddingEngine != nil
+        if releasedResident {
             embeddingEngine = nil
             EngineMemory.releaseCachedBuffers()
         }
@@ -3807,12 +3786,16 @@ public actor HummingbirdServer {
         do {
             try await newEngine.load(target)
         } catch {
-            // Not drained here on purpose: a load that fails before touching
-            // MLX (missing config, unsupported architecture) must not be the
+            // Drain what a part-way failure may have allocated, but only when
+            // this call already released a resident engine: that engine ran
+            // on Metal, so MLX is up. A load that fails before touching MLX
+            // (missing config, unsupported architecture) must never be the
             // first thing to initialize Metal — the SPM test job has no
-            // metallib — so whatever a part-way failure cached waits for the
-            // next swap of a resident engine.
-            throw ModelSwapError.loadFailed(id: requestedID, reason: error.localizedDescription)
+            // metallib and drives exactly that path with bogus directories.
+            if releasedResident {
+                EngineMemory.releaseCachedBuffers()
+            }
+            throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
         embeddingEngine = newEngine
         return newEngine
@@ -3839,7 +3822,8 @@ public actor HummingbirdServer {
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
             return current
         }
-        if rerankEngine != nil {
+        let releasedResident = rerankEngine != nil
+        if releasedResident {
             rerankEngine = nil
             EngineMemory.releaseCachedBuffers()
         }
@@ -3847,7 +3831,11 @@ public actor HummingbirdServer {
         do {
             try await newEngine.load(target)
         } catch {
-            // No drain on failure, for the reason given in `ensureEmbedderLoaded`.
+            // Same rule as `ensureEmbedderLoaded`: drain only when Metal is
+            // known to be up.
+            if releasedResident {
+                EngineMemory.releaseCachedBuffers()
+            }
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
         rerankEngine = newEngine
@@ -3882,6 +3870,29 @@ public actor HummingbirdServer {
             )
         }
 
+        // Lookup and kind gate BEFORE the lock, so an unknown or wrong-kind
+        // model is answered at once even while a generation runs. Same
+        // resolution order as the generation cold-swap (id, then alias).
+        guard let target = await resolveModel(req.model) else {
+            return errorResponse(
+                status: .notFound,
+                message: "Model not found: \(req.model). Download an embedder (e.g. `bge-small-en-v1.5`) and check `macmlx list`.",
+                code: "model_not_found"
+            )
+        }
+        // P3-8: a chat/VLM model resolves fine but the embedder would produce
+        // meaningless vectors — reject it up front with a clear 400 rather than
+        // embedding against the wrong model. `.embedder` is set by
+        // `ModelLibraryManager.upgradeFormat` after the file-listing scan.
+        guard target.format == .embedder else {
+            return errorResponse(
+                status: .badRequest,
+                message: "Model \(req.model) is not an embedding model (kind: \(target.format.rawValue)). "
+                    + "Use an embedder (e.g. `bge-small-en-v1.5`) for /v1/embeddings and /v1/rerank.",
+                code: "model_not_embedder"
+            )
+        }
+
         // Serialise MLX compute with generation — both touch global MLX
         // allocator state that isn't safe to share concurrently. The acquire
         // throws only on cancellation (v0.5.3 cancellation-aware waiters);
@@ -3900,12 +3911,11 @@ public actor HummingbirdServer {
             )
         }
         let embedder: EmbeddingEngine
-        switch await ensureEmbedderOr404(req.model) {
-        case .failure(let response):
+        do {
+            embedder = try await ensureEmbedderLoaded(target)
+        } catch {
             releaseGenerationLock()
-            return response
-        case .engine(let engine):
-            embedder = engine
+            return loadFailureResponse(error, id: req.model)
         }
         let vectors: [[Float]]
         do {
@@ -4015,10 +4025,9 @@ public actor HummingbirdServer {
         }
 
         // `.embedder` → bi-encoder cosine fallback (documented approximation).
-        // Reuse the proven embedder cold-swap; `target` is already `.embedder`
-        // so this only loads (or reports a load failure), never 404s/400s here.
-        // Same lock discipline as /v1/embeddings: throw = not held = no
-        // release; the swap runs under the lock.
+        // `target` is already resolved and known to be `.embedder`, so under
+        // the lock this only loads (or reports a load failure). Same lock
+        // discipline as /v1/embeddings: throw = not held = no release.
         do {
             try await acquireGenerationLock()
         } catch {
@@ -4029,12 +4038,11 @@ public actor HummingbirdServer {
             )
         }
         let embedder: EmbeddingEngine
-        switch await ensureEmbedderOr404(req.model) {
-        case .failure(let response):
+        do {
+            embedder = try await ensureEmbedderLoaded(target)
+        } catch {
             releaseGenerationLock()
-            return response
-        case .engine(let engine):
-            embedder = engine
+            return loadFailureResponse(error, id: req.model)
         }
         let embeddings: [[Float]]
         do {
@@ -4097,23 +4105,9 @@ public actor HummingbirdServer {
         let reranker: RerankEngine
         do {
             reranker = try await ensureRerankerLoaded(target)
-        } catch let err as ModelSwapError {
-            releaseGenerationLock()
-            if case .loadFailed(let id, let reason) = err {
-                return errorResponse(
-                    status: .internalServerError,
-                    message: "Failed to load \(id): \(reason)",
-                    code: "load_failed"
-                )
-            }
-            return errorResponse(
-                status: .internalServerError, message: err.localizedDescription, code: "load_failed"
-            )
         } catch {
             releaseGenerationLock()
-            return errorResponse(
-                status: .internalServerError, message: error.localizedDescription, code: "load_failed"
-            )
+            return loadFailureResponse(error, id: target.id)
         }
         let scores: [Double]
         do {
@@ -4212,54 +4206,21 @@ public actor HummingbirdServer {
         }
     }
 
-    /// The outcome of a cold swap on behalf of one request: the engine to use,
-    /// or a ready-made error `Response`.
-    private enum EmbedderSwap {
-        case engine(EmbeddingEngine)
-        case failure(Response)
-    }
-
-    /// Shared cold-swap-or-error for the embeddings/rerank handlers. Returns
-    /// the resident embedder for this request, or a ready-made error
-    /// `Response` (404 for an unknown model, 400 when the model isn't an
-    /// embedder, 500 for a load failure).
-    private func ensureEmbedderOr404(_ modelID: String) async -> EmbedderSwap {
-        do {
-            return .engine(try await ensureEmbedderLoaded(modelID))
-        } catch let err as EmbedderKindError {
-            switch err {
-            case .notAnEmbedder(let id, let format):
-                // P3-8: resolved to a real model, but not an embedder — 400 so
-                // callers don't get meaningless vectors from a chat/VLM model.
-                return .failure(errorResponse(
-                    status: .badRequest,
-                    message: "Model \(id) is not an embedding model (kind: \(format)). "
-                        + "Use an embedder (e.g. `bge-small-en-v1.5`) for /v1/embeddings and /v1/rerank.",
-                    code: "model_not_embedder"
-                ))
-            }
-        } catch let err as ModelSwapError {
-            switch err {
-            case .modelNotFound(let id):
-                return .failure(errorResponse(
-                    status: .notFound,
-                    message: "Model not found: \(id). Download an embedder (e.g. `bge-small-en-v1.5`) and check `macmlx list`.",
-                    code: "model_not_found"
-                ))
-            case .loadFailed(let id, let reason):
-                return .failure(errorResponse(
-                    status: .internalServerError,
-                    message: "Failed to load \(id): \(reason)",
-                    code: "load_failed"
-                ))
-            }
-        } catch {
-            return .failure(errorResponse(
+    /// The 500 for an auxiliary engine whose load failed, shared by the
+    /// embeddings handler and both branches of `/v1/rerank`.
+    private func loadFailureResponse(_ error: any Error, id: String) -> Response {
+        if case .loadFailed(let failedID, let reason) = error as? ModelSwapError {
+            return errorResponse(
                 status: .internalServerError,
-                message: error.localizedDescription,
+                message: "Failed to load \(failedID): \(reason)",
                 code: "load_failed"
-            ))
+            )
         }
+        return errorResponse(
+            status: .internalServerError,
+            message: "Failed to load \(id): \(error.localizedDescription)",
+            code: "load_failed"
+        )
     }
 
     // MARK: - Audio: transcriptions + speech (v0.9 W1a)
