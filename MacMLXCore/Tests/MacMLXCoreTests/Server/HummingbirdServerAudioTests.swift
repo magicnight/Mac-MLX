@@ -476,7 +476,10 @@ struct HummingbirdServerAudioTests {
 
         /// Whether the server's generation lock is held right now, read from
         /// inside a call. The handler is suspended on this call, so the server
-        /// actor answers at once; no timer is involved.
+        /// actor answers at once; no timer is involved. Owner-agnostic: it says
+        /// someone holds the lock, not that this request does — sound here
+        /// because while a probed call runs no other request owns or waits for
+        /// the lock, and in the fetch-phase probes nobody holds it at all.
         private func probeLock() async -> Bool? {
             guard let server else { return nil }
             return await server.generationLockIsHeld
@@ -531,6 +534,8 @@ struct HummingbirdServerAudioTests {
         func set() { isSet = true }
     }
 
+    /// `done` is raised on a transport failure too, so a timed-out request
+    /// surfaces as its own error at `.value` and not as "not answered".
     private func postMultipartInBackground(
         _ url: URL,
         fields: [(String, String)],
@@ -538,9 +543,14 @@ struct HummingbirdServerAudioTests {
         raising done: Done
     ) -> Task<(Data, HTTPURLResponse), any Error> {
         Task {
-            let result = try await postMultipart(url, fields: fields, file: file)
-            await done.set()
-            return result
+            do {
+                let result = try await postMultipart(url, fields: fields, file: file)
+                await done.set()
+                return result
+            } catch {
+                await done.set()
+                throw error
+            }
         }
     }
 
@@ -548,10 +558,28 @@ struct HummingbirdServerAudioTests {
         _ url: URL, object: [String: any Sendable], raising done: Done
     ) -> Task<(Data, HTTPURLResponse), any Error> {
         Task {
-            let result = try await postJSON(url, object: object)
-            await done.set()
-            return result
+            do {
+                let result = try await postJSON(url, object: object)
+                await done.set()
+                return result
+            } catch {
+                await done.set()
+                throw error
+            }
         }
+    }
+
+    /// The backend's prepare calls once at least one has arrived, polling up
+    /// to `seconds` (same reasoning as `allSet`), or whatever has arrived by
+    /// the deadline.
+    private func prepared(_ backend: ScriptedAudioBackend, within seconds: Double) async -> [String] {
+        let deadline = ContinuousClock.now + .seconds(seconds)
+        while ContinuousClock.now < deadline {
+            let calls = await backend.prepareCalls
+            if !calls.isEmpty { return calls }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return await backend.prepareCalls
     }
 
     /// Whether every flag is set within `seconds`, polling. Used with the lock
@@ -575,7 +603,10 @@ struct HummingbirdServerAudioTests {
     }
 
     /// Whether every path that took the lock also released it: nobody owns
-    /// it and nobody is parked on it.
+    /// it and nobody is parked on it. Owner-agnostic like the probe; sound
+    /// after a response because every probed handler releases before it
+    /// responds, and a release that hands the lock to a parked waiter keeps
+    /// the flag true.
     private func lockIsFree(_ server: HummingbirdServer) async -> Bool {
         await !server.generationLockIsHeld
     }
@@ -600,11 +631,13 @@ struct HummingbirdServerAudioTests {
             fields: [("model", "openai/whisper-tiny")],
             file: (name: "file", filename: "a.wav", bytes: sampleWAV),
             raising: done)
+        // The fetch arrives while the lock is held (it does not wait for it);
+        // then give a wrong handler time to go on and load anyway.
+        let preparedWhileLocked = await prepared(backend, within: 60)
+        #expect(preparedWhileLocked == ["openai/whisper-tiny"], "the fetch must not wait for the lock")
         try await Task.sleep(nanoseconds: 300_000_000)
-        let preparedWhileLocked = await backend.prepareCalls
         let calledWhileLocked = await backend.transcribeCalls.count
         let answeredWhileLocked = await done.isSet
-        #expect(preparedWhileLocked == ["openai/whisper-tiny"], "the fetch must not wait for the lock")
         #expect(calledWhileLocked == 0, "the load must queue behind the generation lock, not run beside a generation")
         #expect(!answeredWhileLocked)
 
@@ -636,11 +669,11 @@ struct HummingbirdServerAudioTests {
             speechURL(port),
             object: ["model": "mlx-community/Kokoro-82M-4bit", "input": "hello", "voice": "af_heart"],
             raising: done)
+        let preparedWhileLocked = await prepared(backend, within: 60)
+        #expect(preparedWhileLocked == ["mlx-community/Kokoro-82M-4bit"], "the fetch must not wait for the lock")
         try await Task.sleep(nanoseconds: 300_000_000)
-        let preparedWhileLocked = await backend.prepareCalls
         let calledWhileLocked = await backend.synthesizeCalls.count
         let answeredWhileLocked = await done.isSet
-        #expect(preparedWhileLocked == ["mlx-community/Kokoro-82M-4bit"], "the fetch must not wait for the lock")
         #expect(calledWhileLocked == 0, "the load must queue behind the generation lock")
         #expect(!answeredWhileLocked)
 

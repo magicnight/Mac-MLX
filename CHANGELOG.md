@@ -112,10 +112,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   next, as the embedder and reranker swaps do. The app's transcription and
   playback go through the same model-bound call: they cancel a superseded
   request and start the next at once, and the superseded one can still be
-  inside the engine. Known gap, unchanged from v0.9.0: a few upstream
-  speech-to-text loaders ignore the cache directory they are given and
-  download a second copy into the shared Hugging Face cache, and that copy
-  is still fetched under the lock.
+  inside the engine; a superseded request now stops before it loads or runs,
+  though two syntheses can still overlap on the app's engine, which has no
+  lock of its own yet. Known gap: the fetch covers what upstream's own first
+  step downloads, so whatever a loader fetches on its own now happens under
+  the lock, since the load does — six upstream speech-to-text families
+  (voxtral, cohere, canary, wav2vec2/mms, lasr, moonshine) ignore the cache
+  directory they are given and download a second full copy into the shared
+  Hugging Face cache, Kokoro fetches its grapheme-to-phoneme model on first
+  synthesis, and Whisper fetches tokenizer files from the matching
+  `openai/whisper-*` repo when its snapshot lacks them. In v0.9.0 those
+  downloads ran outside the lock, with everything else.
 - **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
   model swap could be answered by the other model.** After confirming its
   model was resident the handler read the shared engine slot again, and a

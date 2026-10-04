@@ -152,18 +152,19 @@ public actor AudioEngine {
 
     private let fetch: SnapshotFetch
 
-    /// Fetches in flight, by repo id. Two concurrent requests for one model
-    /// that is not on disk share a single download instead of racing: upstream
-    /// treats a directory without a complete `.safetensors` as stale and
-    /// clears it, so two downloads of one repo would delete each other's files.
-    private var fetches: [String: Task<Void, any Error>] = [:]
+    /// Where concurrent fetches of one repo meet: ``AudioSnapshotFetcher/shared``
+    /// in production, so the server's engine and the app's share a download
+    /// instead of deleting each other's files.
+    private let fetcher: AudioSnapshotFetcher
 
     public init() {
         self.fetch = Self.defaultFetch
+        self.fetcher = .shared
     }
 
-    init(fetch: @escaping SnapshotFetch) {
+    init(fetch: @escaping SnapshotFetch, fetcher: AudioSnapshotFetcher = AudioSnapshotFetcher()) {
         self.fetch = fetch
+        self.fetcher = fetcher
     }
 
     /// What `STT.loadModel` / `TTS.loadModel` do first: resolve the snapshot
@@ -183,42 +184,26 @@ public actor AudioEngine {
 
     /// Make `modelID`'s files local without loading it: the download half of
     /// a cold load, split out so the server can run it before taking the
-    /// generation lock (a first download can take minutes). No-op when that
-    /// model is resident. Concurrent calls for one repo share one fetch.
+    /// generation lock (a first download can take minutes). `nonisolated` on
+    /// purpose: it touches no slot and no MLX state, so it need not wait for a
+    /// forward pass that is running on this actor, and a resolve that finds
+    /// the files on disk is a cheap filesystem check. Concurrent calls for one
+    /// repo, from any engine in the process, share one fetch
+    /// (``AudioSnapshotFetcher``).
     ///
     /// - Throws: ``EngineError/invalidAudioModelID(reason:)`` for a malformed
     ///   id, ``EngineError/modelLoadFailed(reason:)`` when the Hub cannot
     ///   deliver the files (unknown or gated repo, no network).
-    public func prepareSTT(model modelID: String) async throws {
-        if loadedSTTModelID == modelID, sttModel != nil { return }
+    public nonisolated func prepareSTT(model modelID: String) async throws {
         try Self.validateSTTModelID(modelID)
-        try await fetchSnapshot(modelID)
+        try await fetcher.fetch(modelID, using: fetch)
     }
 
     /// Same for a TTS model. A local directory has nothing to fetch.
-    public func prepareTTS(model modelID: String) async throws {
-        if loadedTTSModelID == modelID, ttsModel != nil { return }
+    public nonisolated func prepareTTS(model modelID: String) async throws {
         try Self.validateTTSModelID(modelID)
         if Self.looksLikeLocalDirectory(modelID) { return }
-        try await fetchSnapshot(modelID)
-    }
-
-    private func fetchSnapshot(_ modelID: String) async throws {
-        if let inFlight = fetches[modelID] {
-            do { try await inFlight.value } catch { throw Self.loadFailure(error) }
-            return
-        }
-        let fetch = self.fetch
-        let task = Task { try await fetch(modelID) }
-        fetches[modelID] = task
-        defer { fetches[modelID] = nil }
-        do { try await task.value } catch { throw Self.loadFailure(error) }
-    }
-
-    /// An engine error passes through; anything upstream throws becomes a
-    /// load failure, which the server reports as 500 `load_failed`.
-    private static func loadFailure(_ error: any Error) -> EngineError {
-        (error as? EngineError) ?? .modelLoadFailed(reason: error.localizedDescription)
+        try await fetcher.fetch(modelID, using: fetch)
     }
 
     // MARK: Loading
@@ -257,7 +242,8 @@ public actor AudioEngine {
         // more memory than a swap needs to hold. Then hand MLX's cached buffers
         // back, as the embedder/reranker swaps do (#130) — only when something
         // was resident, so a failed first load never touches MLX.
-        if sttModel != nil {
+        let releasedResident = sttModel != nil
+        if releasedResident {
             sttModel = nil
             loadedSTTModelID = nil
             EngineMemory.releaseCachedBuffers()
@@ -266,6 +252,9 @@ public actor AudioEngine {
         do {
             model = try await STT.loadModel(modelRepo: modelID, cache: Self.hubCache)
         } catch {
+            // A load that fails part-way leaves its allocations in the cache;
+            // drain again, but only if MLX was already up (a resident model).
+            if releasedResident { EngineMemory.releaseCachedBuffers() }
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
         sttModel = model
@@ -292,7 +281,8 @@ public actor AudioEngine {
     private func residentTTSModel(_ modelID: String) async throws -> SpeechModelBox {
         if loadedTTSModelID == modelID, let ttsModel { return ttsModel }
         try Self.validateTTSModelID(modelID)
-        if ttsModel != nil {
+        let releasedResident = ttsModel != nil
+        if releasedResident {
             ttsModel = nil
             loadedTTSModelID = nil
             EngineMemory.releaseCachedBuffers()
@@ -302,6 +292,7 @@ public actor AudioEngine {
             box = SpeechModelBox(
                 model: try await TTS.loadModel(modelRepo: modelID, cache: Self.hubCache))
         } catch {
+            if releasedResident { EngineMemory.releaseCachedBuffers() }
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
         ttsModel = box
@@ -331,14 +322,18 @@ public actor AudioEngine {
     ///   - temperature: Sampling temperature, or `nil` for the model default.
     /// - Throws: What ``loadSTT(_:)`` throws for the load, or
     ///   ``EngineError/audioProcessingFailed(reason:)`` when decoding fails;
-    ///   the cases tell the two apart.
+    ///   the cases tell the two apart. A caller whose task was cancelled (the
+    ///   app's superseded transcription) gets `CancellationError` before the
+    ///   load and again before the forward pass, rather than doing either.
     public func transcribe(
         model modelID: String,
         audioURL: URL,
         language: String? = nil,
         temperature: Float? = nil
     ) async throws -> Transcription {
+        try Task.checkCancellation()
         let model = try await residentSTTModel(modelID)
+        try Task.checkCancellation()
         return try transcribe(
             using: model, audioURL: audioURL, language: language, temperature: temperature)
     }
@@ -396,14 +391,18 @@ public actor AudioEngine {
     /// - Returns: Mono float samples plus the model's native sample rate. The
     ///   caller decides the container (see ``SpeechAudioFormat``).
     /// - Throws: What ``loadTTS(_:)`` throws for the load, or
-    ///   ``EngineError/audioProcessingFailed(reason:)`` when synthesis fails.
+    ///   ``EngineError/audioProcessingFailed(reason:)`` when synthesis fails;
+    ///   `CancellationError` before the load and before the synthesis when the
+    ///   caller's task was cancelled.
     public func synthesize(
         model modelID: String,
         text: String,
         voice: String? = nil,
         language: String? = nil
     ) async throws -> Speech {
+        try Task.checkCancellation()
         let box = try await residentTTSModel(modelID)
+        try Task.checkCancellation()
         return try await synthesize(using: box, text: text, voice: voice, language: language)
     }
 

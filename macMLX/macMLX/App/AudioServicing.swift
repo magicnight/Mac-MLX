@@ -14,7 +14,9 @@
 // here: the view models cancel a superseded task and start the next one at
 // once, and the superseded call can still be inside the engine — suspended in
 // a load, or synthesizing — so a "load, then run on whatever is resident" pair
-// could run the new request on the old model, or on nothing.
+// could run the new request on the old model, or on nothing. The fetch goes
+// first, as on the server, so two overlapping requests for a model that is
+// still downloading share one download instead of deleting each other's files.
 
 import Foundation
 import MacMLXCore
@@ -42,12 +44,15 @@ protocol AudioServicing: Sendable {
 extension AudioEngine: AudioServicing {
 
     func transcribe(audioURL: URL, modelID: String) async throws -> String {
-        try await transcribe(model: modelID, audioURL: audioURL, language: nil, temperature: nil).text
+        try await prepareSTT(model: modelID)
+        return try await transcribe(
+            model: modelID, audioURL: audioURL, language: nil, temperature: nil).text
     }
 
     func synthesize(
         text: String, modelID: String, voice: String?
     ) async throws -> AudioEngine.Speech {
-        try await synthesize(model: modelID, text: text, voice: voice, language: nil)
+        try await prepareTTS(model: modelID)
+        return try await synthesize(model: modelID, text: text, voice: voice, language: nil)
     }
 }
