@@ -106,8 +106,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   anywhere. The tokenizer bridge now bypasses the post-processor when no
   special tokens are wanted; the probabilities match the reference. This
   affected every reranker with a RoBERTa tokenizer since `/v1/rerank` moved
-  to `MLXRerankers` (`stsb-roberta-base`, `quora-distilroberta-base`, the
-  `nli-*roberta*` heads); BERT and XLM-RoBERTa tokenizers use
+  to `MLXRerankers` — `stsb-roberta-base` and `quora-distilroberta-base`
+  were already routed there, and the `nli-*roberta*` heads this release
+  routes would have hit it on arrival; BERT and XLM-RoBERTa tokenizers use
   `TemplateProcessing`, which honours the flag, and were not affected.
 
 ### Changed
