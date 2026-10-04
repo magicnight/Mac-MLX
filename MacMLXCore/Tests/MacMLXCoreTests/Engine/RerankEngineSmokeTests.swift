@@ -295,6 +295,8 @@ final class RerankEngineSmokeTests: XCTestCase {
             throw error
         }
         await server.stop()
+    }
+
     // MARK: - Multi-label head scored through its positive class (#131)
 
     /// The real scanner must classify the NLI checkpoint as a reranker, and the
