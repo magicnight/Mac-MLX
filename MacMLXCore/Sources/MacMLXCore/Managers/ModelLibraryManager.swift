@@ -531,11 +531,18 @@ public actor ModelLibraryManager {
 
     /// The label names upstream treats as the positive class of a multi-label
     /// encoder head (`BertConfiguration.positiveClassIndex`), compared after
-    /// lowercasing and dropping everything but letters and digits — so
-    /// `LABEL_1`, `Entailment` and `relevant` all qualify.
-    static let positiveClassLabels: Set<String> = [
-        "entailment", "label1", "positive", "relevant", "relevance", "true", "yes",
-    ]
+    /// lowercasing and dropping everything but letters and digits. Split in two
+    /// here, NARROWER than upstream: `entailment`, `relevant`, `relevance`,
+    /// `true` and `yes` name relevance whatever the label count, but `positive`
+    /// and `LABEL_1` only plausibly do on a two-label head. On a 3- or 5-way
+    /// head they are sentiment classes — `negative / neutral / positive`, or
+    /// transformers' default `LABEL_0…LABEL_n` naming — and upstream would
+    /// happily serve P(positive sentiment) as a relevance score
+    /// (`mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis`
+    /// is such a checkpoint, with safetensors and a tokenizer.json, so the
+    /// library would scan it).
+    static let positiveClassLabels: Set<String> = ["entailment", "relevant", "relevance", "true", "yes"]
+    static let binaryOnlyPositiveClassLabels: Set<String> = ["label1", "positive"]
 
     /// Classify a `config.json` that carries a `*ForSequenceClassification`
     /// architecture, or return `nil` when it carries none and the ordinary
@@ -553,11 +560,14 @@ public actor ModelLibraryManager {
     ///   else 1 — upstream's own default): `.reranker`, the single relevance
     ///   logit.
     /// - several labels, one of them a positive class in
-    ///   ``positiveClassLabels`` (a 3-way NLI head with `entailment`):
+    ///   ``positiveClassLabels`` (a 3-way NLI head with `entailment`), or two
+    ///   labels one of which is in ``binaryOnlyPositiveClassLabels``:
     ///   `.reranker`; upstream scores the softmax probability of that class.
-    /// - several labels and no recognizable positive class (a 5-label
-    ///   sentiment head): `.mlx`, since upstream rejects the head as
-    ///   ambiguous and an embedder it never was.
+    /// - several labels and no such class (a 3- or 5-way sentiment head,
+    ///   whether its labels are `negative / neutral / positive` or
+    ///   `LABEL_0…LABEL_4`): `.mlx`. Upstream would score the first two as
+    ///   P(positive sentiment) and reject the third as ambiguous; neither is a
+    ///   relevance score, and an embedder the head never was.
     static func sequenceClassificationFormat(json: [String: Any]) -> ModelFormat? {
         guard let architectures = json["architectures"] as? [String],
               architectures.contains(where: { $0.contains("ForSequenceClassification") })
@@ -586,9 +596,9 @@ public actor ModelLibraryManager {
         if numLabels == 1 {
             return .reranker
         }
-        let hasPositiveClass = idToLabel.values.contains { label in
-            positiveClassLabels.contains(label.lowercased().filter { $0.isLetter || $0.isNumber })
-        }
+        let normalized = idToLabel.values.map { $0.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let hasPositiveClass = normalized.contains { positiveClassLabels.contains($0) }
+            || (numLabels == 2 && normalized.contains { binaryOnlyPositiveClassLabels.contains($0) })
         return hasPositiveClass ? .reranker : .mlx
     }
 
