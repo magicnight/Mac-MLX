@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import XCTest
 
 @testable import MacMLXCore
@@ -194,6 +195,70 @@ final class RerankEngineSmokeTests: XCTestCase {
             "every relevant document must outscore every unrelated one")
         XCTAssertGreaterThan(try XCTUnwrap(relevant.min()), 0.5, "a yes answer sits above one half")
         XCTAssertLessThan(try XCTUnwrap(unrelated.max()), 0.5, "a no answer sits below one half")
+    }
+
+    // MARK: - Swap order and cache drain (#130)
+
+    /// Two ids on the same ms-marco weights, then Qwen3, then ms-marco again,
+    /// through the real server. The old load-then-assign order held two
+    /// copies during a swap (peak about twice one copy); releasing first keeps
+    /// the swap's peak near one copy. And the swap drains MLX's cache: without
+    /// the drain the buffers of the dropped 0.6B model stay parked (around
+    /// 600 MB), with it a few MB remain. The same-weights swap cannot show the
+    /// drain, since the new load reuses cached buffers of the same sizes, so
+    /// the drain is checked on the swap back to ms-marco.
+    func testSwapReleasesTheOldEngineBeforeLoadingAndDrainsTheCache() async throws {
+        try requireGate()
+        let encoderDir = try resolve(Self.encoder)
+        let qwenDir = try resolve(Self.qwen3)
+        let msA = localModel(id: "ms-a", directory: encoderDir)
+        let msB = localModel(id: "ms-b", directory: encoderDir)
+        let qwen = localModel(id: "qwen", directory: qwenDir)
+        let table = [msA.id: msA, msB.id: msB, qwen.id: qwen]
+        let server = HummingbirdServer(
+            engine: StubInferenceEngine(engineID: .mlxSwift), modelResolver: { table[$0] })
+        let port = try await server.start(preferredPort: 19_700)
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/v1/rerank"))
+        func rerank(_ id: String) async throws -> Int {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": id,
+                "query": "How many people live in Berlin?",
+                "documents": ["Berlin has about 3.5 million inhabitants.", "The museum opens at nine."],
+            ])
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode ?? -1
+        }
+        do {
+            Memory.clearCache()
+            let firstStatus = try await rerank(msA.id)
+            XCTAssertEqual(firstStatus, 200)
+            let oneCopy = Memory.activeMemory
+            Memory.peakMemory = 0   // the setter resets MLX's peak counter
+            let swapStatus = try await rerank(msB.id)
+            XCTAssertEqual(swapStatus, 200)
+            let swapPeak = Memory.peakMemory
+            print("[rerank-smoke] swap ms-a→ms-b: one copy active=\(oneCopy) B, peak during swap=\(swapPeak) B")
+            XCTAssertLessThan(
+                swapPeak, oneCopy * 3 / 2,
+                "a swap must not hold two copies of the model (load-then-assign peaks near twice one copy)")
+
+            let qwenStatus = try await rerank(qwen.id)
+            XCTAssertEqual(qwenStatus, 200)
+            let backStatus = try await rerank(msA.id)
+            XCTAssertEqual(backStatus, 200)
+            let cached = Memory.cacheMemory
+            print("[rerank-smoke] after qwen→ms-a: cache=\(cached) B active=\(Memory.activeMemory) B")
+            XCTAssertLessThan(
+                cached, 64 << 20,
+                "the dropped model's buffers must leave MLX's cache (around 600 MB stay without the drain)")
+        } catch {
+            await server.stop()
+            throw error
+        }
+        await server.stop()
     }
 
     // MARK: - End to end through POST /v1/rerank

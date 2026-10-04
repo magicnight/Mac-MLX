@@ -94,20 +94,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Kernels now compile under the Metal 4.1 language version that core
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
+### Fixed
+- **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
+  model swap could be answered by the other model.** After confirming its
+  model was resident the handler read the shared engine slot again, and a
+  swap that finished in between handed it the other model's engine; the
+  reply still named the requested model. Present since the embedder path of
+  v0.5.3 and the cross-encoder path of v0.9.0. Each request now keeps the
+  engine it confirmed or loaded, and the swap itself runs under the
+  generation lock, as the chat model's always has.
+
 ### Changed
-- **Swapping the reranker or the embedder releases the resident model
-  first, then drains MLX's buffer cache, then loads the replacement
-  (#130).** The old order loaded the new engine and only then let the old one
-  go, so for the duration of the load both models were resident: on a real
-  server a second Qwen3-Reranker-4B (bf16) took the peak to 14.98 GB against
-  7.66 GB for one copy, and with the 0.6B 4-bit checkpoint a swap peaked at
-  639 MB where one copy is 320 MB. After the change the peak stays at a
-  single copy's load (591 MB in the small case), and the buffers MLX kept
-  cached after a release — 15.5 GB after two 4B swaps, 932 MB after three
-  small ones — go back to the OS (5 MB left). A swap whose load fails now
-  leaves no reranker or embedder resident; the next request for the previous
-  model reloads it. The two engines still sit outside the model pool's byte
-  budget; that part of #130 stays open.
+- **Swapping the reranker or the embedder releases the resident model before
+  loading the replacement, and drains MLX's buffer cache in between (#130).**
+  The old order loaded the new engine first, so both models were resident for
+  the whole load: a second Qwen3-Reranker-4B (bf16) took the peak to 14.98 GB
+  against 7.66 GB for one copy, and with Qwen3-Reranker-0.6B-4bit under two
+  ids a swap peaked at 639 MB, two 320 MB copies. With the change the same
+  0.6B probe never rises above its first request's 591 MB, and after a swap
+  to ms-marco 5 MB stays in MLX's cache instead of 932 MB; the 4B run was not
+  repeated. Swaps now happen under the generation lock, so requests that
+  arrive during one wait for it instead of loading their own copy or holding
+  on to the model being replaced; a chat generation waits behind a swap for
+  the load's duration (about a second for a 4B reranker from the page
+  cache). A swap whose load fails leaves no reranker or embedder resident;
+  the next request for the previous model reloads it. The two engines still
+  sit outside the model pool's byte budget; that part of #130 stays open.
 - **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
   BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
   checkpoint is loaded through upstream's factory, which reads `config.json`
