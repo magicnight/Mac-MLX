@@ -22,6 +22,7 @@ import Testing
 //   rerankReturnDocumentsFieldDecodes           : 19_680
 //   rerankBlankDocumentIsRejectedBeforeTheLoad  : 19_720
 //   rerankBlankQueryIsRejectedOnTheEmbedderPathToo : 19_730
+//   embeddingsRerankerModelReturns400           : 19_740
 
 @Suite("HummingbirdServer embeddings/rerank")
 struct HummingbirdServerEmbeddingsTests {
@@ -212,6 +213,26 @@ struct HummingbirdServerEmbeddingsTests {
         // A 400 here would mean it was wrongly rejected as a non-embedder.
         #expect(response.statusCode == 500)
         #expect(errorCode(data) == "load_failed")
+    }
+
+    /// A `.reranker` is not an embedder: `/v1/embeddings` answers 400 with the
+    /// kind gate rather than loading a classification head and pooling its
+    /// hidden states (#131; a 3-way NLI head used to come back as 19,968-d
+    /// vectors through the `.embedder` fallthrough).
+    @Test
+    func embeddingsRerankerModelReturns400() async throws {
+        let server = serverResolving("nli-cross-encoder", format: .reranker)
+        let port = try await server.start(preferredPort: 19_740)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/embeddings")!
+
+        let (data, response) = try await postRaw(url, jsonObject: [
+            "model": "nli-cross-encoder",
+            "input": "what is the capital of france",
+        ])
+        await server.stop()
+
+        #expect(response.statusCode == 400)
+        #expect(errorCode(data) == "model_not_embedder")
     }
 
     /// A blank document is rejected with a 400 BEFORE the reranker is loaded:

@@ -3,9 +3,10 @@ import Foundation
 @testable import MacMLXCore
 
 /// Reranker detection. An encoder cross-encoder shares its `model_type`
-/// (`bert` / `xlm-roberta`) with the embedders `ModelLibraryManager` tags
-/// `.embedder`, so that family hinges on the single-logit
-/// `*ForSequenceClassification` head in `config.json`'s `architectures`; a
+/// (`bert` / `roberta` / `xlm-roberta`) with the embedders `ModelLibraryManager`
+/// tags `.embedder`, so that family hinges on the `*ForSequenceClassification`
+/// head in `config.json`'s `architectures` and on its labels (one label, or a
+/// positive class upstream can score); a
 /// Qwen3 reranker is config-identical to a chat model, so its family hinges
 /// on the `Qwen3-Reranker` name and its logit-score declaration; Jina
 /// reranker v3 declares `JinaForRanking`. These are pure filesystem tests — a
@@ -240,16 +241,20 @@ struct ModelLibraryManagerRerankerTests {
         #expect(models.first?.format == .reranker)
     }
 
+    /// The head counts wherever it appears in `architectures`, as upstream's
+    /// `isSequenceClassification` checks it (`contains`, not last).
     @Test
-    func lastArchitectureDecidesReranker() async throws {
-        // HF lists the concrete task head last; a trailing
-        // `…ForSequenceClassification` classifies as reranker.
+    func sequenceClassificationHeadAnywhereInArchitecturesDecidesReranker() async throws {
         let temp = try RerankerTempDir()
         try writeModel(
-            in: temp.url, name: "multi-arch", modelType: "bert",
+            in: temp.url, name: "head-last", modelType: "bert",
             architectures: ["BertModel", "BertForSequenceClassification"])
+        try writeModel(
+            in: temp.url, name: "head-first", modelType: "bert",
+            architectures: ["BertForSequenceClassification", "BertModel"])
         let models = try await ModelLibraryManager().scan(temp.url)
-        #expect(models[0].format == .reranker)
+        #expect(models.count == 2)
+        #expect(models.allSatisfy { $0.format == .reranker })
     }
 
     // MARK: - num_labels / id2label gating (multi-class disqualifier)
@@ -264,20 +269,83 @@ struct ModelLibraryManagerRerankerTests {
         #expect(models[0].format == .reranker)
     }
 
-    /// The core hardening: a GENUINE multi-class classifier (e.g. a 5-label
-    /// sentiment BERT) carries the same `*ForSequenceClassification`
-    /// architecture as a reranker, but `num_labels: 5` must disqualify it —
-    /// only single-logit heads are routed to `RerankEngine`. `bert` is a known
-    /// embedder `model_type`, so disqualification falls through to
-    /// `.embedder`.
+    /// A GENUINE multi-class classifier carries the same
+    /// `*ForSequenceClassification` architecture as a reranker: a 5-label head
+    /// with no label metadata, the same with transformers' default
+    /// `LABEL_0…LABEL_4` names (`LABEL_1` is a positive class only on a binary
+    /// head), a 3-way `negative / neutral / positive` sentiment head (the real
+    /// `mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis`
+    /// shape), and a head whose only named label is `neutral` at id 2 (three
+    /// labels by upstream's highest-id rule). None is a relevance model and a
+    /// classifier is not a sentence embedder, so all are plain `.mlx`, never
+    /// `.embedder` — `/v1/embeddings` used to pool their hidden states into
+    /// flattened "vectors" (#131).
     @Test
-    func explicitNumLabelsFiveStaysEmbedderNotReranker() async throws {
+    func multiLabelHeadWithoutAPositiveClassIsNeitherRerankerNorEmbedder() async throws {
         let temp = try RerankerTempDir()
         try writeModel(
             in: temp.url, name: "bert-multiclass", modelType: "bert",
             architectures: ["BertForSequenceClassification"], numLabels: 5)
+        try writeModel(
+            in: temp.url, name: "bert-default-labels", modelType: "bert",
+            architectures: ["BertForSequenceClassification"],
+            id2label: ["0": "LABEL_0", "1": "LABEL_1", "2": "LABEL_2", "3": "LABEL_3", "4": "LABEL_4"])
+        try writeModel(
+            in: temp.url, name: "distilroberta-financial-sentiment", modelType: "roberta",
+            architectures: ["RobertaForSequenceClassification"],
+            id2label: ["0": "negative", "1": "neutral", "2": "positive"])
+        try writeModel(
+            in: temp.url, name: "bert-neutral-at-two", modelType: "bert",
+            architectures: ["BertForSequenceClassification"], id2label: ["2": "neutral"])
         let models = try await ModelLibraryManager().scan(temp.url)
-        #expect(models[0].format == .embedder)
+        #expect(models.count == 4)
+        #expect(models.allSatisfy { $0.format == .mlx })
+    }
+
+    /// A classification head upstream has no encoder for — `electra`
+    /// (`cross-encoder/ms-marco-electra-base`), a `Qwen3ForSequenceClassification`
+    /// conversion (`tomaarsen/Qwen3-Reranker-0.6B-seq-cls`), or a config with no
+    /// `model_type` (`jinaai/jina-reranker-v2-base-multilingual`) — used to get
+    /// the Rerank badge and then a 500 from the factory (#131). Now `.mlx`.
+    @Test
+    func classificationHeadOutsideTheThreeEncoderTypesIsNotARerankerBadge() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "ms-marco-electra-base", modelType: "electra",
+            architectures: ["ElectraForSequenceClassification"], id2label: ["0": "LABEL_0"])
+        try writeModel(
+            in: temp.url, name: "Qwen3-Reranker-0.6B-seq-cls", modelType: "qwen3",
+            architectures: ["Qwen3ForSequenceClassification"], id2label: ["0": "LABEL_0"])
+        try writeModel(
+            in: temp.url, name: "jina-reranker-v2-base-multilingual", modelType: nil,
+            architectures: ["XLMRobertaForSequenceClassification"], numLabels: 1)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models.count == 3)
+        #expect(models.allSatisfy { $0.format == .mlx })
+    }
+
+    /// `roberta` is the third encoder type upstream builds the head for.
+    @Test
+    func robertaSequenceClassificationDetectedAsReranker() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "roberta-rerank", modelType: "roberta",
+            architectures: ["RobertaForSequenceClassification"], numLabels: 1)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models[0].format == .reranker)
+    }
+
+    /// `distilbert` and `nomic_bert` are embedder types but upstream gives them
+    /// no classification head, so a `*ForSequenceClassification` checkpoint of
+    /// theirs is neither a reranker nor an embedder.
+    @Test
+    func distilbertClassificationHeadIsNeither() async throws {
+        let temp = try RerankerTempDir()
+        try writeModel(
+            in: temp.url, name: "distilbert-rerank", modelType: "distilbert",
+            architectures: ["DistilBertForSequenceClassification"], numLabels: 1)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models[0].format == .mlx)
     }
 
     /// `id2label`'s entry count is the second, independent single-label
@@ -294,21 +362,32 @@ struct ModelLibraryManagerRerankerTests {
         #expect(models[0].format == .reranker)
     }
 
-    /// Bugbot #103: a checkpoint that OMITS `num_labels` but declares a
-    /// multi-entry `id2label` — a genuine multi-class head such as the 3-way
-    /// NLI cross-encoder `nli-deberta-v3-base` — must NOT be taken for a
-    /// reranker. The absent `num_labels` must not override the contradicting
-    /// `id2label` count (effective label count is 3), so this stays an
-    /// `.embedder` (bert model_type) rather than misrouting to `RerankEngine`.
+    /// A 3-way NLI head (`cross-encoder/nli-MiniLM2-L6-H768`: contradiction /
+    /// entailment / neutral) names a positive class upstream recognizes, so
+    /// `MLXRerankers` scores it as the softmax probability of `entailment`:
+    /// `.reranker`, with `num_labels` absent and the count coming from the
+    /// `id2label` keys as upstream derives it. A binary head with `Relevant`
+    /// (via `label2id` only) or `LABEL_1` qualifies too. Until #131 these fell
+    /// through to `.embedder` and `/v1/embeddings` served flattened hidden
+    /// states.
     @Test
-    func absentNumLabelsWithMultiEntryId2labelStaysEmbedder() async throws {
+    func multiLabelHeadWithAPositiveClassIsAReranker() async throws {
         let temp = try RerankerTempDir()
         try writeModel(
-            in: temp.url, name: "bert-nli", modelType: "bert",
-            architectures: ["BertForSequenceClassification"],
+            in: temp.url, name: "nli-MiniLM2-L6-H768", modelType: "roberta",
+            architectures: ["RobertaForSequenceClassification"],
             id2label: ["0": "contradiction", "1": "entailment", "2": "neutral"])
+        try writeModel(
+            in: temp.url, name: "bert-binary-relevance", modelType: "bert",
+            architectures: ["BertForSequenceClassification"], numLabels: 2,
+            extra: ["label2id": ["irrelevant": 0, "Relevant": 1]])
+        try writeModel(
+            in: temp.url, name: "bert-label1", modelType: "bert",
+            architectures: ["BertForSequenceClassification"],
+            id2label: ["0": "LABEL_0", "1": "LABEL_1"])
         let models = try await ModelLibraryManager().scan(temp.url)
-        #expect(models[0].format == .embedder)
+        #expect(models.count == 3)
+        #expect(models.allSatisfy { $0.format == .reranker })
     }
 
     // MARK: - Helpers
@@ -318,7 +397,7 @@ struct ModelLibraryManagerRerankerTests {
     /// `architectures`/`num_labels`/`id2label` — so `upgradeFormat` has
     /// something to classify.
     private func writeModel(
-        in root: URL, name: String, modelType: String, architectures: [String]?,
+        in root: URL, name: String, modelType: String?, architectures: [String]?,
         numLabels: Int? = nil, id2label: [String: String]? = nil,
         extra: [String: Any] = [:], logitScore: [String: Any]? = nil
     ) throws {
@@ -327,7 +406,10 @@ struct ModelLibraryManagerRerankerTests {
         try Data("{}".utf8).write(to: dir.appendingPathComponent("tokenizer.json"))
         try Data("\u{00}".utf8).write(to: dir.appendingPathComponent("model.safetensors"))
 
-        var config: [String: Any] = ["model_type": modelType]
+        var config: [String: Any] = [:]
+        if let modelType {
+            config["model_type"] = modelType
+        }
         if let architectures {
             config["architectures"] = architectures
         }
@@ -354,8 +436,9 @@ struct ModelLibraryManagerRerankerTests {
     }
 }
 
-/// Auto-cleaning temp directory for the reranker detection tests.
-private struct RerankerTempDir {
+/// Temp directory for the reranker detection tests, removed when the test's
+/// reference to it goes away.
+private final class RerankerTempDir {
     let url: URL
 
     init() throws {
@@ -363,5 +446,9 @@ private struct RerankerTempDir {
             .appendingPathComponent("macmlx-reranker-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.url = base
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: url)
     }
 }

@@ -14,7 +14,7 @@ import XCTest
 ///        • the HuggingFace cache snapshot under `~/.cache/huggingface/hub`, else
 ///        • `~/.mac-mlx/models/<name>`.
 ///
-/// Checkpoints (about 440 MB together):
+/// Checkpoints (about 750 MB together):
 ///   • encoder — `cross-encoder/ms-marco-MiniLM-L-6-v2` (BERT, 91 MB). Scores are
 ///     compared with a PyTorch fp32 reference captured by
 ///     `docs/reference/capture_ms_marco_reranker.py` into
@@ -22,6 +22,11 @@ import XCTest
 ///   • qwen3 — `mlx-community/Qwen3-Reranker-0.6B-4bit` (347 MB). Ordering and
 ///     range only: no reference for the 4-bit conversion is captured in this
 ///     repository (upstream's integration tests carry bf16 reference margins).
+///   • nli — `cross-encoder/nli-MiniLM2-L6-H768` (RoBERTa tokenizer, 3 labels,
+///     313 MB; env `MACMLX_RERANK_NLI_MODEL_DIR`). The entailment probabilities
+///     are compared with `Fixtures/rerank_nli_reference.json`, captured by
+///     `docs/reference/capture_nli_reranker.py`. This is the checkpoint that
+///     caught the RoBERTa `addSpecialTokens` bug in `TokenizerBridge`.
 ///
 /// Precision: MLX runs fp32 matmuls as TF32 on M5 by default
 /// (`MLX_ENABLE_TF32`, default 1). Under TF32 the ms-marco logits land within
@@ -51,6 +56,14 @@ final class RerankEngineSmokeTests: XCTestCase {
         hfRepo: "mlx-community/Qwen3-Reranker-0.6B-4bit",
         localName: "Qwen3-Reranker-0.6B-4bit")
 
+    /// A 3-way NLI cross-encoder (`roberta`, labels contradiction / entailment /
+    /// neutral, 313 MB): the multi-label head upstream scores through its
+    /// positive class. Exercises the #131 detection change end to end.
+    private static let nli = Checkpoint(
+        envKey: "MACMLX_RERANK_NLI_MODEL_DIR",
+        hfRepo: "cross-encoder/nli-MiniLM2-L6-H768",
+        localName: "nli-MiniLM2-L6-H768")
+
     /// The query and documents of the PyTorch reference, reused for the Qwen3
     /// ordering check: documents 0 and 2 answer the question, 1 and 3 do not.
     private struct Reference: Decodable {
@@ -61,6 +74,20 @@ final class RerankEngineSmokeTests: XCTestCase {
         }
         let model: String
         let query: String
+        let pairs: [Pair]
+    }
+
+    /// `rerank_nli_reference.json`: three class logits per pair and the
+    /// probability of the positive (entailment) class.
+    private struct NLIReference: Decodable {
+        struct Pair: Decodable {
+            let document: String
+            let logits: [Double]
+            let positive_probability: Double
+        }
+        let model: String
+        let query: String
+        let positive_class: Int
         let pairs: [Pair]
     }
 
@@ -112,6 +139,15 @@ final class RerankEngineSmokeTests: XCTestCase {
                 subdirectory: "Fixtures"),
             "missing fixture rerank_ms_marco_reference.json")
         return try JSONDecoder().decode(Reference.self, from: Data(contentsOf: url))
+    }
+
+    private func loadNLIReference() throws -> NLIReference {
+        let url = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "rerank_nli_reference", withExtension: "json",
+                subdirectory: "Fixtures"),
+            "missing fixture rerank_nli_reference.json")
+        return try JSONDecoder().decode(NLIReference.self, from: Data(contentsOf: url))
     }
 
     /// Inverse of the sigmoid `MLXRerankers` applies to a single-logit encoder
@@ -194,6 +230,74 @@ final class RerankEngineSmokeTests: XCTestCase {
             "every relevant document must outscore every unrelated one")
         XCTAssertGreaterThan(try XCTUnwrap(relevant.min()), 0.5, "a yes answer sits above one half")
         XCTAssertLessThan(try XCTUnwrap(unrelated.max()), 0.5, "a no answer sits below one half")
+    }
+
+    // MARK: - Multi-label head scored through its positive class (#131)
+
+    /// The real scanner must classify the NLI checkpoint as a reranker, and the
+    /// engine must then score it as the probability of `entailment`, matching
+    /// the PyTorch reference. Before #131 this checkpoint fell through to
+    /// `.embedder`; and until `TokenizerBridge` started honouring
+    /// `addSpecialTokens: false`, the RoBERTa tokenizer wrapped each segment in
+    /// `<s> … </s>` twice and the scores were those of a different input
+    /// (0.0028 / 0.0008 / 0.0033 / 0.0013 against the reference's
+    /// 0.0046 / 0.0004 / 0.0036 / 0.0012 — top-1 flipped). The ordering check
+    /// alone passed on the wrong input; the probabilities are what catch it.
+    func testMultiLabelNLIHeadIsServedAsAReranker() async throws {
+        try requireGate()
+        try requireTrustworthyMetalOrSkip()
+        let directory = try resolve(Self.nli)
+        let reference = try loadNLIReference()
+        XCTAssertEqual(reference.model, Self.nli.hfRepo)
+
+        // Detection on the real config.json, through a managed-directory scan
+        // of a root that holds just this checkpoint (an APFS clone, so no copy).
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "macmlx-nli-smoke-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clone = Process()
+        clone.executableURL = URL(fileURLWithPath: "/bin/cp")
+        clone.arguments = ["-RcL", directory.path, root.appending(path: Self.nli.localName).path]
+        try clone.run()
+        clone.waitUntilExit()
+        XCTAssertEqual(clone.terminationStatus, 0, "cloning the checkpoint into the temp root")
+        let scanned = try await ModelLibraryManager().scan(root)
+        let model = try XCTUnwrap(scanned.first { $0.id == Self.nli.localName })
+        XCTAssertEqual(model.format, .reranker, "a multi-label head with an entailment class is a reranker")
+
+        let engine = RerankEngine()
+        try await engine.load(model)
+        let kind = await engine.scoreKind
+        XCTAssertEqual(kind, .normalizedRelevance)
+        let scores = try await engine.score(
+            query: reference.query, documents: reference.pairs.map(\.document))
+        XCTAssertEqual(scores.count, reference.pairs.count)
+        // Probabilities here are around 1e-3 (an NLI head measures entailment
+        // of a statement by a question, not relevance), so the comparison is
+        // relative. Measured on 2026-10-04 (M5 Max): worst relative error
+        // 7.4e-6 with TF32 off and 1.8% under M5's default TF32 matmuls, so
+        // the gates are the project's 1e-4 bar and 5%. The doubly wrapped
+        // input this test exists for was off by 127% on one passage.
+        let tf32Enabled = ProcessInfo.processInfo.environment["MLX_ENABLE_TF32"] != "0"
+        let relativeTolerance = tf32Enabled ? 0.05 : 1e-4
+        var worst = 0.0
+        for (score, pair) in zip(scores, reference.pairs) {
+            XCTAssert((0.0 ... 1.0).contains(score), "score out of range: \(score)")
+            let relative = abs(score - pair.positive_probability) / pair.positive_probability
+            worst = max(worst, relative)
+            XCTAssertLessThanOrEqual(
+                relative, relativeTolerance,
+                "P(entailment) \(score) vs reference \(pair.positive_probability) on: \(pair.document)")
+        }
+        print("[rerank-smoke] nli-MiniLM2-L6-H768 P(entailment) (mlx vs torch, TF32 \(tf32Enabled ? "on" : "off")):",
+              zip(scores, reference.pairs).map { "\($0.0) vs \($0.1.positive_probability)" },
+              "worst relative = \(worst)")
+        let relevant = [scores[0], scores[2]]
+        let unrelated = [scores[1], scores[3]]
+        XCTAssertGreaterThan(
+            try XCTUnwrap(relevant.min()), try XCTUnwrap(unrelated.max()),
+            "entailment probability must rank the answering passages first")
     }
 
     // MARK: - End to end through POST /v1/rerank

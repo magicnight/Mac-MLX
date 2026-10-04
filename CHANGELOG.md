@@ -94,7 +94,43 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Kernels now compile under the Metal 4.1 language version that core
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
+### Fixed
+- **RoBERTa-tokenizer rerankers scored a different input than the one they
+  were given.** swift-transformers' `RobertaProcessing` ignores
+  `addSpecialTokens: false` and always wraps the tokens in `<s> … </s>`;
+  mlx-swift-lm's pair encoder relies on the flag, encodes the query and the
+  document bare and adds the special tokens itself, so every segment arrived
+  wrapped twice. Measured on `cross-encoder/nli-MiniLM2-L6-H768`: entailment
+  probabilities of 0.0028 / 0.0008 / 0.0033 / 0.0013 where PyTorch gives
+  0.0046 / 0.0004 / 0.0036 / 0.0012 — the top passage flipped, with no error
+  anywhere. The tokenizer bridge now bypasses the post-processor when no
+  special tokens are wanted; the probabilities match the reference. This
+  affected every reranker with a RoBERTa tokenizer since `/v1/rerank` moved
+  to `MLXRerankers` — `stsb-roberta-base` and `quora-distilroberta-base`
+  were already routed there, and the `nli-*roberta*` heads this release
+  routes would have hit it on arrival; BERT and XLM-RoBERTa tokenizers use
+  `TemplateProcessing`, which honours the flag, and were not affected.
+
 ### Changed
+- **A sequence-classification head is classified by what `MLXRerankers` can
+  do with it, and is never an embedder (#131).** A `*ForSequenceClassification`
+  checkpoint whose `model_type` is `bert`, `roberta` or `xlm-roberta` is a
+  reranker when it has one label, or several labels one of which names
+  relevance (`entailment`, `relevant`, `relevance`, `true`, `yes`), or two
+  labels one of which is `positive` or `LABEL_1`; it then scores as that
+  class's probability, so the 3-way NLI cross-encoders qualify. This is
+  narrower than upstream's own positive-class rule on purpose: on a 3- or
+  5-way head `positive` and `LABEL_1` are sentiment classes
+  (`negative / neutral / positive`, or transformers' default `LABEL_0…n`
+  names), and upstream would serve P(positive sentiment) as a relevance
+  score; those stay plain models here. So does a classification head on any
+  other `model_type` (`electra`, a `Qwen3ForSequenceClassification`
+  conversion, a config with no `model_type`): those used to get the Rerank
+  badge and then a 500 from the factory. Multi-label heads used to fall
+  through to the embedder path, where `/v1/embeddings` pooled their hidden
+  states (a 26-token batch came back as 19,968-dimensional "vectors") and
+  the cosine fallback of `/v1/rerank` ranked an unrelated passage first; a
+  sequence-classification head now never reaches `/v1/embeddings`.
 - **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
   BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
   checkpoint is loaded through upstream's factory, which reads `config.json`

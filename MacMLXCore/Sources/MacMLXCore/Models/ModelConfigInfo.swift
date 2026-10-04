@@ -40,16 +40,15 @@ public struct ModelConfigInfo: Sendable, Equatable {
     /// output width). `nil` when absent — many reranker checkpoints omit it
     /// and rely on the HF default of `1`.
     ///
-    /// The second reranker-detection signal, alongside `architectures`: a
-    /// GENUINE multi-class classifier (e.g. a 5-label sentiment BERT) also
-    /// carries a `*ForSequenceClassification` architecture but must NOT be
-    /// mistaken for a single-logit reranker (`ModelLibraryManager.upgradeFormat`
-    /// routes only single-logit heads to `RerankEngine`).
+    /// Carried on the model record; nothing in the app or the CLI reads it
+    /// today. Detection does not use it either: it re-reads `config.json` in
+    /// `ModelLibraryManager.sequenceClassificationFormat(json:)`, where the
+    /// label count and the label names together decide whether a
+    /// `*ForSequenceClassification` head is a reranker.
     public let numLabels: Int?
     /// The number of entries in `config.json`'s `id2label` map, if present.
-    /// A second, independent source for the same single-vs-multi-label
-    /// signal `numLabels` provides — some checkpoints populate `id2label`
-    /// without an explicit `num_labels`.
+    /// Carried alongside `numLabels` for the same reason; detection derives
+    /// its own label count from the keys, as upstream does.
     public let id2labelCount: Int?
 
     public init(
@@ -99,8 +98,8 @@ public struct ModelConfigInfo: Sendable, Equatable {
             ?? (json["n_positions"] as? Int)
             ?? (json["seq_length"] as? Int)
 
-        // Case-preserved — `hasSuffix("ForSequenceClassification")` in the
-        // reranker classifier is case-sensitive.
+        // Case-preserved — the `contains("ForSequenceClassification")` check
+        // in the reranker classifier is case-sensitive.
         let architectures = json["architectures"] as? [String]
 
         let numLabels = json["num_labels"] as? Int
