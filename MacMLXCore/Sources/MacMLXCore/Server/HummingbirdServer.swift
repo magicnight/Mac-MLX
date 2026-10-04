@@ -3778,6 +3778,15 @@ public actor HummingbirdServer {
             return
         }
 
+        // Release the resident embedder BEFORE the replacement allocates, the
+        // same order the pool uses (POOL-5): otherwise both models are
+        // resident for the duration of the load and the peak is their sum
+        // (#130). A failed load therefore leaves no embedder resident; the
+        // next request for the previous one simply reloads it.
+        if embeddingEngine != nil {
+            embeddingEngine = nil
+            EngineMemory.releaseCachedBuffers()
+        }
         let newEngine = EmbeddingEngine()
         do {
             try await newEngine.load(target)
@@ -3794,9 +3803,20 @@ public actor HummingbirdServer {
     /// `handleRerank`, so there's no inline kind-gate here). Throws
     /// `ModelSwapError.loadFailed` when the load itself fails (an unsupported
     /// architecture, a weight-key mismatch, or a missing config).
+    ///
+    /// The resident reranker is released BEFORE the replacement loads, and
+    /// MLX's buffer cache is drained in between. Rerankers are no longer a
+    /// 100 MB BERT: a Qwen3-Reranker-4B in bf16 is 7.5 GB resident, and with
+    /// the old load-then-assign order a swap held both copies (peak 14.98 GB
+    /// against 7.66 GB for one, measured in #130). A failed load leaves no
+    /// reranker resident; the next request for the previous one reloads it.
     private func ensureRerankerLoaded(_ target: LocalModel) async throws {
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
             return
+        }
+        if rerankEngine != nil {
+            rerankEngine = nil
+            EngineMemory.releaseCachedBuffers()
         }
         let newEngine = RerankEngine()
         do {

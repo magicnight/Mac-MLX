@@ -95,6 +95,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Changed
+- **Swapping the reranker or the embedder releases the resident model
+  first, then drains MLX's buffer cache, then loads the replacement
+  (#130).** The old order loaded the new engine and only then let the old one
+  go, so for the duration of the load both models were resident: on a real
+  server a second Qwen3-Reranker-4B (bf16) took the peak to 14.98 GB against
+  7.66 GB for one copy, and with the 0.6B 4-bit checkpoint a swap peaked at
+  639 MB where one copy is 320 MB. After the change the peak stays at a
+  single copy's load (591 MB in the small case), and the buffers MLX kept
+  cached after a release — 15.5 GB after two 4B swaps, 932 MB after three
+  small ones — go back to the OS (5 MB left). A swap whose load fails now
+  leaves no reranker or embedder resident; the next request for the previous
+  model reloads it. The two engines still sit outside the model pool's byte
+  budget; that part of #130 stays open.
 - **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
   BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
   checkpoint is loaded through upstream's factory, which reads `config.json`
