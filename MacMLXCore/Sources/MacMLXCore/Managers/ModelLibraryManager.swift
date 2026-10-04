@@ -568,6 +568,10 @@ public actor ModelLibraryManager {
     ///   `LABEL_0…LABEL_4`): `.mlx`. Upstream would score the first two as
     ///   P(positive sentiment) and reject the third as ambiguous; neither is a
     ///   relevance score, and an embedder the head never was.
+    ///
+    /// The residual ambiguity is the two-label case: a `NEGATIVE / POSITIVE`
+    /// sentiment head is indistinguishable from a binary relevance head by its
+    /// config alone and is served as P(POSITIVE), the same as upstream.
     static func sequenceClassificationFormat(json: [String: Any]) -> ModelFormat? {
         guard let architectures = json["architectures"] as? [String],
               architectures.contains(where: { $0.contains("ForSequenceClassification") })

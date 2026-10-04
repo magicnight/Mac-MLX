@@ -67,7 +67,13 @@ struct TokenizerBridge: MLXLMCommon.Tokenizer, @unchecked Sendable {
     /// `cross-encoder/nli-MiniLM2-L6-H768` against the PyTorch reference, with
     /// no error anywhere. When no special tokens are wanted, bypass the
     /// post-processor: tokenize, then map tokens to ids. For the post-processors
-    /// that do honour the flag this is the same sequence they would return.
+    /// that do honour the flag this is the same sequence they would return
+    /// (checked against 16 local tokenizers: byte-level BPE, SentencePiece
+    /// BPE, WordPiece and Unigram). The `?? unknown` is unreachable in
+    /// practice — every tokenizer model's `convertTokenToId` already falls
+    /// back to its unknown id, so a `nil` here means the model has none —
+    /// and is spelled out so a vocabulary gap degrades to an unknown token
+    /// rather than the library's force-unwrap trap.
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         guard !addSpecialTokens else {
             return upstream.encode(text: text, addSpecialTokens: true)
