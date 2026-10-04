@@ -479,7 +479,8 @@ struct HummingbirdServerAudioTests {
         /// actor answers at once; no timer is involved. Owner-agnostic: it says
         /// someone holds the lock, not that this request does — sound here
         /// because while a probed call runs no other request owns or waits for
-        /// the lock, and in the fetch-phase probes nobody holds it at all.
+        /// the lock, and in the fetch-phase probes a test asserts on, nobody
+        /// holds it at all.
         private func probeLock() async -> Bool? {
             guard let server else { return nil }
             return await server.generationLockIsHeld
@@ -951,6 +952,18 @@ struct HummingbirdServerAudioFailureClassificationTests {
         #expect(failure.code == "audio_failed")
         #expect(failure.message.hasPrefix("Speech synthesis failed: "))
         #expect(failure.message.contains("forward pass threw"))
+    }
+
+    /// A request cancelled while the backend ran gets the same code as one
+    /// cancelled while waiting for the lock, so a client sees one story.
+    @Test
+    func aCancellationIs500Cancelled() {
+        let failure = HummingbirdServer.audioFailure(
+            CancellationError(), model: "openai/whisper-tiny", operation: "Transcription")
+
+        #expect(failure.status == .internalServerError)
+        #expect(failure.code == "cancelled")
+        #expect(failure.message == "Transcription cancelled")
     }
 
     @Test

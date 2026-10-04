@@ -25,10 +25,11 @@ actor AudioSnapshotFetcher {
     ///
     /// An `EngineError` thrown by the fetch passes through; anything else
     /// becomes ``EngineError/modelLoadFailed(reason:)``, which the server
-    /// reports as 500 `load_failed`. A caller that joins waits for the whole
-    /// download even if its own task is cancelled, and a caller that arrives
-    /// in the moment between the download finishing and its starter clearing
-    /// the entry gets the finished result, a failure included.
+    /// reports as 500 `load_failed`. The download itself is never cancelled:
+    /// whether it started the download or joined it, a caller whose task is
+    /// cancelled waits the download out, and a caller that arrives in the
+    /// moment between the download finishing and its starter clearing the
+    /// entry gets the finished result, a failure included.
     func fetch(_ modelID: String, using fetch: @escaping AudioEngine.SnapshotFetch) async throws {
         if let running = inFlight[modelID] {
             joins += 1

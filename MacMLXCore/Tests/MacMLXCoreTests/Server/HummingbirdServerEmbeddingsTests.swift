@@ -292,18 +292,27 @@ struct HummingbirdServerEmbeddingsTests {
         func set() { isSet = true }
     }
 
-    /// Post `body`, raising `done` when the response arrives.
+    /// Post `body`, raising `done` when the response arrives — or when the
+    /// transport fails, so a timeout surfaces as its own error at `.value`
+    /// rather than as "not answered".
     private func post(_ url: URL, _ body: [String: any Sendable], raising done: Done) -> Task<(Data, HTTPURLResponse), any Error> {
         Task {
-            let result = try await postRaw(url, jsonObject: body)
-            await done.set()
-            return result
+            do {
+                let result = try await postRaw(url, jsonObject: body)
+                await done.set()
+                return result
+            } catch {
+                await done.set()
+                throw error
+            }
         }
     }
 
     /// Whether every path that took the lock also released it (srv3b's race):
     /// nobody owns it and nobody is parked on it. Read from the server rather
-    /// than raced against a timer, which a starved CI runner can lose.
+    /// than raced against a timer, which a starved CI runner can lose. Owner-
+    /// agnostic: sound after a response because every handler under test
+    /// releases before it responds.
     private func lockIsFree(_ server: HummingbirdServer) async -> Bool {
         await !server.generationLockIsHeld
     }

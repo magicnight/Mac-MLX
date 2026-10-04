@@ -4739,9 +4739,11 @@ public actor HummingbirdServer {
     /// becomes a 400 whose message is the engine's hint verbatim (it already
     /// names the id and the expected `owner/name` shape). A fetch or load that
     /// really did fail server-side — an unreachable Hub, missing weights, an
-    /// architecture upstream cannot build — is 500 `load_failed`, and anything
-    /// the forward pass throws is 500 `audio_failed`: the backend's error
-    /// cases tell the phases apart.
+    /// architecture upstream cannot build — is 500 `load_failed`; a request
+    /// whose task was cancelled while the backend ran is 500 `cancelled`, the
+    /// code a cancellation while waiting for the lock already uses; and
+    /// anything the forward pass throws is 500 `audio_failed`. The backend's
+    /// error cases tell the phases apart.
     ///
     /// `nonisolated static` and pure so both handlers share one classification
     /// and it is unit-testable with no server and no checkpoint.
@@ -4750,6 +4752,9 @@ public actor HummingbirdServer {
         model: String,
         operation: String
     ) -> (status: HTTPResponse.Status, message: String, code: String) {
+        if error is CancellationError {
+            return (.internalServerError, "\(operation) cancelled", "cancelled")
+        }
         if let engineError = error as? EngineError {
             switch engineError {
             case .invalidAudioModelID:

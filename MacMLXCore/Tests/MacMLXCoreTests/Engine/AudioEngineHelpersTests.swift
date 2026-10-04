@@ -253,10 +253,12 @@ struct AudioEngineHelpersTests {
     // MARK: Cancellation
 
     /// A caller whose task was cancelled — the app's superseded request —
-    /// stops before the load, so it neither downloads nor holds a second copy
-    /// of a model. A local TTS directory stands in for a real model: the id
-    /// passes validation, and had the load run it would have failed on the
-    /// bogus `config.json` without touching the network.
+    /// stops at the next checkpoint: before the load here, so it neither
+    /// downloads nor holds a second copy of a model (a call superseded while
+    /// its load is already running stops before the forward pass instead). A
+    /// local TTS directory stands in for a real model: the id passes
+    /// validation, and had the load run it would have failed on the bogus
+    /// `config.json` without touching the network.
     @Test
     func aCancelledCallerStopsBeforeTheLoad() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -275,6 +277,26 @@ struct AudioEngineHelpersTests {
         await gate.open()
         await #expect(throws: CancellationError.self) { _ = try await call.value }
         #expect(await engine.loadedTTSModelID == nil)
+    }
+
+    /// The transcription path has the same checkpoints. A malformed id stands
+    /// in for a model: with the check in place the pre-cancelled call throws
+    /// `CancellationError` before validation, and without it validation would
+    /// reject the id instead — two outcomes that cannot be confused, and no
+    /// network either way.
+    @Test
+    func aCancelledTranscriptionStopsBeforeTheLoad() async throws {
+        let engine = AudioEngine()
+        let gate = Gate()
+        let call = Task {
+            await gate.wait()
+            return try await engine.transcribe(
+                model: "not-a-repo-id", audioURL: URL(filePath: "/dev/null"))
+        }
+        call.cancel()
+        await gate.open()
+        await #expect(throws: CancellationError.self) { _ = try await call.value }
+        #expect(await engine.loadedSTTModelID == nil)
     }
 
     /// What the Hub throws becomes `modelLoadFailed` — the case the server
