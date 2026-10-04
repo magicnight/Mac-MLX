@@ -199,20 +199,27 @@ struct SchemaConstraintStateTests {
     }
 
     /// The quote, the backslash and control characters can only be matched
-    /// escaped — the short escape or `\u` — and an ASCII scalar may be
-    /// escaped too.
+    /// escaped — the short escape or `\u` — while every other ASCII scalar is
+    /// matched raw only: `\u0041` is not an `A` here, so a model that is off
+    /// its preferred path cannot drift into spelling a whole literal as
+    /// escapes (seen on a real checkpoint before this rule).
     @Test
     func matchesEscapedASCIIAndControlCharactersInLiterals() {
-        let s = schema([("q\"q", .stringEnum(["a\\b", "line\nbreak", "A"]))], required: ["q\"q"])
+        let s = schema([("q\"q", .stringEnum(["a\\b", "line\nbreak", "A", "a/b"]))], required: ["q\"q"])
         #expect(accepts("{\"q\\\"q\":\"a\\\\b\"}", s))
         #expect(accepts("{\"q\\u0022q\":\"a\\u005cb\"}", s))
         #expect(accepts("{\"q\\\"q\":\"line\\nbreak\"}", s))
         #expect(accepts("{\"q\\\"q\":\"line\\u000Abreak\"}", s))
-        #expect(accepts("{\"q\\\"q\":\"\\u0041\"}", s))
+        #expect(accepts("{\"q\\\"q\":\"A\"}", s))
+        #expect(accepts("{\"q\\\"q\":\"a/b\"}", s))
+        #expect(!accepts("{\"q\\\"q\":\"\\u0041\"}", s))
+        #expect(!accepts("{\"q\\\"q\":\"a\\/b\"}", s))
+        #expect(!accepts("{\"\\u0071\\\"q\":\"A\"}", s))
         #expect(!accepts("{\"q\"q\":\"A\"}", s))
         #expect(!accepts("{\"q\\\"q\":\"line\nbreak\"}", s))
         #expect(!accepts("{\"q\\\"q\":\"a\\b\"}", s))
         #expect(!accepts("{\"q\\\"q\":\"a\\x\"}", s))
+        #expect(walk("{\"q\\\"q\":\"A\\", s) == nil, "nothing after A may be escaped")
     }
 
     // MARK: Structure
@@ -242,7 +249,8 @@ struct SchemaConstraintStateTests {
         #expect(!acceptsRoot("hi", .string))
         #expect(!acceptsRoot("\"hi\" \"\"", .string))
         #expect(acceptsRoot("\"admin\"", .stringEnum(["admin", "user"])))
-        #expect(acceptsRoot("\"\\u0061dmin\"", .stringEnum(["admin", "user"])))
+        #expect(!acceptsRoot("\"\\u0061dmin\"", .stringEnum(["admin", "user"])))
+        #expect(acceptsRoot("\"caf\\u00e9\"", .stringEnum(["café", "user"])))
         #expect(!acceptsRoot("\"root\"", .stringEnum(["admin", "user"])))
         #expect(acceptsRoot("true", .boolean))
         #expect(acceptsRoot(" false ", .boolean))

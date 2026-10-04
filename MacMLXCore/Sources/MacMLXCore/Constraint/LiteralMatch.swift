@@ -4,13 +4,15 @@
 /// string-enum value — matched scalar by scalar against a candidate set of
 /// ``SchemaLiteral``s.
 ///
-/// Each scalar of a literal may arrive as its raw UTF-8 bytes or as a JSON
-/// escape: `\uXXXX` in either hex case, a surrogate pair for a scalar above
-/// the BMP, or one of the two-character escapes. Every candidate still
-/// consistent with the bytes read stays in `candidates`; the bytes read are
-/// the same for all of them, so they are all at the same scalar index and the
-/// same point within its spelling. The closing quote completes the literal
-/// when a candidate has exactly `unit` scalars.
+/// A scalar outside ASCII may arrive as its raw UTF-8 bytes or as a JSON
+/// escape: `\uXXXX` in either hex case, or a surrogate pair above the BMP. The
+/// quote, the backslash and control characters, which JSON cannot carry raw,
+/// arrive as their short escape or as `\uXXXX`. Every other ASCII scalar
+/// arrives raw (``SchemaLiteral/mayBeEscaped(_:)`` says why). Every candidate
+/// still consistent with the bytes read stays in `candidates`; the bytes read
+/// are the same for all of them, so they are all at the same scalar index and
+/// the same point within its spelling. The closing quote completes the
+/// literal when a candidate has exactly `unit` scalars.
 ///
 /// Accepting escapes is what lets a schema declare any string. An escape is
 /// spelled with ASCII bytes, which every tokenizer can produce, so a literal
@@ -72,7 +74,11 @@ struct LiteralMatch: Hashable, Sendable {
                 return .completed(member: member)
             }
             if byte == SchemaBytes.backslash {
-                return narrowed(to: candidates.filtered { literals[$0].scalars.count > unit }, progress: .backslash)
+                let escapable = candidates.filtered { member in
+                    let scalars = literals[member].scalars
+                    return scalars.count > unit && SchemaLiteral.mayBeEscaped(scalars[unit])
+                }
+                return narrowed(to: escapable, progress: .backslash)
             }
             // The quote and the backslash were handled above and JSON forbids
             // raw control characters, so this is the lead byte of a raw scalar.

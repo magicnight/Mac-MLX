@@ -25,8 +25,10 @@
 ///    A root without `type` (and without `$ref`, `const` or `enum`) is an
 ///    object.
 ///    Property names, enum values and `const` values may be any string: the
-///    automaton matches them scalar by scalar, each spelled raw or as a JSON
-///    escape, so nothing a schema declares is unspellable.
+///    automaton matches them scalar by scalar — a scalar outside ASCII raw or
+///    as a JSON escape, the quote, the backslash and control characters as
+///    an escape, every other ASCII scalar raw — so nothing a schema declares
+///    is unspellable.
 ///    `description`, `title`, `default`, `examples`, `$comment`, `deprecated`,
 ///    `readOnly` and `writeOnly` are accepted and ignored anywhere; so is
 ///    `x-order` on an object, and

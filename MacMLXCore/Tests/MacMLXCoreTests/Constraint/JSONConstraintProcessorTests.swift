@@ -307,6 +307,30 @@ final class JSONConstraintProcessorMaskTests: XCTestCase {
         XCTAssertEqual(advanced.state.diagnosticDescription, before)
     }
 
+    /// A sampled token the automaton cannot walk wedges the processor: the
+    /// state stays where it was, and the next step keeps only EOS instead of
+    /// classifying the vocabulary against a position the text has left.
+    func testIllegalSampledTokenWedgesTheProcessorIntoEOS() throws {
+        try requireMLXRuntimeOrSkip()
+        let vocab = ["{", "abc", "}", "</s>"]
+        var processor = processor(vocab: vocab, stop: [3], greedy: true)
+        let before = processor.state.diagnosticDescription
+        processor.didSample(token: MLXArray(Int32(1)))   // "abc": illegal at the JSON start
+        XCTAssertEqual(processor.state.diagnosticDescription, before, "the state must not advance over an illegal token")
+
+        // "{" is the top token and would be legal from the (stale) start state;
+        // the wedged processor forces EOS anyway.
+        let logits = MLXArray([9.0, 1.0, 2.0, 0.5] as [Float]).reshaped([1, 4])
+        let masked = processor.process(logits: logits).reshaped([4])
+        masked.eval()
+        let values = masked.asArray(Float.self)
+        XCTAssertEqual(values[0], -Float.infinity)
+        XCTAssertEqual(values[1], -Float.infinity)
+        XCTAssertEqual(values[2], -Float.infinity)
+        XCTAssertEqual(values[3], 0.5, accuracy: 1e-4)
+        XCTAssertEqual(argMax(masked, axis: -1).item(Int.self), 3)
+    }
+
     /// Greedy path, top token illegal: the highest-logit *legal* token is kept
     /// (one-hot) and all others masked — exercises the argsort fallback +
     /// `selectLegalToken` + `applyMask(keepingOnly:)`.

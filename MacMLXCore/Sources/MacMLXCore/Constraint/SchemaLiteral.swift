@@ -60,8 +60,23 @@ struct SchemaLiteral: Hashable, Sendable {
         return low ? Int(0xDC00 + (offset & 0x3FF)) : Int(0xD800 + (offset >> 10))
     }
 
+    /// Whether `scalar` may be spelled as an escape in a literal: everything
+    /// outside ASCII, and the three things JSON cannot carry raw — the quote,
+    /// the backslash and control characters. Every other ASCII scalar must be
+    /// spelled raw. Escapes exist here so that a scalar the tokenizer cannot
+    /// spell whole is still reachable; ASCII always is, and letting a model
+    /// escape it steers a model that is off its preferred path into spelling
+    /// the whole rest of the literal as `\u00XX` (seen on Qwen3.6-27B: an enum
+    /// value came out as `h\u006f\u0074\u0065…`).
+    @inlinable
+    static func mayBeEscaped(_ scalar: UInt32) -> Bool {
+        scalar > 0x7F || scalar == 0x22 || scalar == 0x5C || scalar < 0x20
+    }
+
     /// The scalar a two-character escape `\X` denotes, or `nil` when `X` is
     /// not one of JSON's eight (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`).
+    /// `\/` denotes `/`, which ``mayBeEscaped(_:)`` excludes, so it never
+    /// matches a literal.
     @inlinable
     static func shortEscapeScalar(_ byte: UInt8) -> UInt32? {
         switch byte {

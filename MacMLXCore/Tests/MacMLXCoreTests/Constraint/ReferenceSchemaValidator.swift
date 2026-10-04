@@ -10,9 +10,11 @@
 /// It decides whole documents only, with the automaton's documented
 /// semantics: keys and string-enum values are compared as the strings they
 /// denote (escapes decoded, like any JSON parser; invalid UTF-8 matches
-/// nothing), unpaired surrogate escapes are rejected (as `JSONSerialization`
-/// does), duplicate keys are rejected, and an integer is a number lexeme with
-/// no fraction or exponent.
+/// nothing), except that an ASCII scalar other than the quote, the backslash
+/// and a control character must be spelled raw in a key or an enum value;
+/// unpaired surrogate escapes are rejected (as `JSONSerialization` does),
+/// duplicate keys are rejected, and an integer is a number lexeme with no
+/// fraction or exponent.
 enum ReferenceSchemaValidator {
 
     /// A parsed JSON value that keeps raw lexemes: strings as the bytes between
@@ -71,9 +73,10 @@ enum ReferenceSchemaValidator {
         }
     }
 
-    /// The scalars a validated string body denotes: escapes decoded (a
-    /// surrogate pair into one scalar), raw runs decoded as strict UTF-8;
-    /// `nil` when a raw run is not valid UTF-8.
+    /// The scalars a validated string body denotes as a key or an enum value:
+    /// escapes decoded (a surrogate pair into one scalar), raw runs decoded as
+    /// strict UTF-8; `nil` when a raw run is not valid UTF-8, or when an
+    /// escape spells an ASCII scalar the automaton only matches raw.
     static func decodeScalars(_ raw: [UInt8]) -> [UInt32]? {
         let shortEscapes: [UInt8: UInt32] = [
             0x22: 0x22, 0x5C: 0x5C, 0x2F: 0x2F, 0x62: 0x08, 0x66: 0x0C, 0x6E: 0x0A, 0x72: 0x0D, 0x74: 0x09,
@@ -92,11 +95,12 @@ enum ReferenceSchemaValidator {
                         scalars.append(UInt32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)))
                         index += 12
                     } else {
+                        guard mayBeEscaped(UInt32(unit)) else { return nil }
                         scalars.append(UInt32(unit))
                         index += 6
                     }
                 } else {
-                    guard let scalar = shortEscapes[escape] else { return nil }
+                    guard let scalar = shortEscapes[escape], mayBeEscaped(scalar) else { return nil }
                     scalars.append(scalar)
                     index += 2
                 }
@@ -116,6 +120,12 @@ enum ReferenceSchemaValidator {
             index = end
         }
         return scalars
+    }
+
+    /// The automaton's rule, written again here: only a scalar outside ASCII,
+    /// the quote, the backslash or a control character may be escaped.
+    static func mayBeEscaped(_ scalar: UInt32) -> Bool {
+        scalar > 0x7F || scalar == 0x22 || scalar == 0x5C || scalar < 0x20
     }
 
     /// A strict recursive-descent JSON parser over bytes.

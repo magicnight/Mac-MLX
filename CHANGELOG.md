@@ -26,11 +26,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **Any string as a key, enum or `const` value, and any type at the root of
   a `response_format` schema.** Keys and literal values may now contain
   characters outside ASCII, quotes, backslashes and control characters: the
-  constraint matches them scalar by scalar, and the model may spell each
-  scalar raw or as a JSON escape (`\uXXXX`, a surrogate pair above the BMP,
-  or one of the short escapes), so a literal the tokenizer cannot produce
-  raw is still reachable through its escape and a required key can never
-  strand a generation. Apple's TripPlanner sample, whose destination enum
+  constraint matches them scalar by scalar, and the model may spell a scalar
+  outside ASCII raw or as a JSON escape (`\uXXXX`, a surrogate pair above
+  the BMP), so a literal the tokenizer cannot produce raw is still reachable
+  through its escape and a required key can never strand a generation. The
+  quote, the backslash and control characters take their escape; every
+  other ASCII scalar is matched raw only, because a model nudged off its
+  preferred word otherwise drifts into spelling the rest of the literal as
+  `\u00XX` escapes (seen on Qwen3.6-27B). Apple's TripPlanner sample, whose destination enum
   holds "Lençóis Maranhenses", now compiles as the framework emits it. The
   root may be an array, a string, a number, an integer, a boolean, an enum,
   a `const` or a `$ref` as well as an object — the shapes `@Generable`

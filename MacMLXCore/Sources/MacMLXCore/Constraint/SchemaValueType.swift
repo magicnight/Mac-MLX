@@ -17,7 +17,8 @@ public enum SchemaValueType: Equatable, Hashable, Sendable, Codable {
     /// `{"type":"boolean"}` — `true` or `false`.
     case boolean
     /// `{"type":"string","enum":[…]}` — exactly one of the given string
-    /// literals, any Unicode (spelled raw or escaped on the wire). The list is
+    /// literals, any Unicode (a scalar outside ASCII spelled raw or escaped on
+    /// the wire, see `LiteralMatch`). The list is
     /// non-empty (guaranteed by the compiler). A string `const` compiles to a
     /// one-value enum.
     case stringEnum([String])

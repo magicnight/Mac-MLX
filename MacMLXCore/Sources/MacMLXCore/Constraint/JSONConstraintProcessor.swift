@@ -66,6 +66,12 @@ public struct JSONConstraintProcessor: LogitProcessor {
     /// mask withholds whitespace at structural positions (see
     /// ``WhitespaceRunLatch`` for why, and why it never releases).
     private var whitespaceRun = WhitespaceRunLatch()
+    /// Set when a sampled token was not a legal continuation, which the mask
+    /// should have made impossible. The automaton cannot advance over it, so
+    /// from here every classification would run against a position the text
+    /// has already left and arbitrary bytes would pass as legal; the next step
+    /// forces EOS instead, and the cause is logged once (see ``didSample``).
+    private var wedged = false
 
     /// - Parameters:
     ///   - format: the validated response format (C1 or C2).
@@ -113,6 +119,7 @@ public struct JSONConstraintProcessor: LogitProcessor {
         let processed = inner?.process(logits: logits) ?? logits
         let vocab = processed.dim(-1)
         let table = resolveTable(vocabularySize: vocab)
+        if wedged { return forceTermination(to: processed, vocab: vocab, reason: "the automaton is wedged") }
         // Withhold whitespace only once the model has shown it is spinning on
         // it, and never inside a string, where a space is data.
         let suppressWhitespace = whitespaceRun.isActive && !state.isInsideString
@@ -151,9 +158,22 @@ public struct JSONConstraintProcessor: LogitProcessor {
         case .bytes(let bytes):
             if let next = state.walk(bytes) {
                 state = next
+                return
             }
-            // If the walk fails the token was illegal yet somehow sampled — keep
-            // the last valid state rather than corrupting it.
+            // The token was illegal yet sampled, which the mask should have made
+            // impossible. Keep the last valid state rather than corrupt it, say
+            // so, and end the stream at the next step: continuing against a
+            // stale position lets arbitrary bytes through as legal.
+            guard !wedged else { return }
+            wedged = true
+            LogManager.shared.logSync(
+                "JSONConstraintProcessor: sampled token \(id) "
+                    + "(\(String(decoding: bytes, as: UTF8.self).debugDescription)) is not a legal "
+                    + "continuation at automaton state [\(state.diagnosticDescription)] — the mask "
+                    + "should have excluded it; forcing EOS at the next step.",
+                level: .error,
+                category: .error
+            )
         }
     }
 
@@ -304,9 +324,11 @@ public struct JSONConstraintProcessor: LogitProcessor {
     /// If the model declares no stop token in range there is nothing to force, so
     /// fall back to the unmasked logits (still logged) rather than masking to an
     /// all -inf distribution.
-    private func forceTermination(to logits: MLXArray, vocab: Int) -> MLXArray {
+    private func forceTermination(
+        to logits: MLXArray, vocab: Int, reason: String = "no legal token"
+    ) -> MLXArray {
         LogManager.shared.logSync(
-            "JSONConstraintProcessor: no legal token at automaton state "
+            "JSONConstraintProcessor: \(reason) at automaton state "
                 + "[\(state.diagnosticDescription)] — forcing EOS to terminate "
                 + "generation (output is an incomplete JSON prefix).",
             level: .error,

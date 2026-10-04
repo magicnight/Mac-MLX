@@ -145,9 +145,10 @@ struct RandomSchemaGenerator {
         int(in: 0...3) == 0 ? pick([" ", "\n", "\t", "  "]) : ""
     }
 
-    /// `text` as a JSON string literal, each scalar spelled raw or as an
-    /// escape at random; the quote, the backslash and control characters,
-    /// which JSON cannot carry raw, always as an escape (short or `\u`).
+    /// `text` as a JSON string literal: a scalar outside ASCII spelled raw or
+    /// as an escape at random; the quote, the backslash and control
+    /// characters, which JSON cannot carry raw, always as an escape (short or
+    /// `\u`); every other ASCII scalar raw, which is the automaton's rule.
     mutating func quoted(_ text: String) -> String {
         var out = "\""
         for scalar in text.unicodeScalars {
@@ -160,7 +161,7 @@ struct RandomSchemaGenerator {
             default: nil
             }
             let mustEscape = value == 0x22 || value == 0x5C || value < 0x20
-            if !mustEscape, int(in: 0...9) < 7 {
+            if !mustEscape, value < 0x80 || int(in: 0...9) < 7 {
                 out.unicodeScalars.append(scalar)
             } else if let short, bool() {
                 out += short
