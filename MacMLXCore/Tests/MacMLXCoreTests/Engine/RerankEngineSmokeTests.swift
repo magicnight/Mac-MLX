@@ -51,6 +51,14 @@ final class RerankEngineSmokeTests: XCTestCase {
         hfRepo: "mlx-community/Qwen3-Reranker-0.6B-4bit",
         localName: "Qwen3-Reranker-0.6B-4bit")
 
+    /// A 3-way NLI cross-encoder (`roberta`, labels contradiction / entailment /
+    /// neutral, 313 MB): the multi-label head upstream scores through its
+    /// positive class. Exercises the #131 detection change end to end.
+    private static let nli = Checkpoint(
+        envKey: "MACMLX_RERANK_NLI_MODEL_DIR",
+        hfRepo: "cross-encoder/nli-MiniLM2-L6-H768",
+        localName: "nli-MiniLM2-L6-H768")
+
     /// The query and documents of the PyTorch reference, reused for the Qwen3
     /// ordering check: documents 0 and 2 answer the question, 1 and 3 do not.
     private struct Reference: Decodable {
@@ -194,6 +202,50 @@ final class RerankEngineSmokeTests: XCTestCase {
             "every relevant document must outscore every unrelated one")
         XCTAssertGreaterThan(try XCTUnwrap(relevant.min()), 0.5, "a yes answer sits above one half")
         XCTAssertLessThan(try XCTUnwrap(unrelated.max()), 0.5, "a no answer sits below one half")
+    }
+
+    // MARK: - Multi-label head scored through its positive class (#131)
+
+    /// The real scanner must classify the NLI checkpoint as a reranker, and the
+    /// engine must then score it as the probability of `entailment`: the
+    /// Berlin-population passages above the unrelated ones, every score in
+    /// 0...1. Before #131 this checkpoint fell through to `.embedder`.
+    func testMultiLabelNLIHeadIsServedAsAReranker() async throws {
+        try requireGate()
+        let directory = try resolve(Self.nli)
+        let reference = try loadReference()
+
+        // Detection on the real config.json, through a managed-directory scan
+        // of a root that holds just this checkpoint (an APFS clone, so no copy).
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "macmlx-nli-smoke-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clone = Process()
+        clone.executableURL = URL(fileURLWithPath: "/bin/cp")
+        clone.arguments = ["-RcL", directory.path, root.appending(path: Self.nli.localName).path]
+        try clone.run()
+        clone.waitUntilExit()
+        XCTAssertEqual(clone.terminationStatus, 0, "cloning the checkpoint into the temp root")
+        let scanned = try await ModelLibraryManager().scan(root)
+        let model = try XCTUnwrap(scanned.first { $0.id == Self.nli.localName })
+        XCTAssertEqual(model.format, .reranker, "a multi-label head with an entailment class is a reranker")
+
+        let engine = RerankEngine()
+        try await engine.load(model)
+        let kind = await engine.scoreKind
+        XCTAssertEqual(kind, .normalizedRelevance)
+        let scores = try await engine.score(
+            query: reference.query, documents: reference.pairs.map(\.document))
+        print("[rerank-smoke] nli-MiniLM2-L6-H768 (softmax of entailment):", scores)
+        for score in scores {
+            XCTAssert((0.0 ... 1.0).contains(score), "score out of range: \(score)")
+        }
+        let relevant = [scores[0], scores[2]]
+        let unrelated = [scores[1], scores[3]]
+        XCTAssertGreaterThan(
+            try XCTUnwrap(relevant.min()), try XCTUnwrap(unrelated.max()),
+            "entailment probability must rank the answering passages first")
     }
 
     // MARK: - End to end through POST /v1/rerank

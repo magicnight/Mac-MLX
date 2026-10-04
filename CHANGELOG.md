@@ -95,6 +95,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Changed
+- **A classification head is classified by what `MLXRerankers` can do with
+  it, and is never an embedder (#131).** A `*ForSequenceClassification`
+  checkpoint whose `model_type` is `bert`, `roberta` or `xlm-roberta` is a
+  reranker when it has one label, or several labels one of which upstream
+  recognizes as the positive class (`entailment`, `relevant`, `positive`,
+  `yes`, `LABEL_1`, …) and scores as that class's probability — the 3-way
+  NLI cross-encoders qualify. Several labels and no such class is a plain
+  model, and so is a classification head on any other `model_type`
+  (`electra`, a `Qwen3ForSequenceClassification` conversion, a config with
+  no `model_type`): those used to get the Rerank badge and then a 500 from
+  the factory. Multi-label heads used to fall through to the embedder path,
+  where `/v1/embeddings` pooled their hidden states into 19,968-dimensional
+  "vectors" and the cosine fallback of `/v1/rerank` ranked an unrelated
+  passage first; a classification head now never reaches `/v1/embeddings`.
 - **`/v1/rerank` now runs on mlx-swift-lm's `MLXRerankers`.** The hand-written
   BERT cross-encoder that v0.9.0 shipped unvalidated is gone; a `.reranker`
   checkpoint is loaded through upstream's factory, which reads `config.json`

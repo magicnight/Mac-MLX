@@ -471,43 +471,14 @@ public actor ModelLibraryManager {
         else {
             return .mlx
         }
-        // Reranker wins, checked FIRST — a cross-encoder reranker
-        // (e.g. cross-encoder/ms-marco-MiniLM-L-6-v2) has `model_type` `bert`
-        // or `xlm-roberta`, EXACTLY the encoders `knownEmbedderTypes` below
-        // would tag `.embedder`. `model_type` therefore can't separate them;
-        // the `*ForSequenceClassification` head in `architectures` (a single
-        // relevance logit) is the discriminator. Take the LAST architecture —
-        // HF lists the concrete task head there. Case-sensitive suffix match:
-        // the HF class name is `…ForSequenceClassification`.
-        //
-        // A `*ForSequenceClassification` architecture alone is NOT sufficient:
-        // a genuine multi-class classifier (e.g. a 5-label sentiment BERT)
-        // carries the same architecture suffix but is NOT a reranker. (The
-        // `MLXRerankers` factory can score a multi-label head whose
-        // `id2label` names a positive class such as `relevant` or `yes`;
-        // routing those is a follow-up — today they fall through to the
-        // embedder path, which is a known pre-existing misroute: a
-        // classification head embedded as if it were an encoder.)
-        // Gate on the EFFECTIVE label count: `num_labels` when present, else
-        // `id2label`'s entry count. Real rerankers (ms-marco-MiniLM,
-        // bge-reranker) omit `num_labels` but declare a single-entry
-        // `id2label`, so the fallback matters; it must resolve to `1`, or be
-        // absent entirely when a checkpoint carries neither field. A
-        // multi-entry `id2label` under an absent `num_labels` (e.g. a 3-way
-        // NLI cross-encoder like nli-deberta-v3-base) is a genuine multi-class
-        // head and must NOT be taken for a reranker — the absent `num_labels`
-        // must not override the contradicting `id2label` count.
-        if let architectures = json["architectures"] as? [String],
-           architectures.last?.hasSuffix("ForSequenceClassification") == true {
-            let numLabels = json["num_labels"] as? Int
-            let id2labelCount = (json["id2label"] as? [String: Any])?.count
-            let effectiveLabelCount = numLabels ?? id2labelCount
-            if effectiveLabelCount == nil || effectiveLabelCount == 1 {
-                return .reranker
-            }
-            // Explicit multi-label config — fall through to the model_type
-            // checks below (typically lands as `.embedder`, since reranker
-            // and embedder checkpoints share `model_type`).
+        // A sequence-classification head is decided FIRST and never falls
+        // through: a cross-encoder reranker (ms-marco-MiniLM, bge-reranker)
+        // has `model_type` `bert` or `xlm-roberta`, EXACTLY the encoders
+        // `knownEmbedderTypes` below would tag `.embedder`, and a
+        // classification head is never a sentence embedder whatever its
+        // label count. See `sequenceClassificationFormat(json:)`.
+        if let format = Self.sequenceClassificationFormat(json: json) {
+            return format
         }
         // Jina reranker v3 declares itself through its architecture. Its
         // `model_type` is `qwen3`, so without this rule it would be served
@@ -549,6 +520,76 @@ public actor ModelLibraryManager {
             return .embedder
         }
         return .mlx
+    }
+
+    /// `model_type` values whose `*ForSequenceClassification` head the
+    /// `MLXRerankers` factory can load: upstream builds its encoder reranker
+    /// only through `createBertCompatibleModel`, which `EmbedderTypeRegistry`
+    /// registers for exactly these three (`distilbert` and `nomic_bert` get the
+    /// plain encoder and no head; everything else is unknown to it).
+    static let encoderRerankerTypes: Set<String> = ["bert", "roberta", "xlm-roberta"]
+
+    /// The label names upstream treats as the positive class of a multi-label
+    /// encoder head (`BertConfiguration.positiveClassIndex`), compared after
+    /// lowercasing and dropping everything but letters and digits — so
+    /// `LABEL_1`, `Entailment` and `relevant` all qualify.
+    static let positiveClassLabels: Set<String> = [
+        "entailment", "label1", "positive", "relevant", "relevance", "true", "yes",
+    ]
+
+    /// Classify a `config.json` that carries a `*ForSequenceClassification`
+    /// architecture, or return `nil` when it carries none and the ordinary
+    /// `model_type` rules should decide.
+    ///
+    /// Mirrors what `MLXRerankers` will do with the checkpoint, so the
+    /// library never promises a reranker the factory refuses and never
+    /// serves a classifier as an embedder:
+    /// - `model_type` outside ``encoderRerankerTypes`` (electra, a
+    ///   `Qwen3ForSequenceClassification` conversion, a config with no
+    ///   `model_type` at all): `.mlx`. Upstream has no encoder for the head,
+    ///   and a classifier is not an embedder either, so it must not reach
+    ///   `/v1/embeddings` through `knownEmbedderTypes`.
+    /// - one label (`num_labels`, else the highest `id2label` key plus one,
+    ///   else 1 — upstream's own default): `.reranker`, the single relevance
+    ///   logit.
+    /// - several labels, one of them a positive class in
+    ///   ``positiveClassLabels`` (a 3-way NLI head with `entailment`):
+    ///   `.reranker`; upstream scores the softmax probability of that class.
+    /// - several labels and no recognizable positive class (a 5-label
+    ///   sentiment head): `.mlx`, since upstream rejects the head as
+    ///   ambiguous and an embedder it never was.
+    static func sequenceClassificationFormat(json: [String: Any]) -> ModelFormat? {
+        guard let architectures = json["architectures"] as? [String],
+              architectures.contains(where: { $0.contains("ForSequenceClassification") })
+        else {
+            return nil
+        }
+        guard let modelType = (json["model_type"] as? String)?.lowercased(),
+              encoderRerankerTypes.contains(modelType)
+        else {
+            return .mlx
+        }
+        // Labels as upstream decodes them: `id2label` first, `label2id`
+        // filling the gaps.
+        var idToLabel: [Int: String] = [:]
+        for (key, value) in json["id2label"] as? [String: Any] ?? [:] {
+            if let id = Int(key), let label = value as? String {
+                idToLabel[id] = label
+            }
+        }
+        for (label, value) in json["label2id"] as? [String: Any] ?? [:] {
+            if let id = value as? Int, idToLabel[id] == nil {
+                idToLabel[id] = label
+            }
+        }
+        let numLabels = (json["num_labels"] as? Int) ?? Swift.max((idToLabel.keys.max() ?? -1) + 1, 1)
+        if numLabels == 1 {
+            return .reranker
+        }
+        let hasPositiveClass = idToLabel.values.contains { label in
+            positiveClassLabels.contains(label.lowercased().filter { $0.isLetter || $0.isNumber })
+        }
+        return hasPositiveClass ? .reranker : .mlx
     }
 
     /// Whether `modelName` (a managed directory name or a Hub repo id) names
