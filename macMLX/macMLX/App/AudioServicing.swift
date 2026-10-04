@@ -9,11 +9,12 @@
 // forwards to the identical engine calls the view model would otherwise have
 // made inline.
 //
-// The two members are coarser than the engine's own API on purpose. `AudioEngine`
-// separates loading from inference (`loadSTT` then `transcribe`), but every GUI
-// entry point has to do both — and the engine already no-ops a `load` for a
-// model that is resident, so pairing them costs nothing and removes an ordering
-// mistake the view models would otherwise be able to make.
+// Each member forwards to the engine's model-bound call, which loads the model
+// if it is not resident and runs on the model that load produced. That matters
+// here: the view models cancel a superseded task and start the next one at
+// once, and the superseded call can still be inside the engine — suspended in
+// a load, or synthesizing — so a "load, then run on whatever is resident" pair
+// could run the new request on the old model, or on nothing.
 
 import Foundation
 import MacMLXCore
@@ -41,14 +42,12 @@ protocol AudioServicing: Sendable {
 extension AudioEngine: AudioServicing {
 
     func transcribe(audioURL: URL, modelID: String) async throws -> String {
-        try await loadSTT(modelID)
-        return try await transcribe(audioURL: audioURL, language: nil, temperature: nil).text
+        try await transcribe(model: modelID, audioURL: audioURL, language: nil, temperature: nil).text
     }
 
     func synthesize(
         text: String, modelID: String, voice: String?
     ) async throws -> AudioEngine.Speech {
-        try await loadTTS(modelID)
-        return try await synthesize(text: text, voice: voice, language: nil)
+        try await synthesize(model: modelID, text: text, voice: voice, language: nil)
     }
 }

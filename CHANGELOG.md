@@ -102,10 +102,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   free. So a load ran beside an LLM generation, and while one request was
   parked at the lock a second one could replace the model: the first then
   transcribed or spoke with the wrong model, or found the slot empty and got
-  a 500. Since v0.9.0. Both handlers now take the lock before the load,
-  release it when the load fails, and run on the model their own load
-  produced. A malformed model id is still a 400, now answered before the
-  lock like the lookup errors on `/v1/embeddings`.
+  a 500. Since v0.9.0. Both handlers now fetch the model's files first,
+  outside the lock — a first download can take minutes, and nothing else
+  should queue behind it — then take the lock, load, run on the model their
+  own load produced, and release. A repo the Hub cannot deliver (a typo, a
+  gated repo, no network) fails with a 500 before the lock is touched; a
+  malformed id is still a 400, answered without waiting for the lock. A swap
+  also drains MLX's buffer cache between dropping one model and loading the
+  next, as the embedder and reranker swaps do. The app's transcription and
+  playback go through the same model-bound call: they cancel a superseded
+  request and start the next at once, and the superseded one can still be
+  inside the engine. Known gap, unchanged from v0.9.0: a few upstream
+  speech-to-text loaders ignore the cache directory they are given and
+  download a second copy into the shared Hugging Face cache, and that copy
+  is still fetched under the lock.
 - **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
   model swap could be answered by the other model.** After confirming its
   model was resident the handler read the shared engine slot again, and a

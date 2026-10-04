@@ -301,19 +301,26 @@ struct HummingbirdServerEmbeddingsTests {
         }
     }
 
-    /// A later acquire must succeed promptly, which proves every path that took
-    /// the lock also released it (srv3b's race).
+    /// Whether every path that took the lock also released it (srv3b's race):
+    /// nobody owns it and nobody is parked on it. Read from the server rather
+    /// than raced against a timer, which a starved CI runner can lose.
     private func lockIsFree(_ server: HummingbirdServer) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask { (try? await server.acquireGenerationLock()) != nil }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
+        await !server.generationLockIsHeld
+    }
+
+    /// Whether `done` is set within `seconds`, polling. Used with the lock held
+    /// throughout: a handler that does not wait for the lock answers in
+    /// milliseconds and one that does never answers, so the bound only decides
+    /// how long a regression takes to fail. Generous because the Metal CI job
+    /// runs the whole suite in parallel on a slow runner, where a round trip
+    /// has taken close to 20 s and a fixed 2 s sleep produced a false failure.
+    private func answered(_ done: Done, within seconds: Double) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(seconds)
+        while ContinuousClock.now < deadline {
+            if await done.isSet { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        return false
     }
 
     /// SRV-2 for the auxiliary engines: a `/v1/rerank` request that needs a
@@ -342,7 +349,6 @@ struct HummingbirdServerEmbeddingsTests {
 
         let free = await lockIsFree(server)
         #expect(free, "the failed swap must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
@@ -367,7 +373,6 @@ struct HummingbirdServerEmbeddingsTests {
 
         let free = await lockIsFree(server)
         #expect(free, "the failed swap must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
@@ -394,7 +399,6 @@ struct HummingbirdServerEmbeddingsTests {
 
         let free = await lockIsFree(server)
         #expect(free, "the failed cosine swap must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
@@ -410,14 +414,12 @@ struct HummingbirdServerEmbeddingsTests {
         try await server.acquireGenerationLock()
         let unknownDone = Done()
         let unknown = post(url, ["model": "nope", "input": "hello"], raising: unknownDone)
-        try await Task.sleep(nanoseconds: 2_000_000_000)
-        let unknownAnswered = await unknownDone.isSet
+        let unknownAnswered = await answered(unknownDone, within: 60)
         #expect(unknownAnswered, "a 404 must not queue behind a generation")
 
         let kindDone = Done()
         let wrongKind = post(url, ["model": "chat-model", "input": "hello"], raising: kindDone)
-        try await Task.sleep(nanoseconds: 2_000_000_000)
-        let kindAnswered = await kindDone.isSet
+        let kindAnswered = await answered(kindDone, within: 60)
         #expect(kindAnswered, "a 400 must not queue behind a generation")
 
         // Release before awaiting the results, so a regression (the request

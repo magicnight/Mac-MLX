@@ -39,6 +39,7 @@ import Testing
 //   transcriptionsServeTheBackendResultAndReleaseTheLock              : 20_820
 //   speechServesTheBackendResultAndReleasesTheLock                    : 20_830
 //   speechPCMAtTheWrongSampleRateIs400                                : 20_840
+//   aPrepareFailureIs500WithoutWaitingForTheLock                      : 20_850
 //   (20_800 belongs to HummingbirdServerBatchTests)
 
 @Suite("HummingbirdServer audio endpoints")
@@ -447,55 +448,60 @@ struct HummingbirdServerAudioTests {
         static let transcript = "scripted transcript"
         static let samples: [Float] = [0, 0.5, -0.5, 0]
 
+        /// Model ids handed to `prepareSTT` / `prepareTTS`, in order.
+        private(set) var prepareCalls: [String] = []
         private(set) var transcribeCalls: [TranscribeCall] = []
         private(set) var synthesizeCalls: [SynthesizeCall] = []
-        /// One entry per backend call: was the server's generation lock held
-        /// while the call ran? Recorded only after `attach(to:)`.
+        /// One entry per prepare call, and one per load-and-run call: was the
+        /// server's generation lock held while it ran? Recorded only after
+        /// `attach(to:)`.
+        private(set) var lockHeldDuringPrepare: [Bool] = []
         private(set) var lockHeldDuringCalls: [Bool] = []
-        private let failure: EngineError?
+        private let prepareFailure: EngineError?
+        private let loadFailure: EngineError?
         private let speechSampleRate: Int
         private var server: HummingbirdServer?
 
-        init(failing failure: EngineError? = nil, speechSampleRate: Int = 24_000) {
-            self.failure = failure
+        init(
+            failingPrepare prepareFailure: EngineError? = nil,
+            failingLoad loadFailure: EngineError? = nil,
+            speechSampleRate: Int = 24_000
+        ) {
+            self.prepareFailure = prepareFailure
+            self.loadFailure = loadFailure
             self.speechSampleRate = speechSampleRate
         }
 
         func attach(to server: HummingbirdServer) { self.server = server }
 
-        /// Probe the lock from inside a call: try to take it and give it
-        /// straight back. Getting it means the handler was NOT holding it;
-        /// not getting it within 150 ms means it was. A probe that loses is
-        /// cancelled, and the lock's cancellation path removes the parked
-        /// waiter; if a release had already handed it ownership, the probe
-        /// releases again, so it never leaves the lock owned by a dead task.
-        private func recordLockState() async {
-            guard let server else { return }
-            let held = await withTaskGroup(of: Bool?.self) { group in
-                group.addTask {
-                    guard (try? await server.acquireGenerationLock()) != nil else { return nil }
-                    await server.releaseGenerationLock()
-                    return false
-                }
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: 150_000_000)
-                    return true
-                }
-                let first = await group.next() ?? nil
-                group.cancelAll()
-                return first ?? true
-            }
-            lockHeldDuringCalls.append(held)
+        /// Whether the server's generation lock is held right now, read from
+        /// inside a call. The handler is suspended on this call, so the server
+        /// actor answers at once; no timer is involved.
+        private func probeLock() async -> Bool? {
+            guard let server else { return nil }
+            return await server.generationLockIsHeld
+        }
+
+        func prepareSTT(model: String) async throws {
+            if let held = await probeLock() { lockHeldDuringPrepare.append(held) }
+            prepareCalls.append(model)
+            if let prepareFailure { throw prepareFailure }
+        }
+
+        func prepareTTS(model: String) async throws {
+            if let held = await probeLock() { lockHeldDuringPrepare.append(held) }
+            prepareCalls.append(model)
+            if let prepareFailure { throw prepareFailure }
         }
 
         func transcribe(
             model: String, audioURL: URL, language: String?, temperature: Float?
         ) async throws -> AudioEngine.Transcription {
-            await recordLockState()
+            if let held = await probeLock() { lockHeldDuringCalls.append(held) }
             let staged = (try? Data(contentsOf: audioURL))?.count ?? -1
             transcribeCalls.append(
                 .init(model: model, stagedBytes: staged, language: language, temperature: temperature))
-            if let failure { throw failure }
+            if let loadFailure { throw loadFailure }
             return AudioEngine.Transcription(
                 text: Self.transcript, language: "en", duration: 1.25,
                 segments: [.init(id: 0, start: 0, end: 1.25, text: Self.transcript)])
@@ -504,9 +510,9 @@ struct HummingbirdServerAudioTests {
         func synthesize(
             model: String, text: String, voice: String?, language: String?
         ) async throws -> AudioEngine.Speech {
-            await recordLockState()
+            if let held = await probeLock() { lockHeldDuringCalls.append(held) }
             synthesizeCalls.append(.init(model: model, text: text, voice: voice, language: language))
-            if let failure { throw failure }
+            if let loadFailure { throw loadFailure }
             return AudioEngine.Speech(samples: Self.samples, sampleRate: speechSampleRate)
         }
     }
@@ -519,7 +525,7 @@ struct HummingbirdServerAudioTests {
     }
 
     /// A completion flag for a request parked behind the lock. `Task.value`
-    /// is not cancellable from a task group, so a timed wait needs a flag.
+    /// is not cancellable from a task group, so a bounded wait needs a flag.
     private actor Done {
         private(set) var isSet = false
         func set() { isSet = true }
@@ -548,7 +554,12 @@ struct HummingbirdServerAudioTests {
         }
     }
 
-    /// Whether every flag is set within `seconds`, polling.
+    /// Whether every flag is set within `seconds`, polling. Used with the lock
+    /// held throughout: a correct handler answers in milliseconds and a
+    /// handler that waits for the lock never answers, so the bound only decides
+    /// how long a regression takes to fail. It is generous because the Metal
+    /// CI job runs the whole suite in parallel on a slow runner, where a
+    /// request round trip has taken close to 20 s; a 2 s bound failed there.
     private func allSet(_ flags: [Done], within seconds: Double) async -> Bool {
         let deadline = ContinuousClock.now + .seconds(seconds)
         while ContinuousClock.now < deadline {
@@ -563,30 +574,22 @@ struct HummingbirdServerAudioTests {
         return false
     }
 
-    /// A later acquire must succeed promptly, which proves every path that
-    /// took the lock also released it.
+    /// Whether every path that took the lock also released it: nobody owns
+    /// it and nobody is parked on it.
     private func lockIsFree(_ server: HummingbirdServer) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask { (try? await server.acquireGenerationLock()) != nil }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
+        await !server.generationLockIsHeld
     }
 
-    /// SRV-2 for the audio engine: a transcription waits for the generation
-    /// lock BEFORE it loads — the backend is not called while a "generation"
-    /// holds the lock — and a load that fails releases the lock again. Before
-    /// this, the handler loaded first and queued second, so a cold swap ran
-    /// beside a generation, and a second request could replace the model, or
-    /// empty the slot, while the first was parked at the lock.
+    /// SRV-2 for the audio engine: a transcription fetches its model's files
+    /// without waiting for the generation lock, then waits for the lock BEFORE
+    /// it loads — the load is not called while a "generation" holds the lock —
+    /// and a load that fails releases the lock again. Before this, the handler
+    /// loaded first and queued second, so a cold swap ran beside a generation,
+    /// and a second request could replace the model, or empty the slot, while
+    /// the first was parked at the lock.
     @Test
     func transcriptionsLoadWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
-        let backend = ScriptedAudioBackend(failing: .modelLoadFailed(reason: "scripted"))
+        let backend = ScriptedAudioBackend(failingLoad: .modelLoadFailed(reason: "scripted"))
         let server = await makeServer(backend: backend)
         let port = try await server.start(preferredPort: 20_780)
 
@@ -598,8 +601,10 @@ struct HummingbirdServerAudioTests {
             file: (name: "file", filename: "a.wav", bytes: sampleWAV),
             raising: done)
         try await Task.sleep(nanoseconds: 300_000_000)
+        let preparedWhileLocked = await backend.prepareCalls
         let calledWhileLocked = await backend.transcribeCalls.count
         let answeredWhileLocked = await done.isSet
+        #expect(preparedWhileLocked == ["openai/whisper-tiny"], "the fetch must not wait for the lock")
         #expect(calledWhileLocked == 0, "the load must queue behind the generation lock, not run beside a generation")
         #expect(!answeredWhileLocked)
 
@@ -615,14 +620,13 @@ struct HummingbirdServerAudioTests {
 
         let free = await lockIsFree(server)
         #expect(free, "the failed load must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
     /// Same contract on `/v1/audio/speech`.
     @Test
     func speechLoadWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
-        let backend = ScriptedAudioBackend(failing: .modelLoadFailed(reason: "scripted"))
+        let backend = ScriptedAudioBackend(failingLoad: .modelLoadFailed(reason: "scripted"))
         let server = await makeServer(backend: backend)
         let port = try await server.start(preferredPort: 20_790)
 
@@ -633,8 +637,10 @@ struct HummingbirdServerAudioTests {
             object: ["model": "mlx-community/Kokoro-82M-4bit", "input": "hello", "voice": "af_heart"],
             raising: done)
         try await Task.sleep(nanoseconds: 300_000_000)
+        let preparedWhileLocked = await backend.prepareCalls
         let calledWhileLocked = await backend.synthesizeCalls.count
         let answeredWhileLocked = await done.isSet
+        #expect(preparedWhileLocked == ["mlx-community/Kokoro-82M-4bit"], "the fetch must not wait for the lock")
         #expect(calledWhileLocked == 0, "the load must queue behind the generation lock")
         #expect(!answeredWhileLocked)
 
@@ -649,7 +655,6 @@ struct HummingbirdServerAudioTests {
 
         let free = await lockIsFree(server)
         #expect(free, "the failed load must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
@@ -674,7 +679,7 @@ struct HummingbirdServerAudioTests {
             speechURL(port),
             object: ["model": "not-a-repo-id", "input": "hello", "voice": "af_heart"],
             raising: speechDone)
-        let answered = await allSet([transcriptionDone, speechDone], within: 2)
+        let answered = await allSet([transcriptionDone, speechDone], within: 60)
         #expect(answered, "a malformed id must be answered without waiting for the lock")
         await server.releaseGenerationLock()
 
@@ -685,9 +690,57 @@ struct HummingbirdServerAudioTests {
         let (speechData, speechResponse) = try await pendingSpeech.value
         #expect(speechResponse.statusCode == 400)
         #expect(errorCode(speechData) == "invalid_request_error")
+        #expect(errorMessage(speechData)?.contains("owner/name") == true)
+        let prepareCalls = await backend.prepareCalls.count
         let transcribeCalls = await backend.transcribeCalls.count
         let synthesizeCalls = await backend.synthesizeCalls.count
-        #expect(transcribeCalls == 0 && synthesizeCalls == 0)
+        #expect(prepareCalls == 0 && transcribeCalls == 0 && synthesizeCalls == 0)
+        await server.stop()
+    }
+
+    /// A model the Hub cannot deliver fails in the fetch, which runs before
+    /// the lock: with the lock held, both routes still return their 500
+    /// promptly, never load, and leave the lock exactly as they found it.
+    @Test
+    func aPrepareFailureIs500WithoutWaitingForTheLock() async throws {
+        let backend = ScriptedAudioBackend(
+            failingPrepare: .modelLoadFailed(reason: "the Hub was unreachable"))
+        let server = await makeServer(backend: backend)
+        let port = try await server.start(preferredPort: 20_850)
+        try await server.acquireGenerationLock()
+
+        let transcriptionDone = Done()
+        let pendingTranscription = postMultipartInBackground(
+            transcriptionsURL(port),
+            fields: [("model", "openai/whisper-tiny")],
+            file: (name: "file", filename: "a.wav", bytes: sampleWAV),
+            raising: transcriptionDone)
+        let speechDone = Done()
+        let pendingSpeech = postJSONInBackground(
+            speechURL(port),
+            object: ["model": "mlx-community/Kokoro-82M-4bit", "input": "hello", "voice": "af_heart"],
+            raising: speechDone)
+        let answered = await allSet([transcriptionDone, speechDone], within: 60)
+        #expect(answered, "a failed fetch must be answered without waiting for the lock")
+        await server.releaseGenerationLock()
+
+        let (transcriptionData, transcriptionResponse) = try await pendingTranscription.value
+        #expect(transcriptionResponse.statusCode == 500)
+        #expect(errorCode(transcriptionData) == "load_failed")
+        #expect(errorMessage(transcriptionData)?.contains("openai/whisper-tiny") == true)
+        #expect(errorMessage(transcriptionData)?.contains("the Hub was unreachable") == true)
+        let (speechData, speechResponse) = try await pendingSpeech.value
+        #expect(speechResponse.statusCode == 500)
+        #expect(errorCode(speechData) == "load_failed")
+        let prepareCalls = await backend.prepareCalls
+        let transcribeCalls = await backend.transcribeCalls.count
+        let synthesizeCalls = await backend.synthesizeCalls.count
+        #expect(prepareCalls == ["openai/whisper-tiny", "mlx-community/Kokoro-82M-4bit"]
+            || prepareCalls == ["mlx-community/Kokoro-82M-4bit", "openai/whisper-tiny"])
+        #expect(transcribeCalls == 0 && synthesizeCalls == 0, "a failed fetch must not load")
+
+        let free = await lockIsFree(server)
+        #expect(free, "a failed fetch never touched the lock")
         await server.stop()
     }
 
@@ -734,9 +787,12 @@ struct HummingbirdServerAudioTests {
         ])
         let lockHeld = await backend.lockHeldDuringCalls
         #expect(lockHeld == [true, true], "load and inference run under the lock")
+        let prepared = await backend.prepareCalls
+        #expect(prepared == ["openai/whisper-tiny", "openai/whisper-tiny"])
+        let lockHeldDuringPrepare = await backend.lockHeldDuringPrepare
+        #expect(lockHeldDuringPrepare == [false, false], "the fetch runs outside the lock")
         let free = await lockIsFree(server)
         #expect(free, "a served request must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
@@ -769,9 +825,12 @@ struct HummingbirdServerAudioTests {
         ])
         let lockHeld = await backend.lockHeldDuringCalls
         #expect(lockHeld == [true, true], "load and inference run under the lock")
+        let prepared = await backend.prepareCalls
+        #expect(prepared == [model, model])
+        let lockHeldDuringPrepare = await backend.lockHeldDuringPrepare
+        #expect(lockHeldDuringPrepare == [false, false], "the fetch runs outside the lock")
         let free = await lockIsFree(server)
         #expect(free, "a served request must release the generation lock")
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 
@@ -797,7 +856,6 @@ struct HummingbirdServerAudioTests {
 
         let free = await lockIsFree(server)
         #expect(free)
-        if free { await server.releaseGenerationLock() }
         await server.stop()
     }
 

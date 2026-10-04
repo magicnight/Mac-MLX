@@ -155,20 +155,82 @@ struct AudioEngineHelpersTests {
         #expect(await engine.loadedTTSModelID == nil)
     }
 
+    /// The model-bound entry points — the ones the server and the app call —
+    /// reject a malformed id exactly as the loaders do, before any network
+    /// call, and leave nothing resident.
     @Test
-    func transcribingBeforeLoadingThrowsModelNotLoaded() async throws {
+    func theModelBoundEntryPointsRejectAMalformedIDLocally() async throws {
         let engine = AudioEngine()
-        await #expect(throws: EngineError.modelNotLoaded) {
-            _ = try await engine.transcribe(audioURL: URL(filePath: "/dev/null"))
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {
+            _ = try await engine.transcribe(
+                model: "not-a-repo-id", audioURL: URL(filePath: "/dev/null"))
         }
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {
+            try await engine.prepareSTT(model: "not-a-repo-id")
+        }
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("../escape", kind: "TTS"))) {
+            _ = try await engine.synthesize(model: "../escape", text: "hello")
+        }
+        await #expect(throws: EngineError.invalidAudioModelID(
+            reason: AudioEngine.repoIDHint("../escape", kind: "TTS"))) {
+            try await engine.prepareTTS(model: "../escape")
+        }
+        #expect(await engine.loadedSTTModelID == nil)
+        #expect(await engine.loadedTTSModelID == nil)
     }
 
+    // MARK: Fetching before the lock
+
+    /// Two requests for one model that is not on disk share a single fetch:
+    /// upstream clears a directory it finds incomplete, so two downloads of
+    /// one repo would delete each other's files. A different repo fetches on
+    /// its own, and once a fetch has finished the next prepare fetches again
+    /// (the engine does not remember "on disk"; upstream's own check is cheap).
     @Test
-    func synthesizingBeforeLoadingThrowsModelNotLoaded() async throws {
-        let engine = AudioEngine()
-        await #expect(throws: EngineError.modelNotLoaded) {
-            _ = try await engine.synthesize(text: "hello")
+    func concurrentPreparesForOneRepoShareASingleFetch() async throws {
+        let log = FetchLog()
+        let engine = AudioEngine(fetch: { modelID in
+            await log.record(modelID)
+            try await Task.sleep(nanoseconds: 400_000_000)
+        })
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await engine.prepareSTT(model: "openai/whisper-tiny") }
+            group.addTask { try await engine.prepareSTT(model: "openai/whisper-tiny") }
+            group.addTask { try await engine.prepareTTS(model: "mlx-community/Kokoro-82M-4bit") }
+            try await group.waitForAll()
         }
+        let during = await log.entries
+        #expect(during.sorted() == ["mlx-community/Kokoro-82M-4bit", "openai/whisper-tiny"])
+
+        try await engine.prepareSTT(model: "openai/whisper-tiny")
+        let after = await log.entries
+        #expect(after.count == 3)
+    }
+
+    /// What the Hub throws becomes `modelLoadFailed` — the case the server
+    /// reports as 500 `load_failed` — and nothing becomes resident.
+    @Test
+    func aFailedFetchIsALoadFailure() async throws {
+        struct HubDown: Error {}
+        let engine = AudioEngine(fetch: { _ in throw HubDown() })
+        do {
+            try await engine.prepareSTT(model: "openai/whisper-tiny")
+            Issue.record("the fetch failure should have propagated")
+        } catch let error as EngineError {
+            guard case .modelLoadFailed = error else {
+                Issue.record("expected modelLoadFailed, got \(error)")
+                return
+            }
+        }
+        #expect(await engine.loadedSTTModelID == nil)
+    }
+
+    private actor FetchLog {
+        private(set) var entries: [String] = []
+        func record(_ modelID: String) { entries.append(modelID) }
     }
 
     @Test
@@ -180,7 +242,7 @@ struct AudioEngineHelpersTests {
         // `invalidAudioModelID` to 400 and everything else to 500, so throwing
         // `modelLoadFailed` here would silently turn a client typo back into a
         // retryable "internal error". See
-        // `HummingbirdServer.audioModelLoadFailure`.
+        // `HummingbirdServer.audioFailure`.
         let engine = AudioEngine()
         await #expect(throws: EngineError.invalidAudioModelID(
             reason: AudioEngine.repoIDHint("not-a-repo-id", kind: "STT"))) {
