@@ -3759,7 +3759,16 @@ public actor HummingbirdServer {
         return nil
     }
 
-    private func ensureEmbedderLoaded(_ requestedID: String) async throws {
+    /// Returns the engine the caller must use for THIS request. Callers never
+    /// re-read `embeddingEngine` afterwards: the `await` on
+    /// `current.loadedModel` lets the actor interleave another request's swap,
+    /// which empties the slot before its replacement is assigned — a re-read
+    /// in that window would see `nil` (or a different model) for a model that
+    /// this call just verified resident. The returned instance also keeps the
+    /// model alive for the duration of the caller's work even if a concurrent
+    /// swap drops it from the slot, so a result always comes from the model
+    /// that was asked for.
+    private func ensureEmbedderLoaded(_ requestedID: String) async throws -> EmbeddingEngine {
         // Same resolution order as the generation cold-swap.
         guard let target = await resolveModel(requestedID) else {
             throw ModelSwapError.modelNotFound(id: requestedID)
@@ -3775,7 +3784,7 @@ public actor HummingbirdServer {
         }
 
         if let current = embeddingEngine, await current.loadedModel?.id == target.id {
-            return
+            return current
         }
 
         // Release the resident embedder BEFORE the replacement allocates, the
@@ -3794,6 +3803,7 @@ public actor HummingbirdServer {
             throw ModelSwapError.loadFailed(id: requestedID, reason: error.localizedDescription)
         }
         embeddingEngine = newEngine
+        return newEngine
     }
 
     /// Make sure `rerankEngine` has `target` resident, cold-swapping when a
@@ -3810,9 +3820,13 @@ public actor HummingbirdServer {
     /// the old load-then-assign order a swap held both copies (peak 14.98 GB
     /// against 7.66 GB for one, measured in #130). A failed load leaves no
     /// reranker resident; the next request for the previous one reloads it.
-    private func ensureRerankerLoaded(_ target: LocalModel) async throws {
+    ///
+    /// Returns the engine for THIS request, for the same reason as
+    /// `ensureEmbedderLoaded`: the slot may be empty or hold another model by
+    /// the time the caller would re-read it.
+    private func ensureRerankerLoaded(_ target: LocalModel) async throws -> RerankEngine {
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
-            return
+            return current
         }
         if rerankEngine != nil {
             rerankEngine = nil
@@ -3825,6 +3839,7 @@ public actor HummingbirdServer {
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
         rerankEngine = newEngine
+        return newEngine
     }
 
     /// `POST /v1/embeddings` — OpenAI-compatible text embeddings. Cold-swaps
@@ -3855,15 +3870,10 @@ public actor HummingbirdServer {
             )
         }
 
-        if let failure = await ensureEmbedderOr404(req.model) {
-            return failure
-        }
-        guard let embedder = embeddingEngine else {
-            return errorResponse(
-                status: .internalServerError,
-                message: "Embedder not loaded",
-                code: "load_failed"
-            )
+        let embedder: EmbeddingEngine
+        switch await ensureEmbedderOr404(req.model) {
+        case .failure(let response): return response
+        case .engine(let engine): embedder = engine
         }
 
         // Serialise MLX compute with generation — both touch global MLX
@@ -3989,15 +3999,10 @@ public actor HummingbirdServer {
         // `.embedder` → bi-encoder cosine fallback (documented approximation).
         // Reuse the proven embedder cold-swap; `target` is already `.embedder`
         // so this only loads (or reports a load failure), never 404s/400s here.
-        if let failure = await ensureEmbedderOr404(req.model) {
-            return failure
-        }
-        guard let embedder = embeddingEngine else {
-            return errorResponse(
-                status: .internalServerError,
-                message: "Embedder not loaded",
-                code: "load_failed"
-            )
+        let embedder: EmbeddingEngine
+        switch await ensureEmbedderOr404(req.model) {
+        case .failure(let response): return response
+        case .engine(let engine): embedder = engine
         }
 
         // Same lock discipline as /v1/embeddings: throw = not held = no release.
@@ -4058,8 +4063,9 @@ public actor HummingbirdServer {
     private func rerankWithCrossEncoder(
         req: RerankRequest, target: LocalModel
     ) async throws -> Response {
+        let reranker: RerankEngine
         do {
-            try await ensureRerankerLoaded(target)
+            reranker = try await ensureRerankerLoaded(target)
         } catch let err as ModelSwapError {
             if case .loadFailed(let id, let reason) = err {
                 return errorResponse(
@@ -4076,12 +4082,6 @@ public actor HummingbirdServer {
                 status: .internalServerError, message: error.localizedDescription, code: "load_failed"
             )
         }
-        guard let reranker = rerankEngine else {
-            return errorResponse(
-                status: .internalServerError, message: "Reranker not loaded", code: "load_failed"
-            )
-        }
-
         do {
             try await acquireGenerationLock()
         } catch {
@@ -4188,47 +4188,53 @@ public actor HummingbirdServer {
         }
     }
 
+    /// The outcome of a cold swap on behalf of one request: the engine to use,
+    /// or a ready-made error `Response`.
+    private enum EmbedderSwap {
+        case engine(EmbeddingEngine)
+        case failure(Response)
+    }
+
     /// Shared cold-swap-or-error for the embeddings/rerank handlers. Returns
-    /// a ready-made error `Response` (404 for an unknown model, 400 when the
-    /// model isn't an embedder, 500 for a load failure) on failure, or `nil`
-    /// once the embedder is resident.
-    private func ensureEmbedderOr404(_ modelID: String) async -> Response? {
+    /// the resident embedder for this request, or a ready-made error
+    /// `Response` (404 for an unknown model, 400 when the model isn't an
+    /// embedder, 500 for a load failure).
+    private func ensureEmbedderOr404(_ modelID: String) async -> EmbedderSwap {
         do {
-            try await ensureEmbedderLoaded(modelID)
-            return nil
+            return .engine(try await ensureEmbedderLoaded(modelID))
         } catch let err as EmbedderKindError {
             switch err {
             case .notAnEmbedder(let id, let format):
                 // P3-8: resolved to a real model, but not an embedder — 400 so
                 // callers don't get meaningless vectors from a chat/VLM model.
-                return errorResponse(
+                return .failure(errorResponse(
                     status: .badRequest,
                     message: "Model \(id) is not an embedding model (kind: \(format)). "
                         + "Use an embedder (e.g. `bge-small-en-v1.5`) for /v1/embeddings and /v1/rerank.",
                     code: "model_not_embedder"
-                )
+                ))
             }
         } catch let err as ModelSwapError {
             switch err {
             case .modelNotFound(let id):
-                return errorResponse(
+                return .failure(errorResponse(
                     status: .notFound,
                     message: "Model not found: \(id). Download an embedder (e.g. `bge-small-en-v1.5`) and check `macmlx list`.",
                     code: "model_not_found"
-                )
+                ))
             case .loadFailed(let id, let reason):
-                return errorResponse(
+                return .failure(errorResponse(
                     status: .internalServerError,
                     message: "Failed to load \(id): \(reason)",
                     code: "load_failed"
-                )
+                ))
             }
         } catch {
-            return errorResponse(
+            return .failure(errorResponse(
                 status: .internalServerError,
                 message: error.localizedDescription,
                 code: "load_failed"
-            )
+            ))
         }
     }
 
