@@ -426,7 +426,9 @@ struct HummingbirdServerAudioTests {
 
     /// Answers every call with a fixed result or a fixed error and records the
     /// calls, so the handlers' lock discipline and reply shapes can be checked
-    /// without weights, the Hub, or Metal.
+    /// without weights, the Hub, or Metal. Once attached to its server it also
+    /// records, per call, whether the generation lock was held while it ran —
+    /// the property this whole seam exists to pin.
     private actor ScriptedAudioBackend: AudioBackend {
         struct TranscribeCall: Equatable {
             let model: String
@@ -447,17 +449,49 @@ struct HummingbirdServerAudioTests {
 
         private(set) var transcribeCalls: [TranscribeCall] = []
         private(set) var synthesizeCalls: [SynthesizeCall] = []
+        /// One entry per backend call: was the server's generation lock held
+        /// while the call ran? Recorded only after `attach(to:)`.
+        private(set) var lockHeldDuringCalls: [Bool] = []
         private let failure: EngineError?
         private let speechSampleRate: Int
+        private var server: HummingbirdServer?
 
         init(failing failure: EngineError? = nil, speechSampleRate: Int = 24_000) {
             self.failure = failure
             self.speechSampleRate = speechSampleRate
         }
 
+        func attach(to server: HummingbirdServer) { self.server = server }
+
+        /// Probe the lock from inside a call: try to take it and give it
+        /// straight back. Getting it means the handler was NOT holding it;
+        /// not getting it within 150 ms means it was. A probe that loses is
+        /// cancelled, and the lock's cancellation path removes the parked
+        /// waiter; if a release had already handed it ownership, the probe
+        /// releases again, so it never leaves the lock owned by a dead task.
+        private func recordLockState() async {
+            guard let server else { return }
+            let held = await withTaskGroup(of: Bool?.self) { group in
+                group.addTask {
+                    guard (try? await server.acquireGenerationLock()) != nil else { return nil }
+                    await server.releaseGenerationLock()
+                    return false
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    return true
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first ?? true
+            }
+            lockHeldDuringCalls.append(held)
+        }
+
         func transcribe(
             model: String, audioURL: URL, language: String?, temperature: Float?
         ) async throws -> AudioEngine.Transcription {
+            await recordLockState()
             let staged = (try? Data(contentsOf: audioURL))?.count ?? -1
             transcribeCalls.append(
                 .init(model: model, stagedBytes: staged, language: language, temperature: temperature))
@@ -470,6 +504,7 @@ struct HummingbirdServerAudioTests {
         func synthesize(
             model: String, text: String, voice: String?, language: String?
         ) async throws -> AudioEngine.Speech {
+            await recordLockState()
             synthesizeCalls.append(.init(model: model, text: text, voice: voice, language: language))
             if let failure { throw failure }
             return AudioEngine.Speech(samples: Self.samples, sampleRate: speechSampleRate)
@@ -479,6 +514,7 @@ struct HummingbirdServerAudioTests {
     private func makeServer(backend: ScriptedAudioBackend) async -> HummingbirdServer {
         let server = makeServer()
         await server.useAudioBackend(backend)
+        await backend.attach(to: server)
         return server
     }
 
@@ -574,6 +610,8 @@ struct HummingbirdServerAudioTests {
         #expect(errorMessage(data)?.contains("openai/whisper-tiny") == true)
         let calls = await backend.transcribeCalls.count
         #expect(calls == 1)
+        let lockHeld = await backend.lockHeldDuringCalls
+        #expect(lockHeld == [true], "the load must run while this request holds the lock")
 
         let free = await lockIsFree(server)
         #expect(free, "the failed load must release the generation lock")
@@ -606,6 +644,8 @@ struct HummingbirdServerAudioTests {
         #expect(errorCode(data) == "load_failed")
         let calls = await backend.synthesizeCalls.count
         #expect(calls == 1)
+        let lockHeld = await backend.lockHeldDuringCalls
+        #expect(lockHeld == [true], "the load must run while this request holds the lock")
 
         let free = await lockIsFree(server)
         #expect(free, "the failed load must release the generation lock")
@@ -692,6 +732,8 @@ struct HummingbirdServerAudioTests {
             .init(model: "openai/whisper-tiny", stagedBytes: wav.count, language: "en", temperature: 0.2),
             .init(model: "openai/whisper-tiny", stagedBytes: wav.count, language: nil, temperature: nil),
         ])
+        let lockHeld = await backend.lockHeldDuringCalls
+        #expect(lockHeld == [true, true], "load and inference run under the lock")
         let free = await lockIsFree(server)
         #expect(free, "a served request must release the generation lock")
         if free { await server.releaseGenerationLock() }
@@ -725,6 +767,8 @@ struct HummingbirdServerAudioTests {
             .init(model: model, text: "hello", voice: "af_heart", language: nil),
             .init(model: model, text: "hello", voice: "af_heart", language: nil),
         ])
+        let lockHeld = await backend.lockHeldDuringCalls
+        #expect(lockHeld == [true, true], "load and inference run under the lock")
         let free = await lockIsFree(server)
         #expect(free, "a served request must release the generation lock")
         if free { await server.releaseGenerationLock() }
