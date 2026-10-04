@@ -25,6 +25,7 @@ import Testing
 //   rerankSwapWaitsForTheGenerationLockAndReleasesItOnFailure : 19_750
 //   embeddingsSwapWaitsForTheGenerationLockAndReleasesItOnFailure : 19_760
 //   embeddingsLookupAndKindErrorsDoNotWaitForTheLock : 19_770
+//   rerankCosineSwapWaitsForTheGenerationLockAndReleasesItOnFailure : 19_790
 //   embeddingsRerankerModelReturns400           : 19_740
 
 @Suite("HummingbirdServer embeddings/rerank")
@@ -366,6 +367,33 @@ struct HummingbirdServerEmbeddingsTests {
 
         let free = await lockIsFree(server)
         #expect(free, "the failed swap must release the generation lock")
+        if free { await server.releaseGenerationLock() }
+        await server.stop()
+    }
+
+    /// The cosine branch of `/v1/rerank` (an `.embedder` model) holds the lock
+    /// across its swap too, and releases it when the load fails — the third
+    /// lock-held failure path, otherwise untested.
+    @Test
+    func rerankCosineSwapWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
+        let server = serverResolving("bge-small", format: .embedder)
+        let port = try await server.start(preferredPort: 19_790)
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/rerank")!
+
+        try await server.acquireGenerationLock()
+        let done = Done()
+        let pending = post(url, ["model": "bge-small", "query": "q", "documents": ["d"]], raising: done)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let answeredWhileLocked = await done.isSet
+        #expect(!answeredWhileLocked, "the cosine swap must queue behind the generation lock")
+
+        await server.releaseGenerationLock()
+        let (data, response) = try await pending.value
+        #expect(response.statusCode == 500)
+        #expect(errorCode(data) == "load_failed")
+
+        let free = await lockIsFree(server)
+        #expect(free, "the failed cosine swap must release the generation lock")
         if free { await server.releaseGenerationLock() }
         await server.stop()
     }

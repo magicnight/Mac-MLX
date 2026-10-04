@@ -3727,7 +3727,6 @@ public actor HummingbirdServer {
 
     // MARK: - Embeddings / rerank (v0.5.2)
 
-
     /// Resolve a request's `model` id to a `LocalModel` the same way the
     /// generation cold-swap does: direct id/displayName first, then a
     /// user-facing alias. Returns `nil` when nothing on disk matches. Shared

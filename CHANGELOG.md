@@ -132,8 +132,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   arrive during one wait for it instead of loading their own copy or holding
   on to the model being replaced; a chat request on the server's
   single-stream path waits behind a swap for the load's duration (about a
-  second for a 4B reranker from the page cache). A swap whose load fails leaves no reranker or embedder resident;
-  the next request for the previous model reloads it. The two engines still
+  second for a 4B reranker from the page cache). A swap whose load fails
+  leaves no reranker or embedder resident; the next request for the previous
+  model reloads it. The two engines still
   sit outside the model pool's byte budget; that part of #130 stays open.
 - **A sequence-classification head is classified by what `MLXRerankers` can
   do with it, and is never an embedder (#131).** A `*ForSequenceClassification`
