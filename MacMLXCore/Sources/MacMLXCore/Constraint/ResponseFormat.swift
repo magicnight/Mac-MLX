@@ -7,7 +7,7 @@
 ///  - ``jsonObject`` ⇄ `{"type":"json_object"}` — output must be some
 ///    well-formed JSON document (C1).
 ///  - ``jsonSchema(_:)`` ⇄ `{"type":"json_schema", …}` — output must conform to
-///    the compiled object schema subset (C2).
+///    the compiled schema subset (C2): a root value of any supported type.
 ///
 /// Decoding from the wire (and rejecting unsupported schema features with a 400)
 /// is ``ResponseFormatDecoder``'s job; this type is the already-validated,
@@ -16,6 +16,7 @@
 public enum ResponseFormat: Equatable, Hashable, Sendable, Codable {
     /// Constrain output to any well-formed JSON value.
     case jsonObject
-    /// Constrain output to the given compiled object schema.
-    case jsonSchema(JSONSchemaObject)
+    /// Constrain output to the given compiled schema: the root value's type,
+    /// an object, an array or a scalar.
+    case jsonSchema(SchemaValueType)
 }

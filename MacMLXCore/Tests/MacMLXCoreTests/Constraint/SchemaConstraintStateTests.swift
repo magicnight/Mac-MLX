@@ -5,8 +5,10 @@ import Testing
 // MARK: - SchemaConstraintState Tests (Track C — C2)
 //
 // Pure, MLX-free tests for the schema-specific automaton: only the declared
-// object shape is accepted, keys are unique and any-order, required keys are
-// enforced, and each value must match its declared type.
+// shape is accepted (an object, an array or a scalar at the root), keys are
+// unique and any-order, required keys are enforced, each value must match its
+// declared type, and keys and enum values match scalar by scalar, raw or
+// escaped.
 
 @Suite("SchemaConstraintState")
 struct SchemaConstraintStateTests {
@@ -22,7 +24,11 @@ struct SchemaConstraintStateTests {
     }
 
     private func accepts(_ text: String, _ object: JSONSchemaObject) -> Bool {
-        guard let end = SchemaConstraintState(schema: object).walk(Array(text.utf8)) else { return false }
+        acceptsRoot(text, .object(object))
+    }
+
+    private func acceptsRoot(_ text: String, _ root: SchemaValueType) -> Bool {
+        guard let end = SchemaConstraintState(root: root).walk(Array(text.utf8)) else { return false }
         return end.isComplete
     }
 
@@ -143,14 +149,126 @@ struct SchemaConstraintStateTests {
         #expect(state.walk(Array("{}".utf8)) == nil)
     }
 
+    // MARK: Literals — any Unicode, raw or escaped
+
+    /// A key or enum value outside ASCII matches its raw UTF-8, its `\u`
+    /// escapes in either hex case, or a mix, and a multi-byte scalar may
+    /// arrive one byte at a time (a token can end inside it).
+    @Test
+    func matchesNonASCIILiteralsRawOrEscaped() {
+        let s = schema([("ciudad", .stringEnum(["Lençóis Maranhenses", "Bogotá"])), ("日本", .string)], required: ["ciudad"])
+        #expect(accepts("{\"ciudad\":\"Lençóis Maranhenses\"}", s))
+        #expect(accepts("{\"ciudad\":\"Len\\u00e7\\u00f3is Maranhenses\"}", s))
+        #expect(accepts("{\"ciudad\":\"Len\\u00E7óis Maranhenses\"}", s))
+        #expect(accepts("{\"ciudad\":\"Bogot\\u00e1\",\"日本\":\"x\"}", s))
+        #expect(accepts("{\"\\u65e5\\u672c\":\"x\",\"ciudad\":\"Bogotá\"}", s))
+        #expect(accepts("{\"\\u65e5本\":\"x\",\"ciudad\":\"Bogotá\"}", s))
+        #expect(!accepts("{\"ciudad\":\"Lencois Maranhenses\"}", s))
+        #expect(!accepts("{\"ciudad\":\"Len\\u00e8óis Maranhenses\"}", s))
+        #expect(!accepts("{\"ciudad\":\"Len\\u00e7\"}", s))
+        #expect(!accepts("{\"\\u65e5\":\"x\"}", s))
+        #expect(!accepts("{\"ciudad\":\"Len\\u00e7\\u00f3is Maranhenses\",\"ciudad\":\"Bogotá\"}", s))
+
+        let start = SchemaConstraintState(schema: s)
+        let mid = start.walk(Array("{\"ciudad\":\"Len".utf8) + [0xC3])
+        #expect(mid != nil)
+        #expect(mid?.walk([0xA9]) == nil, "é is not ç")
+        #expect(mid?.walk([0xA7] + Array("óis Maranhenses\"}".utf8))?.isComplete == true)
+        #expect(start.walk(Array("{\"ciudad\":\"Len".utf8) + [0xE7]) == nil, "a lead byte of the wrong length")
+        #expect(start.walk(Array("{\"ciudad\":\"Len\\u00".utf8))?.isInsideString == true)
+    }
+
+    /// A scalar above the BMP is one raw four-byte sequence or one surrogate
+    /// pair; half a pair, or a pair whose second half is not a low surrogate,
+    /// matches nothing.
+    @Test
+    func matchesSupplementaryScalarsAsSurrogatePairs() {
+        let s = schema([("mood", .stringEnum(["😀", "😁"])), ("x", .string)])
+        #expect(accepts("{\"mood\":\"😀\"}", s))
+        #expect(accepts("{\"mood\":\"\\ud83d\\ude00\"}", s))
+        #expect(accepts("{\"mood\":\"\\uD83D\\uDE01\"}", s))
+        #expect(!accepts("{\"mood\":\"\\ud83d\\ude02\"}", s))
+        #expect(!accepts("{\"mood\":\"\\ud83d\"}", s))
+        #expect(!accepts("{\"mood\":\"\\ud83d\\u0041\"}", s))
+        #expect(walk("{\"mood\":\"\\ud83d\\u", s) != nil)
+        #expect(walk("{\"mood\":\"\\ud83d\\ud", s) != nil, "a low surrogate starts with D")
+        #expect(walk("{\"mood\":\"\\ud83d\\ud8", s) == nil, "the second half must be a low surrogate")
+        #expect(walk("{\"mood\":\"\\ud83d\\u0", s) == nil)
+        #expect(walk("{\"mood\":\"\\ud83dx", s) == nil)
+        #expect(walk("{\"mood\":\"\\ude00", s) == nil, "a lone low surrogate")
+    }
+
+    /// The quote, the backslash and control characters can only be matched
+    /// escaped — the short escape or `\u` — and an ASCII scalar may be
+    /// escaped too.
+    @Test
+    func matchesEscapedASCIIAndControlCharactersInLiterals() {
+        let s = schema([("q\"q", .stringEnum(["a\\b", "line\nbreak", "A"]))], required: ["q\"q"])
+        #expect(accepts("{\"q\\\"q\":\"a\\\\b\"}", s))
+        #expect(accepts("{\"q\\u0022q\":\"a\\u005cb\"}", s))
+        #expect(accepts("{\"q\\\"q\":\"line\\nbreak\"}", s))
+        #expect(accepts("{\"q\\\"q\":\"line\\u000Abreak\"}", s))
+        #expect(accepts("{\"q\\\"q\":\"\\u0041\"}", s))
+        #expect(!accepts("{\"q\"q\":\"A\"}", s))
+        #expect(!accepts("{\"q\\\"q\":\"line\nbreak\"}", s))
+        #expect(!accepts("{\"q\\\"q\":\"a\\b\"}", s))
+        #expect(!accepts("{\"q\\\"q\":\"a\\x\"}", s))
+    }
+
     // MARK: Structure
 
     @Test
-    func rejectsNonObjectRoot() {
+    func rejectsNonObjectDocumentUnderAnObjectRoot() {
         let s = schema([("a", .string)])
         #expect(!accepts("[]", s))
         #expect(!accepts("\"x\"", s))
         #expect(!accepts("123", s))
+    }
+
+    // MARK: Roots of any type
+
+    @Test
+    func acceptsNonObjectRoots() {
+        let item = nested([("id", .integer)], required: ["id"])
+        let list = SchemaValueType.array(items: item, minItems: 1, maxItems: 2)
+        #expect(acceptsRoot("[{\"id\":1}]", list))
+        #expect(acceptsRoot(" [ {\"id\":1} , {\"id\":2} ] ", list))
+        #expect(!acceptsRoot("[]", list))
+        #expect(!acceptsRoot("[{\"id\":1},{\"id\":2},{\"id\":3}]", list))
+        #expect(!acceptsRoot("{\"id\":1}", list))
+        #expect(!acceptsRoot("[{\"id\":1}]]", list))
+        #expect(acceptsRoot("\"hi\"", .string))
+        #expect(acceptsRoot("\"\\u00e9\"", .string))
+        #expect(!acceptsRoot("hi", .string))
+        #expect(!acceptsRoot("\"hi\" \"\"", .string))
+        #expect(acceptsRoot("\"admin\"", .stringEnum(["admin", "user"])))
+        #expect(acceptsRoot("\"\\u0061dmin\"", .stringEnum(["admin", "user"])))
+        #expect(!acceptsRoot("\"root\"", .stringEnum(["admin", "user"])))
+        #expect(acceptsRoot("true", .boolean))
+        #expect(acceptsRoot(" false ", .boolean))
+        #expect(!acceptsRoot("tru", .boolean))
+        #expect(!acceptsRoot("{}", .boolean))
+    }
+
+    /// A root number has no terminator: it is complete while more digits
+    /// could still follow, whitespace ends it, and nothing else may follow.
+    @Test
+    func rootNumbersAreCompleteWithoutATerminator() {
+        for text in ["42", "-0", "3.14", "1e5", "-2.5E-3", "0"] {
+            #expect(acceptsRoot(text, .number), "\(text)")
+            #expect(acceptsRoot(text + " ", .number), "\(text)")
+        }
+        for text in ["-", "1.", "1e", "1e+", ".5", "01", "+1", "1 2", "1,"] {
+            #expect(!acceptsRoot(text, .number), "\(text)")
+        }
+        for text in ["42", "-7", "0"] { #expect(acceptsRoot(text, .integer), "\(text)") }
+        for text in ["1.5", "1e3", "01", "-", "7]"] { #expect(!acceptsRoot(text, .integer), "\(text)") }
+        let afterDigits = SchemaConstraintState(root: .integer).walk(Array("12".utf8))
+        #expect(afterDigits?.isComplete == true)
+        #expect(afterDigits?.walk(Array("3".utf8))?.isComplete == true)
+        #expect(afterDigits?.walk(Array("}".utf8)) == nil)
+        // Inside a container a number still needs its terminator.
+        #expect(walk("{\"n\":12", schema([("n", .integer)]))?.isComplete == false)
     }
 
     @Test
@@ -236,6 +354,10 @@ struct SchemaConstraintStateTests {
             schema([("z", .array(items: .boolean, minItems: 0, maxItems: 0))]),
             schema([("m", .array(items: .array(items: .integer, minItems: 1, maxItems: 2), minItems: 0, maxItems: nil))]),
             schema([("i", .array(items: nested([("id", .integer), ("t", .string)], required: ["id"]), minItems: 1, maxItems: 2))]),
+            // Literals outside ASCII and ones that need escapes: the escape
+            // paths (surrogate pairs included) must never strand the matcher.
+            schema([("c", .stringEnum(["Lençóis", "Bogotá", "😀"]))], required: ["c"]),
+            schema([("日本", .string), ("q\"q", .stringEnum(["a\\b"]))], required: ["日本", "q\"q"]),
         ]
         var generator = RandomSchemaGenerator(seed: 42)
         for _ in 0..<12 {
@@ -244,14 +366,23 @@ struct SchemaConstraintStateTests {
         for _ in 0..<12 {
             schemas.append(generator.object(nested: true))
         }
-        for object in schemas {
+        var roots: [SchemaValueType] = schemas.map { .object($0) }
+        roots += [
+            .array(items: nested([("id", .integer)], required: ["id"]), minItems: 1, maxItems: 2),
+            .array(items: .stringEnum(["é", "e"]), minItems: 0, maxItems: nil),
+            .string, .number, .integer, .boolean, .stringEnum(["😀", "x"]),
+        ]
+        for _ in 0..<8 {
+            roots.append(generator.root())
+        }
+        for root in roots {
             let result = SchemaTrapSearch.run(
-                from: SchemaConstraintState(schema: object),
-                alphabet: SchemaTrapSearch.alphabet(for: object),
+                from: SchemaConstraintState(root: root),
+                alphabet: SchemaTrapSearch.alphabet(for: root),
                 limit: 40_000)
             #expect(
                 result.traps.isEmpty,
-                "\(result.traps.count) trap(s) in \(result.explored) states, first: \(result.traps.first?.diagnosticDescription ?? "-") for \(object)")
+                "\(result.traps.count) trap(s) in \(result.explored) states, first: \(result.traps.first?.diagnosticDescription ?? "-") for \(root)")
         }
     }
 
@@ -474,24 +605,33 @@ struct SchemaConstraintStateTests {
         #expect(!accepts(short, object))
     }
 
-    /// Apple's TripPlanner `Itinerary` schema (without its one non-ASCII enum
-    /// value): `$defs`, `$ref` as `items`, exact array counts, and an enum
-    /// nested two arrays deep.
+    /// Apple's TripPlanner `Itinerary` schema as the framework emits it:
+    /// `$defs`, `$ref` as `items`, exact array counts, an enum nested two
+    /// arrays deep, and the destination enum value "Lençóis Maranhenses",
+    /// which may arrive raw or escaped.
     @Test
     func acceptsATripPlannerItinerary() throws {
-        let trip = try StructuredOutputFixtures.compile(StructuredOutputFixtures.asciiItinerary())
+        let trip = try StructuredOutputFixtures.compile(StructuredOutputFixtures.itinerary())
         let day = { (last: String) in
             "{\"title\":\"T\",\"subtitle\":\"S\",\"destination\":\"D\",\"activities\":["
                 + "{\"type\":\"sightseeing\",\"title\":\"T\",\"description\":\"D\"},"
                 + "{\"type\":\"shopping\",\"title\":\"T\",\"description\":\"D\"},"
                 + "{\"type\":\"\(last)\",\"title\":\"T\",\"description\":\"D\"}]}"
         }
-        let document = "{\"title\":\"T\",\"destinationName\":\"Mount Fuji\",\"description\":\"E\",\"rationale\":\"R\","
-            + "\"days\":[\(day("foodAndDining")),\(day("foodAndDining")),\(day("hotelAndLodging"))]}"
+        func itinerary(_ destination: String) -> String {
+            "{\"title\":\"T\",\"destinationName\":\"\(destination)\",\"description\":\"E\",\"rationale\":\"R\","
+                + "\"days\":[\(day("foodAndDining")),\(day("foodAndDining")),\(day("hotelAndLodging"))]}"
+        }
+        let document = itinerary("Mount Fuji")
         #expect(accepts(document, trip))
         #expect(ReferenceSchemaValidator.validate(Array(document.utf8), trip))
+        for spelling in ["Lençóis Maranhenses", "Len\\u00e7\\u00f3is Maranhenses", "Len\\u00E7óis Maranhenses"] {
+            #expect(accepts(itinerary(spelling), trip), "\(spelling)")
+            #expect(ReferenceSchemaValidator.validate(Array(itinerary(spelling).utf8), trip), "\(spelling)")
+        }
+        #expect(!accepts(itinerary("Lencois Maranhenses"), trip))
         #expect(!accepts(document.replacingOccurrences(of: "\"shopping\"", with: "\"golf\""), trip))
-        #expect(!accepts(document.replacingOccurrences(of: "\"Mount Fuji\"", with: "\"Mount Doom\""), trip))
+        #expect(!accepts(itinerary("Mount Doom"), trip))
         #expect(!accepts(document.replacingOccurrences(of: ",\(day("hotelAndLodging"))", with: ""), trip))
         #expect(!accepts(document.replacingOccurrences(of: "\"rationale\":\"R\",", with: ""), trip))
     }
@@ -602,7 +742,8 @@ struct SchemaConstraintStateTests {
 
     // MARK: Differential test against a reference validator
 
-    /// Seeded schemas (flat and nested) × valid and mutated documents: the
+    /// Seeded schemas (flat, nested, and roots of every type) × valid and
+    /// mutated documents, literals spelled raw or escaped at random: the
     /// automaton accepts exactly what ``ReferenceSchemaValidator`` accepts,
     /// and everything it accepts is well-formed JSON to ``JSONGrammarState``.
     @Test
@@ -610,16 +751,16 @@ struct SchemaConstraintStateTests {
         var generator = RandomSchemaGenerator(seed: 0xC0FFEE)
         var accepted = 0
         var mismatches: [String] = []
-        for round in 0..<500 {
-            let object = generator.object(nested: round % 2 == 1)
-            let start = SchemaConstraintState(schema: object)
+        for round in 0..<600 {
+            let root: SchemaValueType = round % 3 == 2 ? generator.root() : .object(generator.object(nested: round % 2 == 1))
+            let start = SchemaConstraintState(root: root)
             for k in 0..<12 {
-                let valid = generator.document(for: .object(object))
+                let valid = generator.document(for: root)
                 let document = k < 4 ? Array(valid.utf8) : generator.mutate(valid)
                 let automaton = start.walk(document)?.isComplete ?? false
-                let reference = ReferenceSchemaValidator.validate(document, object)
+                let reference = ReferenceSchemaValidator.validate(document, root: root)
                 if automaton != reference {
-                    mismatches.append("automaton=\(automaton) reference=\(reference) \(String(decoding: document, as: UTF8.self)) for \(object)")
+                    mismatches.append("automaton=\(automaton) reference=\(reference) \(String(decoding: document, as: UTF8.self)) for \(root)")
                     continue
                 }
                 if automaton {

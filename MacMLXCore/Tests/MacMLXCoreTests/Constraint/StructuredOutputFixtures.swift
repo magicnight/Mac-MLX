@@ -38,14 +38,15 @@ enum StructuredOutputFixtures {
         return schema
     }
 
-    /// Apple's TripPlanner `Itinerary` schema as the framework emits it. One
-    /// enum value is non-ASCII, so this compiles to a 400 today.
+    /// Apple's TripPlanner `Itinerary` schema as the framework emits it,
+    /// `$defs`, exact item counts and the non-ASCII enum value
+    /// "Lençóis Maranhenses" included.
     static func itinerary() throws -> JSONValue {
         try json("fm_itinerary_production_fixture")
     }
 
-    /// ``itinerary()`` with its non-ASCII enum value removed, which the
-    /// supported subset can compile.
+    /// ``itinerary()`` with its non-ASCII enum value removed — what the subset
+    /// could compile before literals were matched scalar by scalar.
     static func asciiItinerary() throws -> JSONValue {
         withoutNonASCIIEnumValues(try itinerary())
     }
@@ -69,10 +70,18 @@ enum StructuredOutputFixtures {
         ])
     }
 
-    /// Compile `schema` through ``ResponseFormatDecoder``.
-    static func compile(_ schema: JSONValue) throws -> JSONSchemaObject {
-        guard case .jsonSchema(let object)? = try ResponseFormatDecoder.decode(responseFormat(schema)) else {
+    /// Compile `schema` through ``ResponseFormatDecoder`` to its root value.
+    static func compileRoot(_ schema: JSONValue) throws -> SchemaValueType {
+        guard case .jsonSchema(let root)? = try ResponseFormatDecoder.decode(responseFormat(schema)) else {
             throw FixtureError(description: "the decoder returned no json_schema constraint")
+        }
+        return root
+    }
+
+    /// Compile `schema`, whose root must be an object.
+    static func compile(_ schema: JSONValue) throws -> JSONSchemaObject {
+        guard case .object(let object) = try compileRoot(schema) else {
+            throw FixtureError(description: "the schema root is not an object")
         }
         return object
     }

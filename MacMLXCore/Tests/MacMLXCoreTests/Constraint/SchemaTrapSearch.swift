@@ -24,25 +24,46 @@ enum SchemaTrapSearch {
     static let baseAlphabet = Array("{}[],:\" \\u0189dc.-eEtrufalsn".utf8)
 
     /// ``baseAlphabet`` plus every byte of the schema's keys and enum values,
-    /// without duplicates.
+    /// raw and as `\u` escapes, without duplicates.
     static func alphabet(for schema: JSONSchemaObject) -> [UInt8] {
+        alphabet(for: .object(schema))
+    }
+
+    static func alphabet(for root: SchemaValueType) -> [UInt8] {
         var bytes = baseAlphabet
-        collectBytes(of: schema, into: &bytes)
+        collectBytes(of: root, into: &bytes)
         var seen = Set<UInt8>()
         return bytes.filter { seen.insert($0).inserted }
     }
 
     private static func collectBytes(of schema: JSONSchemaObject, into bytes: inout [UInt8]) {
         for property in schema.properties {
-            bytes.append(contentsOf: property.name.utf8)
+            collectBytes(ofLiteral: property.name, into: &bytes)
             collectBytes(of: property.type, into: &bytes)
+        }
+    }
+
+    /// The literal's UTF-8, and the hex digits of its scalars' `\u` escapes
+    /// (surrogate halves above the BMP).
+    private static func collectBytes(ofLiteral literal: String, into bytes: inout [UInt8]) {
+        bytes.append(contentsOf: literal.utf8)
+        for scalar in literal.unicodeScalars {
+            var units = [scalar.value]
+            if scalar.value > 0xFFFF {
+                let offset = scalar.value - 0x10000
+                units = [0xD800 + (offset >> 10), 0xDC00 + (offset & 0x3FF)]
+            }
+            for unit in units {
+                let hex = String(unit, radix: 16)
+                bytes.append(contentsOf: (String(repeating: "0", count: 4 - hex.count) + hex).utf8)
+            }
         }
     }
 
     private static func collectBytes(of type: SchemaValueType, into bytes: inout [UInt8]) {
         switch type {
         case .stringEnum(let values):
-            for value in values { bytes.append(contentsOf: value.utf8) }
+            for value in values { collectBytes(ofLiteral: value, into: &bytes) }
         case .object(let object):
             collectBytes(of: object, into: &bytes)
         case .array(let items, _, _):

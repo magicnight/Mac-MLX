@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import MacMLXCore
@@ -46,8 +47,8 @@ struct ResponseFormatDecoderTests {
             "json_schema": obj(["name": .string("Person"), "schema": schema]),
         ])
         let decoded = try ResponseFormatDecoder.decode(format)
-        guard case .jsonSchema(let object) = decoded else {
-            Issue.record("expected .jsonSchema, got \(String(describing: decoded))")
+        guard case .jsonSchema(.object(let object)) = decoded else {
+            Issue.record("expected .jsonSchema(.object), got \(String(describing: decoded))")
             return
         }
         #expect(object.properties.count == 5)
@@ -78,13 +79,15 @@ struct ResponseFormatDecoderTests {
         expectUnsupported(schema: schema, containing: "nested array")
     }
 
+    /// A root of another type is compiled by that type's rules, so an object
+    /// keyword on an array root is the unsupported keyword it is.
     @Test
-    func rejectsNonObjectRoot() {
+    func rejectsObjectKeywordsOnAnArrayRoot() {
         let schema = obj([
             "type": .string("array"),
             "properties": obj(["x": obj(["type": .string("string")])]),
         ])
-        expectUnsupported(schema: schema, containing: "top-level type 'array'")
+        expectUnsupported(schema: schema, containing: "'properties' at the schema root")
     }
 
     @Test
@@ -134,59 +137,27 @@ struct ResponseFormatDecoderTests {
         }
     }
 
-    // MARK: json_schema — unmatchable keys / enum values (M2)
+    // MARK: json_schema — keys and enum values may be any string
 
+    /// Keys and enum values outside ASCII, or containing a quote, a backslash
+    /// or a control character, compile: the automaton matches each scalar raw
+    /// or as a JSON escape, so none of them can strand it.
     @Test
-    func rejectsKeyRequiringJSONEscaping() {
-        // A `"` in a declared key can never be matched by the literal-byte key
-        // matcher, so a required object with it would deadlock — reject up front.
+    func compilesAnyStringAsAKeyOrEnumValue() throws {
         let schema = obj([
             "type": .string("object"),
-            "properties": obj(["na\"me": obj(["type": .string("string")])]),
+            "properties": obj([
+                "na\"me": obj(["type": .string("string")]),
+                "a\u{01}b": obj(["type": .string("string")]),
+                "café": obj(["type": .string("string")]),
+                "p": obj(["type": .string("string"), "enum": .array([.string("a\\b"), .string("naïve"), .string("😀")])]),
+            ]),
+            "required": .array([.string("café"), .string("na\"me")]),
         ])
-        expectUnsupported(schema: schema, containing: "requires JSON escaping")
-    }
-
-    @Test
-    func rejectsKeyWithControlCharacter() {
-        let schema = obj([
-            "type": .string("object"),
-            "properties": obj(["a\u{01}b": obj(["type": .string("string")])]),
-        ])
-        expectUnsupported(schema: schema, containing: "requires JSON escaping")
-    }
-
-    @Test
-    func rejectsNonASCIIKey() {
-        let schema = obj([
-            "type": .string("object"),
-            "properties": obj(["café": obj(["type": .string("string")])]),
-        ])
-        expectUnsupported(schema: schema, containing: "non-ASCII")
-    }
-
-    @Test
-    func rejectsEnumValueWithBackslash() {
-        let schema = obj([
-            "type": .string("object"),
-            "properties": obj(["p": obj([
-                "type": .string("string"),
-                "enum": .array([.string("a\\b"), .string("ok")]),
-            ])]),
-        ])
-        expectUnsupported(schema: schema, containing: "requires JSON escaping")
-    }
-
-    @Test
-    func rejectsNonASCIIEnumValue() {
-        let schema = obj([
-            "type": .string("object"),
-            "properties": obj(["p": obj([
-                "type": .string("string"),
-                "enum": .array([.string("naïve")]),
-            ])]),
-        ])
-        expectUnsupported(schema: schema, containing: "non-ASCII")
+        let object = try compile(schema)
+        #expect(object.properties.map(\.name) == ["a\u{01}b", "café", "na\"me", "p"])
+        #expect(object.property(named: "p")?.type == .stringEnum(["a\\b", "naïve", "😀"]))
+        #expect(object.required == ["café", "na\"me"])
     }
 
     // MARK: json_schema — malformed → 400 invalid
@@ -231,6 +202,10 @@ struct ResponseFormatDecoderTests {
 
     private func compile(_ schema: JSONValue) throws -> JSONSchemaObject {
         try StructuredOutputFixtures.compile(schema)
+    }
+
+    private func compileRoot(_ schema: JSONValue) throws -> SchemaValueType {
+        try StructuredOutputFixtures.compileRoot(schema)
     }
 
     /// An object schema with `properties`, an optional `required` list and any
@@ -597,18 +572,84 @@ struct ResponseFormatDecoderTests {
         expectUnsupported(schema: root(["x": obj(["type": .string("null")])]), containing: "property type 'null'")
     }
 
-    /// The literal-byte rules (M2) apply at every depth and to `const`.
+    /// Any string is a literal at every depth and in a `const` too.
     @Test
-    func appliesLiteralRulesAtEveryDepth() {
-        expectUnsupported(schema: root(["o": root(["café": string])]), containing: "non-ASCII")
+    func compilesAnyStringLiteralAtEveryDepth() throws {
+        let object = try compile(root([
+            "o": root(["café": string, "e": obj(["type": .string("string"), "enum": .array([.string("a\\b")])])]),
+            "l": array(obj(["type": .string("string"), "enum": .array([.string("naïve")])])),
+            "k": obj(["const": .string("say \"hi\"")]),
+            "m": obj(["const": .string("Lençóis")]),
+        ]))
+        let inner = JSONSchemaObject(
+            properties: [.init(name: "café", type: .string), .init(name: "e", type: .stringEnum(["a\\b"]))], required: [])
+        #expect(object.property(named: "o")?.type == .object(inner))
+        #expect(object.property(named: "l")?.type == .array(items: .stringEnum(["naïve"]), minItems: 0, maxItems: nil))
+        #expect(object.property(named: "k")?.type == .stringEnum(["say \"hi\""]))
+        #expect(object.property(named: "m")?.type == .stringEnum(["Lençóis"]))
+    }
+
+    // MARK: json_schema — roots of any type
+
+    /// A root may be an array, a scalar, an enum, a `const` or a `$ref`; the
+    /// root-only keywords and annotations apply to it as to an object root.
+    @Test
+    func compilesNonObjectRoots() throws {
+        let items = root(["id": integer], required: ["id"])
+        let item = SchemaValueType.object(JSONSchemaObject(properties: [.init(name: "id", type: .integer)], required: ["id"]))
+        #expect(try compileRoot(array(items, ["minItems": .int(1)])) == .array(items: item, minItems: 1, maxItems: nil))
+        #expect(try compileRoot(string) == .string)
+        #expect(try compileRoot(integer) == .integer)
+        #expect(try compileRoot(obj(["type": .string("number"), "description": .string("d")])) == .number)
+        #expect(try compileRoot(obj(["type": .string("boolean")])) == .boolean)
+        #expect(try compileRoot(obj(["type": .string("string"), "enum": .array([.string("a"), .string("é")])])) == .stringEnum(["a", "é"]))
+        #expect(try compileRoot(obj(["const": .string("fixed")])) == .stringEnum(["fixed"]))
+
+        let defs: JSONValue = obj(["Addr": root(["street": string, "zip": integer], required: ["street"])])
+        let viaRef = obj([
+            "$ref": .string("#/$defs/Addr"), "$defs": defs,
+            "$schema": .string("https://json-schema.org/draft/2020-12/schema"), "title": .string("T"),
+        ])
+        #expect(try compileRoot(viaRef) == address)
+        let listOfRefs = obj([
+            "type": .string("array"), "items": ref("#/$defs/Addr"), "maxItems": .int(3),
+            "$defs": defs, "$id": .string("https://example.com/list"),
+        ])
+        #expect(try compileRoot(listOfRefs) == .array(items: address, minItems: 0, maxItems: 3))
+    }
+
+    /// Problems at a non-object root are reported at the root, and a root
+    /// with no `type` is still an object.
+    @Test
+    func reportsRootProblemsAtTheRoot() {
+        expectUnsupported(schema: obj(["type": .string("array")]), containing: "array without 'items' at the schema root")
+        expectUnsupported(schema: obj(["type": .string("null")]), containing: "property type 'null' at the schema root")
         expectUnsupported(
-            schema: root(["o": root(["e": obj(["type": .string("string"), "enum": .array([.string("a\\b")])])])]),
-            containing: "requires JSON escaping")
-        expectUnsupported(
-            schema: root(["l": array(obj(["type": .string("string"), "enum": .array([.string("naïve")])]))]),
-            containing: "non-ASCII")
-        expectUnsupported(schema: root(["k": obj(["const": .string("say \"hi\"")])]), containing: "requires JSON escaping")
-        expectUnsupported(schema: root(["k": obj(["const": .string("Lençóis")])]), containing: "non-ASCII")
+            schema: obj(["type": .array([.string("string"), .string("null")])]),
+            containing: "type arrays (e.g. nullable unions) at the schema root")
+        expectUnsupported(schema: obj(["type": .string("string"), "pattern": .string("x")]), containing: "'pattern' at the schema root")
+        expectUnsupported(schema: obj(["type": .string("integer"), "enum": .array([.int(1)])]), containing: "enum on non-string schema")
+        expectUnsupported(schema: obj(["type": .string("array"), "items": string, "$defs": obj([:]), "x": .int(1)]), containing: "'x' at the schema root")
+        expectInvalid(schema: obj(["type": .string("array"), "items": string, "minItems": .int(-1)]), containing: "minItems at the schema root")
+        expectInvalid(schema: obj(["enum": .array([.string("a")])]), containing: "schema is missing 'type'")
+        expectInvalid(schema: obj(["title": .string("T")]), containing: "schema.properties object is required")
+        expectInvalid(schema: obj(["$ref": .string("#/$defs/Missing")]), containing: "at the schema root does not resolve")
+    }
+
+    /// The constraint rides inside `GenerateRequest` as `Codable`; a
+    /// non-object root survives the round trip.
+    @Test
+    func responseFormatRoundTripsThroughCodable() throws {
+        let formats: [ResponseFormat] = [
+            .jsonObject,
+            .jsonSchema(.array(items: .stringEnum(["é", "x"]), minItems: 1, maxItems: nil)),
+            .jsonSchema(.integer),
+            .jsonSchema(address),
+        ]
+        for format in formats {
+            let data = try JSONEncoder().encode(format)
+            #expect(try JSONDecoder().decode(ResponseFormat.self, from: data) == format)
+        }
     }
 
     /// Exponential `$ref` fan-out (20 levels, 4 uses each) hits the node
@@ -755,13 +796,18 @@ struct ResponseFormatDecoderTests {
         expectUnsupported(schema: try StructuredOutputFixtures.generable("Person"), containing: "'maximum'")
     }
 
-    /// Apple's TripPlanner sample still needs non-ASCII enum values
-    /// ("Lençóis Maranhenses"); without that one value it compiles.
+    /// Apple's TripPlanner sample compiles as the framework emits it, its
+    /// enum value "Lençóis Maranhenses" included.
     @Test
-    func tripPlannerNeedsOnlyNonASCIIEnumValues() throws {
-        expectUnsupported(schema: try StructuredOutputFixtures.itinerary(), containing: "non-ASCII")
-        let trip = try compile(StructuredOutputFixtures.asciiItinerary())
+    func compilesTheTripPlannerSchemaInFull() throws {
+        let trip = try compile(StructuredOutputFixtures.itinerary())
         #expect(trip.required == ["title", "destinationName", "description", "rationale", "days"])
+        guard case .stringEnum(let destinations)? = trip.property(named: "destinationName")?.type else {
+            Issue.record("destinationName should be an enum")
+            return
+        }
+        #expect(destinations.contains("Lençóis Maranhenses"))
+        #expect(try compile(StructuredOutputFixtures.asciiItinerary()) != trip)
     }
 
     // MARK: Helpers

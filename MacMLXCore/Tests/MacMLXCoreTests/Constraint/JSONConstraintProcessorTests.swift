@@ -197,6 +197,28 @@ struct JSONConstraintProcessorDecisionTests {
             state: state, table: table, descendingLogitOrder: [0, 1]) == nil)
     }
 
+    /// A literal the vocabulary cannot spell raw is reached through its
+    /// escape: the byte-fragment tokens are unusable, so the backslash is the
+    /// highest-ranked legal token, and the escape then completes the value.
+    @Test
+    func unspellableLiteralIsReachedThroughItsEscape() throws {
+        let object = JSONSchemaObject(properties: [.init(name: "c", type: .stringEnum(["ç"]))], required: ["c"])
+        // 0: half a scalar (decodes with U+FFFD, unusable); then the escape's
+        // pieces, the closing quote and brace, and a letter.
+        let table = table(["\u{FFFD}", "\\", "u", "00", "e7", "\"}", "x"])
+        #expect(table.classification(of: 0) == .unusable)
+        let state = try schemaState(object, after: "{\"c\":\"")
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 6, 1, 2]) == 1)
+        let afterBackslash = try #require(state.walk(Array("\\".utf8)))
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: afterBackslash, table: table, descendingLogitOrder: [6, 0, 3, 2]) == 2)
+        let escaped = try #require(state.walk(Array("\\u00e7".utf8)))
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: escaped, table: table, descendingLogitOrder: [6, 1, 5]) == 5)
+        #expect(escaped.walk(Array("\"}".utf8))?.isComplete == true)
+    }
+
     /// An object item counts against `maxItems` when its `{` opens it, so a
     /// second item is refused after the first closes.
     @Test

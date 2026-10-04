@@ -1,7 +1,7 @@
 // Copyright © 2026 macMLX. English comments only.
 
 /// The value constraint at one position of the supported JSON-schema subset
-/// (Track C — C2): an object member or an array item, at any depth.
+/// (Track C — C2): the root, an object member or an array item, at any depth.
 ///
 /// The subset is deliberately small and enforced exactly: anything outside it
 /// is rejected at compile time with a 400 rather than silently downgraded (see
@@ -17,8 +17,9 @@ public enum SchemaValueType: Equatable, Hashable, Sendable, Codable {
     /// `{"type":"boolean"}` — `true` or `false`.
     case boolean
     /// `{"type":"string","enum":[…]}` — exactly one of the given string
-    /// literals. The list is non-empty (guaranteed by the compiler). A string
-    /// `const` compiles to a one-value enum.
+    /// literals, any Unicode (spelled raw or escaped on the wire). The list is
+    /// non-empty (guaranteed by the compiler). A string `const` compiles to a
+    /// one-value enum.
     case stringEnum([String])
     /// A nested object: inline `properties`, or a resolved `$ref`.
     case object(JSONSchemaObject)

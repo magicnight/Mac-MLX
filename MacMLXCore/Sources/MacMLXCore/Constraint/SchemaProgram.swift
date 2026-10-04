@@ -1,10 +1,10 @@
 // Copyright © 2026 macMLX. English comments only.
 
-/// A compiled ``JSONSchemaObject`` in the flat, index-addressed form the schema
-/// automaton runs on: every object, array and scalar node of the schema tree in
-/// its own table, keys and enum values pre-encoded as UTF-8.
+/// A compiled root ``SchemaValueType`` in the flat, index-addressed form the
+/// schema automaton runs on: every object, array and scalar node of the schema
+/// tree in its own table, keys and enum values pre-split into scalars.
 ///
-/// Built once per ``SchemaConstraintState/init(schema:)`` and shared by every
+/// Built once per ``SchemaConstraintState/init(root:)`` and shared by every
 /// state derived from it, so walking a token never re-encodes a key or an enum
 /// value, and a state's frames can name their node with a small integer.
 /// Immutable after construction.
@@ -22,9 +22,9 @@ final class SchemaProgram: Sendable {
 
     @usableFromInline
     struct ObjectNode: Sendable {
-        /// Declared property names as UTF-8, in declaration order. A name
-        /// declared twice keeps its first occurrence.
-        @usableFromInline let keys: [[UInt8]]
+        /// Declared property names, in declaration order. A name declared
+        /// twice keeps its first occurrence.
+        @usableFromInline let keys: [SchemaLiteral]
         /// The value node of each key, parallel to ``keys``.
         @usableFromInline let values: [NodeRef]
         /// Every member index.
@@ -50,22 +50,22 @@ final class SchemaProgram: Sendable {
         case number
         case integer
         case boolean
-        /// The enum values as UTF-8.
-        case stringEnum([[UInt8]])
+        /// The enum values.
+        case stringEnum([SchemaLiteral])
     }
 
     @usableFromInline let objects: [ObjectNode]
     @usableFromInline let arrays: [ArrayNode]
     @usableFromInline let scalars: [ScalarKind]
-    /// The root object.
+    /// The root value — an object, an array or a scalar.
     @usableFromInline let root: NodeRef
     /// The schema this program was compiled from; two programs compiled from
     /// equal schemas are interchangeable.
-    @usableFromInline let source: JSONSchemaObject
+    @usableFromInline let source: SchemaValueType
 
-    init(root schema: JSONSchemaObject) {
+    init(root schema: SchemaValueType) {
         var builder = Builder()
-        let root = builder.addObject(schema)
+        let root = builder.add(schema)
         self.objects = builder.objects
         self.arrays = builder.arrays
         self.scalars = builder.scalars
@@ -90,7 +90,7 @@ final class SchemaProgram: Sendable {
             case .boolean:
                 return addScalar(.boolean)
             case .stringEnum(let values):
-                return addScalar(.stringEnum(values.map { Array($0.utf8) }))
+                return addScalar(.stringEnum(values.map(SchemaLiteral.init)))
             case .object(let object):
                 return addObject(object)
             case .array(let items, let minItems, let maxItems):
@@ -102,11 +102,11 @@ final class SchemaProgram: Sendable {
 
         mutating func addObject(_ object: JSONSchemaObject) -> NodeRef {
             var index: [String: Int] = [:]
-            var keys: [[UInt8]] = []
+            var keys: [SchemaLiteral] = []
             var values: [NodeRef] = []
             for property in object.properties where index[property.name] == nil {
                 index[property.name] = keys.count
-                keys.append(Array(property.name.utf8))
+                keys.append(SchemaLiteral(property.name))
                 values.append(add(property.type))
             }
             var required = PropertyMask()

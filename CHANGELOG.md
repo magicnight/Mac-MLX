@@ -22,8 +22,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
   values, and `minItems` may not exceed 65,536. A recursive schema is a 400,
   since nothing would bound its documents. Still unsupported: `null` and
-  unions, `minimum`/`maximum`, `pattern`, non-object roots, and non-ASCII
-  keys or enum values (Apple's TripPlanner sample hits the last one).
+  unions, `minimum`/`maximum`, and `pattern`.
+- **Any string as a key, enum or `const` value, and any type at the root of
+  a `response_format` schema.** Keys and literal values may now contain
+  characters outside ASCII, quotes, backslashes and control characters: the
+  constraint matches them scalar by scalar, and the model may spell each
+  scalar raw or as a JSON escape (`\uXXXX`, a surrogate pair above the BMP,
+  or one of the short escapes), so a literal the tokenizer cannot produce
+  raw is still reachable through its escape and a required key can never
+  strand a generation. Apple's TripPlanner sample, whose destination enum
+  holds "Lençóis Maranhenses", now compiles as the framework emits it. The
+  root may be an array, a string, a number, an integer, a boolean, an enum,
+  a `const` or a `$ref` as well as an object — the shapes `@Generable`
+  emits for `[T].self`, `String.self` or an enum type; a root number is
+  complete without a terminator, as under `json_object`.
 - **`stream_options.include_usage` on streaming chat completions.** When a
   client sets it, every chunk carries `usage: null` and one usage-only chunk —
   empty `choices`, the whole request's token counts — is sent before

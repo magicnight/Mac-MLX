@@ -21,9 +21,8 @@ enum SchemaScalarState: Hashable, Sendable {
     case stringHighSurrogateBackslash
     /// Read the `\` after a high surrogate; only `u` is legal next.
     case stringHighSurrogateU
-    /// String enum of scalar node `node`: `candidates` are the indices of the
-    /// enum values whose first `position` bytes match what was read.
-    case enumBody(node: Int32, position: Int, candidates: PropertyMask)
+    /// String enum of scalar node `node`: the match against its values.
+    case enumBody(node: Int32, match: LiteralMatch)
     // Number (integer or fractional)
     case numberAfterMinus
     case numberAfterLeadingZero
@@ -46,6 +45,19 @@ enum SchemaScalarState: Hashable, Sendable {
         switch self {
         case .stringBody, .stringEscape, .stringUnicode, .stringHighSurrogateBackslash,
             .stringHighSurrogateU, .enumBody:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether the value in progress is a number that could end here: a root
+    /// number has no terminator byte, so these states are accepting at the root.
+    @usableFromInline
+    var isCompleteNumber: Bool {
+        switch self {
+        case .numberAfterLeadingZero, .numberIntDigits, .numberFracDigits, .numberExpDigits,
+            .intAfterZero, .intDigits:
             return true
         default:
             return false
@@ -79,7 +91,7 @@ enum SchemaScalarState: Hashable, Sendable {
             return byte == SchemaBytes.quote ? .stringBody : nil
         case .stringEnum(let values):
             guard byte == SchemaBytes.quote else { return nil }
-            return .enumBody(node: node, position: 0, candidates: .all(count: values.count))
+            return .enumBody(node: node, match: LiteralMatch(candidates: .all(count: values.count)))
         case .number:
             if byte == SchemaBytes.minus { return .numberAfterMinus }
             if byte == SchemaBytes.zero { return .numberAfterLeadingZero }
@@ -127,14 +139,13 @@ enum SchemaScalarState: Hashable, Sendable {
             guard byte == SchemaBytes.lowerU else { return .rejected }
             return .consumed(.stringUnicode(digitsSeen: 0, value: 0, expectingLow: true))
 
-        case .enumBody(let node, let position, let candidates):
+        case .enumBody(let node, let match):
             guard case .stringEnum(let values) = program.scalars[Int(node)] else { return .rejected }
-            if byte == SchemaBytes.quote {
-                return candidates.first(where: { values[$0].count == position }) != nil ? .completed : .rejected
+            switch match.step(byte, literals: values) {
+            case .continued(let next): return .consumed(.enumBody(node: node, match: next))
+            case .completed: return .completed
+            case .rejected: return .rejected
             }
-            let survivors = candidates.filtered { values[$0].count > position && values[$0][position] == byte }
-            guard !survivors.isEmpty else { return .rejected }
-            return .consumed(.enumBody(node: node, position: position + 1, candidates: survivors))
 
         case .numberAfterMinus:
             if byte == SchemaBytes.zero { return .consumed(.numberAfterLeadingZero) }

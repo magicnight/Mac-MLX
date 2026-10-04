@@ -8,10 +8,11 @@
 /// document.
 ///
 /// It decides whole documents only, with the automaton's documented
-/// semantics: keys and string-enum values are compared as raw bytes (the
-/// automaton matches literal bytes and never unescapes), unpaired surrogate
-/// escapes are rejected (as `JSONSerialization` does), duplicate keys are
-/// rejected, and an integer is a number lexeme with no fraction or exponent.
+/// semantics: keys and string-enum values are compared as the strings they
+/// denote (escapes decoded, like any JSON parser; invalid UTF-8 matches
+/// nothing), unpaired surrogate escapes are rejected (as `JSONSerialization`
+/// does), duplicate keys are rejected, and an integer is a number lexeme with
+/// no fraction or exponent.
 enum ReferenceSchemaValidator {
 
     /// A parsed JSON value that keeps raw lexemes: strings as the bytes between
@@ -28,8 +29,14 @@ enum ReferenceSchemaValidator {
     /// Whether `document` is a single JSON object, optionally surrounded by
     /// whitespace, that conforms to `schema`.
     static func validate(_ document: [UInt8], _ schema: JSONSchemaObject) -> Bool {
+        validate(document, root: .object(schema))
+    }
+
+    /// Whether `document` is a single JSON value, optionally surrounded by
+    /// whitespace, that conforms to `root`.
+    static func validate(_ document: [UInt8], root: SchemaValueType) -> Bool {
         guard let value = Parser.parse(document) else { return false }
-        return conforms(value, to: .object(schema))
+        return conforms(value, to: root)
     }
 
     static func conforms(_ value: Value, to type: SchemaValueType) -> Bool {
@@ -37,7 +44,8 @@ enum ReferenceSchemaValidator {
         case (.string, .string):
             return true
         case (.stringEnum(let values), .string(let raw)):
-            return values.contains { Array($0.utf8) == raw }
+            guard let scalars = decodeScalars(raw) else { return false }
+            return values.contains { Array($0.unicodeScalars.map(\.value)) == scalars }
         case (.number, .number):
             return true
         case (.integer, .number(let lexeme)):
@@ -49,17 +57,65 @@ enum ReferenceSchemaValidator {
             if let maxItems, elements.count > maxItems { return false }
             return elements.allSatisfy { conforms($0, to: items) }
         case (.object(let object), .object(let members)):
-            var seen: [[UInt8]] = []
+            var seen: [[UInt32]] = []
             for member in members {
-                if seen.contains(member.key) { return false }
-                seen.append(member.key)
-                guard let property = object.properties.first(where: { Array($0.name.utf8) == member.key }),
+                guard let key = decodeScalars(member.key) else { return false }
+                if seen.contains(key) { return false }
+                seen.append(key)
+                guard let property = object.properties.first(where: { Array($0.name.unicodeScalars.map(\.value)) == key }),
                       conforms(member.value, to: property.type) else { return false }
             }
-            return object.required.allSatisfy { seen.contains(Array($0.utf8)) }
+            return object.required.allSatisfy { seen.contains(Array($0.unicodeScalars.map(\.value))) }
         default:
             return false
         }
+    }
+
+    /// The scalars a validated string body denotes: escapes decoded (a
+    /// surrogate pair into one scalar), raw runs decoded as strict UTF-8;
+    /// `nil` when a raw run is not valid UTF-8.
+    static func decodeScalars(_ raw: [UInt8]) -> [UInt32]? {
+        let shortEscapes: [UInt8: UInt32] = [
+            0x22: 0x22, 0x5C: 0x5C, 0x2F: 0x2F, 0x62: 0x08, 0x66: 0x0C, 0x6E: 0x0A, 0x72: 0x0D, 0x74: 0x09,
+        ]
+        var scalars: [UInt32] = []
+        var index = 0
+        while index < raw.count {
+            if raw[index] == 0x5C {
+                // The parser validated every escape, so its bytes are present.
+                let escape = raw[index + 1]
+                if escape == 0x75 {
+                    let parser = Parser(bytes: raw)
+                    guard let unit = parser.hex4(at: index + 2) else { return nil }
+                    if (0xD800...0xDBFF).contains(unit) {
+                        guard let low = parser.hex4(at: index + 8) else { return nil }
+                        scalars.append(UInt32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)))
+                        index += 12
+                    } else {
+                        scalars.append(UInt32(unit))
+                        index += 6
+                    }
+                } else {
+                    guard let scalar = shortEscapes[escape] else { return nil }
+                    scalars.append(scalar)
+                    index += 2
+                }
+                continue
+            }
+            var end = index
+            while end < raw.count, raw[end] != 0x5C { end += 1 }
+            var iterator = raw[index..<end].makeIterator()
+            var decoder = Unicode.UTF8()
+            decoding: while true {
+                switch decoder.decode(&iterator) {
+                case .scalarValue(let scalar): scalars.append(scalar.value)
+                case .emptyInput: break decoding
+                case .error: return nil
+                }
+            }
+            index = end
+        }
+        return scalars
     }
 
     /// A strict recursive-descent JSON parser over bytes.

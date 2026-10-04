@@ -22,8 +22,8 @@ public enum ConstraintState: Sendable {
         switch format {
         case .jsonObject:
             return .json(JSONGrammarState(maxDepth: maxDepth))
-        case .jsonSchema(let schema):
-            return .schema(SchemaConstraintState(schema: schema))
+        case .jsonSchema(let root):
+            return .schema(SchemaConstraintState(root: root))
         }
     }
 
