@@ -95,6 +95,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **`/v1/audio/transcriptions` and `/v1/audio/speech` loaded their model
+  outside the generation lock, and could answer with another request's
+  model.** Each handler loaded (and cold-swapped) first, queued for the lock
+  second, and then ran on whatever model was resident when the lock came
+  free. So a load ran beside an LLM generation, and while one request was
+  parked at the lock a second one could replace the model: the first then
+  transcribed or spoke with the wrong model, or found the slot empty and got
+  a 500. Since v0.9.0. Both handlers now take the lock before the load,
+  release it when the load fails, and run on the model their own load
+  produced. A malformed model id is still a 400, now answered before the
+  lock like the lookup errors on `/v1/embeddings`.
 - **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
   model swap could be answered by the other model.** After confirming its
   model was resident the handler read the shared engine slot again, and a

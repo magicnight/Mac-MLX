@@ -120,9 +120,10 @@ public actor AudioEngine {
     /// crossed, and hands the actor back only `Sendable` values.
     ///
     /// The `@unchecked` conformance is justified by construction, not by
-    /// inspection: the boxed model is created inside ``AudioEngine``, stored
-    /// only in its actor-isolated property, and never handed out — so the
-    /// actor's serialization is the sole access path. `HummingbirdServer`
+    /// inspection: the boxed model is created inside ``AudioEngine``, lives
+    /// only in its actor-isolated property and in locals of its own methods,
+    /// and is never handed out — so the actor's serialization is the sole
+    /// access path. `HummingbirdServer`
     /// additionally holds the generation lock across every call, which
     /// serializes this against all other MLX compute in the process.
     private struct SpeechModelBox: @unchecked Sendable {
@@ -147,6 +148,12 @@ public actor AudioEngine {
 
     /// Load an STT model, cold-swapping when a different repo id is requested.
     ///
+    /// This is the two-step API (`loadSTT`, then
+    /// ``transcribe(audioURL:language:temperature:)``), which transcribes with
+    /// whatever the slot holds when the forward pass runs. That is only safe
+    /// for one sequential caller; a caller whose requests can interleave uses
+    /// ``transcribe(model:audioURL:language:temperature:)`` instead.
+    ///
     /// - Parameter modelID: A Hugging Face repo id (`owner/name`). Validated
     ///   before any network call so a malformed id fails fast and locally.
     /// - Throws: ``EngineError/invalidAudioModelID(reason:)`` for a malformed
@@ -155,22 +162,32 @@ public actor AudioEngine {
     ///   for an upstream load failure (unknown architecture, missing weights,
     ///   no network, …), which really is server-side.
     public func loadSTT(_ modelID: String) async throws {
-        if loadedSTTModelID == modelID, sttModel != nil { return }
-        guard Self.isHubRepoID(modelID) else {
-            throw EngineError.invalidAudioModelID(reason: Self.repoIDHint(modelID, kind: "STT"))
-        }
+        _ = try await residentSTTModel(modelID)
+    }
+
+    /// The STT model for `modelID`, loading it when it is not resident.
+    ///
+    /// Returned as a value so the caller can bind the model its load produced.
+    /// The actor is reentrant at the `await` inside a load, so by the time a
+    /// caller runs inference another ``loadSTT(_:)`` may have replaced the
+    /// slot — with a different model, or with nothing while its own load is
+    /// still in flight. The returned binding is immune to both.
+    private func residentSTTModel(_ modelID: String) async throws -> any STTGenerationModel {
+        if loadedSTTModelID == modelID, let sttModel { return sttModel }
+        try Self.validateSTTModelID(modelID)
         // Drop the old model first: two resident audio models plus an LLM is
         // more memory than a swap needs to hold.
         sttModel = nil
         loadedSTTModelID = nil
+        let model: any STTGenerationModel
         do {
-            sttModel = try await STT.loadModel(modelRepo: modelID, cache: Self.hubCache)
-            loadedSTTModelID = modelID
+            model = try await STT.loadModel(modelRepo: modelID, cache: Self.hubCache)
         } catch {
-            sttModel = nil
-            loadedSTTModelID = nil
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
+        sttModel = model
+        loadedSTTModelID = modelID
+        return model
     }
 
     /// Load a TTS model, cold-swapping when a different repo id is requested.
@@ -181,23 +198,30 @@ public actor AudioEngine {
     ///   simply forwarded.
     /// - Throws: ``EngineError/invalidAudioModelID(reason:)`` for an id that is
     ///   neither shape, or ``EngineError/modelLoadFailed(reason:)`` for an
-    ///   upstream load failure. Same split as ``loadSTT(_:)``.
+    ///   upstream load failure. Same split as ``loadSTT(_:)``, and the same
+    ///   two-step caveat: pair it with ``synthesize(text:voice:language:)``
+    ///   only from one sequential caller.
     public func loadTTS(_ modelID: String) async throws {
-        if loadedTTSModelID == modelID, ttsModel != nil { return }
-        guard Self.isHubRepoID(modelID) || Self.looksLikeLocalDirectory(modelID) else {
-            throw EngineError.invalidAudioModelID(reason: Self.repoIDHint(modelID, kind: "TTS"))
-        }
+        _ = try await residentTTSModel(modelID)
+    }
+
+    /// The TTS model for `modelID`, loading it when it is not resident. Same
+    /// contract as ``residentSTTModel(_:)``.
+    private func residentTTSModel(_ modelID: String) async throws -> SpeechModelBox {
+        if loadedTTSModelID == modelID, let ttsModel { return ttsModel }
+        try Self.validateTTSModelID(modelID)
         ttsModel = nil
         loadedTTSModelID = nil
+        let box: SpeechModelBox
         do {
-            ttsModel = SpeechModelBox(
+            box = SpeechModelBox(
                 model: try await TTS.loadModel(modelRepo: modelID, cache: Self.hubCache))
-            loadedTTSModelID = modelID
         } catch {
-            ttsModel = nil
-            loadedTTSModelID = nil
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
+        ttsModel = box
+        loadedTTSModelID = modelID
+        return box
     }
 
     // MARK: Inference
@@ -223,7 +247,35 @@ public actor AudioEngine {
         temperature: Float? = nil
     ) async throws -> Transcription {
         guard let sttModel else { throw EngineError.modelNotLoaded }
+        return try transcribe(
+            using: sttModel, audioURL: audioURL, language: language, temperature: temperature)
+    }
 
+    /// Load `modelID` if it is not resident, then transcribe `audioURL` with
+    /// the model that load produced — not with whatever the slot holds once
+    /// the forward pass runs. The entry point for callers whose requests can
+    /// interleave, such as the HTTP server; see ``residentSTTModel(_:)``.
+    ///
+    /// - Throws: What ``loadSTT(_:)`` throws for the load, then what
+    ///   ``transcribe(audioURL:language:temperature:)`` throws for the
+    ///   inference; the cases tell the two apart.
+    public func transcribe(
+        model modelID: String,
+        audioURL: URL,
+        language: String? = nil,
+        temperature: Float? = nil
+    ) async throws -> Transcription {
+        let model = try await residentSTTModel(modelID)
+        return try transcribe(
+            using: model, audioURL: audioURL, language: language, temperature: temperature)
+    }
+
+    private func transcribe(
+        using sttModel: any STTGenerationModel,
+        audioURL: URL,
+        language: String?,
+        temperature: Float?
+    ) throws -> Transcription {
         let audio: MLXArray
         let sampleCount: Int
         do {
@@ -274,6 +326,28 @@ public actor AudioEngine {
         language: String? = nil
     ) async throws -> Speech {
         guard let ttsModel else { throw EngineError.modelNotLoaded }
+        return try await synthesize(using: ttsModel, text: text, voice: voice, language: language)
+    }
+
+    /// Load `modelID` if it is not resident, then synthesize with the model
+    /// that load produced. The TTS counterpart of
+    /// ``transcribe(model:audioURL:language:temperature:)``.
+    public func synthesize(
+        model modelID: String,
+        text: String,
+        voice: String? = nil,
+        language: String? = nil
+    ) async throws -> Speech {
+        let box = try await residentTTSModel(modelID)
+        return try await synthesize(using: box, text: text, voice: voice, language: language)
+    }
+
+    private func synthesize(
+        using ttsModel: SpeechModelBox,
+        text: String,
+        voice: String?,
+        language: String?
+    ) async throws -> Speech {
         do {
             let samples = try await ttsModel.synthesize(
                 text: text, voice: voice, language: language)
@@ -352,6 +426,24 @@ public actor AudioEngine {
         else { return false }
         return FileManager.default.fileExists(
             atPath: URL(filePath: expanded).appending(path: "config.json").path)
+    }
+
+    /// Reject what ``loadSTT(_:)`` would reject, without loading anything: the
+    /// STT loader takes a Hugging Face repo id and nothing else. Shared with
+    /// the server, which answers a malformed id before queuing for the
+    /// generation lock, so the two can never disagree.
+    nonisolated static func validateSTTModelID(_ id: String) throws {
+        guard isHubRepoID(id) else {
+            throw EngineError.invalidAudioModelID(reason: repoIDHint(id, kind: "STT"))
+        }
+    }
+
+    /// Same for ``loadTTS(_:)``, whose loader also takes an absolute local
+    /// directory holding a `config.json`.
+    nonisolated static func validateTTSModelID(_ id: String) throws {
+        guard isHubRepoID(id) || looksLikeLocalDirectory(id) else {
+            throw EngineError.invalidAudioModelID(reason: repoIDHint(id, kind: "TTS"))
+        }
     }
 
     /// The message a rejected model id gets. Split out so both loaders and
