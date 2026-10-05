@@ -17,8 +17,8 @@
 /// Keys may appear in any order (JSON objects are unordered), so the runtime
 /// automaton tracks the set of already-emitted keys of each open object rather
 /// than a fixed sequence. A key may be any string: on the wire the model spells
-/// a scalar outside ASCII raw or as a JSON escape, and the rest raw (see
-/// `LiteralMatch`).
+/// a scalar outside ASCII raw or as a JSON escape, the quote, the backslash and
+/// control characters as an escape, and the rest raw (see `LiteralMatch`).
 public struct JSONSchemaObject: Equatable, Hashable, Sendable, Codable {
 
     /// One declared property: its wire name and value constraint.

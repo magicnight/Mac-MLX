@@ -6,8 +6,8 @@
 public enum ResponseFormatError: Error, Equatable, Sendable, CustomStringConvertible {
     /// A structurally valid request that asks for a feature outside the
     /// supported subset (combinators, `null` and type arrays, numeric or string
-    /// bounds, recursive or over-deep schemas, non-object roots, an unknown
-    /// keyword, …). Reported verbatim, with the property path, so a client
+    /// bounds, recursive or over-deep schemas, an unknown keyword, …).
+    /// Reported verbatim, with the property path, so a client
     /// learns exactly what to drop — never silently downgraded.
     case unsupportedFeature(String)
 

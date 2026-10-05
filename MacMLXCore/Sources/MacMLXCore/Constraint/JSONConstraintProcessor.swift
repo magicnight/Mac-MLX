@@ -150,31 +150,36 @@ public struct JSONConstraintProcessor: LogitProcessor {
         // was sampled at.
         whitespaceRun.record(whitespaceOnly: !state.isInsideString && table.isWhitespaceOnly(id))
         switch table.classification(of: id) {
-        case .eos, .unusable:
-            // EOS terminates generation; an unusable token should never have
-            // been sampled (it is masked). Either way the grammar does not
-            // advance.
+        case .eos:
+            // EOS terminates generation; the grammar does not advance.
             return
+        case .unusable:
+            // Never legal, so never sampled unless the mask was bypassed — and
+            // the text now holds bytes the automaton never saw.
+            wedge(token: id, text: "unusable")
         case .bytes(let bytes):
             if let next = state.walk(bytes) {
                 state = next
                 return
             }
-            // The token was illegal yet sampled, which the mask should have made
-            // impossible. Keep the last valid state rather than corrupt it, say
-            // so, and end the stream at the next step: continuing against a
-            // stale position lets arbitrary bytes through as legal.
-            guard !wedged else { return }
-            wedged = true
-            LogManager.shared.logSync(
-                "JSONConstraintProcessor: sampled token \(id) "
-                    + "(\(String(decoding: bytes, as: UTF8.self).debugDescription)) is not a legal "
-                    + "continuation at automaton state [\(state.diagnosticDescription)] — the mask "
-                    + "should have excluded it; forcing EOS at the next step.",
-                level: .error,
-                category: .error
-            )
+            wedge(token: id, text: String(decoding: bytes, as: UTF8.self).debugDescription)
         }
+    }
+
+    /// A token was sampled that the mask should have excluded. Keep the last
+    /// valid state rather than corrupt it, say so once, and end the stream at
+    /// the next step: continuing against a stale position lets arbitrary bytes
+    /// through as legal.
+    private mutating func wedge(token id: Int, text: String) {
+        guard !wedged else { return }
+        wedged = true
+        LogManager.shared.logSync(
+            "JSONConstraintProcessor: sampled token \(id) (\(text)) is not a legal "
+                + "continuation at automaton state [\(state.diagnosticDescription)] — the mask "
+                + "should have excluded it; forcing EOS at the next step.",
+            level: .error,
+            category: .error
+        )
     }
 
     // MARK: - Masking

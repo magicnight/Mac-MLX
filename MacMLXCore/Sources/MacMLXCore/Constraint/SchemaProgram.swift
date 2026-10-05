@@ -21,7 +21,7 @@ final class SchemaProgram: Sendable {
     }
 
     @usableFromInline
-    struct ObjectNode: Sendable {
+    struct ObjectNode: Equatable, Sendable {
         /// Declared property names, in declaration order. A name declared
         /// twice keeps its first occurrence.
         @usableFromInline let keys: [SchemaLiteral]
@@ -37,7 +37,7 @@ final class SchemaProgram: Sendable {
     }
 
     @usableFromInline
-    struct ArrayNode: Sendable {
+    struct ArrayNode: Equatable, Sendable {
         @usableFromInline let item: NodeRef
         @usableFromInline let minItems: Int
         /// `nil` means unbounded.
@@ -45,7 +45,7 @@ final class SchemaProgram: Sendable {
     }
 
     @usableFromInline
-    enum ScalarKind: Sendable {
+    enum ScalarKind: Equatable, Sendable {
         case string
         case number
         case integer
@@ -59,9 +59,14 @@ final class SchemaProgram: Sendable {
     @usableFromInline let scalars: [ScalarKind]
     /// The root value — an object, an array or a scalar.
     @usableFromInline let root: NodeRef
-    /// The schema this program was compiled from; two programs compiled from
-    /// equal schemas are interchangeable.
-    @usableFromInline let source: SchemaValueType
+
+    /// Whether `other` runs the same automaton: the same tables, literal for
+    /// literal and scalar for scalar. Two programs compiled from the same
+    /// schema value are equivalent, and only those — a key or value spelled
+    /// with a different normalisation has different scalars.
+    func isEquivalent(to other: SchemaProgram) -> Bool {
+        root == other.root && objects == other.objects && arrays == other.arrays && scalars == other.scalars
+    }
 
     init(root schema: SchemaValueType) {
         var builder = Builder()
@@ -70,7 +75,6 @@ final class SchemaProgram: Sendable {
         self.arrays = builder.arrays
         self.scalars = builder.scalars
         self.root = root
-        self.source = schema
     }
 
     /// Flattens the schema tree into the node tables, children first.

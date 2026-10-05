@@ -335,6 +335,31 @@ final class JSONConstraintProcessorMaskTests: XCTestCase {
         XCTAssertEqual(argMax(masked, axis: -1).item(Int.self), 3)
     }
 
+    /// An unusable token (its standalone decode is not valid UTF-8) is never
+    /// legal, so sampling one means the mask was bypassed: it wedges the
+    /// processor too, and the next step keeps only EOS.
+    func testUnusableSampledTokenWedgesTheProcessorIntoEOS() throws {
+        try requireMLXRuntimeOrSkip()
+        let vocab = ["{", "\u{FFFD}", "}", "</s>"]
+        let table = TokenVocabularyTable(vocabularySize: vocab.count, stopTokenIDs: [3], decode: { vocab[$0] })
+        XCTAssertEqual(table.classification(of: 1), .unusable)
+        var processor = processor(vocab: vocab, stop: [3], greedy: true)
+        let logits = MLXArray([9.0, 1.0, 2.0, 0.5] as [Float]).reshaped([1, 4])
+        _ = processor.process(logits: logits)
+        let before = processor.state.diagnosticDescription
+        processor.didSample(token: MLXArray(Int32(1)))
+        XCTAssertEqual(processor.state.diagnosticDescription, before, "the state must not advance over an unusable token")
+
+        let masked = processor.process(logits: logits).reshaped([4])
+        masked.eval()
+        let values = masked.asArray(Float.self)
+        XCTAssertEqual(values[0], -Float.infinity)
+        XCTAssertEqual(values[1], -Float.infinity)
+        XCTAssertEqual(values[2], -Float.infinity)
+        XCTAssertEqual(values[3], 0.5, accuracy: 1e-4)
+        XCTAssertEqual(argMax(masked, axis: -1).item(Int.self), 3)
+    }
+
     /// Greedy path, top token illegal: the highest-logit *legal* token is kept
     /// (one-hot) and all others masked — exercises the argsort fallback +
     /// `selectLegalToken` + `applyMask(keepingOnly:)`.

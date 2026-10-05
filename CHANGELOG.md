@@ -110,6 +110,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **A sampled token the constraint cannot walk no longer leaves the rest of
+  the generation judged against a stale position.** The constraint processor
+  kept its state when a sampled token did not walk, then went on masking the
+  vocabulary from that state while the text had moved on. It now keeps the
+  state, logs once at error level, and forces EOS at the next step; one token
+  still reaches the client before the stream ends, since the sampler runs a
+  token ahead of the processor. Seen once on Qwen3.6-27B as an unpaired
+  surrogate escape inside a string value; the cause is not understood.
 - **`/v1/audio/transcriptions` and `/v1/audio/speech` loaded their model
   outside the generation lock, and could answer with another request's
   model.** Each handler loaded (and cold-swapped) first, queued for the lock

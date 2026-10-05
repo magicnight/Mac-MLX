@@ -140,8 +140,9 @@ struct ResponseFormatDecoderTests {
     // MARK: json_schema — keys and enum values may be any string
 
     /// Keys and enum values outside ASCII, or containing a quote, a backslash
-    /// or a control character, compile: the automaton matches each scalar raw
-    /// or as a JSON escape, so none of them can strand it.
+    /// or a control character, compile: the automaton matches a scalar outside
+    /// ASCII raw or as a JSON escape and those three as an escape, so every
+    /// literal has an all-ASCII spelling.
     @Test
     func compilesAnyStringAsAKeyOrEnumValue() throws {
         let schema = obj([
@@ -552,8 +553,17 @@ struct ResponseFormatDecoderTests {
             expectUnsupported(schema: obj(["$ref": .string("#/$defs/T"), "$defs": obj(["T": target])]), containing: "'\(key)'")
             expectUnsupported(schema: root(["": target]), containing: "'\(key)'")
         }
-        // Nor does a property named "" take the root's wording.
-        expectUnsupported(schema: root(["": obj(["type": .string("object")])]), containing: "nested object without 'properties'")
+        // Nor does a property named "" take the root's wording or the root's
+        // empty path: it is written `""`.
+        expectUnsupported(schema: root(["": obj(["type": .string("object")])]), containing: "nested object without 'properties' on property '\"\"'")
+        expectUnsupported(schema: root(["": obj(["type": .string("string"), "pattern": .string("x")])]), containing: "'pattern' on property '\"\"'")
+        expectUnsupported(
+            schema: root(["": obj(["type": .string("object"), "properties": obj(["x": obj(["type": .string("null")])])])]),
+            containing: "'null' on property '\"\".x'")
+        // A problem inside a `$ref` target names the reference that led there.
+        expectUnsupported(
+            schema: obj(["$ref": .string("#/$defs/T"), "$defs": obj(["T": obj(["type": .string("object"), "properties": obj(["x": string]), "$id": obj([:])])])]),
+            containing: "'$id' at the schema root (via '$ref' '#/$defs/T')")
     }
 
     /// `required` names are compared scalar by scalar, as the automaton
@@ -563,7 +573,9 @@ struct ResponseFormatDecoderTests {
     func comparesRequiredNamesByScalar() throws {
         let precomposed = "\u{E9}", decomposed = "e\u{301}"
         #expect(precomposed == decomposed)
-        _ = try compile(root([precomposed: string], required: [precomposed]))
+        let compiled = try compile(root([decomposed: string], required: [decomposed]))
+        #expect(compiled.properties.map { Array($0.name.unicodeScalars) } == [Array(decomposed.unicodeScalars)])
+        #expect(compiled.required.map { Array($0.unicodeScalars) } == [Array(decomposed.unicodeScalars)])
         expectInvalid(schema: root([precomposed: string], required: [decomposed]), containing: "is not declared")
     }
 
@@ -655,6 +667,13 @@ struct ResponseFormatDecoderTests {
         expectInvalid(schema: obj(["enum": .array([.string("a")])]), containing: "schema is missing 'type'")
         expectInvalid(schema: obj(["title": .string("T")]), containing: "schema.properties object is required")
         expectInvalid(schema: obj(["$ref": .string("#/$defs/Missing")]), containing: "at the schema root does not resolve")
+        let tooMany = JSONValue.array((0...ResponseFormatDecoder.maxSchemaLiterals).map { .string("v\($0)") })
+        expectUnsupported(
+            schema: obj(["type": .string("string"), "enum": tooMany]),
+            containing: "enum and const values after '$ref' expansion, at the schema root")
+        expectUnsupported(
+            schema: root(["x": obj(["type": .string("string"), "enum": tooMany])]),
+            containing: "enum and const values after '$ref' expansion, on property 'x'")
     }
 
     /// The constraint rides inside `GenerateRequest` as `Codable`; a

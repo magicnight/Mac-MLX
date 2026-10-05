@@ -9,8 +9,10 @@
 /// object's declared set (each at most once, all required ones present, in any
 /// order) and each value matching its declared ``SchemaValueType`` — nested
 /// objects and arrays included, every array within its item bounds. Keys and
-/// enum values are matched scalar by scalar, each spelled raw or as a JSON
-/// escape (``LiteralMatch``). It is the runtime companion to
+/// enum values are matched scalar by scalar — a scalar outside ASCII raw or
+/// as a JSON escape, the quote, the backslash and control characters as an
+/// escape, every other ASCII scalar raw (``LiteralMatch``). It is the runtime
+/// companion to
 /// ``ResponseFormatDecoder`` and, like ``JSONGrammarState``, is a pure value
 /// type — token classification is a non-mutating ``walk(_:)`` fold, MLX-free
 /// and unit-testable.
@@ -25,10 +27,10 @@
 /// ## No dead ends
 /// Every reachable state can still reach a complete document: `,` is legal
 /// only where another member or item can follow, the compiler guarantees
-/// `minItems <= maxItems` and that every required key is declared, the
-/// matcher accepts an ASCII escape spelling of every literal (so a key the
-/// tokenizer cannot spell raw is still reachable), and `\u` escapes are cut
-/// off as soon as they cannot complete.
+/// `minItems <= maxItems` and that every required key is declared, every
+/// literal has an all-ASCII spelling (printable ASCII raw, everything else
+/// escaped, so a key the tokenizer cannot spell raw is still reachable), and
+/// `\u` escapes are cut off as soon as they cannot complete.
 public struct SchemaConstraintState: Hashable, Sendable {
 
     /// One open container.
@@ -138,7 +140,12 @@ public struct SchemaConstraintState: Hashable, Sendable {
         let frames = stack.map { frame -> String in
             switch frame {
             case .object(let node, let emitted): return "object(emitted: \(names(emitted, node: node)))"
-            case .array(_, let count): return "array(count: \(count))"
+            case .array(let node, let count):
+                // An unbounded array's count holds at `minItems` (see
+                // ``startValue(_:node:)``); there it means "at least".
+                let array = program.arrays[Int(node)]
+                return array.maxItems == nil && count == array.minItems
+                    ? "array(count: ≥\(count))" : "array(count: \(count))"
             }
         }
         var modeText = "\(mode)"
@@ -160,12 +167,14 @@ public struct SchemaConstraintState: Hashable, Sendable {
         return "[" + shown.joined(separator: ", ") + "]"
     }
 
-    /// Two states are equal when they are at the same position of equal
-    /// schemas: the programs are compared by identity first, then by the schema
-    /// they were compiled from.
+    /// Two states are equal when they are at the same position of the same
+    /// schema: the programs are compared by identity first, then table by
+    /// table, scalar by scalar — not through the schema values they were
+    /// compiled from, whose `String` equality is canonical and would equate a
+    /// precomposed key with a decomposed one the automaton tells apart.
     public static func == (lhs: SchemaConstraintState, rhs: SchemaConstraintState) -> Bool {
         lhs.mode == rhs.mode && lhs.stack == rhs.stack
-            && (lhs.program === rhs.program || lhs.program.source == rhs.program.source)
+            && (lhs.program === rhs.program || lhs.program.isEquivalent(to: rhs.program))
     }
 
     /// Covers the position only, which is consistent with ``==``.

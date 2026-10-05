@@ -349,7 +349,7 @@ struct SchemaConstraintStateTests {
     /// escape); seeded schemas cover the rest.
     @Test
     func noReachableStateIsATrap() {
-        var schemas: [JSONSchemaObject] = [
+        let schemas: [JSONSchemaObject] = [
             schema([("a", .string)]),
             schema([("a", .string)], required: ["a"]),
             schema([("a", .string), ("ab", .integer), ("b", .number)], required: ["ab"]),
@@ -373,11 +373,14 @@ struct SchemaConstraintStateTests {
             .array(items: .stringEnum(["é", "e"]), minItems: 0, maxItems: nil),
             .string, .number, .integer, .boolean, .stringEnum(["😀", "x"]),
         ]
-        // The hand-written schemas are small enough to be explored whole (an
+        // A search the cap cuts off counts the frontier as live and could hide
+        // a trap, so the hand-written schemas must be explored whole (an
         // unbounded array's count holds at `minItems`, so its states are
-        // finite); a search the cap cuts off counts the frontier as live and
-        // could hide a trap, so for them it must finish. Seeded schemas can be
-        // wider than the cap and are checked as far as the search reaches.
+        // finite). A seeded nested object can be too wide for that — every
+        // level multiplies the states by its emitted-key sets — so those are
+        // checked as far as the search reaches, and counted: with seed 42 two
+        // of the 32 exceed 40k states (one of them 400k). A jump in that
+        // number would mean the seeded coverage had mostly vanished.
         var generator = RandomSchemaGenerator(seed: 42)
         var seeded: [SchemaValueType] = []
         for _ in 0..<12 {
@@ -390,7 +393,8 @@ struct SchemaConstraintStateTests {
             seeded.append(generator.root())
         }
         let limit = 40_000
-        for (root, mustFinish) in roots.map { ($0, true) } + seeded.map { ($0, false) } {
+        var capped = 0
+        for (root, isSeeded) in roots.map { ($0, false) } + seeded.map { ($0, true) } {
             let result = SchemaTrapSearch.run(
                 from: SchemaConstraintState(root: root),
                 alphabet: SchemaTrapSearch.alphabet(for: root),
@@ -398,10 +402,13 @@ struct SchemaConstraintStateTests {
             #expect(
                 result.traps.isEmpty,
                 "\(result.traps.count) trap(s) in \(result.explored) states, first: \(result.traps.first?.diagnosticDescription ?? "-") for \(root)")
-            if mustFinish {
+            if isSeeded {
+                if result.explored >= limit { capped += 1 }
+            } else {
                 #expect(result.explored < limit, "the search hit the state cap at \(result.explored) for \(root)")
             }
         }
+        #expect(capped <= 4, "\(capped) seeded roots hit the state cap")
     }
 
     /// Each of JSON's short escapes matches the scalar it denotes, as does the
@@ -760,12 +767,16 @@ struct SchemaConstraintStateTests {
         #expect(text.contains("candidates: [\"a\", \"ab\"]"), "\(text)")
         #expect(text.contains("frames: [object(emitted: [\"o\"]), object(emitted: [\"b\"])]"), "\(text)")
         #expect(!text.contains("PropertyMask"), "\(text)")
+        #expect(text.contains("progress: boundary"), "\(text)")
+        let midEscape = try #require(walk("{\"\\u00", schema([("é", .string)]))).diagnosticDescription
+        #expect(midEscape.contains("progress: hex(digits: 2, low: false)"), "\(midEscape)")
         let inArray = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 0, maxItems: 3))])))
         #expect(inArray.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: 2)") == true)
         // An unbounded array's count holds at `minItems`: past it nothing
-        // reads the count, so the state does not carry it.
+        // reads the count, so the state does not carry it, and the line says so.
         let unbounded = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 1, maxItems: nil))])))
-        #expect(unbounded.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: 1)") == true)
+        #expect(unbounded.walk(Array("[".utf8))?.diagnosticDescription.contains("array(count: 0)") == true)
+        #expect(unbounded.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: ≥1)") == true)
 
         // A wide object lists eight names and counts the rest.
         let wide = schema((0..<70).map { ("p\($0)", SchemaValueType.integer) })
@@ -798,17 +809,26 @@ struct SchemaConstraintStateTests {
 
         #expect(a1 != a)
         #expect(a.walk(Array("{\"t\":[1".utf8)) != a.walk(Array("{\"t\":[1,2".utf8)))
-        // In an unbounded array the count holds at `minItems`, so one item in
-        // and two items in are the same position; before `minItems` they differ.
-        let unbounded = SchemaConstraintState(schema: schema([("t", .array(items: .integer, minItems: 1, maxItems: nil))]))
-        #expect(unbounded.walk(Array("{\"t\":[1".utf8)) == unbounded.walk(Array("{\"t\":[1,2".utf8)))
-        #expect(unbounded.walk(Array("{\"t\":[".utf8)) != unbounded.walk(Array("{\"t\":[1".utf8)))
+        // In an unbounded array the count holds at `minItems`, so two items in
+        // and three items in are the same position; below `minItems` the count
+        // still tells positions apart.
+        let unbounded = SchemaConstraintState(schema: schema([("t", .array(items: .integer, minItems: 2, maxItems: nil))]))
+        #expect(unbounded.walk(Array("{\"t\":[1".utf8)) != unbounded.walk(Array("{\"t\":[1,2".utf8)))
+        #expect(unbounded.walk(Array("{\"t\":[1,2".utf8)) == unbounded.walk(Array("{\"t\":[1,2,3".utf8)))
         // Different paths to the same position are the same state.
         #expect(a.walk(Array("{\"o\":{\"k\":true}".utf8)) == a.walk(Array("{\"o\":{\"k\":false}".utf8)))
 
         // Same node layout, different schema: not equal.
         let other = schema([("o", nested([("k", .boolean)])), ("t", .array(items: .number, minItems: 0, maxItems: 3))])
         #expect(SchemaConstraintState(schema: other) != a)
+
+        // Scalar-exact, as the automaton is: a key or value that is the same
+        // string normalised differently makes a different schema, although
+        // Swift's `String` calls the two equal.
+        let precomposed = "\u{E9}", decomposed = "e\u{301}"
+        #expect(SchemaConstraintState(root: .stringEnum([precomposed])) != SchemaConstraintState(root: .stringEnum([decomposed])))
+        #expect(SchemaConstraintState(schema: schema([(precomposed, .string)])) != SchemaConstraintState(schema: schema([(decomposed, .string)])))
+        #expect(SchemaConstraintState(root: .stringEnum([precomposed])) == SchemaConstraintState(root: .stringEnum([precomposed])))
     }
 
     // MARK: Differential test against a reference validator

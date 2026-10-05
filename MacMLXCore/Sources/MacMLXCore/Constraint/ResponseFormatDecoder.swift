@@ -117,6 +117,13 @@ public enum ResponseFormatDecoder {
         path.isEmpty ? "schema" : "property '\(path)'"
     }
 
+    /// The path of property `name` under `path`. A property named "" is
+    /// written `""`, so that only the root has the empty path.
+    private static func childPath(_ path: String, _ name: String) -> String {
+        let segment = name.isEmpty ? "\"\"" : name
+        return path.isEmpty ? segment : "\(path).\(segment)"
+    }
+
     /// Decode the raw `response_format` field.
     ///
     /// - Parameter raw: the field value, or `nil` when the request omitted it.
@@ -291,13 +298,13 @@ public enum ResponseFormatDecoder {
         // runtime automaton accepts keys in any order).
         var compiled: [JSONSchemaObject.Property] = []
         for name in properties.keys.sorted() {
-            let childPath = path.isEmpty ? name : "\(path).\(name)"
-            try context.spendBytes(of: name, at: childPath)
+            let child = childPath(path, name)
+            try context.spendBytes(of: name, at: child)
             guard let propertyValue = properties[name] else { continue }
             guard case .object(let property) = propertyValue else {
-                throw ResponseFormatError.invalidFormat("property '\(childPath)' must be an object")
+                throw ResponseFormatError.invalidFormat("property '\(child)' must be an object")
             }
-            let type = try compileValue(property, path: childPath, depth: depth, context: &context)
+            let type = try compileValue(property, path: child, depth: depth, context: &context)
             compiled.append(JSONSchemaObject.Property(name: name, type: type))
         }
 
@@ -316,7 +323,7 @@ public enum ResponseFormatDecoder {
                     throw ResponseFormatError.invalidFormat("\(owner).required entries must be strings")
                 }
                 // A `$ref` repeats this list once per reference, like the names.
-                try context.spendBytes(of: name, at: path.isEmpty ? name : "\(path).\(name)")
+                try context.spendBytes(of: name, at: childPath(path, name))
                 // JSON Schema requires unique entries. Refusing the first repeat,
                 // with every entry declared, keeps this loop to one pass over the
                 // declared properties however long the list is or however many
@@ -376,7 +383,15 @@ public enum ResponseFormatDecoder {
             }
             context.expanding.append(ref)
             defer { context.expanding.removeLast() }
-            return try compileValue(target, path: path, depth: depth, isRoot: isRoot, context: &context)
+            // The path names the position, not the definition, so a problem
+            // inside the target also says which reference led there.
+            do {
+                return try compileValue(target, path: path, depth: depth, isRoot: isRoot, context: &context)
+            } catch ResponseFormatError.unsupportedFeature(let message) {
+                throw ResponseFormatError.unsupportedFeature("\(message) (via '$ref' '\(ref)')")
+            } catch ResponseFormatError.invalidFormat(let message) {
+                throw ResponseFormatError.invalidFormat("\(message) (via '$ref' '\(ref)')")
+            }
         }
 
         // Apple's `@Guide(.constant(…))` emits `const` without a `type`.

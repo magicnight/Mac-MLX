@@ -1,8 +1,10 @@
 // Copyright © 2026 macMLX. English comments only.
 
 /// A declared key, enum value or `const` of a compiled schema, in the form the
-/// schema automaton matches it: scalar by scalar, each scalar spelled either
-/// as its raw UTF-8 bytes or as a JSON escape (see ``LiteralMatch``).
+/// schema automaton matches it: scalar by scalar — a scalar outside ASCII as
+/// its raw UTF-8 bytes or as a JSON escape, the quote, the backslash and
+/// control characters as an escape, every other ASCII scalar raw (see
+/// ``LiteralMatch`` and ``mayBeEscaped(_:)``).
 @usableFromInline
 struct SchemaLiteral: Hashable, Sendable {
     /// The literal's text, for diagnostics.

@@ -24,7 +24,7 @@ struct RandomSchemaGenerator {
     /// Property names: shared prefixes (`a`, `ab`, `abc`), names that are also
     /// schema keywords (`type`, `items`), and names outside ASCII or needing
     /// an escape (two-, three- and four-byte scalars, a quote).
-    static let names = ["a", "ab", "b", "type", "items", "abc", "é", "日本", "😀", "q\"q", "p/q", "t\tb"]
+    static let names = ["a", "ab", "b", "type", "items", "abc", "é", "日本", "😀", "q\"q", "p/q", "t\tb", "e\u{301}"]
 
     /// Scalar types, including enums whose values share a prefix, the empty
     /// string as an enum value, and values outside ASCII or needing escapes.
@@ -32,7 +32,7 @@ struct RandomSchemaGenerator {
         .string, .number, .integer, .boolean,
         .stringEnum(["x", "xy", "y"]), .stringEnum([""]), .stringEnum(["a"]),
         .stringEnum(["café", "cafe"]), .stringEnum(["😀", "😁"]), .stringEnum(["a\\b", "a\nb"]),
-        .stringEnum(["/", "\\/"]), .stringEnum(["\u{8}\u{c}\r", "\t"]),
+        .stringEnum(["/", "\\/"]), .stringEnum(["\u{8}\u{c}\r", "\t"]), .stringEnum(["é", "e\u{301}"]),
     ]
 
     var rng: SplitMix64
@@ -120,7 +120,9 @@ struct RandomSchemaGenerator {
             return quoted(pick(values))
         case .object(let object):
             var members: [JSONSchemaObject.Property] = []
-            for property in object.properties where object.required.contains(property.name) || bool() {
+            // Scalar-exact, like the automaton; `String` equality is canonical.
+            let required = Set(object.required.map { Array($0.unicodeScalars) })
+            for property in object.properties where required.contains(Array(property.name.unicodeScalars)) || bool() {
                 members.append(property)
             }
             members.shuffle(using: &rng)

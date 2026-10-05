@@ -193,6 +193,11 @@ final class StructuredOutputModelTests: XCTestCase {
         XCTAssertTrue(
             ReferenceSchemaValidator.validate(Array(text.utf8), schema),
             "output does not conform to the itinerary schema: \(text)")
+        // The automaton must accept what it produced: if it does not, the
+        // text holds bytes it never walked (the processor's wedge guard).
+        XCTAssertTrue(
+            SchemaConstraintState(root: .object(schema)).walk(Array(text.utf8))?.isComplete == true,
+            "the automaton does not accept the text it produced: \(text)")
         let parsed = try JSONSerialization.jsonObject(with: Data(text.utf8))
         let object = try XCTUnwrap(parsed as? [String: Any], "output must be a JSON object: \(text)")
         XCTAssertEqual(
@@ -223,6 +228,9 @@ final class StructuredOutputModelTests: XCTestCase {
         XCTAssertTrue(
             ReferenceSchemaValidator.validate(Array(text.utf8), root: root),
             "output does not conform to the root array schema: \(text)")
+        XCTAssertTrue(
+            SchemaConstraintState(root: root).walk(Array(text.utf8))?.isComplete == true,
+            "the automaton does not accept the text it produced: \(text)")
         let parsed = try JSONSerialization.jsonObject(with: Data(text.utf8))
         let items = try XCTUnwrap(parsed as? [String], "output must be a JSON array of strings: \(text)")
         XCTAssertEqual(items.count, 3, "\(text)")
