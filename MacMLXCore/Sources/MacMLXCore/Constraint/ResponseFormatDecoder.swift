@@ -231,9 +231,9 @@ public enum ResponseFormatDecoder {
         // plainly something else: a `$ref`, a `const`, or an `enum`, which
         // the value rules then report as it is (an enum needs its `type`).
         if root["type"] == nil, root["$ref"] == nil, root["const"] == nil, root["enum"] == nil {
-            return .object(try compileObject(root, path: "", depth: 1, isRoot: true, context: &context))
+            return .object(try compileObject(root, path: "", depth: 1, context: &context))
         }
-        return try compileValue(root, path: "", depth: 0, isRoot: true, context: &context)
+        return try compileValue(root, path: "", depth: 0, context: &context)
     }
 
     private static func definitionTable(_ value: JSONValue?, keyword: String) throws -> [String: JSONValue] {
@@ -244,16 +244,19 @@ public enum ResponseFormatDecoder {
         return table
     }
 
-    /// Compile an object schema: the root (`isRoot`, which only words the
-    /// diagnostics) or a nested object at `path`. `depth` counts this
-    /// object's own container.
+    /// Compile an object schema: the root, or a nested object at `path`.
+    /// `depth` counts this object's own container.
     static func compileObject(
         _ schema: [String: JSONValue],
         path: String,
         depth: Int,
-        isRoot: Bool,
         context: inout Context
     ) throws -> JSONSchemaObject {
+        // Only the root position has the empty path (a property named "" is
+        // written `""`, see `childPath`); a root `$ref` target is compiled
+        // there too. The root is worded as "the schema", the rest as a
+        // property.
+        let isRoot = path.isEmpty
         let location = isRoot ? "at the schema root" : "on property '\(path)'"
         // Allow-list gate. At the root this is the C3 fix: keywords such as
         // `allOf` or `minProperties` used to be accepted there and enforced by
@@ -349,15 +352,11 @@ public enum ResponseFormatDecoder {
 
     /// Compile the schema of one value position at `path`. `depth` is the
     /// number of containers open around it; an object or array value adds its
-    /// own. `isRoot` marks the root position (kept through a root `$ref`) and
-    /// only words the diagnostics: an empty `path` is not proof of the root,
-    /// since a property named "" has one too. Dispatch precedence: `$ref`,
-    /// then `const`, then `type`.
+    /// own. Dispatch precedence: `$ref`, then `const`, then `type`.
     static func compileValue(
         _ schema: [String: JSONValue],
         path: String,
         depth: Int,
-        isRoot: Bool = false,
         context: inout Context
     ) throws -> SchemaValueType {
         try context.spend(at: path)
@@ -386,7 +385,7 @@ public enum ResponseFormatDecoder {
             // The path names the position, not the definition, so a problem
             // inside the target also says which reference led there.
             do {
-                return try compileValue(target, path: path, depth: depth, isRoot: isRoot, context: &context)
+                return try compileValue(target, path: path, depth: depth, context: &context)
             } catch ResponseFormatError.unsupportedFeature(let message) {
                 throw ResponseFormatError.unsupportedFeature("\(message) (via '$ref' '\(ref)')")
             } catch ResponseFormatError.invalidFormat(let message) {
@@ -422,7 +421,7 @@ public enum ResponseFormatDecoder {
         switch schema["type"] {
         case .string("object")?:
             return .object(
-                try compileObject(schema, path: path, depth: depth + 1, isRoot: isRoot, context: &context))
+                try compileObject(schema, path: path, depth: depth + 1, context: &context))
         case .string("array")?:
             return try compileArray(schema, path: path, depth: depth + 1, context: &context)
         default:
