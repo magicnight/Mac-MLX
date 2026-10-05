@@ -544,6 +544,27 @@ struct ResponseFormatDecoderTests {
         for key in ["$defs", "definitions", "$id", "$schema"] {
             expectUnsupported(schema: nested(key, obj([:])), containing: "'\(key)'")
         }
+        // A `$ref` target is compiled at the root position and a property
+        // named "" has the root's empty path; neither is the root, whose
+        // root-only keywords were read and stripped before compilation.
+        for key in ["$defs", "$id"] {
+            let target = obj(["type": .string("object"), "properties": obj(["x": string]), key: obj([:])])
+            expectUnsupported(schema: obj(["$ref": .string("#/$defs/T"), "$defs": obj(["T": target])]), containing: "'\(key)'")
+            expectUnsupported(schema: root(["": target]), containing: "'\(key)'")
+        }
+        // Nor does a property named "" take the root's wording.
+        expectUnsupported(schema: root(["": obj(["type": .string("object")])]), containing: "nested object without 'properties'")
+    }
+
+    /// `required` names are compared scalar by scalar, as the automaton
+    /// matches keys: a decomposed "é" does not name a precomposed one, although
+    /// Swift's `String` says the two are equal.
+    @Test
+    func comparesRequiredNamesByScalar() throws {
+        let precomposed = "\u{E9}", decomposed = "e\u{301}"
+        #expect(precomposed == decomposed)
+        _ = try compile(root([precomposed: string], required: [precomposed]))
+        expectInvalid(schema: root([precomposed: string], required: [decomposed]), containing: "is not declared")
     }
 
     /// Root keywords nothing enforces are a 400 naming the keyword. They used

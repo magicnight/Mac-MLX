@@ -314,13 +314,17 @@ final class JSONConstraintProcessorMaskTests: XCTestCase {
         try requireMLXRuntimeOrSkip()
         let vocab = ["{", "abc", "}", "</s>"]
         var processor = processor(vocab: vocab, stop: [3], greedy: true)
+        // The vocabulary table is built by the first `process`, which the
+        // sampler always runs before `didSample`; a `didSample` before any
+        // `process` has nothing to classify the token against and is a no-op.
+        let logits = MLXArray([9.0, 1.0, 2.0, 0.5] as [Float]).reshaped([1, 4])
+        _ = processor.process(logits: logits)
         let before = processor.state.diagnosticDescription
         processor.didSample(token: MLXArray(Int32(1)))   // "abc": illegal at the JSON start
         XCTAssertEqual(processor.state.diagnosticDescription, before, "the state must not advance over an illegal token")
 
         // "{" is the top token and would be legal from the (stale) start state;
         // the wedged processor forces EOS anyway.
-        let logits = MLXArray([9.0, 1.0, 2.0, 0.5] as [Float]).reshaped([1, 4])
         let masked = processor.process(logits: logits).reshaped([4])
         masked.eval()
         let values = masked.asArray(Float.self)

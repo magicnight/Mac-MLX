@@ -101,17 +101,22 @@ final class SchemaProgram: Sendable {
         }
 
         mutating func addObject(_ object: JSONSchemaObject) -> NodeRef {
-            var index: [String: Int] = [:]
+            // Keyed by scalars, as the automaton matches keys; `String` equality
+            // is canonical, so a decomposed "é" would otherwise find a
+            // precomposed one the matcher never equates it with.
+            var index: [[UInt32]: Int] = [:]
             var keys: [SchemaLiteral] = []
             var values: [NodeRef] = []
-            for property in object.properties where index[property.name] == nil {
-                index[property.name] = keys.count
-                keys.append(SchemaLiteral(property.name))
+            for property in object.properties {
+                let literal = SchemaLiteral(property.name)
+                guard index[literal.scalars] == nil else { continue }
+                index[literal.scalars] = keys.count
+                keys.append(literal)
                 values.append(add(property.type))
             }
             var required = PropertyMask()
             for name in object.required {
-                required.insert(index[name] ?? keys.count)
+                required.insert(index[name.unicodeScalars.map(\.value)] ?? keys.count)
             }
             objects.append(ObjectNode(keys: keys, values: values, all: .all(count: keys.count), required: required))
             return .object(Int32(objects.count - 1))

@@ -29,7 +29,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   constraint matches them scalar by scalar, and the model may spell a scalar
   outside ASCII raw or as a JSON escape (`\uXXXX`, a surrogate pair above
   the BMP), so a literal the tokenizer cannot produce raw is still reachable
-  through its escape and a required key can never strand a generation. The
+  through its ASCII escape. The
   quote, the backslash and control characters take their escape; every
   other ASCII scalar is matched raw only, because a model nudged off its
   preferred word otherwise drifts into spelling the rest of the literal as

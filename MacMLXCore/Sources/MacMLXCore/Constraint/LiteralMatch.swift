@@ -15,10 +15,10 @@
 /// literal when a candidate has exactly `unit` scalars.
 ///
 /// Accepting escapes is what lets a schema declare any string. An escape is
-/// spelled with ASCII bytes, which every tokenizer can produce, so a literal
-/// the model cannot spell raw — a token cut inside a multi-byte scalar is
-/// unusable under the constraint — is still reachable, and a required key can
-/// never deadlock the automaton.
+/// spelled with ASCII bytes, for which a tokenizer can be expected to have
+/// single-byte tokens, so a literal the model cannot spell raw — a token cut
+/// inside a multi-byte scalar is unusable under the constraint — is still
+/// reachable, and a required key need not deadlock the automaton.
 @usableFromInline
 struct LiteralMatch: Hashable, Sendable {
 
@@ -31,9 +31,10 @@ struct LiteralMatch: Hashable, Sendable {
         case raw(offset: Int)
         /// Read `\`; `u` or a two-character escape letter follows.
         case backslash
-        /// Reading the hex digits of a `\u` escape: `digits` seen so far spell
-        /// `value`. `low` marks the second escape of a surrogate pair.
-        case hex(digits: Int, value: Int, low: Bool)
+        /// Reading the hex digits of a `\u` escape: `digits` seen so far, each
+        /// checked against the survivors' code unit as it arrived, so nothing
+        /// accumulates. `low` marks the second escape of a surrogate pair.
+        case hex(digits: Int, low: Bool)
         /// Read a high surrogate; `\` must follow.
         case lowBackslash
         /// Read the `\` after a high surrogate; `u` must follow.
@@ -104,12 +105,12 @@ struct LiteralMatch: Hashable, Sendable {
 
         case .backslash:
             if byte == SchemaBytes.lowerU {
-                return narrowed(to: candidates, progress: .hex(digits: 0, value: 0, low: false))
+                return narrowed(to: candidates, progress: .hex(digits: 0, low: false))
             }
             guard let scalar = SchemaLiteral.shortEscapeScalar(byte) else { return .rejected }
             return advanced(candidates.filtered { literals[$0].scalars[unit] == scalar })
 
-        case .hex(let digits, let value, let low):
+        case .hex(let digits, let low):
             guard SchemaBytes.isHexDigit(byte) else { return .rejected }
             let digit = SchemaBytes.hexValue(byte)
             let shift = 4 * (3 - digits)
@@ -119,7 +120,7 @@ struct LiteralMatch: Hashable, Sendable {
             guard let first = survivors.first else { return .rejected }
             let seen = digits + 1
             if seen < 4 {
-                return narrowed(to: survivors, progress: .hex(digits: seen, value: value * 16 + digit, low: low))
+                return narrowed(to: survivors, progress: .hex(digits: seen, low: low))
             }
             // Four digits spell one code unit, the same for every survivor.
             // A high surrogate (a scalar above the BMP) needs its low half.
@@ -133,7 +134,7 @@ struct LiteralMatch: Hashable, Sendable {
 
         case .lowU:
             return byte == SchemaBytes.lowerU
-                ? narrowed(to: candidates, progress: .hex(digits: 0, value: 0, low: true))
+                ? narrowed(to: candidates, progress: .hex(digits: 0, low: true))
                 : .rejected
         }
     }

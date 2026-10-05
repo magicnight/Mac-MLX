@@ -24,7 +24,7 @@ struct RandomSchemaGenerator {
     /// Property names: shared prefixes (`a`, `ab`, `abc`), names that are also
     /// schema keywords (`type`, `items`), and names outside ASCII or needing
     /// an escape (two-, three- and four-byte scalars, a quote).
-    static let names = ["a", "ab", "b", "type", "items", "abc", "é", "日本", "😀", "q\"q"]
+    static let names = ["a", "ab", "b", "type", "items", "abc", "é", "日本", "😀", "q\"q", "p/q", "t\tb"]
 
     /// Scalar types, including enums whose values share a prefix, the empty
     /// string as an enum value, and values outside ASCII or needing escapes.
@@ -32,6 +32,7 @@ struct RandomSchemaGenerator {
         .string, .number, .integer, .boolean,
         .stringEnum(["x", "xy", "y"]), .stringEnum([""]), .stringEnum(["a"]),
         .stringEnum(["café", "cafe"]), .stringEnum(["😀", "😁"]), .stringEnum(["a\\b", "a\nb"]),
+        .stringEnum(["/", "\\/"]), .stringEnum(["\u{8}\u{c}\r", "\t"]),
     ]
 
     var rng: SplitMix64
@@ -158,6 +159,9 @@ struct RandomSchemaGenerator {
             case 0x5C: "\\\\"
             case 0x0A: "\\n"
             case 0x09: "\\t"
+            case 0x08: "\\b"
+            case 0x0C: "\\f"
+            case 0x0D: "\\r"
             default: nil
             }
             let mustEscape = value == 0x22 || value == 0x5C || value < 0x20
@@ -189,7 +193,7 @@ struct RandomSchemaGenerator {
     /// or a replacement from a JSON-ish alphabet, or a duplicated span.
     mutating func mutate(_ document: String) -> [UInt8] {
         var bytes = Array(document.utf8)
-        let alphabet = Array("{}[],:\"0123456789.-eEtrufalsn abxy\\udDcC".utf8)
+        let alphabet = Array("{}[],:\"0123456789.-eEtrufalsn abxy\\udDcC/".utf8)
             + [0xC3, 0xA9, 0xE6, 0x97, 0xA5, 0xF0, 0x9F, 0x98, 0x80]
         for _ in 0..<int(in: 1...3) {
             switch int(in: 0...3) {

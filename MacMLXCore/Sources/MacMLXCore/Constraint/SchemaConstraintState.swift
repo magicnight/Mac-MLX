@@ -18,16 +18,17 @@
 /// ## Shape
 /// A stack of open containers (``Frame``) plus one lexical ``Mode``. The schema
 /// itself lives in a shared, immutable ``SchemaProgram`` built once in
-/// ``init(schema:)``. The scalar in progress lives in the mode, never in a
+/// ``init(root:)``. The scalar in progress lives in the mode, never in a
 /// frame, so string and number bytes — most of any document — never touch the
 /// stack, and a walk copies at most the open frames, once.
 ///
 /// ## No dead ends
 /// Every reachable state can still reach a complete document: `,` is legal
 /// only where another member or item can follow, the compiler guarantees
-/// `minItems <= maxItems` and that every required key is declared, every
-/// literal can be spelled with ASCII escapes, and `\u` escapes are cut off as
-/// soon as they cannot complete.
+/// `minItems <= maxItems` and that every required key is declared, the
+/// matcher accepts an ASCII escape spelling of every literal (so a key the
+/// tokenizer cannot spell raw is still reachable), and `\u` escapes are cut
+/// off as soon as they cannot complete.
 public struct SchemaConstraintState: Hashable, Sendable {
 
     /// One open container.
@@ -36,7 +37,9 @@ public struct SchemaConstraintState: Hashable, Sendable {
         /// An object of node `node`. A member is marked `emitted` when its key's
         /// closing quote is read.
         case object(node: Int32, emitted: PropertyMask)
-        /// An array of node `node`; `count` items have been started.
+        /// An array of node `node`; `count` items have been started — held at
+        /// `minItems` once an unbounded array has that many, past which the
+        /// count decides nothing (see ``startValue(_:node:)``).
         case array(node: Int32, count: Int)
     }
 
@@ -140,7 +143,8 @@ public struct SchemaConstraintState: Hashable, Sendable {
         }
         var modeText = "\(mode)"
         if case .key(let match) = mode, case .object(let node, _)? = stack.last {
-            modeText = "key(position: \(match.unit), candidates: \(names(match.candidates, node: node)))"
+            modeText = "key(position: \(match.unit), candidates: \(names(match.candidates, node: node)), "
+                + "progress: \(match.progress))"
         }
         return "schema(mode: \(modeText), frames: [\(frames.joined(separator: ", "))], complete: \(isComplete))"
     }
@@ -255,8 +259,13 @@ public struct SchemaConstraintState: Hashable, Sendable {
     @usableFromInline
     mutating func startValue(_ byte: UInt8, node: SchemaProgram.NodeRef) -> Bool {
         if case .array(let arrayNode, let count)? = stack.last {
-            if let maxItems = program.arrays[Int(arrayNode)].maxItems, count >= maxItems { return false }
-            stack[stack.count - 1] = .array(node: arrayNode, count: count + 1)
+            let array = program.arrays[Int(arrayNode)]
+            if let maxItems = array.maxItems, count >= maxItems { return false }
+            // In an unbounded array the count past `minItems` decides nothing
+            // (only `]` consults it), so it stops there: the states of such an
+            // array stay finite, and a search over them can finish.
+            let counted = array.maxItems == nil ? Swift.min(count + 1, array.minItems) : count + 1
+            stack[stack.count - 1] = .array(node: arrayNode, count: counted)
         }
         switch node {
         case .object(let objectNode):

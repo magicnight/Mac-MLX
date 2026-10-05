@@ -185,7 +185,7 @@ public enum ResponseFormatDecoder {
             guard nodes <= ResponseFormatDecoder.maxSchemaNodes else {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaNodes) nodes "
-                        + "after '$ref' expansion, at property '\(path)')")
+                        + "after '$ref' expansion, \(ResponseFormatDecoder.location(path)))")
             }
         }
 
@@ -195,7 +195,7 @@ public enum ResponseFormatDecoder {
             guard literals <= ResponseFormatDecoder.maxSchemaLiterals else {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaLiterals) enum and const values "
-                        + "after '$ref' expansion, at property '\(path)')")
+                        + "after '$ref' expansion, \(ResponseFormatDecoder.location(path)))")
             }
         }
 
@@ -206,7 +206,7 @@ public enum ResponseFormatDecoder {
             guard bytes <= ResponseFormatDecoder.maxSchemaBytes else {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaBytes) bytes of property names "
-                        + "and enum and const values after '$ref' expansion, at property '\(path)')")
+                        + "and enum and const values after '$ref' expansion, \(ResponseFormatDecoder.location(path)))")
             }
         }
     }
@@ -226,7 +226,7 @@ public enum ResponseFormatDecoder {
         if root["type"] == nil, root["$ref"] == nil, root["const"] == nil, root["enum"] == nil {
             return .object(try compileObject(root, path: "", depth: 1, isRoot: true, context: &context))
         }
-        return try compileValue(root, path: "", depth: 0, context: &context)
+        return try compileValue(root, path: "", depth: 0, isRoot: true, context: &context)
     }
 
     private static func definitionTable(_ value: JSONValue?, keyword: String) throws -> [String: JSONValue] {
@@ -237,8 +237,9 @@ public enum ResponseFormatDecoder {
         return table
     }
 
-    /// Compile an object schema: the root (`isRoot`) or a nested object at
-    /// `path`. `depth` counts this object's own container.
+    /// Compile an object schema: the root (`isRoot`, which only words the
+    /// diagnostics) or a nested object at `path`. `depth` counts this
+    /// object's own container.
     static func compileObject(
         _ schema: [String: JSONValue],
         path: String,
@@ -249,8 +250,11 @@ public enum ResponseFormatDecoder {
         let location = isRoot ? "at the schema root" : "on property '\(path)'"
         // Allow-list gate. At the root this is the C3 fix: keywords such as
         // `allOf` or `minProperties` used to be accepted there and enforced by
-        // nothing.
-        let allowed = objectKeys.union(annotationKeys).union(isRoot ? rootOnlyKeys : [])
+        // nothing. The root-only keywords are not on the list: the root's were
+        // read and stripped by `compileRootSchema`, so one that reaches here
+        // sits below the root — in a `$ref` target or under a property named
+        // "", which share the root's empty path — and is a 400 like any other.
+        let allowed = objectKeys.union(annotationKeys)
         for key in schema.keys.sorted() where !allowed.contains(key) {
             throw ResponseFormatError.unsupportedFeature("unsupported schema keyword '\(key)' \(location)")
         }
@@ -302,8 +306,11 @@ public enum ResponseFormatDecoder {
             guard case .array(let entries) = requiredValue else {
                 throw ResponseFormatError.invalidFormat("\(owner).required must be an array")
             }
-            let declared = Set(compiled.map(\.name))
-            var listed = Set<String>()
+            // Compared scalar by scalar, as the automaton matches keys: `String`
+            // equality is canonical, so a decomposed "é" in `required` would
+            // otherwise pass for a precomposed one it can never match.
+            let declared = Set(compiled.map { Array($0.name.unicodeScalars) })
+            var listed = Set<[Unicode.Scalar]>()
             for entry in entries {
                 guard case .string(let name) = entry else {
                     throw ResponseFormatError.invalidFormat("\(owner).required entries must be strings")
@@ -314,13 +321,13 @@ public enum ResponseFormatDecoder {
                 // with every entry declared, keeps this loop to one pass over the
                 // declared properties however long the list is or however many
                 // times a `$ref` compiles it.
-                guard listed.insert(name).inserted else {
+                guard listed.insert(Array(name.unicodeScalars)).inserted else {
                     throw ResponseFormatError.invalidFormat(
                         isRoot
                             ? "required property '\(name)' is listed more than once"
                             : "required property '\(name)' is listed more than once in '\(path)'")
                 }
-                guard declared.contains(name) else {
+                guard declared.contains(Array(name.unicodeScalars)) else {
                     throw ResponseFormatError.invalidFormat(
                         isRoot
                             ? "required property '\(name)' is not declared in properties"
@@ -335,11 +342,15 @@ public enum ResponseFormatDecoder {
 
     /// Compile the schema of one value position at `path`. `depth` is the
     /// number of containers open around it; an object or array value adds its
-    /// own. Dispatch precedence: `$ref`, then `const`, then `type`.
+    /// own. `isRoot` marks the root position (kept through a root `$ref`) and
+    /// only words the diagnostics: an empty `path` is not proof of the root,
+    /// since a property named "" has one too. Dispatch precedence: `$ref`,
+    /// then `const`, then `type`.
     static func compileValue(
         _ schema: [String: JSONValue],
         path: String,
         depth: Int,
+        isRoot: Bool = false,
         context: inout Context
     ) throws -> SchemaValueType {
         try context.spend(at: path)
@@ -365,7 +376,7 @@ public enum ResponseFormatDecoder {
             }
             context.expanding.append(ref)
             defer { context.expanding.removeLast() }
-            return try compileValue(target, path: path, depth: depth, context: &context)
+            return try compileValue(target, path: path, depth: depth, isRoot: isRoot, context: &context)
         }
 
         // Apple's `@Guide(.constant(…))` emits `const` without a `type`.
@@ -396,7 +407,7 @@ public enum ResponseFormatDecoder {
         switch schema["type"] {
         case .string("object")?:
             return .object(
-                try compileObject(schema, path: path, depth: depth + 1, isRoot: path.isEmpty, context: &context))
+                try compileObject(schema, path: path, depth: depth + 1, isRoot: isRoot, context: &context))
         case .string("array")?:
             return try compileArray(schema, path: path, depth: depth + 1, context: &context)
         default:

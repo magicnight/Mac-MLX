@@ -363,35 +363,89 @@ struct SchemaConstraintStateTests {
             schema([("m", .array(items: .array(items: .integer, minItems: 1, maxItems: 2), minItems: 0, maxItems: nil))]),
             schema([("i", .array(items: nested([("id", .integer), ("t", .string)], required: ["id"]), minItems: 1, maxItems: 2))]),
             // Literals outside ASCII and ones that need escapes: the escape
-            // paths (surrogate pairs included) must never strand the matcher.
+            // paths (surrogate pairs included) must not strand the matcher.
             schema([("c", .stringEnum(["Lençóis", "Bogotá", "😀"]))], required: ["c"]),
             schema([("日本", .string), ("q\"q", .stringEnum(["a\\b"]))], required: ["日本", "q\"q"]),
         ]
-        var generator = RandomSchemaGenerator(seed: 42)
-        for _ in 0..<12 {
-            schemas.append(generator.object())
-        }
-        for _ in 0..<12 {
-            schemas.append(generator.object(nested: true))
-        }
         var roots: [SchemaValueType] = schemas.map { .object($0) }
         roots += [
             .array(items: nested([("id", .integer)], required: ["id"]), minItems: 1, maxItems: 2),
             .array(items: .stringEnum(["é", "e"]), minItems: 0, maxItems: nil),
             .string, .number, .integer, .boolean, .stringEnum(["😀", "x"]),
         ]
-        for _ in 0..<8 {
-            roots.append(generator.root())
+        // The hand-written schemas are small enough to be explored whole (an
+        // unbounded array's count holds at `minItems`, so its states are
+        // finite); a search the cap cuts off counts the frontier as live and
+        // could hide a trap, so for them it must finish. Seeded schemas can be
+        // wider than the cap and are checked as far as the search reaches.
+        var generator = RandomSchemaGenerator(seed: 42)
+        var seeded: [SchemaValueType] = []
+        for _ in 0..<12 {
+            seeded.append(.object(generator.object()))
         }
-        for root in roots {
+        for _ in 0..<12 {
+            seeded.append(.object(generator.object(nested: true)))
+        }
+        for _ in 0..<8 {
+            seeded.append(generator.root())
+        }
+        let limit = 40_000
+        for (root, mustFinish) in roots.map { ($0, true) } + seeded.map { ($0, false) } {
             let result = SchemaTrapSearch.run(
                 from: SchemaConstraintState(root: root),
                 alphabet: SchemaTrapSearch.alphabet(for: root),
-                limit: 40_000)
+                limit: limit)
             #expect(
                 result.traps.isEmpty,
                 "\(result.traps.count) trap(s) in \(result.explored) states, first: \(result.traps.first?.diagnosticDescription ?? "-") for \(root)")
+            if mustFinish {
+                #expect(result.explored < limit, "the search hit the state cap at \(result.explored) for \(root)")
+            }
         }
+    }
+
+    /// Each of JSON's short escapes matches the scalar it denotes, as does the
+    /// `\u00XX` spelling; the wrong letter does not, nor does the scalar raw
+    /// where JSON forbids it. `\/` is the exception: `/` is plain ASCII, which
+    /// the matcher takes raw only.
+    @Test
+    func matchesEveryShortEscape() {
+        let escapes: [(letter: String, scalar: UInt32)] = [
+            ("\"", 0x22), ("\\", 0x5C), ("b", 0x08), ("f", 0x0C), ("n", 0x0A), ("r", 0x0D), ("t", 0x09),
+        ]
+        for (letter, scalar) in escapes {
+            let value = String(UnicodeScalar(scalar).map(Character.init) ?? "?")
+            let object = schema([("k", .stringEnum([value]))], required: ["k"])
+            let hex = String(scalar, radix: 16)
+            let padded = String(repeating: "0", count: 4 - hex.count) + hex
+            #expect(accepts("{\"k\":\"\\\(letter)\"}", object), "\\\(letter)")
+            #expect(accepts("{\"k\":\"\\u\(padded)\"}", object), "\\u\(padded)")
+            #expect(!accepts("{\"k\":\"\\\(letter == "t" ? "n" : "t")\"}", object), "the wrong letter for \\\(letter)")
+            if scalar < 0x20 {
+                #expect(!accepts("{\"k\":\"\(value)\"}", object), "raw U+\(padded) in a string")
+            }
+        }
+        let slash = schema([("k", .stringEnum(["/"]))], required: ["k"])
+        #expect(accepts("{\"k\":\"/\"}", slash))
+        #expect(!accepts("{\"k\":\"\\/\"}", slash))
+        #expect(!accepts("{\"k\":\"\\u002f\"}", slash))
+    }
+
+    /// `required` names are matched scalar by scalar, as keys are: a name that
+    /// Swift's `String` calls equal to a declared key (a decomposed "é"
+    /// against a precomposed one) is not that key. The decoder refuses such a
+    /// schema; built directly, it names a member that is never emitted, so
+    /// the object can never close — it never falls back to the look-alike.
+    @Test
+    func requiredNamesAreMatchedByScalar() {
+        let precomposed = "\u{E9}", decomposed = "e\u{301}"
+        #expect(precomposed == decomposed, "String equality is canonical")
+        #expect(Array(precomposed.unicodeScalars) != Array(decomposed.unicodeScalars))
+        let declared = schema([(precomposed, .string)], required: [precomposed])
+        #expect(accepts("{\"\(precomposed)\":\"x\"}", declared))
+        let lookalike = schema([(precomposed, .string)], required: [decomposed])
+        #expect(!accepts("{\"\(precomposed)\":\"x\"}", lookalike))
+        #expect(!accepts("{\"\(decomposed)\":\"x\"}", lookalike))
     }
 
     // MARK: Nested objects
@@ -706,8 +760,12 @@ struct SchemaConstraintStateTests {
         #expect(text.contains("candidates: [\"a\", \"ab\"]"), "\(text)")
         #expect(text.contains("frames: [object(emitted: [\"o\"]), object(emitted: [\"b\"])]"), "\(text)")
         #expect(!text.contains("PropertyMask"), "\(text)")
-        let inArray = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 0, maxItems: nil))])))
+        let inArray = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 0, maxItems: 3))])))
         #expect(inArray.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: 2)") == true)
+        // An unbounded array's count holds at `minItems`: past it nothing
+        // reads the count, so the state does not carry it.
+        let unbounded = try #require(walk("{\"o\":", schema([("o", .array(items: .integer, minItems: 1, maxItems: nil))])))
+        #expect(unbounded.walk(Array("[1,2".utf8))?.diagnosticDescription.contains("array(count: 1)") == true)
 
         // A wide object lists eight names and counts the rest.
         let wide = schema((0..<70).map { ("p\($0)", SchemaValueType.integer) })
@@ -725,7 +783,7 @@ struct SchemaConstraintStateTests {
     /// schemas were compiled separately; the hash agrees.
     @Test
     func equalityIsByPositionAndSchema() throws {
-        let object = schema([("o", nested([("k", .boolean)])), ("t", .array(items: .integer, minItems: 0, maxItems: nil))])
+        let object = schema([("o", nested([("k", .boolean)])), ("t", .array(items: .integer, minItems: 0, maxItems: 3))])
         let a = SchemaConstraintState(schema: object)
         let b = SchemaConstraintState(schema: object)
         #expect(a == b)
@@ -740,11 +798,16 @@ struct SchemaConstraintStateTests {
 
         #expect(a1 != a)
         #expect(a.walk(Array("{\"t\":[1".utf8)) != a.walk(Array("{\"t\":[1,2".utf8)))
+        // In an unbounded array the count holds at `minItems`, so one item in
+        // and two items in are the same position; before `minItems` they differ.
+        let unbounded = SchemaConstraintState(schema: schema([("t", .array(items: .integer, minItems: 1, maxItems: nil))]))
+        #expect(unbounded.walk(Array("{\"t\":[1".utf8)) == unbounded.walk(Array("{\"t\":[1,2".utf8)))
+        #expect(unbounded.walk(Array("{\"t\":[".utf8)) != unbounded.walk(Array("{\"t\":[1".utf8)))
         // Different paths to the same position are the same state.
         #expect(a.walk(Array("{\"o\":{\"k\":true}".utf8)) == a.walk(Array("{\"o\":{\"k\":false}".utf8)))
 
         // Same node layout, different schema: not equal.
-        let other = schema([("o", nested([("k", .boolean)])), ("t", .array(items: .number, minItems: 0, maxItems: nil))])
+        let other = schema([("o", nested([("k", .boolean)])), ("t", .array(items: .number, minItems: 0, maxItems: 3))])
         #expect(SchemaConstraintState(schema: other) != a)
     }
 
