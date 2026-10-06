@@ -197,6 +197,28 @@ struct JSONConstraintProcessorDecisionTests {
             state: state, table: table, descendingLogitOrder: [0, 1]) == nil)
     }
 
+    /// A literal the vocabulary cannot spell raw is reached through its
+    /// escape: the byte-fragment tokens are unusable, so the backslash is the
+    /// highest-ranked legal token, and the escape then completes the value.
+    @Test
+    func unspellableLiteralIsReachedThroughItsEscape() throws {
+        let object = JSONSchemaObject(properties: [.init(name: "c", type: .stringEnum(["ç"]))], required: ["c"])
+        // 0: half a scalar (decodes with U+FFFD, unusable); then the escape's
+        // pieces, the closing quote and brace, and a letter.
+        let table = table(["\u{FFFD}", "\\", "u", "00", "e7", "\"}", "x"])
+        #expect(table.classification(of: 0) == .unusable)
+        let state = try schemaState(object, after: "{\"c\":\"")
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: state, table: table, descendingLogitOrder: [0, 6, 1, 2]) == 1)
+        let afterBackslash = try #require(state.walk(Array("\\".utf8)))
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: afterBackslash, table: table, descendingLogitOrder: [6, 0, 3, 2]) == 2)
+        let escaped = try #require(state.walk(Array("\\u00e7".utf8)))
+        #expect(JSONConstraintProcessor.selectLegalToken(
+            state: escaped, table: table, descendingLogitOrder: [6, 1, 5]) == 5)
+        #expect(escaped.walk(Array("\"}".utf8))?.isComplete == true)
+    }
+
     /// An object item counts against `maxItems` when its `{` opens it, so a
     /// second item is refused after the first closes.
     @Test
@@ -283,6 +305,59 @@ final class JSONConstraintProcessorMaskTests: XCTestCase {
         let before = advanced.state.diagnosticDescription
         advanced.didSample(token: MLXArray(Int32(3)))
         XCTAssertEqual(advanced.state.diagnosticDescription, before)
+    }
+
+    /// A sampled token the automaton cannot walk wedges the processor: the
+    /// state stays where it was, and the next step keeps only EOS instead of
+    /// classifying the vocabulary against a position the text has left.
+    func testIllegalSampledTokenWedgesTheProcessorIntoEOS() throws {
+        try requireMLXRuntimeOrSkip()
+        let vocab = ["{", "abc", "}", "</s>"]
+        var processor = processor(vocab: vocab, stop: [3], greedy: true)
+        // The vocabulary table is built by the first `process`, which the
+        // sampler always runs before `didSample`; a `didSample` before any
+        // `process` has nothing to classify the token against and is a no-op.
+        let logits = MLXArray([9.0, 1.0, 2.0, 0.5] as [Float]).reshaped([1, 4])
+        _ = processor.process(logits: logits)
+        let before = processor.state.diagnosticDescription
+        processor.didSample(token: MLXArray(Int32(1)))   // "abc": illegal at the JSON start
+        XCTAssertEqual(processor.state.diagnosticDescription, before, "the state must not advance over an illegal token")
+
+        // "{" is the top token and would be legal from the (stale) start state;
+        // the wedged processor forces EOS anyway.
+        let masked = processor.process(logits: logits).reshaped([4])
+        masked.eval()
+        let values = masked.asArray(Float.self)
+        XCTAssertEqual(values[0], -Float.infinity)
+        XCTAssertEqual(values[1], -Float.infinity)
+        XCTAssertEqual(values[2], -Float.infinity)
+        XCTAssertEqual(values[3], 0.5, accuracy: 1e-4)
+        XCTAssertEqual(argMax(masked, axis: -1).item(Int.self), 3)
+    }
+
+    /// An unusable token (its standalone decode is not valid UTF-8) is never
+    /// legal, so sampling one means the mask was bypassed: it wedges the
+    /// processor too, and the next step keeps only EOS.
+    func testUnusableSampledTokenWedgesTheProcessorIntoEOS() throws {
+        try requireMLXRuntimeOrSkip()
+        let vocab = ["{", "\u{FFFD}", "}", "</s>"]
+        let table = TokenVocabularyTable(vocabularySize: vocab.count, stopTokenIDs: [3], decode: { vocab[$0] })
+        XCTAssertEqual(table.classification(of: 1), .unusable)
+        var processor = processor(vocab: vocab, stop: [3], greedy: true)
+        let logits = MLXArray([9.0, 1.0, 2.0, 0.5] as [Float]).reshaped([1, 4])
+        _ = processor.process(logits: logits)
+        let before = processor.state.diagnosticDescription
+        processor.didSample(token: MLXArray(Int32(1)))
+        XCTAssertEqual(processor.state.diagnosticDescription, before, "the state must not advance over an unusable token")
+
+        let masked = processor.process(logits: logits).reshaped([4])
+        masked.eval()
+        let values = masked.asArray(Float.self)
+        XCTAssertEqual(values[0], -Float.infinity)
+        XCTAssertEqual(values[1], -Float.infinity)
+        XCTAssertEqual(values[2], -Float.infinity)
+        XCTAssertEqual(values[3], 0.5, accuracy: 1e-4)
+        XCTAssertEqual(argMax(masked, axis: -1).item(Int.self), 3)
     }
 
     /// Greedy path, top token illegal: the highest-logit *legal* token is kept

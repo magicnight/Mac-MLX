@@ -152,7 +152,7 @@ final class WhitespaceSuppressionMaskTests: XCTestCase {
     /// the default 256-token first pass would never reach those loops.
     private func processor(vocab: [String], greedy: Bool) -> JSONConstraintProcessor {
         JSONConstraintProcessor(
-            format: .jsonSchema(JSONSchemaObject(properties: [.init(name: "a", type: .string)], required: ["a"])),
+            format: .jsonSchema(.object(JSONSchemaObject(properties: [.init(name: "a", type: .string)], required: ["a"]))),
             inner: nil,
             cache: TokenVocabularyCache(),
             modelID: "test-whitespace-\(greedy)",

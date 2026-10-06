@@ -14,14 +14,21 @@
 ///  - `{"type":"text"}` and an absent/`null` field → no constraint (`nil`).
 ///  - `{"type":"json_object"}` → ``ResponseFormat/jsonObject`` (C1).
 ///  - `{"type":"json_schema","json_schema":{"schema":{…}}}` → C2, where the
-///    schema is an object whose properties are, at any depth:
+///    schema's root, and every property and item below it, is one of:
 ///     - `string`, `number`, `integer` or `boolean`;
 ///     - a string `enum`, or a string `const` (a one-value enum);
-///     - a nested object: `properties`, an optional `required` list, and
+///     - an object: `properties`, an optional `required` list, and
 ///       `additionalProperties: false` when present;
 ///     - an array: an `items` schema and optional `minItems` / `maxItems`;
 ///     - a `$ref` to `#/$defs/<name>` or `#/definitions/<name>` of the root.
 ///
+///    A root without `type` (and without `$ref`, `const` or `enum`) is an
+///    object.
+///    Property names, enum values and `const` values may be any string: the
+///    automaton matches them scalar by scalar — a scalar outside ASCII raw or
+///    as a JSON escape, the quote, the backslash and control characters as
+///    an escape, every other ASCII scalar raw — so nothing a schema declares
+///    is unspellable.
 ///    `description`, `title`, `default`, `examples`, `$comment`, `deprecated`,
 ///    `readOnly` and `writeOnly` are accepted and ignored anywhere; so is
 ///    `x-order` on an object, and
@@ -34,10 +41,10 @@
 ///    and a `required` list may not repeat a name.
 ///
 /// Everything else — combinators, `null`, type arrays, numeric and string
-/// bounds (`minimum`, `pattern`, …), non-object roots,
-/// `additionalProperties: true`, free-form objects and arrays, any unknown
-/// keyword — is an explicit ``ResponseFormatError/unsupportedFeature(_:)``.
-/// An enforceable-looking constraint is never silently dropped.
+/// bounds (`minimum`, `pattern`, …), `additionalProperties: true`, free-form
+/// objects and arrays, any unknown keyword — is an explicit
+/// ``ResponseFormatError/unsupportedFeature(_:)``. An enforceable-looking
+/// constraint is never silently dropped.
 public enum ResponseFormatDecoder {
 
     /// The most containers a compiled schema may hold open at once, the root
@@ -94,10 +101,28 @@ public enum ResponseFormatDecoder {
     private static let arrayKeys: Set<String> = ["type", "items", "minItems", "maxItems"]
     /// The keywords of a `const` schema besides annotations.
     private static let constKeys: Set<String> = ["type", "const"]
-    /// Keywords honoured only on the root object. A nested `$id` would rebase
-    /// `$ref` resolution and nested `$defs` would need scoped lookup, so both
-    /// stay a 400 below the root.
+    /// Keywords honoured only at the root, whatever its type. A nested `$id`
+    /// would rebase `$ref` resolution and nested `$defs` would need scoped
+    /// lookup, so both stay a 400 below the root.
     private static let rootOnlyKeys: Set<String> = ["$defs", "definitions", "$schema", "$id"]
+
+    /// Where a diagnostic points: the root, or a property path.
+    private static func location(_ path: String) -> String {
+        path.isEmpty ? "at the schema root" : "on property '\(path)'"
+    }
+
+    /// What a diagnostic names as the owner of a keyword: the schema itself at
+    /// the root, or a property.
+    private static func owner(_ path: String) -> String {
+        path.isEmpty ? "schema" : "property '\(path)'"
+    }
+
+    /// The path of property `name` under `path`. A property named "" is
+    /// written `""`, so that only the root has the empty path.
+    private static func childPath(_ path: String, _ name: String) -> String {
+        let segment = name.isEmpty ? "\"\"" : name
+        return path.isEmpty ? segment : "\(path).\(segment)"
+    }
 
     /// Decode the raw `response_format` field.
     ///
@@ -133,7 +158,7 @@ public enum ResponseFormatDecoder {
     /// envelope and compile it.
     private static func compileJSONSchemaEnvelope(
         _ root: [String: JSONValue]
-    ) throws -> JSONSchemaObject {
+    ) throws -> SchemaValueType {
         guard let envelopeValue = root["json_schema"] else {
             throw ResponseFormatError.invalidFormat("json_schema object is required")
         }
@@ -167,7 +192,7 @@ public enum ResponseFormatDecoder {
             guard nodes <= ResponseFormatDecoder.maxSchemaNodes else {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaNodes) nodes "
-                        + "after '$ref' expansion, at property '\(path)')")
+                        + "after '$ref' expansion, \(ResponseFormatDecoder.location(path)))")
             }
         }
 
@@ -177,7 +202,7 @@ public enum ResponseFormatDecoder {
             guard literals <= ResponseFormatDecoder.maxSchemaLiterals else {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaLiterals) enum and const values "
-                        + "after '$ref' expansion, at property '\(path)')")
+                        + "after '$ref' expansion, \(ResponseFormatDecoder.location(path)))")
             }
         }
 
@@ -188,26 +213,27 @@ public enum ResponseFormatDecoder {
             guard bytes <= ResponseFormatDecoder.maxSchemaBytes else {
                 throw ResponseFormatError.unsupportedFeature(
                     "schema too large (more than \(ResponseFormatDecoder.maxSchemaBytes) bytes of property names "
-                        + "and enum and const values after '$ref' expansion, at property '\(path)')")
+                        + "and enum and const values after '$ref' expansion, \(ResponseFormatDecoder.location(path)))")
             }
         }
     }
 
-    /// Compile the top-level schema, which must be an object.
-    static func compileRootSchema(_ schema: [String: JSONValue]) throws -> JSONSchemaObject {
-        if let typeValue = schema["type"] {
-            guard case .string(let type) = typeValue else {
-                throw ResponseFormatError.invalidFormat("schema.type must be a string")
-            }
-            guard type == "object" else {
-                throw ResponseFormatError.unsupportedFeature(
-                    "top-level type '\(type)' (only 'object' is supported)")
-            }
-        }
+    /// Compile the top-level schema: a value of any supported type. The root's
+    /// definition tables are read here and the root-only keywords stripped, so
+    /// the value compiler sees the root like any other position.
+    static func compileRootSchema(_ schema: [String: JSONValue]) throws -> SchemaValueType {
         var context = Context(
             defs: try definitionTable(schema["$defs"], keyword: "$defs"),
             definitions: try definitionTable(schema["definitions"], keyword: "definitions"))
-        return try compileObject(schema, path: "", depth: 1, isRoot: true, context: &context)
+        var root = schema
+        for key in rootOnlyKeys { root[key] = nil }
+        // A root without a type is an object, as it always was — unless it is
+        // plainly something else: a `$ref`, a `const`, or an `enum`, which
+        // the value rules then report as it is (an enum needs its `type`).
+        if root["type"] == nil, root["$ref"] == nil, root["const"] == nil, root["enum"] == nil {
+            return .object(try compileObject(root, path: "", depth: 1, context: &context))
+        }
+        return try compileValue(root, path: "", depth: 0, context: &context)
     }
 
     private static func definitionTable(_ value: JSONValue?, keyword: String) throws -> [String: JSONValue] {
@@ -218,20 +244,27 @@ public enum ResponseFormatDecoder {
         return table
     }
 
-    /// Compile an object schema: the root (`isRoot`) or a nested object at
-    /// `path`. `depth` counts this object's own container.
+    /// Compile an object schema: the root, or a nested object at `path`.
+    /// `depth` counts this object's own container.
     static func compileObject(
         _ schema: [String: JSONValue],
         path: String,
         depth: Int,
-        isRoot: Bool,
         context: inout Context
     ) throws -> JSONSchemaObject {
+        // Only the root position has the empty path (a property named "" is
+        // written `""`, see `childPath`); a root `$ref` target is compiled
+        // there too. The root is worded as "the schema", the rest as a
+        // property.
+        let isRoot = path.isEmpty
         let location = isRoot ? "at the schema root" : "on property '\(path)'"
         // Allow-list gate. At the root this is the C3 fix: keywords such as
         // `allOf` or `minProperties` used to be accepted there and enforced by
-        // nothing.
-        let allowed = objectKeys.union(annotationKeys).union(isRoot ? rootOnlyKeys : [])
+        // nothing. The root-only keywords are not on the list: the root's were
+        // read and stripped by `compileRootSchema`, so one that reaches here
+        // sits below the root — in a `$ref` target or under a property named
+        // "", which share the root's empty path — and is a 400 like any other.
+        let allowed = objectKeys.union(annotationKeys)
         for key in schema.keys.sorted() where !allowed.contains(key) {
             throw ResponseFormatError.unsupportedFeature("unsupported schema keyword '\(key)' \(location)")
         }
@@ -268,17 +301,13 @@ public enum ResponseFormatDecoder {
         // runtime automaton accepts keys in any order).
         var compiled: [JSONSchemaObject.Property] = []
         for name in properties.keys.sorted() {
-            let childPath = path.isEmpty ? name : "\(path).\(name)"
-            try context.spendBytes(of: name, at: childPath)
-            // The runtime key matcher compares literal UTF-8 bytes, so a declared
-            // key the model could never spell would deadlock a `required` object
-            // into the no-legal-token path — reject it up front (M2).
-            try requireLiteralMatchable(name, role: "property key '\(childPath)'")
+            let child = childPath(path, name)
+            try context.spendBytes(of: name, at: child)
             guard let propertyValue = properties[name] else { continue }
             guard case .object(let property) = propertyValue else {
-                throw ResponseFormatError.invalidFormat("property '\(childPath)' must be an object")
+                throw ResponseFormatError.invalidFormat("property '\(child)' must be an object")
             }
-            let type = try compileValue(property, path: childPath, depth: depth, context: &context)
+            let type = try compileValue(property, path: child, depth: depth, context: &context)
             compiled.append(JSONSchemaObject.Property(name: name, type: type))
         }
 
@@ -287,25 +316,28 @@ public enum ResponseFormatDecoder {
             guard case .array(let entries) = requiredValue else {
                 throw ResponseFormatError.invalidFormat("\(owner).required must be an array")
             }
-            let declared = Set(compiled.map(\.name))
-            var listed = Set<String>()
+            // Compared scalar by scalar, as the automaton matches keys: `String`
+            // equality is canonical, so a decomposed "é" in `required` would
+            // otherwise pass for a precomposed one it can never match.
+            let declared = Set(compiled.map { Array($0.name.unicodeScalars) })
+            var listed = Set<[Unicode.Scalar]>()
             for entry in entries {
                 guard case .string(let name) = entry else {
                     throw ResponseFormatError.invalidFormat("\(owner).required entries must be strings")
                 }
                 // A `$ref` repeats this list once per reference, like the names.
-                try context.spendBytes(of: name, at: path.isEmpty ? name : "\(path).\(name)")
+                try context.spendBytes(of: name, at: childPath(path, name))
                 // JSON Schema requires unique entries. Refusing the first repeat,
                 // with every entry declared, keeps this loop to one pass over the
                 // declared properties however long the list is or however many
                 // times a `$ref` compiles it.
-                guard listed.insert(name).inserted else {
+                guard listed.insert(Array(name.unicodeScalars)).inserted else {
                     throw ResponseFormatError.invalidFormat(
                         isRoot
                             ? "required property '\(name)' is listed more than once"
                             : "required property '\(name)' is listed more than once in '\(path)'")
                 }
-                guard declared.contains(name) else {
+                guard declared.contains(Array(name.unicodeScalars)) else {
                     throw ResponseFormatError.invalidFormat(
                         isRoot
                             ? "required property '\(name)' is not declared in properties"
@@ -332,43 +364,49 @@ public enum ResponseFormatDecoder {
         if let refValue = schema["$ref"] {
             for key in schema.keys.sorted() where key != "$ref" && !annotationKeys.contains(key) {
                 throw ResponseFormatError.unsupportedFeature(
-                    "schema keyword '\(key)' alongside '$ref' on property '\(path)' "
+                    "schema keyword '\(key)' alongside '$ref' \(location(path)) "
                         + "(only annotations may accompany '$ref')")
             }
             guard case .string(let ref) = refValue else {
-                throw ResponseFormatError.invalidFormat("'$ref' on property '\(path)' must be a string")
+                throw ResponseFormatError.invalidFormat("'$ref' \(location(path)) must be a string")
             }
             let target = try resolve(ref, path: path, context: context)
             guard !context.expanding.contains(ref) else {
                 throw ResponseFormatError.unsupportedFeature(
-                    "recursive schema: '$ref' '\(ref)' on property '\(path)' refers back to itself "
+                    "recursive schema: '$ref' '\(ref)' \(location(path)) refers back to itself "
                         + "(recursive schemas cannot be bounded)")
             }
             guard context.expanding.count < maxSchemaDepth else {
                 throw ResponseFormatError.unsupportedFeature(
-                    "'$ref' chain deeper than \(maxSchemaDepth) on property '\(path)'")
+                    "'$ref' chain deeper than \(maxSchemaDepth) \(location(path))")
             }
             context.expanding.append(ref)
             defer { context.expanding.removeLast() }
-            return try compileValue(target, path: path, depth: depth, context: &context)
+            // The path names the position, not the definition, so a problem
+            // inside the target also says which reference led there.
+            do {
+                return try compileValue(target, path: path, depth: depth, context: &context)
+            } catch ResponseFormatError.unsupportedFeature(let message) {
+                throw ResponseFormatError.unsupportedFeature("\(message) (via '$ref' '\(ref)')")
+            } catch ResponseFormatError.invalidFormat(let message) {
+                throw ResponseFormatError.invalidFormat("\(message) (via '$ref' '\(ref)')")
+            }
         }
 
         // Apple's `@Guide(.constant(…))` emits `const` without a `type`.
         if let constValue = schema["const"] {
             for key in schema.keys.sorted() where !constKeys.contains(key) && !annotationKeys.contains(key) {
                 throw ResponseFormatError.unsupportedFeature(
-                    "unsupported schema keyword '\(key)' on property '\(path)'")
+                    "unsupported schema keyword '\(key)' \(location(path))")
             }
             if let typeValue = schema["type"], typeValue != .string("string") {
-                throw ResponseFormatError.unsupportedFeature("'const' on non-string property '\(path)'")
+                throw ResponseFormatError.unsupportedFeature("'const' on non-string \(owner(path))")
             }
             guard case .string(let value) = constValue else {
-                throw ResponseFormatError.unsupportedFeature("non-string 'const' on property '\(path)'")
+                throw ResponseFormatError.unsupportedFeature("non-string 'const' \(location(path))")
             }
             try context.spendLiterals(1, at: path)
             try context.spendBytes(of: value, at: path)
-            // Matched as a literal at runtime, like an enum value (M2).
-            try requireLiteralMatchable(value, role: "const value on property '\(path)'")
             return .stringEnum([value])
         }
 
@@ -377,12 +415,13 @@ public enum ResponseFormatDecoder {
         // through to the scalar rules and be reported as an unknown
         // `properties` keyword instead of what it is.
         if case .array? = schema["type"] {
-            throw ResponseFormatError.unsupportedFeature("type arrays (e.g. nullable unions) on property '\(path)'")
+            throw ResponseFormatError.unsupportedFeature("type arrays (e.g. nullable unions) \(location(path))")
         }
 
         switch schema["type"] {
         case .string("object")?:
-            return .object(try compileObject(schema, path: path, depth: depth + 1, isRoot: false, context: &context))
+            return .object(
+                try compileObject(schema, path: path, depth: depth + 1, context: &context))
         case .string("array")?:
             return try compileArray(schema, path: path, depth: depth + 1, context: &context)
         default:
@@ -399,37 +438,38 @@ public enum ResponseFormatDecoder {
         context: inout Context
     ) throws -> SchemaValueType {
         for key in schema.keys.sorted() where !arrayKeys.contains(key) && !annotationKeys.contains(key) {
-            throw ResponseFormatError.unsupportedFeature("unsupported schema keyword '\(key)' on property '\(path)'")
+            throw ResponseFormatError.unsupportedFeature("unsupported schema keyword '\(key)' \(location(path))")
         }
         guard depth <= maxSchemaDepth else {
             throw ResponseFormatError.unsupportedFeature(
-                "schema nesting deeper than \(maxSchemaDepth) levels on property '\(path)'")
+                "schema nesting deeper than \(maxSchemaDepth) levels \(location(path))")
         }
         let items: [String: JSONValue]
         switch schema["items"] {
         case nil:
             throw ResponseFormatError.unsupportedFeature(
-                "nested array without 'items' on property '\(path)' (free-form arrays are not supported)")
+                "\(path.isEmpty ? "array" : "nested array") without 'items' \(location(path)) "
+                    + "(free-form arrays are not supported)")
         case .object(let object)?:
             items = object
         case .array?:
-            throw ResponseFormatError.unsupportedFeature("tuple-form 'items' on property '\(path)'")
+            throw ResponseFormatError.unsupportedFeature("tuple-form 'items' \(location(path))")
         case .bool?:
-            throw ResponseFormatError.unsupportedFeature("boolean 'items' schema on property '\(path)'")
+            throw ResponseFormatError.unsupportedFeature("boolean 'items' schema \(location(path))")
         default:
-            throw ResponseFormatError.invalidFormat("'items' on property '\(path)' must be a schema object")
+            throw ResponseFormatError.invalidFormat("'items' \(location(path)) must be a schema object")
         }
         let minItems = try itemCount(schema["minItems"], keyword: "minItems", path: path) ?? 0
         guard minItems <= maxMinItems else {
             throw ResponseFormatError.unsupportedFeature(
-                "schema too large (minItems \(minItems) on property '\(path)' is above the limit of \(maxMinItems))")
+                "schema too large (minItems \(minItems) \(location(path)) is above the limit of \(maxMinItems))")
         }
         let maxItems = try itemCount(schema["maxItems"], keyword: "maxItems", path: path)
         // `minItems > maxItems` admits no document: `]` could never close the
         // array, so the automaton would be stuck at its last item.
         if let maxItems, minItems > maxItems {
             throw ResponseFormatError.invalidFormat(
-                "minItems (\(minItems)) exceeds maxItems (\(maxItems)) on property '\(path)'")
+                "minItems (\(minItems)) exceeds maxItems (\(maxItems)) \(location(path))")
         }
         let item = try compileValue(items, path: "\(path)[]", depth: depth, context: &context)
         return .array(items: item, minItems: minItems, maxItems: maxItems)
@@ -441,7 +481,7 @@ public enum ResponseFormatDecoder {
         guard let value else { return nil }
         guard case .int(let count) = value, count >= 0 else {
             throw ResponseFormatError.invalidFormat(
-                "\(keyword) on property '\(path)' must be a non-negative integer")
+                "\(keyword) \(location(path)) must be a non-negative integer")
         }
         return count
     }
@@ -459,37 +499,33 @@ public enum ResponseFormatDecoder {
         // silently dropped. Sorted so the reported keyword is deterministic.
         for key in property.keys.sorted() where !scalarKeys.contains(key) && !annotationKeys.contains(key) {
             throw ResponseFormatError.unsupportedFeature(
-                "unsupported schema keyword '\(key)' on property '\(name)'")
+                "unsupported schema keyword '\(key)' \(location(name))")
         }
 
         guard let typeValue = property["type"] else {
-            throw ResponseFormatError.invalidFormat("property '\(name)' is missing 'type'")
+            throw ResponseFormatError.invalidFormat("\(owner(name)) is missing 'type'")
         }
         guard case .string(let type) = typeValue else {
-            throw ResponseFormatError.invalidFormat("property '\(name)' type must be a string")
+            throw ResponseFormatError.invalidFormat("\(owner(name)) type must be a string")
         }
 
         if let enumValue = property["enum"] {
             guard case .array(let entries) = enumValue, !entries.isEmpty else {
                 throw ResponseFormatError.invalidFormat(
-                    "property '\(name)' enum must be a non-empty array")
+                    "\(owner(name)) enum must be a non-empty array")
             }
             guard type == "string" else {
                 throw ResponseFormatError.unsupportedFeature(
-                    "enum on non-string property '\(name)'")
+                    "enum on non-string \(owner(name))")
             }
             try context.spendLiterals(entries.count, at: name)
             var values: [String] = []
             for entry in entries {
                 guard case .string(let value) = entry else {
                     throw ResponseFormatError.unsupportedFeature(
-                        "non-string enum value on property '\(name)'")
+                        "non-string enum value \(location(name))")
                 }
                 try context.spendBytes(of: value, at: name)
-                // Enum values are matched as literal bytes at runtime, so one the
-                // model could never spell would narrow (or, if the only choice,
-                // deadlock) the value — reject it up front (M2).
-                try requireLiteralMatchable(value, role: "enum value on property '\(name)'")
                 values.append(value)
             }
             return .stringEnum(values)
@@ -501,7 +537,7 @@ public enum ResponseFormatDecoder {
         case "integer": return .integer
         case "boolean": return .boolean
         default:
-            throw ResponseFormatError.unsupportedFeature("property type '\(type)' on property '\(name)'")
+            throw ResponseFormatError.unsupportedFeature("property type '\(type)' \(location(name))")
         }
     }
 
@@ -511,7 +547,7 @@ public enum ResponseFormatDecoder {
     /// `#/properties/…`, a deeper pointer — is unsupported.
     private static func resolve(_ ref: String, path: String, context: Context) throws -> [String: JSONValue] {
         let unsupported = ResponseFormatError.unsupportedFeature(
-            "'$ref' '\(ref)' on property '\(path)' "
+            "'$ref' '\(ref)' \(location(path)) "
                 + "(only '#/$defs/<name>' and '#/definitions/<name>' are supported)")
         let table: [String: JSONValue]
         let segment: Substring
@@ -530,7 +566,7 @@ public enum ResponseFormatDecoder {
         }
         guard let value = table[name] else {
             throw ResponseFormatError.invalidFormat(
-                "'$ref' '\(ref)' on property '\(path)' does not resolve to a definition")
+                "'$ref' '\(ref)' \(location(path)) does not resolve to a definition")
         }
         guard case .object(let target) = value else {
             throw ResponseFormatError.invalidFormat("'$ref' target '\(ref)' must be a schema object")
@@ -554,30 +590,5 @@ public enum ResponseFormatDecoder {
             }
         }
         return decoded
-    }
-
-    /// Reject a declared key or enum literal the byte-level runtime matcher could
-    /// never match (M2). That matcher compares literal UTF-8 bytes with no
-    /// JSON-unescaping and can only use whole-scalar tokens, so:
-    ///
-    ///  - a `"`, `\`, or control character (< 0x20) would require the string
-    ///    escaping we do not model — the literal bytes can never appear raw; and
-    ///  - a non-ASCII scalar may be unspellable by the tokenizer's complete-scalar
-    ///    tokens (a conservative v1 restriction; it can be relaxed later by
-    ///    modeling `\uXXXX` / multi-byte escapes).
-    ///
-    /// A `required` property whose key hits either case would deadlock the
-    /// automaton into the no-legal-token path, so both are 400s at compile time
-    /// rather than a silent narrowing.
-    private static func requireLiteralMatchable(_ value: String, role: String) throws {
-        for scalar in value.unicodeScalars
-        where scalar == "\"" || scalar == "\\" || scalar.value < 0x20 {
-            throw ResponseFormatError.unsupportedFeature(
-                "\(role) requires JSON escaping we do not model (contains '\"', '\\', or a control character)")
-        }
-        for scalar in value.unicodeScalars where scalar.value > 0x7F {
-            throw ResponseFormatError.unsupportedFeature(
-                "\(role) contains non-ASCII characters (unsupported in v1)")
-        }
     }
 }

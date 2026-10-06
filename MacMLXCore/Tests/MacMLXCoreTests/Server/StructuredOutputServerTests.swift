@@ -135,6 +135,33 @@ struct StructuredOutputServerTests {
         #expect(message.contains("recursive schema"))
     }
 
+    /// The two shapes Apple's `@Generable` emits that used to be a 400: a
+    /// non-object root (`generating: [T].self`) and a non-ASCII enum value
+    /// (TripPlanner's "Lençóis Maranhenses").
+    @Test
+    func acceptsRootArrayAndUnicodeEnumSchemas() async throws {
+        let (server, _) = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_960)
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/v1/chat/completions"))
+
+        let itinerary = try JSONSerialization.jsonObject(with: StructuredOutputFixtures.data("fm_itinerary_production_fixture"))
+        let list: [String: Any] = ["type": "array", "items": ["type": "string", "enum": ["Lençóis", "Bogotá"]], "minItems": 1]
+        for schema in [itinerary, list] {
+            let body: [String: Any] = [
+                "model": "stub-model",
+                "messages": [["role": "user", "content": "hi"]],
+                "stream": false,
+                "response_format": [
+                    "type": "json_schema",
+                    "json_schema": ["name": "T", "strict": true, "schema": schema],
+                ],
+            ]
+            let (data, response) = try await postRaw(url, jsonObject: body)
+            #expect(response.statusCode == 200, "\(String(decoding: data, as: UTF8.self))")
+        }
+        await server.stop()
+    }
+
     @Test
     func acceptsJsonObjectResponseFormat() async throws {
         let (server, _) = try await loadedStubServer()

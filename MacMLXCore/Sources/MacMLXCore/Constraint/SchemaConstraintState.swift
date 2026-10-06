@@ -1,29 +1,36 @@
 // Copyright © 2026 macMLX. English comments only.
 
-/// A byte-level automaton that constrains generation to a specific
-/// ``JSONSchemaObject`` (Track C — C2).
+/// A byte-level automaton that constrains generation to a specific compiled
+/// schema, a root ``SchemaValueType`` (Track C — C2).
 ///
 /// Where ``JSONGrammarState`` accepts *any* well-formed JSON, this accepts only
-/// documents of the compiled schema: in every object, keys drawn from that
+/// documents of the compiled schema: at the root, a value of the root's type —
+/// an object, an array or a scalar; in every object, keys drawn from that
 /// object's declared set (each at most once, all required ones present, in any
 /// order) and each value matching its declared ``SchemaValueType`` — nested
-/// objects and arrays included, every array within its item bounds. It is the
-/// runtime companion to ``ResponseFormatDecoder`` and, like
-/// ``JSONGrammarState``, is a pure value type — token classification is a
-/// non-mutating ``walk(_:)`` fold, MLX-free and unit-testable.
+/// objects and arrays included, every array within its item bounds. Keys and
+/// enum values are matched scalar by scalar — a scalar outside ASCII raw or
+/// as a JSON escape, the quote, the backslash and control characters as an
+/// escape, every other ASCII scalar raw (``LiteralMatch``). It is the runtime
+/// companion to
+/// ``ResponseFormatDecoder`` and, like ``JSONGrammarState``, is a pure value
+/// type — token classification is a non-mutating ``walk(_:)`` fold, MLX-free
+/// and unit-testable.
 ///
 /// ## Shape
 /// A stack of open containers (``Frame``) plus one lexical ``Mode``. The schema
 /// itself lives in a shared, immutable ``SchemaProgram`` built once in
-/// ``init(schema:)``. The scalar in progress lives in the mode, never in a
+/// ``init(root:)``. The scalar in progress lives in the mode, never in a
 /// frame, so string and number bytes — most of any document — never touch the
 /// stack, and a walk copies at most the open frames, once.
 ///
 /// ## No dead ends
 /// Every reachable state can still reach a complete document: `,` is legal
 /// only where another member or item can follow, the compiler guarantees
-/// `minItems <= maxItems` and that every required key is declared and
-/// spellable, and `\u` escapes are cut off as soon as they cannot complete.
+/// `minItems <= maxItems` and that every required key is declared, every
+/// literal has an all-ASCII spelling (printable ASCII raw, everything else
+/// escaped, so a key the tokenizer cannot spell raw is still reachable), and
+/// `\u` escapes are cut off as soon as they cannot complete.
 public struct SchemaConstraintState: Hashable, Sendable {
 
     /// One open container.
@@ -32,7 +39,9 @@ public struct SchemaConstraintState: Hashable, Sendable {
         /// An object of node `node`. A member is marked `emitted` when its key's
         /// closing quote is read.
         case object(node: Int32, emitted: PropertyMask)
-        /// An array of node `node`; `count` items have been started.
+        /// An array of node `node`; `count` items have been started — held at
+        /// `minItems` once an unbounded array has that many, past which the
+        /// count decides nothing (see ``startValue(_:node:)``).
         case array(node: Int32, count: Int)
     }
 
@@ -47,16 +56,15 @@ public struct SchemaConstraintState: Hashable, Sendable {
         /// Just after `{` (`afterComma == false`) or after `,` in an object: a
         /// key not yet emitted, or `}` (never right after a comma).
         case objectOpen(afterComma: Bool)
-        /// Inside a key; `candidates` are the members not yet emitted whose
-        /// names match the first `position` bytes read.
-        case key(position: Int, candidates: PropertyMask)
+        /// Inside a key: the match against the members not yet emitted.
+        case key(LiteralMatch)
         /// A key was read; whitespace, `:`, then a value of `value`.
         case colon(value: SchemaProgram.NodeRef)
         /// Inside a scalar value.
         case scalar(SchemaScalarState)
         /// A value just completed in the innermost container: whitespace, `,`,
-        /// or that container's close. With an empty stack the root object has
-        /// closed — the accept state, where only whitespace may follow.
+        /// or that container's close. With an empty stack the root value has
+        /// ended — the accept state, where only whitespace may follow.
         case afterValue
     }
 
@@ -64,19 +72,33 @@ public struct SchemaConstraintState: Hashable, Sendable {
     @usableFromInline var stack: ContiguousArray<Frame>
     @usableFromInline var mode: Mode
 
-    /// A fresh automaton positioned before the schema's object.
-    public init(schema: JSONSchemaObject) {
-        let program = SchemaProgram(root: schema)
+    /// A fresh automaton positioned before the root value.
+    public init(root: SchemaValueType) {
+        let program = SchemaProgram(root: root)
         self.program = program
         self.stack = []
         self.stack.reserveCapacity(4)
         self.mode = .expectValue(node: program.root)
     }
 
-    /// Whether the schema object has been fully and validly produced — the
-    /// accept state, and the only state in which EOS is permitted.
+    /// A fresh automaton positioned before a root object.
+    public init(schema: JSONSchemaObject) {
+        self.init(root: .object(schema))
+    }
+
+    /// Whether the root value has been fully and validly produced — the accept
+    /// state, and the only state in which EOS is permitted. A root number has
+    /// no terminator byte, so a root in a terminal number state counts too
+    /// (as in ``JSONGrammarState/isComplete``).
     @inlinable
-    public var isComplete: Bool { stack.isEmpty && mode == .afterValue }
+    public var isComplete: Bool {
+        guard stack.isEmpty else { return false }
+        switch mode {
+        case .afterValue: return true
+        case .scalar(let scalar): return scalar.isCompleteNumber
+        default: return false
+        }
+    }
 
     /// Whether the automaton is inside a string literal — a key (matched byte by
     /// byte against the declared names), a string value or an enum literal —
@@ -118,12 +140,18 @@ public struct SchemaConstraintState: Hashable, Sendable {
         let frames = stack.map { frame -> String in
             switch frame {
             case .object(let node, let emitted): return "object(emitted: \(names(emitted, node: node)))"
-            case .array(_, let count): return "array(count: \(count))"
+            case .array(let node, let count):
+                // An unbounded array's count holds at `minItems` (see
+                // ``startValue(_:node:)``); there it means "at least".
+                let array = program.arrays[Int(node)]
+                return array.maxItems == nil && count == array.minItems
+                    ? "array(count: ≥\(count))" : "array(count: \(count))"
             }
         }
         var modeText = "\(mode)"
-        if case .key(let position, let candidates) = mode, case .object(let node, _)? = stack.last {
-            modeText = "key(position: \(position), candidates: \(names(candidates, node: node)))"
+        if case .key(let match) = mode, case .object(let node, _)? = stack.last {
+            modeText = "key(position: \(match.unit), candidates: \(names(match.candidates, node: node)), "
+                + "progress: \(match.progress))"
         }
         return "schema(mode: \(modeText), frames: [\(frames.joined(separator: ", "))], complete: \(isComplete))"
     }
@@ -134,17 +162,19 @@ public struct SchemaConstraintState: Hashable, Sendable {
     private func names(_ members: PropertyMask, node: Int32) -> String {
         let keys = program.objects[Int(node)].keys
         let listed = keys.indices.filter(members.contains)
-        var shown = listed.prefix(8).map { "\"\(String(decoding: keys[$0], as: UTF8.self))\"" }
+        var shown = listed.prefix(8).map { "\"\(keys[$0].text)\"" }
         if listed.count > 8 { shown.append("… (+\(listed.count - 8))") }
         return "[" + shown.joined(separator: ", ") + "]"
     }
 
-    /// Two states are equal when they are at the same position of equal
-    /// schemas: the programs are compared by identity first, then by the schema
-    /// they were compiled from.
+    /// Two states are equal when they are at the same position of the same
+    /// schema: the programs are compared by identity first, then table by
+    /// table, scalar by scalar — not through the schema values they were
+    /// compiled from, whose `String` equality is canonical and would equate a
+    /// precomposed key with a decomposed one the automaton tells apart.
     public static func == (lhs: SchemaConstraintState, rhs: SchemaConstraintState) -> Bool {
         lhs.mode == rhs.mode && lhs.stack == rhs.stack
-            && (lhs.program === rhs.program || lhs.program.source == rhs.program.source)
+            && (lhs.program === rhs.program || lhs.program.isEquivalent(to: rhs.program))
     }
 
     /// Covers the position only, which is consistent with ``==``.
@@ -179,7 +209,7 @@ public struct SchemaConstraintState: Hashable, Sendable {
             if byte == SchemaBytes.quote {
                 let remaining = object.all.subtracting(emitted)
                 guard !remaining.isEmpty else { return false }
-                mode = .key(position: 0, candidates: remaining)
+                mode = .key(LiteralMatch(candidates: remaining))
                 return true
             }
             if byte == SchemaBytes.rBrace {
@@ -188,22 +218,21 @@ public struct SchemaConstraintState: Hashable, Sendable {
             }
             return false
 
-        case .key(let position, let candidates):
+        case .key(let match):
             guard case .object(let node, var emitted)? = stack.last else { return false }
-            let keys = program.objects[Int(node)].keys
-            if byte == SchemaBytes.quote {
-                // Close the key only on an exact match with a remaining name.
-                guard let member = candidates.first(where: { keys[$0].count == position }) else { return false }
+            switch match.step(byte, literals: program.objects[Int(node)].keys) {
+            case .continued(let next):
+                mode = .key(next)
+                return true
+            case .completed(let member):
+                // The closing quote matched a remaining name exactly.
                 emitted.insert(member)
                 stack[stack.count - 1] = .object(node: node, emitted: emitted)
                 mode = .colon(value: program.objects[Int(node)].values[member])
                 return true
+            case .rejected:
+                return false
             }
-            // Otherwise the byte must extend the key toward a remaining name.
-            let survivors = candidates.filtered { keys[$0].count > position && keys[$0][position] == byte }
-            guard !survivors.isEmpty else { return false }
-            mode = .key(position: position + 1, candidates: survivors)
-            return true
 
         case .colon(let value):
             if SchemaBytes.isWhitespace(byte) { return true }
@@ -239,8 +268,13 @@ public struct SchemaConstraintState: Hashable, Sendable {
     @usableFromInline
     mutating func startValue(_ byte: UInt8, node: SchemaProgram.NodeRef) -> Bool {
         if case .array(let arrayNode, let count)? = stack.last {
-            if let maxItems = program.arrays[Int(arrayNode)].maxItems, count >= maxItems { return false }
-            stack[stack.count - 1] = .array(node: arrayNode, count: count + 1)
+            let array = program.arrays[Int(arrayNode)]
+            if let maxItems = array.maxItems, count >= maxItems { return false }
+            // In an unbounded array the count past `minItems` decides nothing
+            // (only `]` consults it), so it stops there: the states of such an
+            // array stay finite, and a search over them can finish.
+            let counted = array.maxItems == nil ? Swift.min(count + 1, array.minItems) : count + 1
+            stack[stack.count - 1] = .array(node: arrayNode, count: counted)
         }
         switch node {
         case .object(let objectNode):

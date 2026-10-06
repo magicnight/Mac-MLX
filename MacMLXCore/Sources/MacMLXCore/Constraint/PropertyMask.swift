@@ -91,6 +91,10 @@ struct PropertyMask: Hashable, Sendable {
         return result
     }
 
+    /// The smallest member, if any.
+    @inlinable
+    var first: Int? { first(where: { _ in true }) }
+
     /// The smallest member satisfying `predicate`, if any.
     @inlinable
     func first(where predicate: (Int) -> Bool) -> Int? {
