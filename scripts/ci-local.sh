@@ -122,7 +122,8 @@ job_metal() {
         -scheme MacMLXCore \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
-        -derivedDataPath "$DERIVED_METAL" )
+        -derivedDataPath "$DERIVED_METAL" \
+        -resultBundlePath "$LOGS/metal.xcresult" )
 }
 
 job_app() {
@@ -191,7 +192,8 @@ PY
         -configuration Debug \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
-        -derivedDataPath "$DERIVED_APP"
+        -derivedDataPath "$DERIVED_APP" \
+        -resultBundlePath "$LOGS/app.xcresult"
 }
 
 # ------------------------------------------------------------- runner ----
@@ -204,18 +206,24 @@ SUMMARY="$LOGS/summary.md"
     echo "|---|---|---|---|---|"
 } > "$SUMMARY"
 
-# The lines of a job's log that say what ran: swift-testing and XCTest totals,
-# the fork-pin verdict, the CLI's version. Counted, since a suite's total line
-# can be cut by an interleaved xcodebuild line while its per-test lines stay.
+# What a job ran. An xcodebuild job's counts come from its result bundle:
+# the console is xcodebuild's own log interleaved with the test runner's, and
+# a summary line can be cut in two. `swift test` writes its summary itself,
+# in order, so the spm job's counts come from the console.
 evidence() {
+    local job="$1" log="$2" bundle="$LOGS/$1.xcresult"
     {
-        grep -o 'Test run with [0-9]* tests in [0-9]* suites passed' "$1" | sort | uniq -c | sed 's/^ *\([0-9]*\) /\1× /'
-        grep -o 'Executed [0-9]* tests, with [0-9]* tests skipped and [0-9]* failures' "$1" | tail -1
-        grep -o 'Executed [0-9]* tests, with [0-9]* failures' "$1" | tail -1
-        n=$(grep -c '✔ Test "' "$1" || true); f=$(grep -c '✘ Test "' "$1" || true)
-        [ "$n" -gt 0 ] && echo "$n ✔ / $f ✘ test lines"
-        grep -o 'app resolved the fork at the pinned revision [0-9a-f]\{7\}' "$1" | head -1
-        grep -o '^macmlx [0-9][^ ]*' "$1" | head -1
+        if [ -d "$bundle" ]; then
+            xcrun xcresulttool get test-results summary --path "$bundle" 2>/dev/null | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+print(f"{s.get(\"passedTests\", \"?\")} passed, {s.get(\"failedTests\", \"?\")} failed, {s.get(\"skippedTests\", \"?\")} skipped of {s.get(\"totalTestCount\", \"?\")} ({s.get(\"result\", \"?\")})")
+' || echo "result bundle unreadable"
+        else
+            grep -o 'Test run with [0-9]* tests in [0-9]* suites passed' "$log" | sort | uniq -c | sed 's/^ *\([0-9]*\) /\1× /'
+        fi
+        grep -o 'app resolved the fork at the pinned revision [0-9a-f]\{7\}' "$log" | head -1
+        grep -o '^macmlx [0-9][^ ]*' "$log" | head -1
     } 2>/dev/null | paste -sd ';' - | sed 's/;/; /g'
 }
 
@@ -240,7 +248,7 @@ for job in "${JOBS[@]}"; do
     fi
     duration=$(( $(date +%s) - start ))
     printf '==> %-8s %s in %dm%02ds (%s)\n' "$job" "$result" $((duration / 60)) $((duration % 60)) "$log"
-    echo "| $job | $result | $((duration / 60))m$((duration % 60))s | $(evidence "$log") | \`$log\` |" >> "$SUMMARY"
+    echo "| $job | $result | $((duration / 60))m$((duration % 60))s | $(evidence "$job" "$log") | \`$log\` |" >> "$SUMMARY"
     if [ "$result" = "FAILED" ]; then
         echo "    --- last 40 lines of $log ---"
         tail -40 "$log" | sed 's/^/    /'
