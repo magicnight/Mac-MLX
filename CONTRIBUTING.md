@@ -69,8 +69,16 @@ xcodebuild -project macMLX/macMLX.xcodeproj -scheme macMLX \
            -configuration Debug -destination 'platform=macOS' build
 ```
 
-All three must succeed before `git push`. If the Xcode build fails with a
-"missing Metal Toolchain" error on a fresh Mac, run:
+All three must succeed before `git push`. To run the whole CI pipeline here
+instead — the same four jobs as `ci.yml`, with the same commands — use
+`scripts/ci-local.sh` (pick jobs with `scripts/ci-local.sh website spm`;
+each run leaves its logs and a pasteable `summary.md` under
+`~/Library/Caches/macmlx-ci-local/logs/`). When GitHub Actions minutes are
+exhausted, that script *is* the pipeline: a PR merges on a green run on its
+head, with the summary posted in the PR.
+
+If the Xcode build fails with a "missing Metal Toolchain" error on a fresh
+Mac, run:
 
 ```bash
 sudo xcodebuild -downloadComponent MetalToolchain

@@ -175,8 +175,19 @@ Triggers on: `v*.*.*` tags
 
 ### ci.yml (push to main / PR)
 
-1. Swift build + test
-2. SwiftLint
+Four jobs on `macos-26` with Xcode 26.4.1 pinned: `website` (static site
+build and tests), `spm` (`swift test` for MacMLXCore and macmlx-cli, the
+lockfiles unchanged by resolve, `macmlx --version`), `metal` (the full
+MacMLXCore suite under `xcodebuild test`; strict numeric parity is skipped
+on the runners' paravirtualized Metal), `app` (unsigned Debug build, the app
+resolved the controlled mlx-swift fork at the pinned revision, `macMLXTests`).
+
+`scripts/ci-local.sh [website] [spm] [metal] [app]` runs the same jobs with
+the same commands on a developer machine: shared caches under
+`~/Library/Caches/macmlx-ci-local`, a `summary.md` per run, `DEVELOPER_DIR`
+to pick the Xcode, `CI_LOCAL_UNTRUSTED_METAL=1` to skip parity as CI does.
+When Actions minutes are out it is the merge gate: a PR merges on a green
+local run on its head, with the summary posted in the PR.
 
 ## Without Developer Account
 
