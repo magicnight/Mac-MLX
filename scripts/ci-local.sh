@@ -214,11 +214,17 @@ evidence() {
     local job="$1" log="$2" bundle="$LOGS/$1.xcresult"
     {
         if [ -d "$bundle" ]; then
-            xcrun xcresulttool get test-results summary --path "$bundle" 2>/dev/null | python3 -c '
+            local summary="$LOGS/$job.summary.json"
+            if xcrun xcresulttool get test-results summary --path "$bundle" > "$summary" 2>/dev/null; then
+                python3 - "$summary" <<'PY'
 import json, sys
-s = json.load(sys.stdin)
-print(f"{s.get(\"passedTests\", \"?\")} passed, {s.get(\"failedTests\", \"?\")} failed, {s.get(\"skippedTests\", \"?\")} skipped of {s.get(\"totalTestCount\", \"?\")} ({s.get(\"result\", \"?\")})")
-' || echo "result bundle unreadable"
+s = json.load(open(sys.argv[1]))
+def g(key): return s.get(key, "?")
+print(f"{g('passedTests')} passed, {g('failedTests')} failed, {g('skippedTests')} skipped of {g('totalTestCount')} ({g('result')})")
+PY
+            else
+                echo "result bundle unreadable"
+            fi
         else
             grep -o 'Test run with [0-9]* tests in [0-9]* suites passed' "$log" | sort | uniq -c | sed 's/^ *\([0-9]*\) /\1× /'
         fi
