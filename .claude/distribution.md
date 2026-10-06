@@ -2,7 +2,7 @@
 
 ## Build Requirements
 
-- Xcode 15+
+- Xcode 26.4.1, the version `ci.yml` and `release.yml` pin (Xcode 27.0 builds and tests it too)
 - macOS 14.0+ build machine (Apple Silicon)
 - No Apple Developer account required for development
 - Sparkle framework for auto-update
@@ -175,19 +175,24 @@ Triggers on: `v*.*.*` tags
 
 ### ci.yml (push to main / PR)
 
-Four jobs on `macos-26` with Xcode 26.4.1 pinned: `website` (static site
-build and tests), `spm` (`swift test` for MacMLXCore and macmlx-cli, the
-lockfiles unchanged by resolve, `macmlx --version`), `metal` (the full
-MacMLXCore suite under `xcodebuild test`; strict numeric parity is skipped
-on the runners' paravirtualized Metal), `app` (unsigned Debug build, the app
-resolved the controlled mlx-swift fork at the pinned revision, `macMLXTests`).
+Four jobs on `macos-26`: `website` (static site build and tests, the
+runner's Node), and with Xcode 26.4.1 pinned `spm` (`swift test` for
+MacMLXCore and macmlx-cli, the lockfiles unchanged by resolve,
+`macmlx --version`), `metal` (the full MacMLXCore suite under
+`xcodebuild test`; strict numeric parity is skipped on the runners'
+paravirtualized Metal), `app` (unsigned Debug build, the app resolved the
+controlled mlx-swift fork at the pinned revision, `macMLXTests`).
 
 `scripts/ci-local.sh [website] [spm] [metal] [app]` runs the same jobs with
-the same commands on a developer machine: shared caches under
-`~/Library/Caches/macmlx-ci-local`, a `summary.md` per run, `DEVELOPER_DIR`
-to pick the Xcode, `CI_LOCAL_UNTRUSTED_METAL=1` to skip parity as CI does.
-When Actions minutes are out it is the merge gate: a PR merges on a green
-local run on its head, with the summary posted in the PR.
+the same commands on a developer machine, in a fresh worktree of the commit
+under test (`CI_LOCAL_REF`, default HEAD): shared caches under
+`~/Library/Caches/macmlx-ci-local` held by one run at a time, a `summary.md`
+per run with per-job evidence from the result bundles, the Xcode `ci.yml`
+pins when it is installed (else the selected one, and the verdict says so),
+`CI_LOCAL_UNTRUSTED_METAL=1` to skip parity as CI does. When Actions minutes
+are out it is the merge gate: the maintainer runs all four jobs from `main`'s
+copy of the script against the exact PR head and posts the summary in the
+PR. `ci.yml` and the script change together.
 
 ## Without Developer Account
 

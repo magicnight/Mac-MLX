@@ -70,12 +70,23 @@ xcodebuild -project macMLX/macMLX.xcodeproj -scheme macMLX \
 ```
 
 All three must succeed before `git push`. To run the whole CI pipeline here
-instead — the same four jobs as `ci.yml`, with the same commands — use
-`scripts/ci-local.sh` (pick jobs with `scripts/ci-local.sh website spm`;
-each run leaves its logs and a pasteable `summary.md` under
-`~/Library/Caches/macmlx-ci-local/logs/`). When GitHub Actions minutes are
-exhausted, that script *is* the pipeline: a PR merges on a green run on its
-head, with the summary posted in the PR.
+instead — the same four jobs as `ci.yml`, with the same commands, in a
+fresh worktree of the commit under test — use `scripts/ci-local.sh` (pick
+jobs with `scripts/ci-local.sh website spm`; `CI_LOCAL_REF=<sha>` tests
+another commit; each run leaves its logs, result bundles and a pasteable
+`summary.md` under `~/Library/Caches/macmlx-ci-local/logs/`). Uncommitted
+and untracked files are not part of a run, and the summary says so when
+there are any.
+
+While GitHub Actions minutes are exhausted that script *is* the pipeline,
+and the gate is this: the maintainer runs the default four-job set, from
+`main`'s copy of the script, against the exact PR head (`CI_LOCAL_REF`), and
+posts the summary in the PR; a contributor's own summary is informational.
+A PR from a fork is run only after its diff has been read, because the jobs
+run as the maintainer's user with the maintainer's credentials, not in a
+throwaway VM. `ci.yml` pins Xcode 26.4.1; a run on another Xcode says so in
+its verdict, and merged code is then unverified under the release toolchain
+until Actions are back.
 
 If the Xcode build fails with a "missing Metal Toolchain" error on a fresh
 Mac, run:
