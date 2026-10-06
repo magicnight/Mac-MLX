@@ -229,7 +229,8 @@ PY
             grep -o 'Test run with [0-9]* tests in [0-9]* suites passed' "$log" | sort | uniq -c | sed 's/^ *\([0-9]*\) /\1× /'
         fi
         grep -o 'app resolved the fork at the pinned revision [0-9a-f]\{7\}' "$log" | head -1
-        grep -o '^macmlx [0-9][^ ]*' "$log" | head -1
+        # `macmlx --version` prints the bare version on its own line.
+        grep -o '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][^ ]*$' "$log" | tail -1 | sed 's/^/macmlx --version: /'
     } 2>/dev/null | paste -sd ';' - | sed 's/;/; /g'
 }
 
