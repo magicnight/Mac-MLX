@@ -9,8 +9,9 @@
 #
 # Environment:
 #   CI_LOCAL_CACHE            build caches shared across checkouts (SwiftPM
-#                             scratch paths, DerivedData); stands in for
-#                             actions/cache. Default ~/Library/Caches/macmlx-ci-local
+#                             scratch paths, one DerivedData per xcodebuild
+#                             job); stands in for actions/cache.
+#                             Default ~/Library/Caches/macmlx-ci-local
 #   CI_LOCAL_LOGS             where the per-job logs and summary.md go.
 #                             Default $CI_LOCAL_CACHE/logs/<utc time>-<head>-<pid>
 #   CI_LOCAL_UNTRUSTED_METAL  set to 1 to skip the strict numeric parity suites
@@ -41,8 +42,13 @@ HEAD="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 DIRTY=""
 if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then DIRTY=" (dirty tree)"; fi
 LOGS="${CI_LOCAL_LOGS:-$CACHE/logs/$(date -u +%Y%m%dT%H%M%SZ)-$HEAD-$$}"
-DERIVED="$CACHE/DerivedData"
-mkdir -p "$LOGS" "$DERIVED" "$CACHE/spm"
+# One DerivedData per xcodebuild job, as CI has one runner per job: the
+# package and the app project resolve the same dependencies into
+# `SourcePackages` at their own versions, and sharing one directory left the
+# package's resolution reading the app's checkouts (a hummingbird trait error).
+DERIVED_METAL="$CACHE/DerivedData/metal"
+DERIVED_APP="$CACHE/DerivedData/app"
+mkdir -p "$LOGS" "$DERIVED_METAL" "$DERIVED_APP" "$CACHE/spm"
 
 JOBS=("$@")
 if [ ${#JOBS[@]} -eq 0 ]; then JOBS=(website spm metal app); fi
@@ -116,7 +122,7 @@ job_metal() {
         -scheme MacMLXCore \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
-        -derivedDataPath "$DERIVED" )
+        -derivedDataPath "$DERIVED_METAL" )
 }
 
 job_app() {
@@ -126,7 +132,7 @@ job_app() {
         -configuration Debug \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
-        -derivedDataPath "$DERIVED" \
+        -derivedDataPath "$DERIVED_APP" \
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGNING_ALLOWED=NO \
@@ -185,7 +191,7 @@ PY
         -configuration Debug \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
-        -derivedDataPath "$DERIVED"
+        -derivedDataPath "$DERIVED_APP"
 }
 
 # ------------------------------------------------------------- runner ----
@@ -194,9 +200,24 @@ SUMMARY="$LOGS/summary.md"
 {
     echo "ci-local on \`$HEAD\`$DIRTY — $(date -u +'%Y-%m-%d %H:%M UTC'), $(sw_vers -productVersion), $(xcodebuild -version | head -1), $(swift --version 2>/dev/null | head -1 | sed 's/ (.*//')"
     echo
-    echo "| job | result | duration | log |"
-    echo "|---|---|---|---|"
+    echo "| job | result | duration | evidence | log |"
+    echo "|---|---|---|---|---|"
 } > "$SUMMARY"
+
+# The lines of a job's log that say what ran: swift-testing and XCTest totals,
+# the fork-pin verdict, the CLI's version. Counted, since a suite's total line
+# can be cut by an interleaved xcodebuild line while its per-test lines stay.
+evidence() {
+    {
+        grep -o 'Test run with [0-9]* tests in [0-9]* suites passed' "$1" | sort | uniq -c | sed 's/^ *\([0-9]*\) /\1× /'
+        grep -o 'Executed [0-9]* tests, with [0-9]* tests skipped and [0-9]* failures' "$1" | tail -1
+        grep -o 'Executed [0-9]* tests, with [0-9]* failures' "$1" | tail -1
+        n=$(grep -c '✔ Test "' "$1" || true); f=$(grep -c '✘ Test "' "$1" || true)
+        [ "$n" -gt 0 ] && echo "$n ✔ / $f ✘ test lines"
+        grep -o 'app resolved the fork at the pinned revision [0-9a-f]\{7\}' "$1" | head -1
+        grep -o '^macmlx [0-9][^ ]*' "$1" | head -1
+    } 2>/dev/null | paste -sd ';' - | sed 's/;/; /g'
+}
 
 FAILED=0
 for job in "${JOBS[@]}"; do
@@ -219,7 +240,7 @@ for job in "${JOBS[@]}"; do
     fi
     duration=$(( $(date +%s) - start ))
     printf '==> %-8s %s in %dm%02ds (%s)\n' "$job" "$result" $((duration / 60)) $((duration % 60)) "$log"
-    echo "| $job | $result | $((duration / 60))m$((duration % 60))s | \`$log\` |" >> "$SUMMARY"
+    echo "| $job | $result | $((duration / 60))m$((duration % 60))s | $(evidence "$log") | \`$log\` |" >> "$SUMMARY"
     if [ "$result" = "FAILED" ]; then
         echo "    --- last 40 lines of $log ---"
         tail -40 "$log" | sed 's/^/    /'
