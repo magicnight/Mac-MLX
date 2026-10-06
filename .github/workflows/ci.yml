@@ -29,6 +29,7 @@ on:
 #   - Consecutive pushes to the same ref cancel the older run.
 #   - SPM resolution + MLX C++ compile is cached across runs (~7min -> ~2min).
 #   - Use "[skip ci]" in a commit message to bypass entirely.
+#   - scripts/ci-local.sh mirrors these jobs step for step; change both.
 
 concurrency:
   group: ci-${{ github.ref }}
