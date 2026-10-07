@@ -577,13 +577,14 @@ public enum ResponseFormatDecoder {
 
     /// The numeric bounds of `property`. A bound is a JSON number of at most
     /// 19 significant digits and decimals (what the automaton can hold
-    /// exactly). An integer bound keeps every digit; a fractional one has
-    /// been read as a double by the request parser and is taken as the
-    /// shortest decimal that names that double, which is the literal as
-    /// written for anything a double carries (`0.3333333333333333`, as
-    /// serialisers write a third) and the rounded value for a longer one
-    /// (`1.0000000000000001` is 1). The draft-4 boolean form of
-    /// `exclusiveMinimum` / `exclusiveMaximum` is refused by name.
+    /// exactly). An integer bound within `Int` keeps every digit; any other —
+    /// fractional, or an integer beyond `Int` — has been read as a double by
+    /// the request parser and is taken as the shortest decimal that names
+    /// that double, which is the literal as written for anything a double
+    /// carries (`0.3333333333333333`, as serialisers write a third) and the
+    /// rounded value for a longer one (`1.0000000000000001` is 1). The
+    /// draft-4 boolean form of `exclusiveMinimum` / `exclusiveMaximum` is
+    /// refused by name.
     private static func rawBounds(of property: [String: JSONValue], path: String) throws -> RawBounds {
         var bounds = RawBounds()
         for keyword in boundKeys {

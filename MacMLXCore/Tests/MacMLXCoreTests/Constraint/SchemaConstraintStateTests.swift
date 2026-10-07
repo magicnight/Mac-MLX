@@ -514,7 +514,8 @@ struct SchemaConstraintStateTests {
         let inObject = try #require(walk("{\"n\":" + twoToTheSixtyFour, object))
         #expect(inObject.walk(Array("9".utf8)) == nil)
         #expect(inObject.walk(Array("}".utf8))?.isComplete == true)
-        // The emptiness walk holds the same mantissa when the bound sits there.
+        // A range at that value is a range (the emptiness walk never holds the
+        // mantissa itself: a 19-digit cell is one value, and this one is out).
         #expect(SchemaNumberBounds(minimum: SchemaDecimal(parsing: twoToTheSixtyFour), minimumIsExclusive: true, maximum: SchemaDecimal(parsing: "1844674407370955162")) != nil)
     }
 
