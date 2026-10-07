@@ -14,6 +14,13 @@ public enum SchemaValueType: Equatable, Hashable, Sendable, Codable {
     /// `{"type":"integer"}` — a JSON integer: optional sign then digits, with
     /// no fraction or exponent.
     case integer
+    /// `{"type":"integer","minimum":…,"maximum":…}` — an integer within the
+    /// bounds (`exclusiveMinimum` / `exclusiveMaximum` folded in).
+    case boundedInteger(SchemaIntegerBounds)
+    /// `{"type":"number","minimum":…,"maximum":…}` — a number within the
+    /// bounds, spelled as a plain decimal (no exponent) of at most 19
+    /// significant digits and 19 decimals (see ``SchemaNumberBounds``).
+    case boundedNumber(SchemaNumberBounds)
     /// `{"type":"boolean"}` — `true` or `false`.
     case boolean
     /// `{"type":"string","enum":[…]}` — exactly one of the given string

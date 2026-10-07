@@ -184,6 +184,40 @@ struct StructuredOutputServerTests {
         #expect(json["object"] as? String == "chat.completion")
     }
 
+    /// Numeric bounds, as `@Guide(.range(…))` emits them, are accepted.
+    @Test
+    func acceptsNumericBounds() async throws {
+        let (server, _) = try await loadedStubServer()
+        let port = try await server.start(preferredPort: 19_970)
+        let url = try #require(URL(string: "http://127.0.0.1:\(port)/v1/chat/completions"))
+
+        let body: [String: Any] = [
+            "model": "stub-model",
+            "messages": [["role": "user", "content": "hi"]],
+            "stream": false,
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "Report",
+                    "schema": [
+                        "type": "object",
+                        "properties": [
+                            "rating": ["type": "integer", "minimum": 1, "maximum": 10],
+                            "share": ["type": "number", "exclusiveMinimum": 0, "maximum": 1],
+                        ],
+                        "required": ["rating"],
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as [String: Any],
+        ]
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["object"] as? String == "chat.completion")
+    }
+
     @Test
     func acceptsMissingResponseFormat() async throws {
         // Zero-regression: a request with no response_format is unchanged.

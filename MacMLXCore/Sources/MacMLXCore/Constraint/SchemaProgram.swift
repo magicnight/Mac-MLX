@@ -52,6 +52,8 @@ final class SchemaProgram: Sendable {
         case boolean
         /// The enum values.
         case stringEnum([SchemaLiteral])
+        /// A number or integer within a range.
+        case boundedNumber(NumberRange)
     }
 
     @usableFromInline let objects: [ObjectNode]
@@ -91,6 +93,10 @@ final class SchemaProgram: Sendable {
                 return addScalar(.number)
             case .integer:
                 return addScalar(.integer)
+            case .boundedInteger(let bounds):
+                return addScalar(.boundedNumber(NumberRange(bounds)))
+            case .boundedNumber(let bounds):
+                return addScalar(.boundedNumber(NumberRange(bounds)))
             case .boolean:
                 return addScalar(.boolean)
             case .stringEnum(let values):

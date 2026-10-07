@@ -1,5 +1,8 @@
 // Copyright © 2026 macMLX. English comments only.
 
+import Foundation
+import Testing
+
 @testable import MacMLXCore
 
 /// Seeded schema and document generator for the schema automaton's property
@@ -33,7 +36,28 @@ struct RandomSchemaGenerator {
         .stringEnum(["x", "xy", "y"]), .stringEnum([""]), .stringEnum(["a"]),
         .stringEnum(["café", "cafe"]), .stringEnum(["😀", "😁"]), .stringEnum(["a\\b", "a\nb"]),
         .stringEnum(["/", "\\/"]), .stringEnum(["\u{8}\u{c}\r", "\t"]), .stringEnum(["é", "e\u{301}"]),
+    ] + boundedScalars
+
+    /// Numbers and integers within a range: two-sided, one-sided, closed and
+    /// open, a single value, zero on either side of the range.
+    static let boundedScalars: [SchemaValueType] = [
+        integers(-12, 35), integers(0, 0), integers(100, 100), integers(1, 10), integers(7, nil), integers(nil, -3),
+        numbers("0.5", "2.75"), numbers("0", "1", open: true), numbers("-1.5", "-0.25"), numbers(nil, "-1.25"),
+        numbers("10", "10"), numbers("0.3", nil, open: true), numbers("-0.5", "0.5"),
     ]
+
+    private static func integers(_ minimum: Int?, _ maximum: Int?) -> SchemaValueType {
+        guard let bounds = SchemaIntegerBounds(minimum: minimum, maximum: maximum) else { return .integer }
+        return .boundedInteger(bounds)
+    }
+
+    private static func numbers(_ minimum: String?, _ maximum: String?, open: Bool = false) -> SchemaValueType {
+        guard let bounds = SchemaNumberBounds(
+            minimum: minimum.flatMap { SchemaDecimal(parsing: $0) }, minimumIsExclusive: open,
+            maximum: maximum.flatMap { SchemaDecimal(parsing: $0) }, maximumIsExclusive: open)
+        else { return .number }
+        return .boundedNumber(bounds)
+    }
 
     var rng: SplitMix64
 
@@ -114,6 +138,15 @@ struct RandomSchemaGenerator {
             return pick(["0", "-0", "3.14", "1e10", "-2.5E-3", "42", "0.5"])
         case .integer:
             return pick(["0", "-7", "42", "100"])
+        case .boundedInteger(let bounds):
+            return boundedValue(
+                minimum: bounds.minimum.map { Decimal($0) }, minimumIsExclusive: false,
+                maximum: bounds.maximum.map { Decimal($0) }, maximumIsExclusive: false, integers: true)
+        case .boundedNumber(let bounds):
+            return boundedValue(
+                minimum: bounds.minimum.flatMap { Decimal(string: $0.description) }, minimumIsExclusive: bounds.minimumIsExclusive,
+                maximum: bounds.maximum.flatMap { Decimal(string: $0.description) }, maximumIsExclusive: bounds.maximumIsExclusive,
+                integers: false)
         case .boolean:
             return bool() ? "true" : "false"
         case .stringEnum(let values):
@@ -176,6 +209,39 @@ struct RandomSchemaGenerator {
             }
         }
         return out + "\""
+    }
+
+    /// A value within the bounds, spelled plain: one of the bounds when
+    /// closed, a step inside either, the midpoint, and a few fixed values when
+    /// they fit — so that the ends of a range are exercised as often as its
+    /// middle. A one-sided range steps away from its bound.
+    mutating func boundedValue(
+        minimum: Decimal?, minimumIsExclusive: Bool, maximum: Decimal?, maximumIsExclusive: Bool, integers: Bool
+    ) -> String {
+        let step: Decimal = integers ? 1 : Decimal(string: "0.25") ?? 1
+        var candidates: [Decimal] = [0, 7, -3, 42]
+        if !integers { candidates += [Decimal(string: "1.5") ?? 1, Decimal(string: "-2.25") ?? -2, Decimal(string: "0.5") ?? 0] }
+        if let minimum {
+            if !minimumIsExclusive { candidates.append(minimum) }
+            candidates += [minimum + step, minimum + 1, minimum + 37]
+        }
+        if let maximum {
+            if !maximumIsExclusive { candidates.append(maximum) }
+            candidates += [maximum - step, maximum - 1, maximum - 37]
+        }
+        if let minimum, let maximum { candidates.append((minimum + maximum) / 2) }
+        let fitting = candidates.filter { value in
+            if integers, value != Decimal(Int(truncating: value as NSNumber)) { return false }
+            if let minimum, value < minimum || (value == minimum && minimumIsExclusive) { return false }
+            if let maximum, value > maximum || (value == maximum && maximumIsExclusive) { return false }
+            return true
+        }
+        guard !fitting.isEmpty else {
+            Issue.record("no candidate value fits the bounds \(String(describing: minimum)) … \(String(describing: maximum))")
+            return "0"
+        }
+        let value = pick(fitting)
+        return "\(value)"
     }
 
     /// `\uXXXX` (a surrogate pair above the BMP), upper- or lower-case hex.

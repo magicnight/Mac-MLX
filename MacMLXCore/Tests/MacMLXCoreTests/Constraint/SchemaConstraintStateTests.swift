@@ -32,6 +32,35 @@ struct SchemaConstraintStateTests {
         return end.isComplete
     }
 
+    // The helpers record an issue instead of throwing: `#expect` evaluates
+    // each operand in its own autoclosure, where a `try` does not reach.
+
+    private func integers(_ minimum: Int?, _ maximum: Int?) -> SchemaValueType {
+        guard let bounds = SchemaIntegerBounds(minimum: minimum, maximum: maximum) else {
+            Issue.record("no integer between \(String(describing: minimum)) and \(String(describing: maximum))")
+            return .integer
+        }
+        return .boundedInteger(bounds)
+    }
+
+    private func numbers(_ minimum: String?, _ maximum: String?, openBelow: Bool = false, openAbove: Bool = false) -> SchemaValueType {
+        func decimal(_ text: String) -> SchemaDecimal {
+            guard let value = SchemaDecimal(parsing: text) else {
+                Issue.record("not a decimal: \(text)")
+                return SchemaDecimal(0)
+            }
+            return value
+        }
+        guard let bounds = SchemaNumberBounds(
+            minimum: minimum.map(decimal), minimumIsExclusive: openBelow,
+            maximum: maximum.map(decimal), maximumIsExclusive: openAbove)
+        else {
+            Issue.record("no number between \(String(describing: minimum)) and \(String(describing: maximum))")
+            return .number
+        }
+        return .boundedNumber(bounds)
+    }
+
     // MARK: Types
 
     @Test
@@ -308,6 +337,285 @@ struct SchemaConstraintStateTests {
         #expect(afterFirst?.walk(Array("}".utf8))?.isComplete == true)
     }
 
+    // MARK: Numeric bounds
+
+    /// A bounded integer: a digit is legal only while some completion fits
+    /// the range, and the number ends only on a value in it.
+    @Test
+    func boundedIntegersEndOnlyInRange() throws {
+        let r = schema([("r", integers(-12, 35))], required: ["r"])
+        for v in ["-12", "-1", "0", "7", "35", "-0", "30"] { #expect(accepts("{\"r\":\(v)}", r), "\(v)") }
+        for v in ["-13", "36", "40", "100", "01", "3.5", "1e1", "-", "350", "+1", "-20"] { #expect(!accepts("{\"r\":\(v)}", r), "\(v)") }
+        let open = try #require(walk("{\"r\":", r))
+        #expect(open.walk(Array("4".utf8)) != nil, "4 is in range on its own")
+        #expect(open.walk(Array("4}".utf8))?.isComplete == true)
+        #expect(open.walk(Array("40".utf8)) == nil, "but no value in [-12, 35] starts with 40")
+        #expect(open.walk(Array("3".utf8)) != nil)
+        #expect(open.walk(Array("36".utf8)) == nil)
+        #expect(open.walk(Array("35}".utf8))?.isComplete == true)
+        #expect(open.walk(Array("3}".utf8))?.isComplete == true)
+        #expect(open.walk(Array("-1".utf8)) != nil)
+        #expect(open.walk(Array("-13".utf8)) == nil)
+        #expect(open.walk(Array("-12}".utf8))?.isComplete == true)
+        #expect(open.walk(Array("-2".utf8)) != nil)
+        #expect(open.walk(Array("-20".utf8)) == nil, "-2x is below -12")
+        // A range that starts past the single digits refuses them outright.
+        let tens = try #require(walk("{\"r\":", schema([("r", integers(10, 35))])))
+        #expect(tens.walk(Array("4".utf8)) == nil, "no value in [10, 35] starts with 4")
+        #expect(tens.walk(Array("1".utf8)) != nil)
+        #expect(tens.walk(Array("1}".utf8)) == nil)
+    }
+
+    @Test
+    func boundedIntegerSingletonsAndOneSidedRanges() throws {
+        let zero = schema([("z", integers(0, 0))])
+        #expect(accepts("{\"z\":0}", zero))
+        #expect(accepts("{\"z\":-0}", zero))
+        #expect(!accepts("{\"z\":1}", zero))
+        #expect(!accepts("{\"z\":00}", zero))
+        #expect(walk("{\"z\":-1", zero) == nil)
+
+        let hundred = schema([("c", integers(100, 100))])
+        #expect(accepts("{\"c\":100}", hundred))
+        #expect(!accepts("{\"c\":10}", hundred))
+        #expect(!accepts("{\"c\":1000}", hundred))
+        #expect(walk("{\"c\":1", hundred) != nil)
+        #expect(walk("{\"c\":2", hundred) == nil)
+        #expect(walk("{\"c\":101", hundred) == nil)
+
+        let atLeast = schema([("n", integers(7, nil))])
+        #expect(accepts("{\"n\":7}", atLeast))
+        #expect(accepts("{\"n\":700000000000000000}", atLeast))
+        #expect(accepts("{\"n\":\(String(repeating: "9", count: 19))}", atLeast), "19 digits is the most a value may have")
+        #expect(walk("{\"n\":\(String(repeating: "9", count: 20))", atLeast) == nil)
+        #expect(!accepts("{\"n\":6}", atLeast))
+        #expect(!accepts("{\"n\":-7}", atLeast))
+        #expect(walk("{\"n\":-", atLeast) == nil, "nothing at or below zero is in [7, ...)")
+
+        let atMost = schema([("n", integers(nil, -3))])
+        #expect(accepts("{\"n\":-3}", atMost))
+        #expect(accepts("{\"n\":-4000}", atMost))
+        #expect(!accepts("{\"n\":-2}", atMost))
+        #expect(!accepts("{\"n\":0}", atMost))
+        #expect(walk("{\"n\":1", atMost) == nil)
+        #expect(walk("{\"n\":0", atMost) == nil)
+
+        // A range above zero refuses the sign outright; one that touches zero takes -0.
+        #expect(walk("{\"r\":-", schema([("r", integers(1, 10))])) == nil)
+        #expect(accepts("{\"r\":-0}", schema([("r", integers(0, 10))])))
+    }
+
+    /// A bounded number is spelled plain — no exponent — and judged digit by
+    /// digit: 0 may still become 0.5, but 0 itself is below [0.5, 2.75].
+    @Test
+    func boundedNumbersEndOnlyInRangeAndTakeNoExponent() throws {
+        let r = schema([("x", numbers("0.5", "2.75"))], required: ["x"])
+        for v in ["0.5", "0.50", "1", "1.0", "2.75", "2.7", "0.999", "2.749999", "2.750000000000000000"] {
+            #expect(accepts("{\"x\":\(v)}", r), "\(v)")
+        }
+        for v in ["0.4", "0.49", "2.76", "2.8", "3", "0", "-0.5", "-1", "1e0", "1E0", "0.5e1", "1.", ".5", "00.5", "2.75000000000000000001"] {
+            #expect(!accepts("{\"x\":\(v)}", r), "\(v)")
+        }
+        let open = try #require(walk("{\"x\":", r))
+        #expect(open.walk(Array("0".utf8)) != nil, "0 can still become 0.5")
+        #expect(open.walk(Array("0}".utf8)) == nil, "but 0 itself is below the range")
+        #expect(open.walk(Array("0.4".utf8)) == nil)
+        #expect(open.walk(Array("2.7".utf8)) != nil)
+        #expect(open.walk(Array("2.76".utf8)) == nil)
+        #expect(open.walk(Array("2.75}".utf8))?.isComplete == true)
+        #expect(open.walk(Array("3".utf8)) == nil)
+        #expect(open.walk(Array("-".utf8)) == nil)
+        #expect(open.walk(Array("1e".utf8)) == nil)
+        #expect(open.walk(Array("1.}".utf8)) == nil, "a dot needs a digit")
+    }
+
+    @Test
+    func openNegativeAndOneSidedNumberRanges() throws {
+        let unit = schema([("p", numbers("0", "1", openBelow: true, openAbove: true))])
+        for v in ["0.01", "0.5", "0.999", "0.0000000000000000001"] { #expect(accepts("{\"p\":\(v)}", unit), "\(v)") }
+        for v in ["0", "0.0", "-0", "1", "1.0", "0.00000000000000000001", "-0.5"] { #expect(!accepts("{\"p\":\(v)}", unit), "\(v)") }
+        #expect(walk("{\"p\":-", unit) == nil)
+        #expect(walk("{\"p\":0.0", unit) != nil, "0.0 can still become 0.01")
+
+        let negative = schema([("t", numbers("-1.5", "-0.25"))])
+        for v in ["-1.5", "-0.25", "-1", "-0.3", "-1.50", "-0.250"] { #expect(accepts("{\"t\":\(v)}", negative), "\(v)") }
+        for v in ["-0.2", "-1.6", "0", "-0", "0.5", "-2", "1"] { #expect(!accepts("{\"t\":\(v)}", negative), "\(v)") }
+        #expect(walk("{\"t\":-0", negative) != nil, "-0 can still become -0.25")
+        #expect(walk("{\"t\":-0.2", negative) != nil, "-0.2 can still become -0.25")
+        #expect(walk("{\"t\":-0.24", negative) == nil, "-0.24x is above -0.25")
+
+        let below = schema([("t", numbers(nil, "-1.25"))])
+        for v in ["-1.25", "-100", "-1.250", "-999999999999999999.9"] { #expect(accepts("{\"t\":\(v)}", below), "\(v)") }
+        for v in ["-1.24", "-1.2", "0", "-0", "-1", "5"] { #expect(!accepts("{\"t\":\(v)}", below), "\(v)") }
+
+        let fixed = schema([("f", numbers("10", "10"))])
+        for v in ["10", "10.0", "10.000"] { #expect(accepts("{\"f\":\(v)}", fixed), "\(v)") }
+        for v in ["1", "100", "10.1", "9.99", "-10"] { #expect(!accepts("{\"f\":\(v)}", fixed), "\(v)") }
+        #expect(walk("{\"f\":1", fixed) != nil)
+        #expect(walk("{\"f\":1}", fixed) == nil)
+
+        let above = schema([("a", numbers("0.3", nil, openBelow: true))])
+        for v in ["0.31", "1", "999", "0.3000000000000000001"] { #expect(accepts("{\"a\":\(v)}", above), "\(v)") }
+        for v in ["0.3", "0.30", "0.29", "-5", "0"] { #expect(!accepts("{\"a\":\(v)}", above), "\(v)") }
+    }
+
+    /// The digit limits are part of what a prefix can still become: a
+    /// 19-digit integer takes no decimal point, and a fraction that has used
+    /// the last digit cannot creep past an open bound — the digit before it
+    /// is refused instead, and the value one grid step inside the bound is
+    /// the way through.
+    @Test
+    func limitsLeaveNoDeadEnds() throws {
+        let nineteen = "1234567890123456789"
+        let nonNegative = numbers("0", nil)
+        #expect(acceptsRoot(nineteen, nonNegative))
+        #expect(SchemaConstraintState(root: nonNegative).walk(Array((nineteen + ".").utf8)) == nil, "no digit could follow the point")
+        #expect(acceptsRoot(String(nineteen.dropLast()) + ".5", nonNegative))
+        let object = schema([("x", nonNegative)])
+        #expect(walk("{\"x\":1000000000000000000.", object) == nil)
+        #expect(accepts("{\"x\":1000000000000000000}", object))
+        #expect(SchemaConstraintState(root: numbers(nil, "100")).walk(Array("-1000000000000000000.".utf8)) == nil)
+
+        let zeros = { (count: Int) in String(repeating: "0", count: count) }
+        let positive = numbers("0", nil, openBelow: true)
+        #expect(SchemaConstraintState(root: positive).walk(Array(("0." + zeros(19)).utf8)) == nil, "the last digit could only spell 0")
+        #expect(acceptsRoot("0." + zeros(18) + "1", positive))
+        let aboveFive = numbers("5", "10", openBelow: true)
+        #expect(SchemaConstraintState(root: aboveFive).walk(Array(("5." + zeros(18)).utf8)) == nil)
+        #expect(acceptsRoot("5." + zeros(17) + "1", aboveFive))
+        #expect(acceptsRoot("5." + zeros(18), numbers("5", "10")), "closed at 5, every spelling of 5 is in")
+        let belowZero = numbers(nil, "0", openAbove: true)
+        #expect(SchemaConstraintState(root: belowZero).walk(Array(("-0." + zeros(19)).utf8)) == nil)
+        #expect(acceptsRoot("-0." + zeros(18) + "1", belowZero))
+        let above = numbers("0.3", nil, openBelow: true)
+        #expect(SchemaConstraintState(root: above).walk(Array(("0.3" + zeros(18)).utf8)) == nil)
+        #expect(acceptsRoot("0.3" + zeros(17) + "1", above))
+        // A bound with 19 significant digits: the point is already dead when nothing after it can pass the bound.
+        let steep = numbers("9.999999999999999999", nil, openBelow: true)
+        #expect(SchemaConstraintState(root: steep).walk(Array("9.".utf8)) == nil)
+        #expect(acceptsRoot("10", steep))
+    }
+
+    /// The first 19 digits of 2^64 are a legal value; a twentieth digit is
+    /// refused, not trapped on: ten times that mantissa fits a `UInt64`, and
+    /// adding a digit of six or more does not.
+    @Test
+    func aTwentiethDigitIsRefusedNotTrappedOn() throws {
+        let twoToTheSixtyFour = "1844674407370955161"
+        for root in [numbers("0", nil), integers(0, nil), numbers("0", "1")] {
+            let prefix = root == numbers("0", "1") ? "0." + twoToTheSixtyFour : twoToTheSixtyFour
+            let state = try #require(SchemaConstraintState(root: root).walk(Array(prefix.utf8)), "\(prefix)")
+            #expect(state.isComplete)
+            for digit in "0123456789" {
+                #expect(state.walk(Array(String(digit).utf8)) == nil, "\(prefix)\(digit) for \(root)")
+            }
+        }
+        let object = schema([("n", numbers("0", nil))])
+        let inObject = try #require(walk("{\"n\":" + twoToTheSixtyFour, object))
+        #expect(inObject.walk(Array("9".utf8)) == nil)
+        #expect(inObject.walk(Array("}".utf8))?.isComplete == true)
+        // A range at that value is a range (the emptiness walk never holds the
+        // mantissa itself: a 19-digit cell is one value, and this one is out).
+        #expect(SchemaNumberBounds(minimum: SchemaDecimal(parsing: twoToTheSixtyFour), minimumIsExclusive: true, maximum: SchemaDecimal(parsing: "1844674407370955162")) != nil)
+    }
+
+    @Test
+    func rootBoundedNumbersAreCompleteWithoutATerminator() throws {
+        let digits = integers(0, 9)
+        for t in ["0", "5", "9", "-0", "7 "] { #expect(acceptsRoot(t, digits), "\(t)") }
+        for t in ["10", "-1", "1.5", "5 1", "", "-"] { #expect(!acceptsRoot(t, digits), "\(t)") }
+        let n = numbers("0.5", "2.75")
+        for t in ["0.5", "2.75", "1", "1.0 "] { #expect(acceptsRoot(t, n), "\(t)") }
+        for t in ["0", "0.", "3", "1e0"] { #expect(!acceptsRoot(t, n), "\(t)") }
+        // At the root a value in range is complete as soon as its digits are,
+        // and stays complete as digits that keep it in range follow.
+        let afterOne = SchemaConstraintState(root: n).walk(Array("1".utf8))
+        #expect(afterOne?.isComplete == true)
+        #expect(afterOne?.walk(Array(".".utf8))?.isComplete == false)
+        #expect(afterOne?.walk(Array(".5".utf8))?.isComplete == true)
+        #expect(SchemaConstraintState(root: n).walk(Array("0".utf8))?.isComplete == false)
+        #expect(SchemaConstraintState(root: n).walk(Array("2.75".utf8))?.walk(Array("1".utf8)) == nil)
+    }
+
+    /// Every legal prefix of a bounded value completes: from every state the
+    /// automaton reaches within five bytes of a bounded value, a complete
+    /// document is reached within six more. The trap search proves this for
+    /// bounded integers with two-sided bounds, whose states are finite; a
+    /// bounded number has a state per prefix (every fraction digit opens
+    /// ten more), so this walks them to a fixed depth instead. The search
+    /// for a completion has a budget of walks: a correct automaton completes
+    /// every prefix within a few, and a dead end would otherwise be explored
+    /// to the full depth, thousands of times over.
+    @Test
+    func boundedPrefixesAlwaysComplete() throws {
+        let roots: [SchemaValueType] = [
+            integers(-12, 35), integers(0, 0), integers(7, nil), integers(nil, -3),
+            numbers("0.5", "2.75"), numbers("0", "1", openBelow: true, openAbove: true),
+            numbers("-1.5", "-0.25"), numbers(nil, "-1.25"), numbers("10", "10"),
+            numbers("0.3", nil, openBelow: true), numbers("-0.5", "0.5"), numbers("0.125", "0.125"),
+            numbers("99.5", "100.25"), numbers("-0.001", "0.001", openBelow: true, openAbove: true),
+        ]
+        let digits = Array("-0123456789.".utf8)
+        for root in roots {
+            // The root itself, and the same value inside an object (where `}` must still follow).
+            let object = JSONSchemaObject(properties: [.init(name: "v", type: root)], required: ["v"])
+            let starts: [(SchemaConstraintState, [UInt8])] = [
+                (SchemaConstraintState(root: root), digits),
+                (try #require(walk("{\"v\":", object)), digits + [SchemaBytes.rBrace]),
+            ]
+            for (start, alphabet) in starts {
+                var frontier = [start]
+                var seen: Set<SchemaConstraintState> = [start]
+                for _ in 0..<5 {
+                    var next: [SchemaConstraintState] = []
+                    for state in frontier {
+                        for byte in alphabet {
+                            if let advanced = state.advanced(over: byte), seen.insert(advanced).inserted { next.append(advanced) }
+                        }
+                    }
+                    frontier = next
+                }
+                var deadEnds = 0
+                for state in seen {
+                    var budget = 10_000
+                    if !completes(state, within: 6, alphabet, budget: &budget) {
+                        Issue.record("\(budget == 0 ? "no completion within the budget" : "dead end") at \(state.diagnosticDescription) for \(root)")
+                        deadEnds += 1
+                        if deadEnds == 3 { break }   // three say enough
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a value of `type` has unboundedly many legal prefixes: a bounded
+    /// number (every fraction digit opens ten more) or an integer bounded on
+    /// one side only. The trap search cannot finish on those.
+    private static func hasUnboundedPrefixes(_ type: SchemaValueType) -> Bool {
+        switch type {
+        case .boundedNumber: return true
+        case .boundedInteger(let bounds): return bounds.minimum == nil || bounds.maximum == nil
+        case .object(let object): return object.properties.contains { hasUnboundedPrefixes($0.type) }
+        case .array(let items, _, _): return hasUnboundedPrefixes(items)
+        case .string, .number, .integer, .boolean, .stringEnum: return false
+        }
+    }
+
+    /// Whether a complete document is reachable from `state` within `depth`
+    /// bytes, trying at most `budget` walks in all.
+    private func completes(_ state: SchemaConstraintState, within depth: Int, _ alphabet: [UInt8], budget: inout Int) -> Bool {
+        if state.isComplete { return true }
+        guard depth > 0 else { return false }
+        for byte in alphabet {
+            guard budget > 0 else { return false }
+            budget -= 1
+            if let next = state.advanced(over: byte), completes(next, within: depth - 1, alphabet, budget: &budget) {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: Surrogate escapes (C2)
 
     /// A `\u` escape is cut off as soon as no completion of it could be legal.
@@ -348,7 +656,7 @@ struct SchemaConstraintStateTests {
     /// shapes of known traps (a comma after the last key, a dead surrogate
     /// escape); seeded schemas cover the rest.
     @Test
-    func noReachableStateIsATrap() {
+    func noReachableStateIsATrap() throws {
         let schemas: [JSONSchemaObject] = [
             schema([("a", .string)]),
             schema([("a", .string)], required: ["a"]),
@@ -366,12 +674,17 @@ struct SchemaConstraintStateTests {
             // paths (surrogate pairs included) must not strand the matcher.
             schema([("c", .stringEnum(["Lençóis", "Bogotá", "😀"]))], required: ["c"]),
             schema([("日本", .string), ("q\"q", .stringEnum(["a\\b"]))], required: ["日本", "q\"q"]),
+            // Bounded integers with two-sided bounds: finitely many prefixes.
+            schema([("r", integers(-12, 35)), ("z", integers(0, 0))], required: ["r", "z"]),
+            schema([("c", integers(100, 100)), ("one", integers(1, 10))], required: ["one"]),
+            schema([("i", .array(items: integers(-5, 5), minItems: 1, maxItems: 2))]),
         ]
         var roots: [SchemaValueType] = schemas.map { .object($0) }
         roots += [
             .array(items: nested([("id", .integer)], required: ["id"]), minItems: 1, maxItems: 2),
             .array(items: .stringEnum(["é", "e"]), minItems: 0, maxItems: nil),
             .string, .number, .integer, .boolean, .stringEnum(["😀", "x"]),
+            integers(-12, 35), integers(0, 0),
         ]
         // A search the cap cuts off counts the frontier as live and could hide
         // a trap, so the hand-written schemas must be explored whole (an
@@ -392,9 +705,18 @@ struct SchemaConstraintStateTests {
         for _ in 0..<8 {
             seeded.append(generator.root())
         }
+        // A bounded number, or an integer bounded on one side only, has a
+        // state per prefix and always reaches the cap: checked as far as the
+        // search goes (`boundedPrefixesAlwaysComplete` walks them to depth).
+        let unbounded: [SchemaValueType] = [
+            numbers("0.5", "2.75"), numbers("0", "1", openBelow: true, openAbove: true), integers(7, nil),
+            .object(schema([("p", numbers("-1.5", "-0.25")), ("n", integers(nil, -3))], required: ["p"])),
+        ]
         let limit = 40_000
         var capped = 0
-        for (root, isSeeded) in roots.map { ($0, false) } + seeded.map { ($0, true) } {
+        let runs = roots.map { ($0, "fixed") } + seeded.map { ($0, Self.hasUnboundedPrefixes($0) ? "unbounded" : "seeded") }
+            + unbounded.map { ($0, "unbounded") }
+        for (root, group) in runs {
             let result = SchemaTrapSearch.run(
                 from: SchemaConstraintState(root: root),
                 alphabet: SchemaTrapSearch.alphabet(for: root),
@@ -402,10 +724,10 @@ struct SchemaConstraintStateTests {
             #expect(
                 result.traps.isEmpty,
                 "\(result.traps.count) trap(s) in \(result.explored) states, first: \(result.traps.first?.diagnosticDescription ?? "-") for \(root)")
-            if isSeeded {
-                if result.explored >= limit { capped += 1 }
-            } else {
-                #expect(result.explored < limit, "the search hit the state cap at \(result.explored) for \(root)")
+            switch group {
+            case "fixed": #expect(result.explored < limit, "the search hit the state cap at \(result.explored) for \(root)")
+            case "seeded": if result.explored >= limit { capped += 1 }
+            default: break
             }
         }
         #expect(capped <= 4, "\(capped) seeded roots hit the state cap")
@@ -850,6 +1172,10 @@ struct SchemaConstraintStateTests {
                 let document = k < 4 ? Array(valid.utf8) : generator.mutate(valid)
                 let automaton = start.walk(document)?.isComplete ?? false
                 let reference = ReferenceSchemaValidator.validate(document, root: root)
+                if k < 4, !reference {
+                    mismatches.append("the generator wrote an invalid document: \(valid) for \(root)")
+                    continue
+                }
                 if automaton != reference {
                     mismatches.append("automaton=\(automaton) reference=\(reference) \(String(decoding: document, as: UTF8.self)) for \(root)")
                     continue

@@ -39,10 +39,19 @@
 ///    bytes of property names (declared and `required`) and values. A
 ///    recursive schema is rejected because no bound on its documents exists,
 ///    and a `required` list may not repeat a name.
+///    A `number` or `integer` may carry `minimum`, `maximum`,
+///    `exclusiveMinimum` and `exclusiveMaximum` (numbers of at most 19
+///    significant digits and decimals): an integer's bounds fold to the
+///    nearest integers inside them; a bounded number is spelled as a plain
+///    decimal, without an exponent, within the same limits, and a range that
+///    holds no such number is refused. A fractional bound reaches the
+///    decoder as a double and is enforced as the shortest decimal naming
+///    that double — the digits as written for anything a double carries,
+///    the rounded value for a longer literal.
 ///
-/// Everything else — combinators, `null`, type arrays, numeric and string
-/// bounds (`minimum`, `pattern`, …), `additionalProperties: true`, free-form
-/// objects and arrays, any unknown keyword — is an explicit
+/// Everything else — combinators, `null`, type arrays, string bounds
+/// (`pattern`, `minLength`, …), `multipleOf`, `additionalProperties: true`,
+/// free-form objects and arrays, any unknown keyword — is an explicit
 /// ``ResponseFormatError/unsupportedFeature(_:)``. An enforceable-looking
 /// constraint is never silently dropped.
 public enum ResponseFormatDecoder {
@@ -87,11 +96,15 @@ public enum ResponseFormatDecoder {
 
     /// The keywords a scalar property schema may carry besides annotations.
     /// This is a strict allow-list, not a blocklist: any other keyword
-    /// (`pattern`, `minLength`, `maximum`, `format`, combinators, …) is
+    /// (`pattern`, `minLength`, `multipleOf`, `format`, combinators, …) is
     /// rejected with a 400 rather than silently ignored — a value constraint we
     /// cannot enforce must never be silently downgraded (see
     /// ``ResponseFormatError``).
-    private static let scalarKeys: Set<String> = ["type", "enum"]
+    private static let scalarKeys: Set<String> = [
+        "type", "enum", "minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum",
+    ]
+    /// The keywords that bound a number, in the order they are reported.
+    private static let boundKeys = ["minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"]
     /// The keywords of an object schema besides annotations. `x-order` (Apple's
     /// declaration order) is accepted and ignored.
     private static let objectKeys: Set<String> = [
@@ -494,7 +507,7 @@ public enum ResponseFormatDecoder {
         context: inout Context
     ) throws -> SchemaValueType {
         // Allow-list gate (M1): reject any keyword we do not model — a value
-        // constraint (`pattern`, `minLength`, `maximum`, `format`, …) or a
+        // constraint (`pattern`, `minLength`, `multipleOf`, `format`, …) or a
         // structural one (`properties`, combinators) must 400, never be
         // silently dropped. Sorted so the reported keyword is deterministic.
         for key in property.keys.sorted() where !scalarKeys.contains(key) && !annotationKeys.contains(key) {
@@ -509,7 +522,12 @@ public enum ResponseFormatDecoder {
             throw ResponseFormatError.invalidFormat("\(owner(name)) type must be a string")
         }
 
+        let boundKeyword = boundKeys.first { property[$0] != nil }
+
         if let enumValue = property["enum"] {
+            if let boundKeyword {
+                throw ResponseFormatError.unsupportedFeature("'\(boundKeyword)' alongside 'enum' \(location(name))")
+            }
             guard case .array(let entries) = enumValue, !entries.isEmpty else {
                 throw ResponseFormatError.invalidFormat(
                     "\(owner(name)) enum must be a non-empty array")
@@ -532,13 +550,133 @@ public enum ResponseFormatDecoder {
         }
 
         switch type {
-        case "string": return .string
-        case "number": return .number
-        case "integer": return .integer
-        case "boolean": return .boolean
+        case "number":
+            guard boundKeyword != nil else { return .number }
+            return .boundedNumber(try numberBounds(try rawBounds(of: property, path: name), path: name))
+        case "integer":
+            guard boundKeyword != nil else { return .integer }
+            return .boundedInteger(try integerBounds(try rawBounds(of: property, path: name), path: name))
+        case "string", "boolean":
+            if let boundKeyword {
+                throw ResponseFormatError.unsupportedFeature(
+                    "'\(boundKeyword)' on non-numeric \(owner(name)) (type '\(type)')")
+            }
+            return type == "string" ? .string : .boolean
         default:
             throw ResponseFormatError.unsupportedFeature("property type '\(type)' \(location(name))")
         }
+    }
+
+    /// The bounds a scalar schema declares, as the decimals they were written.
+    private struct RawBounds {
+        var minimum: SchemaDecimal?
+        var exclusiveMinimum: SchemaDecimal?
+        var maximum: SchemaDecimal?
+        var exclusiveMaximum: SchemaDecimal?
+    }
+
+    /// The numeric bounds of `property`. A bound is a JSON number of at most
+    /// 19 significant digits and decimals (what the automaton can hold
+    /// exactly). An integer bound within `Int` keeps every digit; any other —
+    /// fractional, or an integer beyond `Int` — has been read as a double by
+    /// the request parser and is taken as the shortest decimal that names
+    /// that double, which is the literal as written for anything a double
+    /// carries (`0.3333333333333333`, as serialisers write a third) and the
+    /// rounded value for a longer one (`1.0000000000000001` is 1). The
+    /// draft-4 boolean form of `exclusiveMinimum` / `exclusiveMaximum` is
+    /// refused by name.
+    private static func rawBounds(of property: [String: JSONValue], path: String) throws -> RawBounds {
+        var bounds = RawBounds()
+        for keyword in boundKeys {
+            guard let value = property[keyword] else { continue }
+            let decimal: SchemaDecimal?
+            switch value {
+            case .int(let integer):
+                decimal = SchemaDecimal(integer)
+            case .double(let double):
+                decimal = SchemaDecimal(double)
+            case .bool:
+                throw ResponseFormatError.unsupportedFeature(
+                    "boolean '\(keyword)' \(location(path)) (JSON Schema draft 4; give the bound as a number)")
+            default:
+                throw ResponseFormatError.invalidFormat("'\(keyword)' \(location(path)) must be a number")
+            }
+            guard let decimal else {
+                throw ResponseFormatError.unsupportedFeature(
+                    "'\(keyword)' \(location(path)) is beyond what a bounded number can hold "
+                        + "(\(SchemaDecimal.maximumDigits) significant digits and \(SchemaDecimal.maximumDigits) decimals)")
+            }
+            switch keyword {
+            case "minimum": bounds.minimum = decimal
+            case "exclusiveMinimum": bounds.exclusiveMinimum = decimal
+            case "maximum": bounds.maximum = decimal
+            default: bounds.exclusiveMaximum = decimal
+            }
+        }
+        return bounds
+    }
+
+    /// Integer bounds: each bound moves to the nearest integer inside it (a
+    /// fractional `minimum` rounds up, an `exclusiveMinimum` steps past
+    /// itself), and when both forms of a side are given the stricter wins.
+    private static func integerBounds(_ raw: RawBounds, path: String) throws -> SchemaIntegerBounds {
+        func integer(_ value: Int?, _ keyword: String) throws -> Int {
+            guard let value else {
+                throw ResponseFormatError.unsupportedFeature("'\(keyword)' \(location(path)) is beyond the integer range")
+            }
+            return value
+        }
+        var minimum: Int?
+        if let bound = raw.minimum { minimum = try integer(bound.ceiling, "minimum") }
+        if let bound = raw.exclusiveMinimum {
+            let (stepped, overflow) = try integer(bound.floor, "exclusiveMinimum").addingReportingOverflow(1)
+            guard !overflow else {
+                throw ResponseFormatError.unsupportedFeature("'exclusiveMinimum' \(location(path)) is beyond the integer range")
+            }
+            minimum = Swift.max(minimum ?? stepped, stepped)
+        }
+        var maximum: Int?
+        if let bound = raw.maximum { maximum = try integer(bound.floor, "maximum") }
+        if let bound = raw.exclusiveMaximum {
+            let (stepped, overflow) = try integer(bound.ceiling, "exclusiveMaximum").subtractingReportingOverflow(1)
+            guard !overflow else {
+                throw ResponseFormatError.unsupportedFeature("'exclusiveMaximum' \(location(path)) is beyond the integer range")
+            }
+            maximum = Swift.min(maximum ?? stepped, stepped)
+        }
+        guard let bounds = SchemaIntegerBounds(minimum: minimum, maximum: maximum) else {
+            throw ResponseFormatError.invalidFormat(
+                "the bounds \(location(path)) admit no integer (minimum \(minimum.map(String.init) ?? "-"), "
+                    + "maximum \(maximum.map(String.init) ?? "-") once folded)")
+        }
+        return bounds
+    }
+
+    /// Number bounds: when both forms of a side are given the stricter wins
+    /// (an exclusive bound at the same value, or inside the closed one).
+    private static func numberBounds(_ raw: RawBounds, path: String) throws -> SchemaNumberBounds {
+        var minimum = raw.minimum
+        var minimumIsExclusive = false
+        if let exclusive = raw.exclusiveMinimum, minimum.map({ exclusive >= $0 }) ?? true {
+            minimum = exclusive
+            minimumIsExclusive = true
+        }
+        var maximum = raw.maximum
+        var maximumIsExclusive = false
+        if let exclusive = raw.exclusiveMaximum, maximum.map({ exclusive <= $0 }) ?? true {
+            maximum = exclusive
+            maximumIsExclusive = true
+        }
+        guard let bounds = SchemaNumberBounds(
+            minimum: minimum, minimumIsExclusive: minimumIsExclusive,
+            maximum: maximum, maximumIsExclusive: maximumIsExclusive)
+        else {
+            throw ResponseFormatError.invalidFormat(
+                "the bounds \(location(path)) admit no number (\(minimumIsExclusive ? "exclusiveMinimum" : "minimum") "
+                    + "\(minimum.map(\.description) ?? "-"), \(maximumIsExclusive ? "exclusiveMaximum" : "maximum") "
+                    + "\(maximum.map(\.description) ?? "-"))")
+        }
+        return bounds
     }
 
     /// Resolve `#/$defs/<name>` or `#/definitions/<name>` against the root's

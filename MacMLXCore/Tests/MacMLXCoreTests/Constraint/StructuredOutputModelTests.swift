@@ -236,6 +236,58 @@ final class StructuredOutputModelTests: XCTestCase {
         XCTAssertEqual(items.count, 3, "\(text)")
     }
 
+    // MARK: - C2: numeric bounds
+
+    /// Bounded numbers on a real checkpoint: a prompt that invites values
+    /// outside the ranges (a 52 °C day, a 110 % humidity), checked by the
+    /// reference validator and by the automaton itself.
+    func testC2BoundedNumbersConformToSchema() async throws {
+        let (modelID, directory) = try gateAndResolveModel()
+        let engine = MLXSwiftEngine()
+        try await engine.load(localModel(id: modelID, directory: directory))
+
+        let temperature = try XCTUnwrap(SchemaNumberBounds(minimum: SchemaDecimal(-30), maximum: SchemaDecimal(45)))
+        let humidity = try XCTUnwrap(SchemaIntegerBounds(minimum: 0, maximum: 100))
+        let rating = try XCTUnwrap(SchemaIntegerBounds(minimum: 1, maximum: 5))
+        let schema = JSONSchemaObject(
+            properties: [
+                .init(name: "temperatureCelsius", type: .boundedNumber(temperature)),
+                .init(name: "humidityPercent", type: .boundedInteger(humidity)),
+                .init(name: "comfortRating", type: .boundedInteger(rating)),
+            ],
+            required: ["temperatureCelsius", "humidityPercent", "comfortRating"]
+        )
+        let request = GenerateRequest(
+            model: modelID,
+            messages: [ChatMessage(
+                role: .user,
+                content: "A weather report for Death Valley on its hottest day on record, 56.7 degrees Celsius with "
+                    + "humidity of 110 percent and a comfort rating of 0 out of 10. Report temperatureCelsius, "
+                    + "humidityPercent and comfortRating as JSON."
+            )],
+            parameters: GenerationParameters(temperature: 0, topP: 1.0, maxTokens: 200, stream: true),
+            templateKwargs: ["enable_thinking": .bool(false)],
+            responseFormat: .jsonSchema(.object(schema))
+        )
+        let (text, tokens) = try await run(engine, request)
+        print("STRUCTURED_BOUNDS model=\(modelID) completion_tokens=\(tokens.map(String.init) ?? "?") output=\(text)")
+
+        XCTAssertTrue(
+            ReferenceSchemaValidator.validate(Array(text.utf8), schema),
+            "output does not conform to the bounded schema: \(text)")
+        XCTAssertTrue(
+            SchemaConstraintState(root: .object(schema)).walk(Array(text.utf8))?.isComplete == true,
+            "the automaton does not accept the text it produced: \(text)")
+        let parsed = try JSONSerialization.jsonObject(with: Data(text.utf8))
+        let object = try XCTUnwrap(parsed as? [String: Any], "output must be a JSON object: \(text)")
+        let celsius = try XCTUnwrap(object["temperatureCelsius"] as? NSNumber, "\(text)").doubleValue
+        XCTAssertTrue((-30...45).contains(celsius), "temperature out of range: \(text)")
+        let percent = try XCTUnwrap(object["humidityPercent"] as? NSNumber, "\(text)").intValue
+        XCTAssertTrue((0...100).contains(percent), "humidity out of range: \(text)")
+        let comfort = try XCTUnwrap(object["comfortRating"] as? NSNumber, "\(text)").intValue
+        XCTAssertTrue((1...5).contains(comfort), "rating out of range: \(text)")
+    }
+
     // MARK: - Throughput (informational)
 
     func testConstraintThroughputOverhead() async throws {
