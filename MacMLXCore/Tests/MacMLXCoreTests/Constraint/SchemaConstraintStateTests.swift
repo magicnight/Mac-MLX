@@ -515,10 +515,13 @@ struct SchemaConstraintStateTests {
                     }
                     frontier = next
                 }
+                var deadEnds = 0
                 for state in seen {
                     var budget = 10_000
                     if !completes(state, within: 6, alphabet, budget: &budget) {
                         Issue.record("\(budget == 0 ? "no completion within the budget" : "dead end") at \(state.diagnosticDescription) for \(root)")
+                        deadEnds += 1
+                        if deadEnds == 3 { break }   // three say enough
                     }
                 }
             }

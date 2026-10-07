@@ -217,9 +217,7 @@ enum SchemaScalarState: Hashable, Sendable {
         case .bounded(let node, let negative, let mantissa, let scale, let phase):
             guard case .boundedNumber(let range) = program.scalars[Int(node)] else { return .rejected }
             if SchemaBytes.isDigit(byte) {
-                // A lone zero takes no more integer digits (JSON forbids leading
-                // zeros); the mantissa and the decimals stay within the limit.
-                guard phase != .loneZero else { return .rejected }
+                // The mantissa and the decimals stay within the limit.
                 let digit = UInt64(byte - SchemaBytes.zero)
                 let (grown, overflow) = mantissa.multipliedReportingOverflow(by: 10)
                 guard !overflow, grown + digit < SchemaDecimal.limit else { return .rejected }
@@ -234,6 +232,8 @@ enum SchemaScalarState: Hashable, Sendable {
                     else { return .rejected }
                     return .consumed(.bounded(node: node, negative: negative, mantissa: next, scale: scale + 1, phase: .fraction))
                 case .loneZero:
+                    // A lone zero takes no more integer digits: JSON forbids
+                    // leading zeros.
                     return .rejected
                 }
             }
