@@ -69,7 +69,7 @@ struct NumberRangeTests {
         #expect(dec("0.0000000000000000001").description == "0.0000000000000000001")
         #expect(dec("123.456").description == "123.456")
         #expect(SchemaDecimal(9.3e18)?.significantDigits == 2)
-        #expect(dec("0.123456789012345").significantDigits == 15)
+        #expect(dec("0.3333333333333333").significantDigits == 16)
         #expect(dec("1234567890123456789").significantDigits == 19)
         #expect(SchemaDecimal(0).significantDigits == 0)
     }

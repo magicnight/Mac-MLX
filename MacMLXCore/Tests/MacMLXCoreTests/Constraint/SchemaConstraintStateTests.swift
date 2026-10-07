@@ -490,7 +490,7 @@ struct SchemaConstraintStateTests {
         let above = numbers("0.3", nil, openBelow: true)
         #expect(SchemaConstraintState(root: above).walk(Array(("0.3" + zeros(18)).utf8)) == nil)
         #expect(acceptsRoot("0.3" + zeros(17) + "1", above))
-        // A bound on the 19th decimal: the point is already dead when nothing after it can pass the bound.
+        // A bound with 19 significant digits: the point is already dead when nothing after it can pass the bound.
         let steep = numbers("9.999999999999999999", nil, openBelow: true)
         #expect(SchemaConstraintState(root: steep).walk(Array("9.".utf8)) == nil)
         #expect(acceptsRoot("10", steep))

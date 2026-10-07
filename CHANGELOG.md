@@ -50,11 +50,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `minimum: 2`). A bounded number is spelled as a plain decimal — no
   exponent — of at most 19 significant digits and 19 decimals, and is
   compared with its bounds exactly, as decimals; a range that holds no such
-  number is refused, as is a bound beyond those limits or a fractional bound
-  of more than 15 significant digits (which the request parser could not
-  carry exactly). Apple's Person sample, whose rating is
-  `@Guide(.range(1...10))`, now compiles as the framework emits it. Still
-  unsupported: `multipleOf`, `pattern`, `null` and unions.
+  number is refused, as is a bound beyond those limits. A fractional bound
+  reaches the decoder as a double and is enforced as the shortest decimal
+  naming that double: the digits as written for anything a double carries
+  (`0.3333333333333333`, as serialisers write a third), the rounded value
+  for a longer literal (`1.0000000000000001` is 1). Apple's Person sample,
+  whose rating is `@Guide(.range(1...10))`, now compiles as the framework
+  emits it. Still unsupported: `multipleOf`, `pattern`, `null` and unions.
 - **`stream_options.include_usage` on streaming chat completions.** When a
   client sets it, every chunk carries `usage: null` and one usage-only chunk —
   empty `choices`, the whole request's token counts — is sent before
