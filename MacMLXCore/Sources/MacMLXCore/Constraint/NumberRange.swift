@@ -79,10 +79,11 @@ struct NumberRange: Hashable, Sendable {
 
     /// The digits a prefix with mantissa `mantissa` and `scale` decimals may
     /// still take: the digit limit less the digits it has, or the decimal
-    /// limit less its decimals, whichever is smaller.
+    /// limit less its decimals, whichever is smaller — never below zero, for a
+    /// prefix past the limits that the automaton does not build.
     @usableFromInline
     static func remainingDigits(mantissa: UInt64, scale: UInt8) -> Int {
-        Swift.min(SchemaDecimal.maximumDigits - Int(scale), SchemaDecimal.maximumDigits - SchemaDecimal.digits(of: mantissa))
+        Swift.max(0, Swift.min(SchemaDecimal.maximumDigits - Int(scale), SchemaDecimal.maximumDigits - SchemaDecimal.digits(of: mantissa)))
     }
 
     /// Whether a prefix with the given sign, mantissa and decimals, in the
@@ -165,7 +166,10 @@ struct NumberRange: Hashable, Sendable {
                 return true
             }
             var stepped = false
-            if phase != .loneZero {
+            // The same limits as the automaton's step: a digit fits while the
+            // mantissa stays below 10^19 and a fraction digit while the
+            // decimals stay within the limit.
+            if phase != .loneZero, phase == .integerDigits || scale < SchemaDecimal.maximumDigits {
                 for digit in UInt64(0)...9 {
                     let next = mantissa * 10 + digit
                     guard next < SchemaDecimal.limit else { break }
