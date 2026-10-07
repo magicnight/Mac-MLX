@@ -20,8 +20,9 @@ enum SchemaTrapSearch {
     }
 
     /// Structural bytes, a space, `\u` escapes reaching the surrogate range
-    /// (`\`, `u`, `0`, `1`, `8`, `9`, `d`, `c`), and number and literal bytes.
-    static let baseAlphabet = Array("{}[],:\" \\u0189dc.-eEtrufalsn".utf8)
+    /// (`\`, `u`, hex digits, `d`, `c`), every digit (a bounded number's legal
+    /// digits depend on its bounds), and number and literal bytes.
+    static let baseAlphabet = Array("{}[],:\" \\u0123456789dc.-eEtrufalsn".utf8)
 
     /// ``baseAlphabet`` plus every byte of the schema's keys and enum values,
     /// raw and as `\u` escapes, without duplicates.
@@ -68,7 +69,7 @@ enum SchemaTrapSearch {
             collectBytes(of: object, into: &bytes)
         case .array(let items, _, _):
             collectBytes(of: items, into: &bytes)
-        case .string, .number, .integer, .boolean:
+        case .string, .number, .integer, .boolean, .boundedInteger, .boundedNumber:
             break
         }
     }

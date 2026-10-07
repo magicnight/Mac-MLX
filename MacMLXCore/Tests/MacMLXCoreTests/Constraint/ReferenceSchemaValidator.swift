@@ -1,5 +1,7 @@
 // Copyright © 2026 macMLX. English comments only.
 
+import Foundation
+
 @testable import MacMLXCore
 
 /// An independent reference for ``SchemaConstraintState``: a strict RFC 8259
@@ -14,7 +16,10 @@
 /// and a control character must be spelled raw in a key or an enum value;
 /// unpaired surrogate escapes are rejected (as `JSONSerialization` does),
 /// duplicate keys are rejected, and an integer is a number lexeme with no
-/// fraction or exponent.
+/// fraction or exponent. A bounded number is compared with its bounds as the
+/// decimal it spells (Foundation's `Decimal`, not the automaton's arithmetic)
+/// and must be spelled the way the automaton reads it: no exponent, at most
+/// 19 significant digits and 19 decimals.
 enum ReferenceSchemaValidator {
 
     /// A parsed JSON value that keeps raw lexemes: strings as the bytes between
@@ -52,6 +57,20 @@ enum ReferenceSchemaValidator {
             return true
         case (.integer, .number(let lexeme)):
             return !lexeme.contains(0x2E) && !lexeme.contains(0x65) && !lexeme.contains(0x45)
+        case (.boundedInteger(let bounds), .number(let lexeme)):
+            guard !lexeme.contains(0x2E), let value = plainDecimal(lexeme) else { return false }
+            if let minimum = bounds.minimum, value < Decimal(minimum) { return false }
+            if let maximum = bounds.maximum, value > Decimal(maximum) { return false }
+            return true
+        case (.boundedNumber(let bounds), .number(let lexeme)):
+            guard let value = plainDecimal(lexeme) else { return false }
+            if let minimum = bounds.minimum.flatMap({ Decimal(string: $0.description) }) {
+                if value < minimum || (value == minimum && bounds.minimumIsExclusive) { return false }
+            }
+            if let maximum = bounds.maximum.flatMap({ Decimal(string: $0.description) }) {
+                if value > maximum || (value == maximum && bounds.maximumIsExclusive) { return false }
+            }
+            return true
         case (.boolean, .bool):
             return true
         case (.array(let items, let minItems, let maxItems), .array(let elements)):
@@ -71,6 +90,18 @@ enum ReferenceSchemaValidator {
         default:
             return false
         }
+    }
+
+    /// The value of a number lexeme spelled the way a bounded number must be:
+    /// no exponent, at most 19 decimals and at most 19 significant digits
+    /// (leading zeros aside); `nil` otherwise.
+    static func plainDecimal(_ lexeme: [UInt8]) -> Decimal? {
+        guard !lexeme.contains(0x65), !lexeme.contains(0x45) else { return nil }
+        let digits = lexeme.filter { (0x30...0x39).contains($0) }
+        let significant = digits.drop { $0 == 0x30 }
+        let decimals = lexeme.firstIndex(of: 0x2E).map { lexeme.count - $0 - 1 } ?? 0
+        guard significant.count <= 19, decimals <= 19 else { return nil }
+        return Decimal(string: String(decoding: lexeme, as: UTF8.self))
     }
 
     /// The scalars a validated string body denotes as a key or an enum value:

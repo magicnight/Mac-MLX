@@ -36,6 +36,13 @@ enum SchemaScalarState: Hashable, Sendable {
     case intAfterMinus
     case intAfterZero
     case intDigits
+    // Number or integer within a range (scalar node `node`): judged digit by
+    // digit against the range, see ``NumberRange``.
+    /// Read `-`; a digit must follow.
+    case boundedMinus(node: Int32)
+    /// The sign, the mantissa and decimals read so far, and where the prefix
+    /// stands. The mantissa stays below 10^19 and `scale` at most 19.
+    case bounded(node: Int32, negative: Bool, mantissa: UInt64, scale: UInt8, phase: NumberRange.Phase)
     /// `true` / `false`: the first `matched` bytes of the literal have been read.
     case literal(isTrue: Bool, matched: Int)
 
@@ -52,16 +59,27 @@ enum SchemaScalarState: Hashable, Sendable {
     }
 
     /// Whether the value in progress is a number that could end here: a root
-    /// number has no terminator byte, so these states are accepting at the root.
+    /// number has no terminator byte, so these states are accepting at the
+    /// root. A bounded number ends only on a value in its range.
     @usableFromInline
-    var isCompleteNumber: Bool {
+    func isCompleteNumber(program: SchemaProgram) -> Bool {
         switch self {
         case .numberAfterLeadingZero, .numberIntDigits, .numberFracDigits, .numberExpDigits,
             .intAfterZero, .intDigits:
             return true
+        case .bounded(let node, let negative, let mantissa, let scale, let phase):
+            guard phase != .afterDot, case .boundedNumber(let range) = program.scalars[Int(node)] else { return false }
+            return Self.inRange(range, negative: negative, mantissa: mantissa, scale: scale)
         default:
             return false
         }
+    }
+
+    /// Whether the value a bounded prefix spells lies in `range`.
+    @usableFromInline
+    static func inRange(_ range: NumberRange, negative: Bool, mantissa: UInt64, scale: UInt8) -> Bool {
+        guard let value = SchemaDecimal(negative: negative, mantissa: mantissa, scale: Int(scale)) else { return false }
+        return range.contains(value)
     }
 
     /// How one byte relates to the value in progress.
@@ -102,6 +120,9 @@ enum SchemaScalarState: Hashable, Sendable {
             if byte == SchemaBytes.zero { return .intAfterZero }
             if SchemaBytes.isDigit1to9(byte) { return .intDigits }
             return nil
+        case .boundedNumber(let range):
+            if byte == SchemaBytes.minus { return range.admitsNegativeSign ? .boundedMinus(node: node) : nil }
+            return boundedFirstDigit(byte, node: node, negative: false, range: range)
         case .boolean:
             if byte == SchemaBytes.lowerT { return .literal(isTrue: true, matched: 1) }
             if byte == SchemaBytes.lowerF { return .literal(isTrue: false, matched: 1) }
@@ -187,11 +208,67 @@ enum SchemaScalarState: Hashable, Sendable {
         case .intDigits:
             return SchemaBytes.isDigit(byte) ? .consumed(.intDigits) : .endedBefore
 
+        case .boundedMinus(let node):
+            guard case .boundedNumber(let range) = program.scalars[Int(node)],
+                  let next = Self.boundedFirstDigit(byte, node: node, negative: true, range: range)
+            else { return .rejected }
+            return .consumed(next)
+
+        case .bounded(let node, let negative, let mantissa, let scale, let phase):
+            guard case .boundedNumber(let range) = program.scalars[Int(node)] else { return .rejected }
+            if SchemaBytes.isDigit(byte) {
+                // A lone zero takes no more integer digits (JSON forbids leading
+                // zeros); the mantissa and the decimals stay within the limit.
+                guard phase != .loneZero else { return .rejected }
+                let digit = UInt64(byte - SchemaBytes.zero)
+                let (grown, overflow) = mantissa.multipliedReportingOverflow(by: 10)
+                guard !overflow, grown + digit < SchemaDecimal.limit else { return .rejected }
+                let next = grown + digit
+                switch phase {
+                case .integerDigits:
+                    guard range.admits(negative: negative, mantissa: next, scale: 0, phase: .integerDigits) else { return .rejected }
+                    return .consumed(.bounded(node: node, negative: negative, mantissa: next, scale: 0, phase: .integerDigits))
+                case .afterDot, .fraction:
+                    guard scale < SchemaDecimal.maximumDigits,
+                          range.admits(negative: negative, mantissa: next, scale: scale + 1, phase: .fraction)
+                    else { return .rejected }
+                    return .consumed(.bounded(node: node, negative: negative, mantissa: next, scale: scale + 1, phase: .fraction))
+                case .loneZero:
+                    return .rejected
+                }
+            }
+            if byte == SchemaBytes.dot {
+                guard !range.integersOnly, phase == .loneZero || phase == .integerDigits,
+                      range.admits(negative: negative, mantissa: mantissa, scale: 0, phase: .afterDot)
+                else { return .rejected }
+                return .consumed(.bounded(node: node, negative: negative, mantissa: mantissa, scale: 0, phase: .afterDot))
+            }
+            // No exponent: a bounded number is spelled plain. Any other byte
+            // ends the number, which must then be in range.
+            guard phase != .afterDot, Self.inRange(range, negative: negative, mantissa: mantissa, scale: scale) else {
+                return .rejected
+            }
+            return .endedBefore
+
         case .literal(let isTrue, let matched):
             let bytes = isTrue ? Self.trueBytes : Self.falseBytes
             guard matched < bytes.count, bytes[matched] == byte else { return .rejected }
             return matched + 1 == bytes.count ? .completed : .consumed(.literal(isTrue: isTrue, matched: matched + 1))
         }
+    }
+
+    /// The state after the first digit of a bounded number, or `nil` when no
+    /// value starting with it lies in the range.
+    @usableFromInline
+    static func boundedFirstDigit(_ byte: UInt8, node: Int32, negative: Bool, range: NumberRange) -> SchemaScalarState? {
+        if byte == SchemaBytes.zero {
+            guard range.admits(negative: negative, mantissa: 0, scale: 0, phase: .loneZero) else { return nil }
+            return .bounded(node: node, negative: negative, mantissa: 0, scale: 0, phase: .loneZero)
+        }
+        guard SchemaBytes.isDigit1to9(byte) else { return nil }
+        let digit = UInt64(byte - SchemaBytes.zero)
+        guard range.admits(negative: negative, mantissa: digit, scale: 0, phase: .integerDigits) else { return nil }
+        return .bounded(node: node, negative: negative, mantissa: digit, scale: 0, phase: .integerDigits)
     }
 
     /// Number terminal sub-states (`numberAfterLeadingZero` / `numberIntDigits`):

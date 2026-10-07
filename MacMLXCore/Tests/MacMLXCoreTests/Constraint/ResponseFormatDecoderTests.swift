@@ -829,11 +829,112 @@ struct ResponseFormatDecoderTests {
             containing: "'enum'")
     }
 
-    /// `@Guide(.range(…))` becomes `minimum`/`maximum`, which nothing here can
-    /// enforce: a 400, not a silently unbounded integer.
+    /// `@Guide(.range(1...10))` becomes `minimum`/`maximum`: the Person
+    /// fixture compiles as the framework emits it, its rating bounded.
     @Test
-    func rejectsTheRangeGuide() throws {
-        expectUnsupported(schema: try StructuredOutputFixtures.generable("Person"), containing: "'maximum'")
+    func compilesTheRangeGuide() throws {
+        let person = try compile(StructuredOutputFixtures.generable("Person"))
+        #expect(person.property(named: "rating")?.type == .boundedInteger(try #require(SchemaIntegerBounds(minimum: 1, maximum: 10))))
+        #expect(person.properties.count == 14)
+        #expect(person.required.count == 11)
+    }
+
+    // MARK: json_schema — numeric bounds
+
+    private func bounded(_ type: String, _ extra: [String: JSONValue]) throws -> SchemaValueType? {
+        var property: [String: JSONValue] = ["type": .string(type)]
+        property.merge(extra) { _, new in new }
+        return try compile(root(["n": obj(property)])).property(named: "n")?.type
+    }
+
+    // The helpers record an issue instead of throwing: `#expect` evaluates
+    // each operand in its own autoclosure, where a `try` does not reach.
+
+    private func integers(_ minimum: Int?, _ maximum: Int?) -> SchemaValueType {
+        guard let bounds = SchemaIntegerBounds(minimum: minimum, maximum: maximum) else {
+            Issue.record("no integer between \(String(describing: minimum)) and \(String(describing: maximum))")
+            return .integer
+        }
+        return .boundedInteger(bounds)
+    }
+
+    private func numbers(_ minimum: String?, _ maximum: String?, openBelow: Bool = false, openAbove: Bool = false) -> SchemaValueType {
+        func decimal(_ text: String) -> SchemaDecimal {
+            guard let value = SchemaDecimal(parsing: text) else {
+                Issue.record("not a decimal: \(text)")
+                return SchemaDecimal(0)
+            }
+            return value
+        }
+        guard let bounds = SchemaNumberBounds(
+            minimum: minimum.map(decimal), minimumIsExclusive: openBelow,
+            maximum: maximum.map(decimal), maximumIsExclusive: openAbove)
+        else {
+            Issue.record("no number between \(String(describing: minimum)) and \(String(describing: maximum))")
+            return .number
+        }
+        return .boundedNumber(bounds)
+    }
+
+    /// Integer bounds fold to the nearest integer inside them: a fractional
+    /// `minimum` rounds up, an exclusive bound steps past itself, and the
+    /// stricter of the two forms of a side wins.
+    @Test
+    func compilesIntegerBounds() throws {
+        #expect(try bounded("integer", ["minimum": .int(1), "maximum": .int(10)]) == integers(1, 10))
+        #expect(try bounded("integer", ["minimum": .int(7)]) == integers(7, nil))
+        #expect(try bounded("integer", ["maximum": .int(-3)]) == integers(nil, -3))
+        #expect(try bounded("integer", ["minimum": .double(1.5)]) == integers(2, nil))
+        #expect(try bounded("integer", ["minimum": .double(-1.5)]) == integers(-1, nil))
+        #expect(try bounded("integer", ["exclusiveMinimum": .int(2)]) == integers(3, nil))
+        #expect(try bounded("integer", ["exclusiveMinimum": .double(1.5)]) == integers(2, nil))
+        #expect(try bounded("integer", ["maximum": .double(2.5)]) == integers(nil, 2))
+        #expect(try bounded("integer", ["maximum": .double(-2.5)]) == integers(nil, -3))
+        #expect(try bounded("integer", ["exclusiveMaximum": .int(3)]) == integers(nil, 2))
+        #expect(try bounded("integer", ["exclusiveMaximum": .double(2.5)]) == integers(nil, 2))
+        #expect(try bounded("integer", ["minimum": .int(1), "exclusiveMinimum": .int(1)]) == integers(2, nil))
+        #expect(try bounded("integer", ["minimum": .int(5), "exclusiveMinimum": .int(1)]) == integers(5, nil))
+        #expect(try bounded("integer", ["maximum": .int(3), "exclusiveMaximum": .int(9)]) == integers(nil, 3))
+        #expect(try bounded("integer", ["minimum": .double(-0.0)]) == integers(0, nil))
+        #expect(try bounded("integer", ["exclusiveMinimum": .int(2), "exclusiveMaximum": .int(4)]) == integers(3, 3))
+        #expect(try bounded("integer", ["minimum": .int(Int.min), "maximum": .int(Int.max)]) == integers(Int.min, Int.max))
+    }
+
+    @Test
+    func compilesNumberBounds() throws {
+        #expect(try bounded("number", ["minimum": .double(0.5), "maximum": .double(2.75)]) == numbers("0.5", "2.75"))
+        #expect(try bounded("number", ["minimum": .int(1), "maximum": .int(10)]) == numbers("1", "10"))
+        #expect(try bounded("number", ["exclusiveMinimum": .int(0), "exclusiveMaximum": .int(1)]) == numbers("0", "1", openBelow: true, openAbove: true))
+        #expect(try bounded("number", ["minimum": .int(0), "exclusiveMinimum": .int(0)]) == numbers("0", nil, openBelow: true))
+        #expect(try bounded("number", ["minimum": .int(1), "exclusiveMinimum": .double(0.5)]) == numbers("1", nil))
+        #expect(try bounded("number", ["minimum": .double(0.5), "exclusiveMinimum": .int(1)]) == numbers("1", nil, openBelow: true))
+        #expect(try bounded("number", ["maximum": .int(1), "exclusiveMaximum": .int(1)]) == numbers(nil, "1", openAbove: true))
+        #expect(try bounded("number", ["maximum": .int(1), "exclusiveMaximum": .int(5)]) == numbers(nil, "1"))
+        #expect(try bounded("number", ["maximum": .double(-1.25)]) == numbers(nil, "-1.25"))
+        #expect(try bounded("number", ["minimum": .double(0.1), "maximum": .double(0.1)]) == numbers("0.1", "0.1"))
+        #expect(try bounded("number", ["minimum": .double(-0.0)]) == numbers("0", nil))
+    }
+
+    @Test
+    func rejectsUnusableBounds() {
+        expectUnsupported(schema: root(["s": obj(["type": .string("string"), "minimum": .int(1)])]), containing: "'minimum' on non-numeric property 's'")
+        expectUnsupported(schema: root(["b": obj(["type": .string("boolean"), "exclusiveMaximum": .int(1)])]), containing: "'exclusiveMaximum' on non-numeric property 'b'")
+        expectUnsupported(
+            schema: root(["e": obj(["type": .string("string"), "enum": .array([.string("a")]), "maximum": .int(1)])]),
+            containing: "'maximum' alongside 'enum'")
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "exclusiveMinimum": .bool(true), "minimum": .int(1)])]), containing: "draft 4")
+        expectInvalid(schema: root(["n": obj(["type": .string("integer"), "minimum": .string("5")])]), containing: "'minimum' on property 'n' must be a number")
+        expectInvalid(schema: root(["n": obj(["type": .string("integer"), "minimum": .int(5), "maximum": .int(3)])]), containing: "admit no integer")
+        expectInvalid(schema: root(["n": obj(["type": .string("integer"), "exclusiveMinimum": .int(2), "exclusiveMaximum": .int(3)])]), containing: "admit no integer")
+        expectInvalid(schema: root(["n": obj(["type": .string("integer"), "minimum": .double(2.5), "maximum": .double(2.9)])]), containing: "admit no integer")
+        expectInvalid(schema: root(["n": obj(["type": .string("number"), "minimum": .int(5), "maximum": .int(3)])]), containing: "admit no number")
+        expectInvalid(schema: root(["n": obj(["type": .string("number"), "minimum": .int(1), "exclusiveMaximum": .int(1)])]), containing: "admit no number")
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "minimum": .double(1e25)])]), containing: "more than 19 significant digits")
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "maximum": .double(1e-20)])]), containing: "more than 19 significant digits")
+        expectUnsupported(schema: root(["n": obj(["type": .string("integer"), "maximum": .double(9.3e18)])]), containing: "'maximum' on property 'n' is beyond the integer range")
+        expectUnsupported(schema: root(["n": obj(["type": .string("integer"), "exclusiveMinimum": .int(Int.max)])]), containing: "beyond the integer range")
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "multipleOf": .int(2)])]), containing: "'multipleOf'")
+        expectInvalid(schema: obj(["type": .string("integer"), "minimum": .int(3), "maximum": .int(1)]), containing: "the bounds at the schema root admit no integer")
     }
 
     /// Apple's TripPlanner sample compiles as the framework emits it, its

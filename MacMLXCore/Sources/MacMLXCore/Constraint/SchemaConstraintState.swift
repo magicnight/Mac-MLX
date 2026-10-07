@@ -95,7 +95,7 @@ public struct SchemaConstraintState: Hashable, Sendable {
         guard stack.isEmpty else { return false }
         switch mode {
         case .afterValue: return true
-        case .scalar(let scalar): return scalar.isCompleteNumber
+        case .scalar(let scalar): return scalar.isCompleteNumber(program: program)
         default: return false
         }
     }

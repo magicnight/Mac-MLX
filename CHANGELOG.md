@@ -22,7 +22,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   4,096 nodes, 65,536 enum and `const` values and 4 MiB of property names and
   values, and `minItems` may not exceed 65,536. A recursive schema is a 400,
   since nothing would bound its documents. Still unsupported: `null` and
-  unions, `minimum`/`maximum`, and `pattern`.
+  unions, and `pattern`.
 - **Any string as a key, enum or `const` value, and any type at the root of
   a `response_format` schema.** Keys and literal values may now contain
   characters outside ASCII, quotes, backslashes and control characters: the
@@ -39,6 +39,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   a `const` or a `$ref` as well as an object — the shapes `@Generable`
   emits for `[T].self`, `String.self` or an enum type; a root number is
   complete without a terminator, as under `json_object`.
+- **`minimum`, `maximum`, `exclusiveMinimum` and `exclusiveMaximum` on
+  numbers and integers in a `response_format` schema** — what
+  `@Guide(.range(…))`, `.minimum(…)` and `.maximum(…)` emit. The constraint
+  judges every digit: a digit is legal only while some completion of the
+  digits so far still fits the range, and the number may end only on a
+  value in it, so an out-of-range value is never produced and the model is
+  never left without a legal digit. An integer's bounds fold to the nearest
+  integers inside them (`exclusiveMaximum: 3` is `maximum: 2`,
+  `minimum: 1.5` is `minimum: 2`). A bounded number is spelled as a plain
+  decimal — no exponent — of at most 19 significant digits and 19 decimals,
+  which every value in the range has, and the bounds must fit the same
+  limits; a bound is the decimal number the schema wrote, compared exactly.
+  Apple's Person sample, whose rating is `@Guide(.range(1...10))`, now
+  compiles as the framework emits it. Still unsupported: `multipleOf`,
+  `pattern`, `null` and unions.
 - **`stream_options.include_usage` on streaming chat completions.** When a
   client sets it, every chunk carries `usage: null` and one usage-only chunk —
   empty `choices`, the whole request's token counts — is sent before
