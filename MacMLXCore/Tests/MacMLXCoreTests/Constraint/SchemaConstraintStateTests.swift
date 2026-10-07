@@ -496,6 +496,28 @@ struct SchemaConstraintStateTests {
         #expect(acceptsRoot("10", steep))
     }
 
+    /// The first 19 digits of 2^64 are a legal value; a twentieth digit is
+    /// refused, not trapped on: ten times that mantissa fits a `UInt64`, and
+    /// adding a digit of six or more does not.
+    @Test
+    func aTwentiethDigitIsRefusedNotTrappedOn() throws {
+        let twoToTheSixtyFour = "1844674407370955161"
+        for root in [numbers("0", nil), integers(0, nil), numbers("0", "1")] {
+            let prefix = root == numbers("0", "1") ? "0." + twoToTheSixtyFour : twoToTheSixtyFour
+            let state = try #require(SchemaConstraintState(root: root).walk(Array(prefix.utf8)), "\(prefix)")
+            #expect(state.isComplete)
+            for digit in "0123456789" {
+                #expect(state.walk(Array(String(digit).utf8)) == nil, "\(prefix)\(digit) for \(root)")
+            }
+        }
+        let object = schema([("n", numbers("0", nil))])
+        let inObject = try #require(walk("{\"n\":" + twoToTheSixtyFour, object))
+        #expect(inObject.walk(Array("9".utf8)) == nil)
+        #expect(inObject.walk(Array("}".utf8))?.isComplete == true)
+        // The emptiness walk holds the same mantissa when the bound sits there.
+        #expect(SchemaNumberBounds(minimum: SchemaDecimal(parsing: twoToTheSixtyFour), minimumIsExclusive: true, maximum: SchemaDecimal(parsing: "1844674407370955162")) != nil)
+    }
+
     @Test
     func rootBoundedNumbersAreCompleteWithoutATerminator() throws {
         let digits = integers(0, 9)

@@ -108,7 +108,7 @@ struct NumberRange: Hashable, Sendable {
             // disjoint and rise (fall, for a negative prefix), so the first one
             // past a bound ends the search.
             let digits = SchemaDecimal.digits(of: mantissa)
-            let spare = SchemaDecimal.maximumDigits - digits
+            let spare = Swift.max(0, SchemaDecimal.maximumDigits - digits)
             for k in 0...spare {
                 let low = mantissa * SchemaDecimal.powersOfTen[k]
                 let met: Bool
@@ -172,7 +172,7 @@ struct NumberRange: Hashable, Sendable {
             if phase != .loneZero, phase == .integerDigits || scale < SchemaDecimal.maximumDigits {
                 for digit in UInt64(0)...9 {
                     let (grown, overflow) = mantissa.multipliedReportingOverflow(by: 10)
-                    guard !overflow, grown + digit < SchemaDecimal.limit else { break }
+                    guard !overflow, grown < SchemaDecimal.limit - digit else { break }
                     let next = grown + digit
                     let nextScale = phase == .integerDigits ? scale : scale + 1
                     let nextPhase: Phase = phase == .integerDigits ? .integerDigits : .fraction

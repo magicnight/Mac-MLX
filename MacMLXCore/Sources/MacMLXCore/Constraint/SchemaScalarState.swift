@@ -219,8 +219,11 @@ enum SchemaScalarState: Hashable, Sendable {
             if SchemaBytes.isDigit(byte) {
                 // The mantissa and the decimals stay within the limit.
                 let digit = UInt64(byte - SchemaBytes.zero)
+                // `grown + digit` could itself overflow (a mantissa of
+                // 1844674407370955161, the first 19 digits of 2^64, times ten
+                // fits; plus 6 does not), so the limit moves to the other side.
                 let (grown, overflow) = mantissa.multipliedReportingOverflow(by: 10)
-                guard !overflow, grown + digit < SchemaDecimal.limit else { return .rejected }
+                guard !overflow, grown < SchemaDecimal.limit - digit else { return .rejected }
                 let next = grown + digit
                 switch phase {
                 case .integerDigits:
