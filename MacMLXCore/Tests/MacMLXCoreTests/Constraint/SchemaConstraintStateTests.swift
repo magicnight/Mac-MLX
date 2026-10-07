@@ -482,7 +482,10 @@ struct SchemaConstraintStateTests {
     /// document is reached within six more. The trap search proves this for
     /// bounded integers with two-sided bounds, whose states are finite; a
     /// bounded number has a state per prefix (every fraction digit opens
-    /// ten more), so this walks them to a fixed depth instead.
+    /// ten more), so this walks them to a fixed depth instead. The search
+    /// for a completion has a budget of walks: a correct automaton completes
+    /// every prefix within a few, and a dead end would otherwise be explored
+    /// to the full depth, thousands of times over.
     @Test
     func boundedPrefixesAlwaysComplete() throws {
         let roots: [SchemaValueType] = [
@@ -512,8 +515,11 @@ struct SchemaConstraintStateTests {
                     }
                     frontier = next
                 }
-                for state in seen where !completes(state, within: 6, alphabet) {
-                    Issue.record("dead end at \(state.diagnosticDescription) for \(root)")
+                for state in seen {
+                    var budget = 10_000
+                    if !completes(state, within: 6, alphabet, budget: &budget) {
+                        Issue.record("\(budget == 0 ? "no completion within the budget" : "dead end") at \(state.diagnosticDescription) for \(root)")
+                    }
                 }
             }
         }
@@ -532,12 +538,19 @@ struct SchemaConstraintStateTests {
         }
     }
 
-    private func completes(_ state: SchemaConstraintState, within budget: Int, _ alphabet: [UInt8]) -> Bool {
+    /// Whether a complete document is reachable from `state` within `depth`
+    /// bytes, trying at most `budget` walks in all.
+    private func completes(_ state: SchemaConstraintState, within depth: Int, _ alphabet: [UInt8], budget: inout Int) -> Bool {
         if state.isComplete { return true }
-        guard budget > 0 else { return false }
-        return alphabet.contains { byte in
-            state.advanced(over: byte).map { completes($0, within: budget - 1, alphabet) } ?? false
+        guard depth > 0 else { return false }
+        for byte in alphabet {
+            guard budget > 0 else { return false }
+            budget -= 1
+            if let next = state.advanced(over: byte), completes(next, within: depth - 1, alphabet, budget: &budget) {
+                return true
+            }
         }
+        return false
     }
 
     // MARK: Surrogate escapes (C2)
