@@ -215,6 +215,11 @@ struct NumberRangeTests {
         #expect(SchemaNumberBounds(minimum: dec("1"), maximum: dec("1")) != nil)
         #expect(SchemaNumberBounds(minimum: dec("1"), minimumIsExclusive: true, maximum: dec("1")) == nil)
         #expect(SchemaNumberBounds(minimum: dec("2"), maximum: dec("1")) == nil)
+        // At the top of the grid: 9000000000000000001 lies above 9e18, nothing lies above 19 nines.
+        #expect(SchemaNumberBounds(minimum: dec("9000000000000000000"), minimumIsExclusive: true, maximum: nil) != nil)
+        #expect(SchemaNumberBounds(minimum: dec("9999999999999999999"), minimumIsExclusive: true, maximum: nil) == nil)
+        #expect(SchemaNumberBounds(minimum: dec("9999999999999999999"), maximum: nil) != nil)
+        #expect(SchemaNumberBounds(minimum: nil, maximum: dec("-9999999999999999999"), maximumIsExclusive: true) == nil)
     }
 
     /// Decoding checks what the initialisers check: a decimal is normalised

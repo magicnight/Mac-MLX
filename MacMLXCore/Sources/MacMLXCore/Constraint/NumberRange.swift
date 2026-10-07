@@ -171,8 +171,9 @@ struct NumberRange: Hashable, Sendable {
             // decimals stay within the limit.
             if phase != .loneZero, phase == .integerDigits || scale < SchemaDecimal.maximumDigits {
                 for digit in UInt64(0)...9 {
-                    let next = mantissa * 10 + digit
-                    guard next < SchemaDecimal.limit else { break }
+                    let (grown, overflow) = mantissa.multipliedReportingOverflow(by: 10)
+                    guard !overflow, grown + digit < SchemaDecimal.limit else { break }
+                    let next = grown + digit
                     let nextScale = phase == .integerDigits ? scale : scale + 1
                     let nextPhase: Phase = phase == .integerDigits ? .integerDigits : .fraction
                     if admits(negative: negative, mantissa: next, scale: nextScale, phase: nextPhase) {
