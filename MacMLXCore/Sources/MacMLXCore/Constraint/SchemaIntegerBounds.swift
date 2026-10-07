@@ -14,4 +14,19 @@ public struct SchemaIntegerBounds: Equatable, Hashable, Sendable, Codable {
         self.minimum = minimum
         self.maximum = maximum
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case minimum, maximum
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let bounds = SchemaIntegerBounds(
+            minimum: try container.decodeIfPresent(Int.self, forKey: .minimum),
+            maximum: try container.decodeIfPresent(Int.self, forKey: .maximum))
+        else {
+            throw DecodingError.dataCorruptedError(forKey: .minimum, in: container, debugDescription: "no integer lies between the bounds")
+        }
+        self = bounds
+    }
 }

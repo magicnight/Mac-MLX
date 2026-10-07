@@ -459,6 +459,43 @@ struct SchemaConstraintStateTests {
         for v in ["0.3", "0.30", "0.29", "-5", "0"] { #expect(!accepts("{\"a\":\(v)}", above), "\(v)") }
     }
 
+    /// The digit limits are part of what a prefix can still become: a
+    /// 19-digit integer takes no decimal point, and a fraction that has used
+    /// the last digit cannot creep past an open bound — the digit before it
+    /// is refused instead, and the value one grid step inside the bound is
+    /// the way through.
+    @Test
+    func limitsLeaveNoDeadEnds() throws {
+        let nineteen = "1234567890123456789"
+        let nonNegative = numbers("0", nil)
+        #expect(acceptsRoot(nineteen, nonNegative))
+        #expect(SchemaConstraintState(root: nonNegative).walk(Array((nineteen + ".").utf8)) == nil, "no digit could follow the point")
+        #expect(acceptsRoot(String(nineteen.dropLast()) + ".5", nonNegative))
+        let object = schema([("x", nonNegative)])
+        #expect(walk("{\"x\":1000000000000000000.", object) == nil)
+        #expect(accepts("{\"x\":1000000000000000000}", object))
+        #expect(SchemaConstraintState(root: numbers(nil, "100")).walk(Array("-1000000000000000000.".utf8)) == nil)
+
+        let zeros = { (count: Int) in String(repeating: "0", count: count) }
+        let positive = numbers("0", nil, openBelow: true)
+        #expect(SchemaConstraintState(root: positive).walk(Array(("0." + zeros(19)).utf8)) == nil, "the last digit could only spell 0")
+        #expect(acceptsRoot("0." + zeros(18) + "1", positive))
+        let aboveFive = numbers("5", "10", openBelow: true)
+        #expect(SchemaConstraintState(root: aboveFive).walk(Array(("5." + zeros(18)).utf8)) == nil)
+        #expect(acceptsRoot("5." + zeros(17) + "1", aboveFive))
+        #expect(acceptsRoot("5." + zeros(18), numbers("5", "10")), "closed at 5, every spelling of 5 is in")
+        let belowZero = numbers(nil, "0", openAbove: true)
+        #expect(SchemaConstraintState(root: belowZero).walk(Array(("-0." + zeros(19)).utf8)) == nil)
+        #expect(acceptsRoot("-0." + zeros(18) + "1", belowZero))
+        let above = numbers("0.3", nil, openBelow: true)
+        #expect(SchemaConstraintState(root: above).walk(Array(("0.3" + zeros(18)).utf8)) == nil)
+        #expect(acceptsRoot("0.3" + zeros(17) + "1", above))
+        // A bound on the 19th decimal: the point is already dead when nothing after it can pass the bound.
+        let steep = numbers("9.999999999999999999", nil, openBelow: true)
+        #expect(SchemaConstraintState(root: steep).walk(Array("9.".utf8)) == nil)
+        #expect(acceptsRoot("10", steep))
+    }
+
     @Test
     func rootBoundedNumbersAreCompleteWithoutATerminator() throws {
         let digits = integers(0, 9)
@@ -1112,6 +1149,10 @@ struct SchemaConstraintStateTests {
                 let document = k < 4 ? Array(valid.utf8) : generator.mutate(valid)
                 let automaton = start.walk(document)?.isComplete ?? false
                 let reference = ReferenceSchemaValidator.validate(document, root: root)
+                if k < 4, !reference {
+                    mismatches.append("the generator wrote an invalid document: \(valid) for \(root)")
+                    continue
+                }
                 if automaton != reference {
                     mismatches.append("automaton=\(automaton) reference=\(reference) \(String(decoding: document, as: UTF8.self)) for \(root)")
                     continue

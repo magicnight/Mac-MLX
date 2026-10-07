@@ -29,8 +29,10 @@
 /// only where another member or item can follow, the compiler guarantees
 /// `minItems <= maxItems` and that every required key is declared, every
 /// literal has an all-ASCII spelling (printable ASCII raw, everything else
-/// escaped, so a key the tokenizer cannot spell raw is still reachable), and
-/// `\u` escapes are cut off as soon as they cannot complete.
+/// escaped, so a key the tokenizer cannot spell raw is still reachable),
+/// `\u` escapes are cut off as soon as they cannot complete, and a bounded
+/// number takes a digit only while some value it can still spell lies in
+/// the range (``NumberRange``).
 public struct SchemaConstraintState: Hashable, Sendable {
 
     /// One open container.

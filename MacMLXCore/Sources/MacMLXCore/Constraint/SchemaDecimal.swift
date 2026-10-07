@@ -5,10 +5,11 @@
 ///
 /// The value is `±mantissa / 10^scale`. The automaton compares values of this
 /// form without rounding (two of them cross-multiplied fit in 128 bits), so a
-/// bound means the decimal number the schema wrote — `0.3` is three tenths,
-/// not the nearest double — and a generated number is judged by the digits
-/// the model wrote. Zero has no sign and no trailing zeros are kept, so equal
-/// values are equal structurally.
+/// bound means the decimal number it holds — `0.3` is three tenths, not the
+/// nearest double — and a generated number is judged by the digits the model
+/// wrote. Zero has no sign and no trailing zeros are kept, so equal values
+/// are equal structurally. Decoding checks the same limits as the
+/// initialisers.
 public struct SchemaDecimal: Hashable, Sendable, Codable, Comparable, CustomStringConvertible {
 
     /// The most significant digits a value may have, and the most decimals.
@@ -54,6 +55,25 @@ public struct SchemaDecimal: Hashable, Sendable, Codable, Comparable, CustomStri
         self.init(normalisedNegative: value < 0, mantissa: UInt64(value.magnitude), scale: 0)
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case negative, mantissa, scale
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let negative = try container.decode(Bool.self, forKey: .negative)
+        let mantissa = try container.decode(UInt64.self, forKey: .mantissa)
+        let scale = try container.decode(UInt8.self, forKey: .scale)
+        guard let value = SchemaDecimal(negative: negative, mantissa: mantissa, scale: Int(scale)), value.scale == scale,
+              value.negative == negative
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .mantissa, in: container,
+                debugDescription: "not a normalised decimal of at most \(Self.maximumDigits) digits and decimals")
+        }
+        self = value
+    }
+
     /// The decimal number `value` prints as (its shortest round-trip form), or
     /// `nil` when it is not finite or needs more than 19 digits or decimals.
     public init?(_ value: Double) {
@@ -97,7 +117,7 @@ public struct SchemaDecimal: Hashable, Sendable, Codable, Comparable, CustomStri
                 bytes = bytes.dropFirst()
             }
             guard !bytes.isEmpty, bytes.allSatisfy({ $0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9") }) else { return nil }
-            guard bytes.count <= 4 else { return nil }   // anything larger is out of range anyway
+            guard bytes.count <= 4 else { return nil }   // a longer exponent is out of range, or a zero
             for byte in bytes { exponent = exponent * 10 + Int(byte - UInt8(ascii: "0")) }
             if exponentNegative { exponent = -exponent }
         } else if !bytes.isEmpty {
@@ -125,6 +145,26 @@ public struct SchemaDecimal: Hashable, Sendable, Codable, Comparable, CustomStri
 
     /// Whether the value has no fractional part.
     public var isInteger: Bool { scale == 0 }
+
+    /// The significant digits of the value: those of its mantissa without
+    /// trailing zeros (`9.3e18` has two).
+    public var significantDigits: Int {
+        var rest = mantissa
+        while rest > 0, rest % 10 == 0 { rest /= 10 }
+        return Self.digits(of: rest)
+    }
+
+    /// The decimal digits of `magnitude`; 0 for zero.
+    @usableFromInline
+    static func digits(of magnitude: UInt64) -> Int {
+        var count = 0
+        var rest = magnitude
+        while rest > 0 {
+            rest /= 10
+            count += 1
+        }
+        return count
+    }
 
     /// The value as an `Int`, when it is an integer in range.
     public var integerValue: Int? {

@@ -19,8 +19,7 @@ public enum SchemaValueType: Equatable, Hashable, Sendable, Codable {
     case boundedInteger(SchemaIntegerBounds)
     /// `{"type":"number","minimum":…,"maximum":…}` — a number within the
     /// bounds, spelled as a plain decimal (no exponent) of at most 19
-    /// significant digits and 19 decimals, which every number in the range
-    /// has (see ``SchemaNumberBounds``).
+    /// significant digits and 19 decimals (see ``SchemaNumberBounds``).
     case boundedNumber(SchemaNumberBounds)
     /// `{"type":"boolean"}` — `true` or `false`.
     case boolean

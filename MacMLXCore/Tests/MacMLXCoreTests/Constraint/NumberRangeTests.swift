@@ -1,5 +1,6 @@
 // Copyright © 2026 macMLX. English comments only.
 
+import Foundation
 import Testing
 
 @testable import MacMLXCore
@@ -67,6 +68,10 @@ struct NumberRangeTests {
         #expect(dec("100").description == "100")
         #expect(dec("0.0000000000000000001").description == "0.0000000000000000001")
         #expect(dec("123.456").description == "123.456")
+        #expect(SchemaDecimal(9.3e18)?.significantDigits == 2)
+        #expect(dec("0.123456789012345").significantDigits == 15)
+        #expect(dec("1234567890123456789").significantDigits == 19)
+        #expect(SchemaDecimal(0).significantDigits == 0)
     }
 
     @Test
@@ -177,5 +182,241 @@ struct NumberRangeTests {
         #expect(huge.admits(negative: false, mantissa: 9, scale: 0, phase: .integerDigits))
         #expect(huge.admits(negative: false, mantissa: 9_000_000_000_000_000_001, scale: 0, phase: .integerDigits))
         #expect(!huge.admitsNegativeSign)
+
+        // The limits are part of what a prefix can become: after the last
+        // digit the cell is a single value, and an open bound on it is out.
+        let positive = numbers("0", nil, openBelow: true)
+        #expect(positive.admits(negative: false, mantissa: 0, scale: 18, phase: .fraction), "0.000000000000000000 can still become 0.0000000000000000001")
+        #expect(!positive.admits(negative: false, mantissa: 0, scale: 19, phase: .fraction), "the last digit could only spell 0")
+        #expect(!positive.admits(negative: false, mantissa: 1_000_000_000_000_000_000, scale: 0, phase: .afterDot), "no digit fits after 19 digits")
+        #expect(positive.admits(negative: false, mantissa: 100_000_000_000_000_000, scale: 0, phase: .afterDot))
+        let aboveFive = numbers("5", "10", openBelow: true)
+        #expect(aboveFive.admits(negative: false, mantissa: 500_000_000_000_000_000, scale: 17, phase: .fraction))
+        #expect(!aboveFive.admits(negative: false, mantissa: 5_000_000_000_000_000_000, scale: 18, phase: .fraction))
+        #expect(numbers("5", "10").admits(negative: false, mantissa: 5_000_000_000_000_000_000, scale: 18, phase: .fraction), "closed at 5, 5.000000000000000000 is in")
+    }
+
+    /// Whether the range holds a value the automaton can spell, as the
+    /// bounds' initialiser decides it: open bounds on two neighbouring values
+    /// of the grid hold nothing.
+    @Test
+    func rangesHoldAValueOfTheGrid() {
+        #expect(numbers("0", "1").holdsSomeValue)
+        #expect(numbers("0", nil, openBelow: true).holdsSomeValue)
+        #expect(numbers(nil, "0", openAbove: true).holdsSomeValue)
+        #expect(integers(nil, nil).holdsSomeValue)
+        #expect(SchemaNumberBounds(minimum: dec("0"), minimumIsExclusive: true, maximum: dec("0.0000000000000000002"), maximumIsExclusive: true) != nil)
+        #expect(SchemaNumberBounds(minimum: dec("0"), minimumIsExclusive: true, maximum: dec("0.0000000000000000001"), maximumIsExclusive: true) == nil)
+        #expect(SchemaNumberBounds(minimum: dec("0.5"), minimumIsExclusive: true, maximum: dec("0.5000000000000000001"), maximumIsExclusive: true) == nil)
+        #expect(SchemaNumberBounds(minimum: dec("-0.0000000000000000001"), minimumIsExclusive: true, maximum: dec("0"), maximumIsExclusive: true) == nil)
+        #expect(SchemaNumberBounds(minimum: dec("100000000000000000.2"), minimumIsExclusive: true, maximum: dec("100000000000000000.3"), maximumIsExclusive: true) == nil, "a value between would need 20 digits")
+        #expect(SchemaNumberBounds(minimum: dec("100000000000000000.2"), minimumIsExclusive: true, maximum: dec("100000000000000000.8"), maximumIsExclusive: true) != nil, "100000000000000000.3 lies between")
+        #expect(SchemaNumberBounds(minimum: dec("100000000000000000.2"), maximum: dec("100000000000000000.3")) != nil, "the bounds themselves are values")
+        #expect(SchemaNumberBounds(minimum: dec("1"), maximum: dec("1")) != nil)
+        #expect(SchemaNumberBounds(minimum: dec("1"), minimumIsExclusive: true, maximum: dec("1")) == nil)
+        #expect(SchemaNumberBounds(minimum: dec("2"), maximum: dec("1")) == nil)
+    }
+
+    /// Decoding checks what the initialisers check: a decimal is normalised
+    /// and within the limits, bounds hold a value.
+    @Test
+    func decodesOnlyWhatTheInitialisersAccept() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        let value = dec("-12.5")
+        #expect(try decoder.decode(SchemaDecimal.self, from: encoder.encode(value)) == value)
+        let bounds = SchemaNumberBounds(minimum: dec("0"), minimumIsExclusive: true, maximum: dec("2.75"))
+        #expect(try decoder.decode(SchemaNumberBounds.self, from: encoder.encode(bounds)) == bounds)
+        let integerBounds = SchemaIntegerBounds(minimum: -12, maximum: 35)
+        #expect(try decoder.decode(SchemaIntegerBounds.self, from: encoder.encode(integerBounds)) == integerBounds)
+        for bad in [
+            #"{"negative":true,"mantissa":0,"scale":0}"#,
+            #"{"negative":false,"mantissa":50,"scale":1}"#,
+            #"{"negative":false,"mantissa":1,"scale":25}"#,
+            #"{"negative":false,"mantissa":10000000000000000000,"scale":0}"#,
+        ] {
+            #expect(throws: DecodingError.self, "\(bad)") { try decoder.decode(SchemaDecimal.self, from: Data(bad.utf8)) }
+        }
+        #expect(throws: DecodingError.self) { try decoder.decode(SchemaIntegerBounds.self, from: Data(#"{"minimum":5,"maximum":3}"#.utf8)) }
+        let empty = #"{"minimum":{"negative":false,"mantissa":1,"scale":0},"minimumIsExclusive":true,"maximum":{"negative":false,"mantissa":1,"scale":0},"maximumIsExclusive":false}"#
+        #expect(throws: DecodingError.self) { try decoder.decode(SchemaNumberBounds.self, from: Data(empty.utf8)) }
+    }
+
+    // MARK: An exact model of the grid, near the bounds
+
+    /// The same grid model written over Foundation's `Decimal`: the values a
+    /// prefix can still become, and whether one lies in the range.
+    private struct GridModel {
+        let lower: Decimal?, lowerOpen: Bool, upper: Decimal?, upperOpen: Bool, integersOnly: Bool
+
+        init(_ range: NumberRange) {
+            lower = range.lower.flatMap { Decimal(string: $0.description) }
+            lowerOpen = range.lowerOpen
+            upper = range.upper.flatMap { Decimal(string: $0.description) }
+            upperOpen = range.upperOpen
+            integersOnly = range.integersOnly
+        }
+
+        static func power(_ n: Int) -> Decimal { Decimal(string: "1" + String(repeating: "0", count: n)) ?? 1 }
+        static func tenth(_ n: Int) -> Decimal { n == 0 ? 1 : (Decimal(string: "0." + String(repeating: "0", count: n - 1) + "1") ?? 1) }
+
+        func contains(_ value: Decimal) -> Bool {
+            if let lower, value < lower || (value == lower && lowerOpen) { return false }
+            if let upper, value > upper || (value == upper && upperOpen) { return false }
+            return true
+        }
+
+        /// Whether the closed interval `[low, high]`, mirrored when negative, holds a value in the range.
+        func meets(_ low: Decimal, _ high: Decimal, negative: Bool) -> Bool {
+            var l = negative ? -high : low, lOpen = false
+            var h = negative ? -low : high, hOpen = false
+            if let lower {
+                if lower > l { l = lower; lOpen = lowerOpen } else if lower == l { lOpen = lOpen || lowerOpen }
+            }
+            if let upper {
+                if upper < h { h = upper; hOpen = upperOpen } else if upper == h { hOpen = hOpen || upperOpen }
+            }
+            return l < h || (l == h && !lOpen && !hOpen)
+        }
+
+        /// `(admitted, completeHere)` for a prefix as the model would spell it, or `nil` when it is not a prefix at all.
+        func judge(_ text: String) -> (admitted: Bool, complete: Bool)? {
+            var rest = Substring(text)
+            var negative = false
+            if rest.first == "-" { negative = true; rest = rest.dropFirst() }
+            if rest.isEmpty {
+                guard negative else { return nil }
+                let any = judge("-0")?.admitted == true || (1...9).contains { judge("-\($0)")?.admitted == true }
+                return (any, false)
+            }
+            let integerPart = rest.prefix { $0.isNumber }
+            rest = rest.dropFirst(integerPart.count)
+            guard !integerPart.isEmpty, integerPart.allSatisfy({ $0.isASCII }) else { return nil }
+            if integerPart.count > 1, integerPart.first == "0" { return (false, false) }
+            var dot = false
+            var fraction = Substring("")
+            if rest.first == "." {
+                dot = true
+                rest = rest.dropFirst()
+                fraction = rest.prefix { $0.isNumber }
+                rest = rest.dropFirst(fraction.count)
+            }
+            guard rest.isEmpty else { return nil }
+            if integersOnly, dot { return (false, false) }
+            let allDigits = String(integerPart) + String(fraction)
+            let significant = String(allDigits.drop { $0 == "0" })
+            let mantissa = Decimal(string: significant.isEmpty ? "0" : significant) ?? 0
+            let d = significant.count
+            let s = fraction.count
+            if d > 19 || s > 19 { return (false, false) }
+            let value = mantissa * Self.tenth(s)
+            if !dot, integerPart == "0" {
+                // The lone zero: 0 itself, or any fraction, or nothing for integers.
+                let admitted = integersOnly ? meets(0, 0, negative: negative) : meets(0, (Self.power(19) - 1) * Self.tenth(19), negative: negative)
+                return (admitted, contains(negative ? -value : value))
+            }
+            if dot {
+                let remaining = Swift.min(19 - s, 19 - d)
+                if fraction.isEmpty, remaining < 1 { return (false, false) }
+                let low = value
+                let high = (mantissa + 1) * Self.tenth(s) - Self.tenth(s + remaining)
+                let admitted = meets(low, high, negative: negative)
+                return (admitted, !fraction.isEmpty && admitted && contains(negative ? -value : value))
+            }
+            var admitted = false
+            for k in 0...(19 - d) {
+                let low = mantissa * Self.power(k)
+                let high: Decimal = integersOnly
+                    ? (mantissa + 1) * Self.power(k) - 1
+                    : (mantissa + 1) * Self.power(k) - Self.tenth(19 - d - k)
+                if meets(low, high, negative: negative) { admitted = true; break }
+            }
+            return (admitted, admitted && contains(negative ? -value : value))
+        }
+    }
+
+    /// Near every bound of the pooled ranges — the bound's own spelling, each
+    /// prefix of it, its last digit moved, padded with zeros and nines to the
+    /// digit limit, with and without a point, both signs — the automaton
+    /// admits a prefix exactly when the model says a value in range can still
+    /// follow, and is complete exactly when the model says the value is in.
+    @Test
+    func agreesWithTheGridModelNearTheBounds() {
+        var pool = RandomSchemaGenerator.boundedScalars
+        if let forty = SchemaIntegerBounds(minimum: 40, maximum: 40) { pool.append(.boundedInteger(forty)) }
+        if let huge = SchemaIntegerBounds(minimum: 9_000_000_000_000_000_001, maximum: nil) { pool.append(.boundedInteger(huge)) }
+        for text in ["0.3", "0.125", "99.5", "100.25", "1000000000000000000", "0.0000000000000000001", "123456789012345678.9"] {
+            if let a = SchemaDecimal(parsing: text) {
+                if let b = SchemaNumberBounds(minimum: a, minimumIsExclusive: true, maximum: nil) { pool.append(.boundedNumber(b)) }
+                if let b = SchemaNumberBounds(minimum: nil, maximum: a, maximumIsExclusive: true) { pool.append(.boundedNumber(b)) }
+                if let b = SchemaNumberBounds(minimum: a, maximum: a) { pool.append(.boundedNumber(b)) }
+                if let b = SchemaNumberBounds(minimum: a.negated, maximum: nil) { pool.append(.boundedNumber(b)) }
+            }
+        }
+        var compared = 0
+        var disagreements: [String] = []
+        for root in pool {
+            let range: NumberRange
+            switch root {
+            case .boundedInteger(let bounds): range = NumberRange(bounds)
+            case .boundedNumber(let bounds): range = NumberRange(bounds)
+            default: continue
+            }
+            let model = GridModel(range)
+            let start = SchemaConstraintState(root: root)
+            for prefix in Self.prefixes(near: range) {
+                guard let verdict = model.judge(prefix) else { continue }
+                let walked = start.walk(Array(prefix.utf8))
+                compared += 1
+                if (walked != nil) != verdict.admitted {
+                    disagreements.append("admitted: automaton \(walked != nil), model \(verdict.admitted): \(prefix) for \(root)")
+                } else if let walked, walked.isComplete != verdict.complete {
+                    disagreements.append("complete: automaton \(walked.isComplete), model \(verdict.complete): \(prefix) for \(root)")
+                }
+            }
+        }
+        #expect(disagreements.isEmpty, "\(disagreements.count) of \(compared): \(disagreements.prefix(5).joined(separator: "; "))")
+        #expect(compared > 20_000, "\(compared) prefixes compared")
+    }
+
+    /// Prefixes around a range's bounds (and around 0 and 1 for a missing bound).
+    private static func prefixes(near range: NumberRange) -> [String] {
+        var seeds: [String] = []
+        for bound in [range.lower, range.upper] {
+            if let bound { seeds.append(bound.description) }
+        }
+        if range.lower == nil { seeds += ["-1", "-0.5"] }
+        if range.upper == nil { seeds += ["1", "0.5"] }
+        seeds += ["0", "9"]
+        var out: Set<String> = []
+        func add(_ text: String) {
+            out.insert(text)
+            out.insert("-" + text)
+            if text.hasPrefix("-") { out.insert(String(text.dropFirst())) }
+        }
+        for seed in seeds {
+            let bare = seed.hasPrefix("-") ? String(seed.dropFirst()) : seed
+            var spellings = [bare]
+            // The last digit moved by one, when it stays a digit.
+            if let last = bare.last, let digit = last.wholeNumberValue {
+                if digit > 0 { spellings.append(String(bare.dropLast()) + String(digit - 1)) }
+                if digit < 9 { spellings.append(String(bare.dropLast()) + String(digit + 1)) }
+            }
+            for spelling in spellings {
+                for length in 1...spelling.count {
+                    add(String(spelling.prefix(length)))
+                }
+                let digits = spelling.filter(\.isNumber).count
+                for pad in 1...max(1, 21 - digits) {
+                    for filler in ["0", "9"] {
+                        let padding = String(repeating: filler, count: pad)
+                        add(spelling + padding)
+                        if !spelling.contains(".") { add(spelling + "." + padding) }
+                    }
+                }
+                if !spelling.contains(".") { add(spelling + ".") }
+            }
+        }
+        return out.sorted()
     }
 }

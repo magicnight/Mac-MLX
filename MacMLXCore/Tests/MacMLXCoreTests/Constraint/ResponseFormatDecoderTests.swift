@@ -916,7 +916,7 @@ struct ResponseFormatDecoderTests {
     }
 
     @Test
-    func rejectsUnusableBounds() {
+    func rejectsUnusableBounds() throws {
         expectUnsupported(schema: root(["s": obj(["type": .string("string"), "minimum": .int(1)])]), containing: "'minimum' on non-numeric property 's'")
         expectUnsupported(schema: root(["b": obj(["type": .string("boolean"), "exclusiveMaximum": .int(1)])]), containing: "'exclusiveMaximum' on non-numeric property 'b'")
         expectUnsupported(
@@ -929,8 +929,14 @@ struct ResponseFormatDecoderTests {
         expectInvalid(schema: root(["n": obj(["type": .string("integer"), "minimum": .double(2.5), "maximum": .double(2.9)])]), containing: "admit no integer")
         expectInvalid(schema: root(["n": obj(["type": .string("number"), "minimum": .int(5), "maximum": .int(3)])]), containing: "admit no number")
         expectInvalid(schema: root(["n": obj(["type": .string("number"), "minimum": .int(1), "exclusiveMaximum": .int(1)])]), containing: "admit no number")
-        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "minimum": .double(1e25)])]), containing: "more than 19 significant digits")
-        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "maximum": .double(1e-20)])]), containing: "more than 19 significant digits")
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "minimum": .double(1e25)])]), containing: "'minimum' on property 'n' is beyond what a bounded number can hold")
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "maximum": .double(1e-20)])]), containing: "'maximum' on property 'n' is beyond what a bounded number can hold")
+        // A fractional bound arrives as a double, which carries 15 significant digits exactly and may round more.
+        expectUnsupported(schema: root(["n": obj(["type": .string("number"), "minimum": .double(0.1234567890123456789)])]), containing: "'minimum' on property 'n' has more than 15 significant digits")
+        #expect(try bounded("number", ["minimum": .double(0.123456789012345)]) == numbers("0.123456789012345", nil))
+        #expect(try bounded("integer", ["minimum": .int(1234567890123456789)]) == integers(1234567890123456789, nil), "an integer bound keeps all 19 digits")
+        // Bounds between two neighbouring values the automaton can spell admit nothing.
+        expectInvalid(schema: root(["n": obj(["type": .string("number"), "exclusiveMinimum": .int(0), "exclusiveMaximum": .double(1e-19)])]), containing: "admit no number")
         expectUnsupported(schema: root(["n": obj(["type": .string("integer"), "maximum": .double(9.3e18)])]), containing: "'maximum' on property 'n' is beyond the integer range")
         expectUnsupported(schema: root(["n": obj(["type": .string("integer"), "exclusiveMinimum": .int(Int.max)])]), containing: "beyond the integer range")
         expectUnsupported(schema: root(["n": obj(["type": .string("number"), "multipleOf": .int(2)])]), containing: "'multipleOf'")

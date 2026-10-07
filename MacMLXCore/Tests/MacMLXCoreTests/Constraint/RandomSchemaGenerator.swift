@@ -1,6 +1,7 @@
 // Copyright © 2026 macMLX. English comments only.
 
 import Foundation
+import Testing
 
 @testable import MacMLXCore
 
@@ -235,7 +236,10 @@ struct RandomSchemaGenerator {
             if let maximum, value > maximum || (value == maximum && maximumIsExclusive) { return false }
             return true
         }
-        guard !fitting.isEmpty else { return "0" }
+        guard !fitting.isEmpty else {
+            Issue.record("no candidate value fits the bounds \(String(describing: minimum)) … \(String(describing: maximum))")
+            return "0"
+        }
         let value = pick(fitting)
         return "\(value)"
     }

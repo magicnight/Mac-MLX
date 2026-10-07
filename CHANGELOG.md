@@ -42,18 +42,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **`minimum`, `maximum`, `exclusiveMinimum` and `exclusiveMaximum` on
   numbers and integers in a `response_format` schema** — what
   `@Guide(.range(…))`, `.minimum(…)` and `.maximum(…)` emit. The constraint
-  judges every digit: a digit is legal only while some completion of the
-  digits so far still fits the range, and the number may end only on a
-  value in it, so an out-of-range value is never produced and the model is
-  never left without a legal digit. An integer's bounds fold to the nearest
-  integers inside them (`exclusiveMaximum: 3` is `maximum: 2`,
-  `minimum: 1.5` is `minimum: 2`). A bounded number is spelled as a plain
-  decimal — no exponent — of at most 19 significant digits and 19 decimals,
-  which every value in the range has, and the bounds must fit the same
-  limits; a bound is the decimal number the schema wrote, compared exactly.
-  Apple's Person sample, whose rating is `@Guide(.range(1...10))`, now
-  compiles as the framework emits it. Still unsupported: `multipleOf`,
-  `pattern`, `null` and unions.
+  judges every digit: a digit is legal only while some value the digits so
+  far can still become lies in the range, and the number may end only on a
+  value in it, so an out-of-range value is never produced and no legal
+  prefix is a dead end. An integer's bounds fold to the nearest integers
+  inside them (`exclusiveMaximum: 3` is `maximum: 2`, `minimum: 1.5` is
+  `minimum: 2`). A bounded number is spelled as a plain decimal — no
+  exponent — of at most 19 significant digits and 19 decimals, and is
+  compared with its bounds exactly, as decimals; a range that holds no such
+  number is refused, as is a bound beyond those limits or a fractional bound
+  of more than 15 significant digits (which the request parser could not
+  carry exactly). Apple's Person sample, whose rating is
+  `@Guide(.range(1...10))`, now compiles as the framework emits it. Still
+  unsupported: `multipleOf`, `pattern`, `null` and unions.
 - **`stream_options.include_usage` on streaming chat completions.** When a
   client sets it, every chunk carries `usage: null` and one usage-only chunk —
   empty `choices`, the whole request's token counts — is sent before

@@ -41,9 +41,10 @@
 ///    and a `required` list may not repeat a name.
 ///    A `number` or `integer` may carry `minimum`, `maximum`,
 ///    `exclusiveMinimum` and `exclusiveMaximum` (numbers of at most 19
-///    significant digits and decimals): an integer's bounds fold to the
-///    nearest integers inside them; a bounded number is spelled as a plain
-///    decimal, without an exponent.
+///    significant digits and decimals, 15 when fractional): an integer's
+///    bounds fold to the nearest integers inside them; a bounded number is
+///    spelled as a plain decimal, without an exponent, within the same
+///    limits, and a range that holds no such number is refused.
 ///
 /// Everything else — combinators, `null`, type arrays, string bounds
 /// (`pattern`, `minLength`, …), `multipleOf`, `additionalProperties: true`,
@@ -92,7 +93,7 @@ public enum ResponseFormatDecoder {
 
     /// The keywords a scalar property schema may carry besides annotations.
     /// This is a strict allow-list, not a blocklist: any other keyword
-    /// (`pattern`, `minLength`, `maximum`, `format`, combinators, …) is
+    /// (`pattern`, `minLength`, `multipleOf`, `format`, combinators, …) is
     /// rejected with a 400 rather than silently ignored — a value constraint we
     /// cannot enforce must never be silently downgraded (see
     /// ``ResponseFormatError``).
@@ -503,7 +504,7 @@ public enum ResponseFormatDecoder {
         context: inout Context
     ) throws -> SchemaValueType {
         // Allow-list gate (M1): reject any keyword we do not model — a value
-        // constraint (`pattern`, `minLength`, `maximum`, `format`, …) or a
+        // constraint (`pattern`, `minLength`, `multipleOf`, `format`, …) or a
         // structural one (`properties`, combinators) must 400, never be
         // silently dropped. Sorted so the reported keyword is deterministic.
         for key in property.keys.sorted() where !scalarKeys.contains(key) && !annotationKeys.contains(key) {
@@ -571,10 +572,17 @@ public enum ResponseFormatDecoder {
         var exclusiveMaximum: SchemaDecimal?
     }
 
+    /// The most significant digits a fractional bound may carry. The request
+    /// parser reads such a bound as a double, which keeps a decimal of up to
+    /// 15 significant digits exactly and may round a longer one; a bound the
+    /// automaton would enforce other than as written is refused instead.
+    static let maximumFractionalBoundDigits = 15
+
     /// The numeric bounds of `property`. A bound is a JSON number of at most
     /// 19 significant digits and decimals (what the automaton can hold
-    /// exactly); the draft-4 boolean form of `exclusiveMinimum` /
-    /// `exclusiveMaximum` is refused by name.
+    /// exactly) — 15 significant digits when it is fractional; the draft-4
+    /// boolean form of `exclusiveMinimum` / `exclusiveMaximum` is refused by
+    /// name.
     private static func rawBounds(of property: [String: JSONValue], path: String) throws -> RawBounds {
         var bounds = RawBounds()
         for keyword in boundKeys {
@@ -585,6 +593,11 @@ public enum ResponseFormatDecoder {
                 decimal = SchemaDecimal(integer)
             case .double(let double):
                 decimal = SchemaDecimal(double)
+                if let decimal, decimal.significantDigits > maximumFractionalBoundDigits {
+                    throw ResponseFormatError.unsupportedFeature(
+                        "'\(keyword)' \(location(path)) has more than \(maximumFractionalBoundDigits) significant digits, "
+                            + "which a fractional bound cannot carry exactly")
+                }
             case .bool:
                 throw ResponseFormatError.unsupportedFeature(
                     "boolean '\(keyword)' \(location(path)) (JSON Schema draft 4; give the bound as a number)")
@@ -593,7 +606,8 @@ public enum ResponseFormatDecoder {
             }
             guard let decimal else {
                 throw ResponseFormatError.unsupportedFeature(
-                    "'\(keyword)' \(location(path)) has more than \(SchemaDecimal.maximumDigits) significant digits or decimals")
+                    "'\(keyword)' \(location(path)) is beyond what a bounded number can hold "
+                        + "(\(SchemaDecimal.maximumDigits) significant digits and \(SchemaDecimal.maximumDigits) decimals)")
             }
             switch keyword {
             case "minimum": bounds.minimum = decimal
