@@ -115,18 +115,33 @@ let package = Package(
         // NOTE: the package declares swift-tools-version 6.2 while this manifest
         // is 6.0. That is legal — a dependency may use a newer tools version than
         // its consumer; only the toolchain in use has to be new enough to parse it.
-        // mlx-audio-swift v0.1.3 plus two compatibility commits, carried on a
-        // fork because the package does not compile against mlx-swift-lm 3.32.3
-        // as released: that version added a complete `compile()` overload
-        // matrix to MLXLMCommon with `@Sendable` bodies (#589), which hijacks
-        // Parakeet's two bare `compile` calls, and made `newCache(parameters:)`
-        // throwing, which Marvis's non-throwing cache resets did not expect.
-        // Both patches are one-line qualifications; nothing else differs from
-        // the upstream tag. Drop the fork once upstream tags a release that
-        // builds against 3.32.x. Pinned by revision so it can never drift.
+        // mlx-audio-swift v0.1.3 plus the commits on the fork's branch
+        // `v0.1.3-macmlx`. Two make it compile against mlx-swift-lm 3.32.3:
+        // that version added a complete `compile()` overload matrix to
+        // MLXLMCommon with `@Sendable` bodies (#589), which hijacks Parakeet's
+        // two bare `compile` calls, and made `newCache(parameters:)` throwing,
+        // which Marvis's non-throwing cache resets did not expect; both are
+        // one-line qualifications. The rest fix where audio models land
+        // (#135): upstream's pending PR Blaizzy/mlx-audio-swift#257, so a
+        // cached snapshot counts as complete only when it holds the files a
+        // loader's patterns name, reworked so the Hub's listing is what
+        // certifies a pattern and a load fetches, one by one, only the listed
+        // files not yet on disk, refusing a listed path it cannot write under
+        // the model directory; and the caller's `HubCache` passed through the
+        // six STT loaders and the TTS loaders that fetched without it:
+        // Chatterbox and OmniVoice
+        // (their whole model, Chatterbox's S3 tokenizer with it), the Llama
+        // and Qwen3 voices and Echo (their codecs); the token clients follow
+        // `HF_ENDPOINT` like the plain one. The STT half is upstream issue
+        // Blaizzy/mlx-audio-swift#279. Nothing else differs from the upstream
+        // tag. Upstream's v0.1.5 builds against mlx-swift-lm 3.32.3 on its own
+        // but has neither cache fix: drop the fork once a release passes the
+        // cache through, completes a cached snapshot by the Hub's listing
+        // rather than by what a load asked for, and sends its token clients to
+        // `HF_ENDPOINT` too. Pinned by revision so it can never drift.
         .package(
             url: "https://github.com/magicnight/mlx-audio-swift.git",
-            revision: "d13853250a7e4eda66fe686d23f0d5cfd3cc86da"),
+            revision: "da4cd79efe76af57e4fbe78ce995c7f287aa56e3"),
         // Already resolved transitively (mlx-audio-swift pins
         // `.upToNextMajor(from: "0.8.1")`, currently 0.9.0). Declared directly
         // with the SAME requirement — so no new version is introduced — purely

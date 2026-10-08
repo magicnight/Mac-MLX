@@ -174,6 +174,68 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   load, which allocates its buffers afresh instead of reusing cached ones,
   took about half a second from the page cache, and the unload, drain
   included, about 50 ms.
+- **Six speech-to-text families and several text-to-speech ones downloaded
+  into `~/.cache/huggingface` (#135).** `AudioEngine` hands the upstream loaders
+  the app's cache (`~/.mac-mlx/audio-models`) and, since the audio entry
+  below, fetches the snapshot there before taking the lock. But voxtral,
+  cohere, canary, wav2vec2/mms, lasr and moonshine resolved the model a
+  second time inside their loader without the cache they were given, so the
+  weights they read came from a second full download into the shared
+  Hugging Face cache, and on the text-to-speech side Chatterbox and
+  OmniVoice did the same for their whole model (Chatterbox's S3 tokenizer,
+  495 MB, with it), and the Llama and Qwen3 voices (their SNAC codec,
+  79 MB) and Echo (its Fish codec, 1.87 GB) for the codec they fetch from a
+  second repo: twice the disk for a model fetched whole, a copy the model
+  library does not manage either way, and,
+  once the audio entry below moved the load under the generation lock, a
+  first use that stalled every chat, embeddings and rerank request for the
+  length of that download (in v0.9.0 it ran beside them). The controlled
+  fork of mlx-audio-swift now passes the cache through those loaders (the
+  six STT loaders are reported upstream as Blaizzy/mlx-audio-swift#279; the
+  TTS half is not) and carries upstream's
+  pending fix for the completeness check (Blaizzy/mlx-audio-swift#257),
+  reworked: a cached snapshot counted as complete as soon as it held weights
+  and a config, so a loader that asks for more than the first resolve
+  fetched (cohere's `tokenizer.model`, SenseVoice's `am.mvn` and
+  `*.bpe.model`) found those files missing. A snapshot now records the
+  patterns the Hub's listing has confirmed complete, including those a repo
+  has no file for (Whisper asks for `*.model`; no Whisper repo ships one); a
+  load that asks for more lists the repo, given ten seconds (twice when
+  the Hub no longer has the cached commit), and fetches, at the revision
+  the snapshot came from (or at `main` when the app's Hub cache does not
+  record that revision or the Hub no longer has the commit; the files then
+  come from `main` and may be newer than the snapshot), one by one only
+  the listed files not yet on disk, so the weights are neither downloaded
+  nor copied again, refusing a listed path that cannot be written under
+  the model directory;
+  a name with no glob characters whose file is on disk is complete by
+  itself. Without a listing the snapshot is served as it is and nothing is
+  recorded, and a manifest left beside a snapshot that could not be used
+  is dropped before the fetch; a repo whose listing ran out of time, or
+  took two seconds or more to fail, is not asked again for ten minutes, so
+  a network that drops packets or a proxy that answers late costs one
+  attempt per repo every ten minutes, not that much per resolve under the
+  lock, while a failure that comes back at once (no network, a refused
+  connection, a 404) is asked again at the next load. The first load of a
+  model cached by v0.9.0 therefore asks the Hub for a listing (two when the
+  Hub no longer has the cached commit), for a few small files
+  at most, and a snapshot not confirmed since cannot be completed offline:
+  cohere's app copy lacks `tokenizer.model` until one online load. The
+  copies v0.9.0 left in the Hugging Face cache (`mlx-audio/<org>_<name>` and
+  `models--<org>--<name>`, under `$HF_HUB_CACHE`, else `$HF_HOME/hub`, else
+  `~/.cache/huggingface/hub`) are not removed. Still fetched into the
+  default cache: the tokenizer or codec of a model loaded from a local
+  directory rather than by repo id (Chatterbox's S3 tokenizer, the SNAC
+  codec, Echo's Fish codec, Irodori's text tokenizer), Kokoro's and Kitten's
+  grapheme-to-phoneme model, 9 MB (Blaizzy/mlx-audio-swift#242), and, for a
+  non-English Kokoro voice, its 83 MB byT5 grapheme-to-phoneme model or a
+  lexicon of up to 24 MB.
+- **SenseVoice loaded without its CMVN file and tokenizer in v0.9.0.** Its
+  snapshot was fetched with the default patterns and counted as complete,
+  so the loader found neither `am.mvn` nor the `.bpe.model`, which upstream
+  reports as transcriptions of raw token ids. With the completeness fix
+  above its first load fetches both: two files, verified against
+  mlx-community/SenseVoiceSmall.
 - **A sampled token the constraint cannot walk no longer leaves the rest of
   the generation judged against a stale position.** The constraint processor
   kept its state when a sampled token did not walk, then went on masking the
@@ -204,13 +266,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   though two syntheses can still overlap on the app's engine, which has no
   lock of its own yet. Known gap: the fetch covers what upstream's own first
   step downloads, so whatever a loader fetches on its own now happens under
-  the lock, since the load does — six upstream speech-to-text families
-  (voxtral, cohere, canary, wav2vec2/mms, lasr, moonshine) ignore the cache
-  directory they are given and download a second full copy into the shared
-  Hugging Face cache, and Whisper fetches tokenizer files from the matching
-  `openai/whisper-*` repo when its snapshot lacks them; in v0.9.0 those
-  downloads ran outside the lock, with everything else. Kokoro's first
-  synthesis fetches its grapheme-to-phoneme model, under the lock as in
+  the lock, since the load does — Whisper fetches tokenizer files from the
+  matching `openai/whisper-*` repo when its snapshot lacks them, a loader
+  that needs files the first resolve did not fetch gets them there (a listing, two when the Hub no longer has the
+  cached commit, and at most a few small files, once per model; see the
+  entry above), and the text-to-speech families that fetch a second repo at load
+  (Chatterbox's S3 tokenizer, 495 MB; Marvis's Mimi codec, 385 MB; the SNAC
+  codec of the Llama and Qwen3 voices, 79 MB; Echo's Fish codec, 1.87 GB;
+  Irodori's text tokenizer repo, 311 MB, since that fetch takes the repo's
+  weights along with its tokenizer; Kitten's grapheme-to-phoneme model,
+  9 MB; IndexTTS's tokenizer repo when its snapshot carries none) do so
+  under it; in v0.9.0 those downloads ran outside the lock, with everything
+  else. Kokoro's first synthesis fetches its grapheme-to-phoneme model (and
+  a non-English voice its byT5 model or a lexicon), under the lock as in
   v0.9.0, since synthesis always ran there.
 - **A `/v1/embeddings` or `/v1/rerank` request that raced another request's
   model swap could be answered by the other model.** After confirming its
@@ -348,8 +416,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   run). Gemma3Text's prefill was reworked upstream on its own and is not
   covered. Adopting `.balanced` is a separate, measured change.
 - mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
-  v0.1.3 plus two one-line compatibility commits) because no released
-  version builds against mlx-swift-lm 3.32.3.
+  v0.1.3 plus two one-line compatibility commits and the cache fixes under
+  Fixed) because no released version keeps audio downloads in the cache it
+  is given (upstream v0.1.5 builds against mlx-swift-lm 3.32.3, which the
+  compatibility commits were for, but has neither fix).
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE
