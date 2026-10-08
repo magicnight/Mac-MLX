@@ -128,6 +128,52 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **Unloading a chat model gave back almost none of its memory (#136).** The
+  engine dropped the model, but MLX keeps freed buffers in its cache and
+  gives them back only when the cache passes its limit, an allocation
+  crosses the collection threshold, or something clears it (mlx-swift-lm's
+  decode loop does at a generation's first token and every 256 after, which
+  does nothing for a model unloaded while nothing generates): after
+  unloading Mellum2-12B-A2.5B-Thinking-4bit the process still held 7,021 MB
+  of the 7,035 MB the model had used, until a later allocation reused them,
+  MLX trimmed its cache under pressure, or the next plain generation began.
+  That
+  is what the pool's eviction left
+  behind before a bigger model loaded (the victim's bytes were reusable by
+  MLX but not free, while the budget assumed they were gone), what the idle
+  sweep reclaimed, and what the Models tab's unload came to, with Activity
+  Monitor still showing the full size. This has been so for as long as there
+  has been an unload. The engine now drains MLX's cache once it has released
+  the model: at once when no generation is running on it, and otherwise when
+  the last one ends, since a stream holds the weights until then; a
+  cancelled stream is waited for until the token worker has let go. A
+  cancelled response records no prompt cache entry, since the worker may
+  have stepped tokens nobody received and the cache then no longer matches
+  the key, and a cancelled vision or speculative response is reported as
+  cancelled rather than completed. The draft model is handed back the same
+  way when a request drops or swaps it. A response produced with
+  speculative decoding has no worker to wait for: a cancel there can let
+  the drain run before the current speculative round has let go of the
+  weights, which then wait for the next drain, the next generation in the
+  process that is neither speculative nor batched (those two never clear
+  MLX's cache; a plain decode loop does at its first token), or allocator
+  pressure. The drain runs only once Metal is known to be up: after a
+  model this engine held, or after any model has loaded in the process
+  (chat, embedder, reranker or speech),
+  so a load that failed before reaching MLX never initializes it; once a
+  model has loaded in the process, a load that fails drains what it
+  allocated (a first-ever load that fails after allocating is left to the
+  next plain generation's clear). A load over a resident model releases it
+  first.
+  Measured on the 12B: after the unload MLX's cache was empty and 15 MB
+  stayed active, nearly all of it the in-memory tier of the prompt cache
+  (a run that recorded no entry ended at 7 KB), which an unload does not
+  release (up to 512 MiB by default; it returns to MLX's cache when the
+  pool discards the engine, after the drain, and goes at the next plain
+  generation's first decode step or under allocator pressure); the next
+  load, which allocates its buffers afresh instead of reusing cached ones,
+  took about half a second from the page cache, and the unload, drain
+  included, about 50 ms.
 - **A sampled token the constraint cannot walk no longer leaves the rest of
   the generation judged against a stale position.** The constraint processor
   kept its state when a sampled token did not walk, then went on masking the

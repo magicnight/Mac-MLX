@@ -58,6 +58,7 @@ public actor EmbeddingEngine: EmbeddingModel {
             )
             container = loaded
             loadedModel = model
+            EngineMemory.noteModelLoaded()
         } catch {
             container = nil
             loadedModel = nil
