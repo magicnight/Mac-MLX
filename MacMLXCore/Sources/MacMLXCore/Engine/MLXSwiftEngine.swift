@@ -51,7 +51,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     private var loadedModelFingerprint: String?
 
     /// Version string including the mlx-swift-lm library tag.
-    public let version: String = "mlx-swift-lm 3.31.3"
+    public let version: String = "mlx-swift-lm 3.32.3"
 
     // MARK: Private state
 
@@ -82,6 +82,126 @@ public actor MLXSwiftEngine: InferenceEngine {
     }
 
     private var loadedSupport: LoadedSupport = .none
+
+    /// The drain the engine runs after releasing a resident model, from
+    /// `unload()`, from the catches in `load()` and `ensureDraftContainer`,
+    /// and from `endGenerationRun()` when one was deferred:
+    /// `EngineMemory.releaseCachedBuffers` in production. A test seam, internal
+    /// like `hasDraftContainer`: the SPM test job has no metallib, so the test
+    /// that proves a never-loaded engine's unload stays away from MLX has to
+    /// observe the call rather than let it happen.
+    private var releaseCachedBuffers: @Sendable () -> Void = { EngineMemory.releaseCachedBuffers() }
+
+    /// Test seam: replace the drain `unload()` performs (see
+    /// `releaseCachedBuffers`).
+    func setReleaseCachedBuffers(_ release: @escaping @Sendable () -> Void) {
+        releaseCachedBuffers = release
+    }
+
+    /// Whether a drain is safe although this engine holds nothing: some model
+    /// has loaded in the process, so Metal is up. `EngineMemory.hasLoadedAModel`
+    /// in production, a seam so the SPM tests decide it themselves instead of
+    /// inheriting it from whatever ran before them in the process.
+    private var metalKnownUp: @Sendable () -> Bool = { EngineMemory.hasLoadedAModel }
+
+    /// Test seam: replace the process-wide "a model has loaded" answer (see
+    /// `metalKnownUp`).
+    func setMetalKnownUp(_ known: @escaping @Sendable () -> Bool) {
+        metalKnownUp = known
+    }
+
+    /// Whether this engine holds a model through any of its three references:
+    /// the container, a draft, or the batch-serving copy. Each is set only
+    /// after weights were evaluated, so any of them means Metal is up; and
+    /// the engine is an actor, so a draft or batch probe interrupted by an
+    /// unload can outlive the container it came with.
+    private var holdsAModel: Bool {
+        loadedSupport.container != nil || draftContainer != nil || batchServingContainer != nil
+    }
+
+    /// Runs holding this engine's containers: `runGeneration` (which waits
+    /// for mlx-swift-lm's worker task before it counts itself over), the
+    /// batch drive loop, `promptOpensThinkBlock` and `applyAdapter`, each
+    /// bracketed by `beginGenerationRun()` and `endGenerationRun()`. An
+    /// unload that lands while one runs cannot free the weights, since the
+    /// run holds the container; it leaves `drainWhenIdle` set instead, and
+    /// the last run to end drains (#136). The speculative path has no worker
+    /// task to wait for (mlx-swift-lm 3.32.3's raw-token
+    /// `generateTokens(…draftModel:)` discards it): its run ends as soon as
+    /// the consumer leaves, while the iterator finishes the speculative round
+    /// it is in (draft, verify, synchronize) on its own, so a drain deferred
+    /// to that run's end can come before the weights are let go, and then
+    /// they wait for the next drain, the next generation in the process that
+    /// steps mlx-swift-lm's plain `TokenIterator` (text, constrained or
+    /// vision: its decode loop clears MLX's cache at its first token, while
+    /// a speculative round and a batched cohort never do), or allocator
+    /// pressure.
+    private var generationsInFlight = 0
+    private var drainWhenIdle = false
+
+    func beginGenerationRun() {
+        generationsInFlight += 1
+    }
+
+    func endGenerationRun() {
+        assert(generationsInFlight > 0, "endGenerationRun without a matching begin")
+        generationsInFlight = max(0, generationsInFlight - 1)
+        if generationsInFlight == 0, drainWhenIdle {
+            drainWhenIdle = false
+            releaseCachedBuffers()
+        }
+    }
+
+    /// Drain now, or once the last generation running on this engine ends.
+    /// The one rule for every drain the engine decides on: a running
+    /// generation holds the model, and a drain before it lets go frees
+    /// nothing.
+    private func drainOrDefer() {
+        if generationsInFlight > 0 {
+            drainWhenIdle = true
+        } else {
+            releaseCachedBuffers()
+        }
+    }
+
+    /// Wait for mlx-swift-lm's token worker, which holds the model until it
+    /// returns: it checks for cancellation only between decode steps and
+    /// synchronizes the GPU stream before it lets go. Its stream cancels it
+    /// only when the stream is dropped or a consumer is cancelled while
+    /// waiting on it; `runGeneration` keeps the stream alive in its frame, so
+    /// a loop that leaves the stream early would leave the worker decoding
+    /// to EOS or maxTokens. It is cancelled here first: a no-op when the
+    /// stream ran to its end (the worker is then past its last cancellation
+    /// check and its `finish()`, with nothing cancellable after them in
+    /// mlx-swift-lm 3.32.x, which this depends on) or the consumer was
+    /// cancelled while waiting (the stream did it), and what stops the worker
+    /// otherwise. Waiting is what lets `endGenerationRun()` count the run as
+    /// over only once the worker has let go of the model (#136); on the one
+    /// exit that records the prompt cache, the natural end, the worker's
+    /// last cache write already precedes the stream's end.
+    static func awaitWorker(_ worker: Task<Void, Never>) async {
+        worker.cancel()
+        await worker.value
+    }
+
+    /// Test seam: hold `container` (and a draft or batch-serving reference)
+    /// the way a load would, without evaluating any weights, so the SPM tests
+    /// can drive `unload()` and `load()` over a resident model without Metal.
+    /// Internal, like `hasDraftContainer`.
+    func installForTesting(
+        container: ModelContainer?, draft: ModelContainer? = nil, batch: ModelContainer? = nil,
+        model: LocalModel
+    ) {
+        loadedSupport = container.map { .llm($0) } ?? .none
+        draftContainer = draft
+        loadedDraftModelID = draft == nil ? nil : "\(model.id)-draft"
+        batchServingContainer = batch
+        // A draft or batch copy left behind without its target has no loaded
+        // model and no ready status, which is the shape the residency test
+        // must see through.
+        loadedModel = container == nil ? nil : model
+        status = container == nil ? .idle : .ready(model: model.id)
+    }
 
     /// Resident draft model container for classic per-request speculative
     /// decoding (D1, text-only), or nil when no draft model is loaded.
@@ -270,6 +390,16 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///   a valid MLX model (`config.json`, `.safetensors` weights, tokenizer files).
     /// - Throws: ``EngineError/modelLoadFailed(reason:)`` if loading fails for any reason.
     public func load(_ model: LocalModel) async throws {
+        // Release whatever is resident before the new model allocates (keeping
+        // the first until the second had finished allocating is the shape #130
+        // found in the reranker swap). On an empty engine it resets state and
+        // drains nothing. Remembered, because a load that fails after allocating (a
+        // tokenizer the factory awaits only once the weights are in) leaves
+        // those buffers in MLX's cache, and a drain is safe only once Metal is
+        // known to be up: a model having been resident here, or any model
+        // having loaded in this process (`EngineMemory.hasLoadedAModel`).
+        let wasResident = holdsAModel
+        try await unload()
         status = .loading(model: model.id)
 
         // Teach the stock factory about macMLX-owned architectures before
@@ -281,15 +411,15 @@ public actor MLXSwiftEngine: InferenceEngine {
             overlayRegistered = true
         }
 
-        // Preflight: catch Gemma 4 MoE checkpoints before handing off to
-        // LLMModelFactory, which surfaces a cryptic "Unhandled keys"
-        // error (see mlx-swift-lm#219).
+        // Preflight: refuse Gemma 4 MoE checkpoints until one has been run
+        // here; under mlx-swift-lm 3.31.x the factory failed on them with a
+        // cryptic "Unhandled keys" error (see mlx-swift-lm#219).
         let configURL = model.directory.appending(
             path: "config.json", directoryHint: .notDirectory)
         if Self.isUnsupportedGemma4MoE(configURL: configURL) {
-            let reason = "Gemma 4 Mixture-of-Experts variants (e.g. `a4b`) are not yet "
-                + "supported by mlx-swift-lm 3.31.x. Tracking upstream at "
-                + "https://github.com/ml-explore/mlx-swift-lm/issues/219. "
+            let reason = "Gemma 4 Mixture-of-Experts variants (e.g. `a4b`) are refused by "
+                + "this build until a run of one has been verified "
+                + "(see https://github.com/ml-explore/mlx-swift-lm/issues/219). "
                 + "Use a dense Gemma 4 checkpoint (E2B / E4B) in the meantime."
             status = .error(reason)
             loadedSupport = .none
@@ -347,6 +477,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             // tier can reject a restored KV snapshot whose weights changed under
             // the same directory path (a re-download / re-quantize / swap).
             let newFingerprint = ModelFingerprint.compute(directory: model.directory)
+            EngineMemory.noteModelLoaded()
             // No clear-on-reload here for the HOT tier: `PromptCacheStore.fetchNearest`
             // now gates every hot hit on this fingerprint, so a stale entry left by a
             // swap-weights-at-same-path reload misses at the point of reuse — safe
@@ -371,9 +502,10 @@ public actor MLXSwiftEngine: InferenceEngine {
             // draft left resident across a target swap only wastes memory
             // (the tokenizer-compatibility check in
             // `runSpeculativeLLMGeneration` already fails safely on a
-            // mismatched pairing either way).
-            draftContainer = nil
-            loadedDraftModelID = nil
+            // mismatched pairing either way). The `unload()` above dropped
+            // the draft; a generation that ran meanwhile may have installed
+            // one, which goes the same way.
+            releaseDraft()
             // A freshly-loaded model carries no LoRA adapter (Track E).
             loadedAdapterID = nil
             status = .ready(model: model.id)
@@ -381,12 +513,14 @@ public actor MLXSwiftEngine: InferenceEngine {
             // Already shaped — preserve the typed error.
             loadedSupport = .none
             loadedModel = nil
+            if wasResident || metalKnownUp() { drainOrDefer() }
             throw engineError
         } catch {
             let reason = error.localizedDescription
             status = .error(reason)
             loadedSupport = .none
             loadedModel = nil
+            if wasResident || metalKnownUp() { drainOrDefer() }
             throw EngineError.modelLoadFailed(reason: reason)
         }
     }
@@ -394,13 +528,15 @@ public actor MLXSwiftEngine: InferenceEngine {
     // MARK: Preflight
 
     /// Inspect the model's `config.json` for Gemma 4 MoE markers. Returns
-    /// `true` when the config declares Mixture-of-Experts fields that
-    /// mlx-swift-lm 3.31.x does not yet implement (see mlx-swift-lm#219).
+    /// `true` when the config declares Mixture-of-Experts fields, which this
+    /// build refuses: mlx-swift-lm 3.32.3 added the text-side MoE block, but
+    /// no run of a Gemma 4 MoE checkpoint has been verified here (see
+    /// mlx-swift-lm#219 for the history).
     ///
     /// Kept internal so tests can exercise it. Any IO / JSON error is
     /// treated as "not MoE" — preflight should never hijack load errors
     /// from unrelated causes; we only want to catch the specific
-    /// Gemma 4 MoE-on-3.31.x case.
+    /// Gemma 4 MoE case.
     static func isUnsupportedGemma4MoE(configURL: URL) -> Bool {
         guard let data = try? Data(contentsOf: configURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -460,6 +596,11 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// check in `runSpeculativeLLMGeneration` already fails safely on a
     /// mismatched pairing, but there's no reason to keep it around).
     public func unload() async throws {
+        // A resident model is what proves Metal is up. Decided before the state
+        // is reset, because the drain below must not run for an engine that
+        // never held one: a load that failed before reaching MLX, or the SPM
+        // test job with no metallib.
+        let releasedResident = holdsAModel
         loadedSupport = .none
         loadedModel = nil
         // No model resident ⇒ no fingerprint (Wave 2a). Harmless if left stale
@@ -472,10 +613,31 @@ public actor MLXSwiftEngine: InferenceEngine {
         loadedAdapterID = nil
         // A2d-2: no model resident ⇒ nothing is batchable. Any in-flight cohort's
         // drive loop captured its container locally and finishes on its own; new
-        // submits decline (coverage now false). The server drains the cohort before
-        // reaching here on a swap; a direct unload is guarded by POOL-3 in-flight
-        // refcounting against evicting a model with live rows.
+        // submits decline (coverage now false). The server drains the cohort
+        // before reaching here on a swap; the pool's eviction and sweep skip a
+        // model with live rows (POOL-3), though a run can still be finishing
+        // when they land, since the pool counts a generation over when the
+        // consumer's loop ends; `ModelPool.unload(_:)` (the GUI's unload) does
+        // not skip at all. The deferred drain below covers both.
         clearBatchServingState()
+        // The engine's references are gone, but MLX keeps the model's buffers
+        // in its cache until an allocation reuses them, the cache passes its
+        // limit, or a plain generation's decode loop clears it (mlx-swift-lm
+        // 3.32.3's `TokenIterator` does at its first token and every 256
+        // after; speculative and batched runs never do, and nothing does
+        // while nothing generates): after
+        // unloading a 12B 4-bit checkpoint the process still held 7,021 MB of
+        // the 7,035 MB the model had used (#136). Hand them to the OS now, so
+        // the pool's eviction makes room before the next model allocates
+        // (POOL-5), and the idle sweep and the Models tab's unload shrink the
+        // process. Only after a resident model was released, the terms the
+        // embedder, reranker and audio swaps use (#133, #134), and only after
+        // `clearBatchServingState()` above, which drops the last reference the
+        // engine itself holds. A generation still running on the model holds
+        // its own reference: then the drain waits for the last one to finish
+        // (`endGenerationRun`). The next load allocates its buffers afresh
+        // instead of reusing cached ones.
+        if releasedResident { drainOrDefer() }
         status = .idle
     }
 
@@ -485,6 +647,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// without needing a real model load — mirrors `isUnsupportedGemma4MoE`'s
     /// "kept internal so tests can exercise it" precedent below.
     var hasDraftContainer: Bool { draftContainer != nil }
+
+    /// Test seam: entries in the prompt cache's in-memory tier, for the gated
+    /// smoke that checks a cancelled response records none.
+    var promptCacheResidentCount: Int {
+        get async { await promptCacheStore.residentCount }
+    }
 
     /// Apply a LoRA adapter (v0.5+) to the currently-loaded model.
     ///
@@ -497,6 +665,10 @@ public actor MLXSwiftEngine: InferenceEngine {
         guard let container = loadedSupport.container else {
             throw EngineError.modelNotLoaded
         }
+        // Borrows the container across awaits (a large LoRA takes a while):
+        // counted like a generation, see `promptOpensThinkBlock`.
+        beginGenerationRun()
+        defer { endGenerationRun() }
 
         // Resolve the directory the LoRAContainer should read from.
         // PEFT → run the converter into a sibling cache dir; mlx-
@@ -680,11 +852,15 @@ public actor MLXSwiftEngine: InferenceEngine {
                     continuation.finish()
                     return
                 }
+                // Counted while `runGeneration`'s frame holds the container,
+                // so an unload that lands meanwhile drains once it returns.
+                await self.beginGenerationRun()
                 do {
                     try await self.runGeneration(request, into: continuation)
                 } catch {
                     continuation.finish(throwing: error)
                 }
+                await self.endGenerationRun()
             }
             // POOL-2: propagate abandonment/cancellation of this stream's
             // iteration down into the generation Task. `onTermination`
@@ -714,6 +890,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// loaded or the template can't be applied.
     public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
         guard let container = loadedSupport.container else { return false }
+        // Borrows the container across an await: counted like a generation,
+        // so an unload that lands meanwhile drains once this lets go (#136).
+        beginGenerationRun()
+        defer { endGenerationRun() }
         // Same tool-aware mapping as generation, without image attachments —
         // this heuristic only inspects the rendered token tail.
         let chatMessages: [Chat.Message] = request.allMessages.map {
@@ -777,10 +957,14 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///
     /// - Throws: `EngineError.modelLoadFailed` if the draft directory doesn't
     ///   exist or fails to load through the same `LLMModelFactory` path
-    ///   `load(_:)` uses for the primary model. On failure, any previously
-    ///   loaded draft container is dropped too — a half-applied swap must
-    ///   never leave a stale, silently-mismatched draft resident.
-    private func ensureDraftContainer(requestedDraftModelID: String?) async throws {
+    ///   `load(_:)` uses for the primary model. The draft resident so far is
+    ///   released before the new one loads, so a failure leaves no draft — a
+    ///   half-applied swap must never leave a stale, silently-mismatched
+    ///   draft resident.
+    ///
+    /// Internal (not `private`) so the SPM tests can drive the draft's
+    /// release and a failed draft load over a weightless container.
+    func ensureDraftContainer(requestedDraftModelID: String?) async throws {
         switch DraftContainerAction.decide(
             currentDraftModelID: loadedDraftModelID,
             requestedDraftModelID: requestedDraftModelID
@@ -788,9 +972,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         case .keep:
             return
         case .unload:
-            draftContainer = nil
-            loadedDraftModelID = nil
+            releaseDraft()
         case .load(let id):
+            // The reference goes before the next one allocates, as in
+            // `load()`; the drain itself waits for this run's end, since the
+            // previous speculative worker is not awaited and may still hold
+            // the old draft (#136).
+            releaseDraft()
             do {
                 let container = try await LLMModelFactory.shared.loadContainer(
                     from: Self.draftModelDirectory(id: id),
@@ -799,13 +987,25 @@ public actor MLXSwiftEngine: InferenceEngine {
                 draftContainer = container
                 loadedDraftModelID = id
             } catch {
-                draftContainer = nil
-                loadedDraftModelID = nil
+                // What a part-way failure allocated goes with a drain, under
+                // the rule `load()` applies: only once Metal is known to be up.
+                if holdsAModel || metalKnownUp() { drainOrDefer() }
                 throw EngineError.modelLoadFailed(
                     reason: "Draft model '\(id)' failed to load: \(error.localizedDescription)"
                 )
             }
         }
+    }
+
+    /// Drop the draft model and hand its buffers back (#136): a draft is a
+    /// model too, and its buffers stayed in MLX's cache after every swap and
+    /// drop before. Drains only when a draft was held, which is what proves
+    /// Metal is up (an unload may have dropped the main model meanwhile).
+    private func releaseDraft() {
+        let held = draftContainer != nil
+        draftContainer = nil
+        loadedDraftModelID = nil
+        if held { drainOrDefer() }
     }
 
     /// Default on-disk location for a draft model named by bare id —
@@ -941,7 +1141,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///    hit the store returns a cache already trimmed to the longest shared
     ///    prefix; we prefill only the remaining suffix. On a miss, allocate a
     ///    fresh cache via `model.newCache(...)` and prefill the whole prompt.
-    /// 3. Drive the low-level `generateTokens(input:cache:...)` call so
+    /// 3. Drive the low-level `generateTokensTask(input:cache:...)` call so
     ///    we see raw token IDs and can `insert` the full sequence
     ///    `inputTokens + generatedTokenIDs` after the stream ends.
     /// 4. The `KVCache` protocol is class-bound — the same reference we
@@ -1172,7 +1372,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         topLogprobs: Int,
         modelID: String,
         vocabCache: TokenVocabularyCache
-    ) throws -> AsyncStream<TokenGeneration> {
+    ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
         // logit_bias runs FIRST (mlx-lm `make_logits_processors` order), then the
         // penalty processor. `ChainedLogitProcessor` collapses them into the one
         // `inner` slot the constraint (and the plain path) expect; nil when neither
@@ -1238,13 +1438,14 @@ public actor MLXSwiftEngine: InferenceEngine {
             maxTokens: generateParams.maxTokens
         )
 
-        let (stream, _) = MLXLMCommon.generateTokenTask(
+        // The worker task comes back with the stream: the caller waits for it
+        // after the stream ends, since it holds the model until it returns.
+        return MLXLMCommon.generateTokenTask(
             promptTokenCount: input.text.tokens.size,
             modelConfiguration: context.configuration,
             tokenizer: context.tokenizer,
             iterator: iterator
         )
-        return stream
     }
 
     /// Text-only path: tokenise, look up the prompt cache, prefill only
@@ -1399,7 +1600,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         // cache already TRIMMED to the shared prefix, so we prefill only the
         // remaining suffix `prompt[reused...]`; the reused KV already covers
         // positions `0..<reused`. On a miss we feed the whole prompt and let
-        // the iterator allocate a fresh cache inside `generateTokens`. This is
+        // the iterator allocate a fresh cache inside `generateTokensTask`. This is
         // what turns a tool-loop / multi-turn agent's per-turn full cold
         // prefill into an incremental one (only the newly-appended tokens).
         // Skip the prompt cache entirely when quantizing the KV cache: the
@@ -1474,19 +1675,20 @@ public actor MLXSwiftEngine: InferenceEngine {
         let setup: (
             cache: PromptCacheSnapshot,
             stream: AsyncStream<TokenGeneration>,
+            worker: Task<Void, Never>,
             toolCallFormat: ToolCallFormat?
         ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = try priorCacheBox?.caches
                     ?? context.model.newCache(parameters: generateParams)
-                let stream: AsyncStream<TokenGeneration>
+                let generation: (stream: AsyncStream<TokenGeneration>, worker: Task<Void, Never>)
                 if usesCustomPipeline {
                     // Track C constraint AND the Track E sampling extensions
                     // (logit_bias / XTC / logprobs) all install a hand-built
                     // `TokenIterator` via `customTokenStream`, then run it through
                     // the same raw-token task the plain path uses so all downstream
                     // streaming/detokenization is byte-for-byte the same.
-                    stream = try Self.customTokenStream(
+                    generation = try Self.customTokenStream(
                         input: inputBox.value,
                         cache: cache,
                         generateParams: generateParams,
@@ -1503,19 +1705,23 @@ public actor MLXSwiftEngine: InferenceEngine {
                 } else {
                     // Stock parameter-driven path — the ONLY LLM path that honors
                     // `kv_bits` (via `generateParams`).
-                    stream = try MLXLMCommon.generateTokens(
+                    generation = try MLXLMCommon.generateTokensTask(
                         input: inputBox.value,
                         cache: cache,
                         parameters: generateParams,
                         context: context
                     )
                 }
-                // `ToolCallFormat?` is Sendable, so it rides back out of the
-                // actor alongside the cache + stream.
-                return (PromptCacheSnapshot(cache), stream, context.configuration.toolCallFormat)
+                // `ToolCallFormat?` and the worker task are Sendable, so they
+                // ride back out of the actor alongside the cache + stream.
+                return (
+                    PromptCacheSnapshot(cache), generation.stream, generation.worker,
+                    context.configuration.toolCallFormat
+                )
             }
         let workingCache = setup.cache.caches
         let stream = setup.stream
+        let worker = setup.worker
 
         // Only route through the streaming `ToolCallProcessor` when the caller
         // actually requested tools this turn — see `makeToolProcessor` for why
@@ -1548,13 +1754,20 @@ public actor MLXSwiftEngine: InferenceEngine {
         phaseReporter?.begin()
         defer { phaseReporter?.abortIfUnfinished() }
 
-        for await event in stream {
+        // `ended`: this loop left the stream early (the generate task was
+        // cancelled, or the client went away); the worker is stopped and
+        // awaited below before this returns. A cancel that lands while the
+        // loop waits for a token ends the stream instead, with `ended` false
+        // and the task cancelled.
+        var ended = false
+        consume: for await event in stream {
             // POOL-2: stop promptly once the consumer has abandoned/
             // cancelled this stream (see `generate`'s `onTermination`
             // hook) instead of running to maxTokens/EOS regardless.
             if Task.isCancelled {
                 continuation.finish(throwing: CancellationError())
-                return
+                ended = true
+                break consume
             }
             switch event {
             case .token(let token):
@@ -1572,14 +1785,16 @@ public actor MLXSwiftEngine: InferenceEngine {
                         if let display = toolProcessor.processChunk(piece), !display.isEmpty {
                             if case .terminated = continuation.yield(
                                 GenerateChunk(text: display, logprobs: lp)) {
-                                return
+                                ended = true
+                                break consume
                             }
                             pendingLogprobs.removeAll()
                         }
                     } else {
                         if case .terminated = continuation.yield(
                             GenerateChunk(text: piece, logprobs: lp)) {
-                            return
+                            ended = true
+                            break consume
                         }
                         pendingLogprobs.removeAll()
                     }
@@ -1587,6 +1802,21 @@ public actor MLXSwiftEngine: InferenceEngine {
             case .info(let info):
                 completionInfo = info
             }
+        }
+
+        // The worker holds the model until it returns, and nothing but this
+        // frame stops it once the loop left early (#136): see `awaitWorker`.
+        await Self.awaitWorker(worker)
+        if ended { return }
+        if Task.isCancelled {
+            // Cancelled while the loop waited for a token: the worker may
+            // have stepped a token nobody received (it had, unless the cancel
+            // reached it before its first check), so the cache can hold more
+            // positions than `inputTokens + generatedTokenIDs` names, and an
+            // entry under that key would serve a stale position on its next
+            // hit. Nothing is recorded.
+            continuation.finish(throwing: CancellationError())
+            return
         }
 
         // Finalise tool-call parsing: flush any residual buffered text (a
@@ -1810,6 +2040,13 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
         }
 
+        if Task.isCancelled {
+            // Cancelled while the loop waited for a token: reported as such,
+            // not as a completed response (this path records no prompt cache).
+            continuation.finish(throwing: CancellationError())
+            return
+        }
+
         var drainedToolCalls: [ToolCallRequest] = []
         if let toolProcessor {
             if let residual = toolProcessor.processEOS(returnBufferedText: true), !residual.isEmpty {
@@ -1857,15 +2094,16 @@ public actor MLXSwiftEngine: InferenceEngine {
         let tokenizer = await container.tokenizer
         let inputBox = NonSendableBox(lmInput)
 
-        let stream: AsyncStream<TokenGeneration> = try await container.perform(nonSendable: inputBox) { context, inputBox in
-            let cache = try context.model.newCache(parameters: generateParams)
-            return try MLXLMCommon.generateTokens(
-                input: inputBox.value,
-                cache: cache,
-                parameters: generateParams,
-                context: context
-            )
-        }
+        let (stream, worker): (AsyncStream<TokenGeneration>, Task<Void, Never>) =
+            try await container.perform(nonSendable: inputBox) { context, inputBox in
+                let cache = try context.model.newCache(parameters: generateParams)
+                return try MLXLMCommon.generateTokensTask(
+                    input: inputBox.value,
+                    cache: cache,
+                    parameters: generateParams,
+                    context: context
+                )
+            }
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         var completionInfo: GenerateCompletionInfo?
@@ -1879,13 +2117,15 @@ public actor MLXSwiftEngine: InferenceEngine {
         phaseReporter?.begin()
         defer { phaseReporter?.abortIfUnfinished() }
 
-        for await event in stream {
+        var ended = false
+        consume: for await event in stream {
             // POOL-2: stop promptly once the consumer has abandoned/
             // cancelled this stream (see `generate`'s `onTermination`
             // hook) instead of running to maxTokens/EOS regardless.
             if Task.isCancelled {
                 continuation.finish(throwing: CancellationError())
-                return
+                ended = true
+                break consume
             }
             switch event {
             case .token(let token):
@@ -1894,12 +2134,24 @@ public actor MLXSwiftEngine: InferenceEngine {
                 if let piece = detokenizer.next() {
                     let chunk = GenerateChunk(text: piece)
                     if case .terminated = continuation.yield(chunk) {
-                        return
+                        ended = true
+                        break consume
                     }
                 }
             case .info(let info):
                 completionInfo = info
             }
+        }
+
+        // Same as the text path: the worker holds the model until it returns,
+        // and only this frame stops it once the loop left early (#136).
+        await Self.awaitWorker(worker)
+        if ended { return }
+        if Task.isCancelled {
+            // Cancelled while the loop waited for a token: reported as such,
+            // not as a completed response.
+            continuation.finish(throwing: CancellationError())
+            return
         }
 
         if let reporter = phaseReporter {

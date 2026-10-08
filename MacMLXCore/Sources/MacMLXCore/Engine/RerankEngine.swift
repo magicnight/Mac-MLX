@@ -70,6 +70,7 @@ public actor RerankEngine {
                 allowUnverifiedModel: true)
             container = loaded
             loadedModel = model
+            EngineMemory.noteModelLoaded()
             await LogManager.shared.info(
                 "Reranker loaded: \(model.id) (\(Self.describe(loaded.scoreKind)))",
                 category: .inference)

@@ -259,6 +259,7 @@ public actor AudioEngine {
         }
         sttModel = model
         loadedSTTModelID = modelID
+        EngineMemory.noteModelLoaded()
         return model
     }
 
@@ -297,6 +298,7 @@ public actor AudioEngine {
         }
         ttsModel = box
         loadedTTSModelID = modelID
+        EngineMemory.noteModelLoaded()
         return box
     }
 

@@ -221,7 +221,13 @@ extension MLXSwiftEngine: BatchGenerationServing {
     /// claimed `driving` via ``BatchServingCoordinator/claimSoloOrEnqueue(_:)`` (which
     /// enqueues + claims in one actor step).
     func startBatchDriveLoop() {
-        Task { await self.runBatchDriveLoop() }
+        Task {
+            // Counted like a single-stream generation: the drive loop holds
+            // the container until it returns (#136).
+            self.beginGenerationRun()
+            await self.runBatchDriveLoop()
+            self.endGenerationRun()
+        }
     }
 
     /// Run continuous batched decode for the resident model, pulling admissions /
