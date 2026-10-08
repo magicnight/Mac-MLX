@@ -1,4 +1,5 @@
 import XCTest
+import os
 @testable import MacMLXCore
 
 /// Stub engine for pool tests — no Metal/MLX required. Implements
@@ -387,6 +388,322 @@ final class ModelPoolTests: XCTestCase {
         XCTAssertTrue(residents.contains("B"), "B must survive — a leaked A reservation would have forced its eviction")
         XCTAssertTrue(residents.contains("C"))
         XCTAssertFalse(residents.contains("A"))
+    }
+
+    // MARK: - Auxiliary residents (#130)
+
+    /// Records what the pool makes happen and when, from closures that may
+    /// not touch an actor (the engine factory is synchronous).
+    private typealias Events = OSAllocatedUnfairLock<[String]>
+
+    /// A chat engine that records its unload, so a test can see a victim go
+    /// before the next model is built.
+    private actor RecordingEngine: InferenceEngine {
+        nonisolated let engineID: EngineID = .mlxSwift
+        var status: EngineStatus = .idle
+        var loadedModel: LocalModel?
+        var version: String = "recording"
+        private let events: Events
+
+        init(events: Events) { self.events = events }
+
+        func load(_ model: LocalModel) async throws {
+            loadedModel = model
+            status = .ready(model: model.id)
+            events.withLock { $0.append("loaded \(model.id)") }
+        }
+
+        func unload() async throws {
+            let id = loadedModel?.id ?? "?"
+            events.withLock { $0.append("unloaded \(id)") }
+            loadedModel = nil
+            status = .idle
+        }
+
+        nonisolated func generate(_ request: GenerateRequest) -> AsyncThrowingStream<GenerateChunk, Error> {
+            AsyncThrowingStream { $0.finish(throwing: EngineError.modelNotLoaded) }
+        }
+
+        func healthCheck() async -> Bool { true }
+    }
+
+    /// Something a release closure may capture; its deinit tells when the
+    /// pool let go of the closure.
+    private final class Captured: @unchecked Sendable {
+        private let events: Events
+        init(events: Events) { self.events = events }
+        deinit { events.withLock { $0.append("freed") } }
+    }
+
+    private func auxiliary(_ id: String, size: Int64 = 1_000_000_000) -> LocalModel {
+        LocalModel(
+            id: id,
+            displayName: id,
+            directory: FileManager.default.temporaryDirectory,
+            sizeBytes: size,
+            format: .reranker,
+            quantization: nil,
+            parameterCount: nil,
+            architecture: nil
+        )
+    }
+
+    /// A release that waits until the test lets it finish.
+    private actor ReleaseGate {
+        private var opened = false
+        func open() { opened = true }
+        func wait() async {
+            while !opened {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+    }
+
+    /// Poll (never a fixed sleep) for a detached unload or a sweep.
+    private func waitUntil(_ condition: @escaping () -> Bool) async {
+        let deadline = Date().addingTimeInterval(60)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    func testAuxiliaryKeysAreScopedByKind() {
+        XCTAssertEqual(ModelPool.auxiliaryKey(.reranker, "qwen"), "reranker:qwen")
+        XCTAssertEqual(ModelPool.auxiliaryKey(.embedder, "qwen"), "embedder:qwen")
+    }
+
+    func testAdmitAuxiliaryUnloadsTheVictimBeforeItsLoadRuns() async throws {
+        let events = Events(initialState: [])
+        let pool = ModelPool(maxBytes: 2_500_000_000) { _ in RecordingEngine(events: events) }
+        _ = try await pool.load(mkModel("a"))
+        _ = try await pool.load(mkModel("b"))
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"),
+            load: {
+                let resident = await pool.residentModelIDs()
+                events.withLock { $0.append("load resident=\(resident)") }
+            },
+            release: { events.withLock { $0.append("release") } }
+        )
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, ["b", "reranker:r"], "the LRU chat model makes room for the reranker")
+        XCTAssertEqual(
+            events.withLock { $0 },
+            ["loaded a", "loaded b", "unloaded a", "load resident=[\"b\"]"],
+            "the victim is unloaded before the auxiliary load runs, and admission releases nothing")
+    }
+
+    func testAuxiliaryIsReleasedAndItsReleaseDroppedBeforeALaterLoadBuildsItsEngine() async throws {
+        let events = Events(initialState: [])
+        let pool = ModelPool(maxBytes: 1_500_000_000) { _ in
+            events.withLock { $0.append("factory") }
+            return StubEngine()
+        }
+        func admitWithCapture() async throws {
+            let captured = Captured(events: events)
+            try await pool.admitAuxiliary(
+                .reranker, auxiliary("r"), load: {},
+                release: {
+                    _ = captured
+                    events.withLock { $0.append("release") }
+                })
+        }
+        try await admitWithCapture()
+        _ = try await pool.load(mkModel("c"))
+        XCTAssertEqual(
+            events.withLock { $0 }, ["release", "freed", "factory"],
+            "the reranker is released, and what its release captured is freed, before the new engine is even built")
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, ["c"])
+    }
+
+    func testAdmitReclaimsIdleEntriesFirst() async throws {
+        let pool = ModelPool(maxBytes: 10_000_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), ttlSeconds: 1, load: {},
+            release: { events.withLock { $0.append("release r") } })
+        // Nothing but the sweep that admission runs can release `r` (the
+        // budget is never under pressure): keep admitting until it does.
+        let deadline = Date().addingTimeInterval(60)
+        while events.withLock({ $0.isEmpty }), Date() < deadline {
+            try await pool.admitAuxiliary(.embedder, auxiliary("e"), load: {}, release: {})
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(events.withLock { $0 }, ["release r"], "admission sweeps idle entries like a load does")
+    }
+
+    func testSweepIdleReclaimsAnAuxiliaryPastItsTTL() async throws {
+        let pool = ModelPool(maxBytes: 10_000_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), ttlSeconds: 1, load: {},
+            release: { events.withLock { $0.append("release") } })
+        await pool.sweepIdle(now: Date().addingTimeInterval(0.5))
+        let keptResident = await pool.residentModelIDs()
+        XCTAssertEqual(keptResident, ["reranker:r"], "within its TTL it stays")
+        await pool.sweepIdle(now: Date().addingTimeInterval(5))
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, [], "past its TTL the entry leaves the resident set at once")
+        await waitUntil { events.withLock { $0 } == ["release"] }
+        XCTAssertEqual(events.withLock { $0 }, ["release"], "and its owner is told to let go")
+    }
+
+    func testInUseAuxiliaryIsSparedUntilBalanced() async throws {
+        let pool = ModelPool(maxBytes: 1_500_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: { events.withLock { $0.append("release") } })
+        _ = await pool.beginUsingAuxiliary(.reranker, "r")
+        _ = try await pool.load(mkModel("c"))
+        XCTAssertEqual(events.withLock { $0 }, [], "a reranker scoring a request is never evicted")
+        let both = await pool.residentModelIDs()
+        XCTAssertEqual(both, ["c", "reranker:r"])
+        await pool.endUsingAuxiliary(.reranker, "r")
+        _ = try await pool.load(mkModel("d"))
+        XCTAssertEqual(events.withLock { $0 }, ["release"], "once balanced it is the LRU victim again")
+    }
+
+    func testBeginningUseOfAnEntryThePoolLetGoIsRefused() async throws {
+        let pool = ModelPool(maxBytes: 1_500_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: { events.withLock { $0.append("release") } })
+        let held = await pool.beginUsingAuxiliary(.reranker, "r")
+        XCTAssertTrue(held, "resident, so the use begins")
+        await pool.endUsingAuxiliary(.reranker, "r")
+        _ = try await pool.load(mkModel("c"))
+        XCTAssertEqual(events.withLock { $0 }, ["release"], "over budget, the pool let the reranker go")
+        let refused = await pool.beginUsingAuxiliary(.reranker, "r")
+        XCTAssertFalse(refused, "the pool no longer holds it, so nothing is marked and the owner is told")
+        let unknown = await pool.beginUsingAuxiliary(.embedder, "never")
+        XCTAssertFalse(unknown)
+    }
+
+    func testAnAdmissionInUseIsSparedUntilEnded() async throws {
+        let pool = ModelPool(maxBytes: 1_500_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), inUse: true, load: {},
+            release: { events.withLock { $0.append("release") } })
+        _ = try await pool.load(mkModel("c"))
+        XCTAssertEqual(events.withLock { $0 }, [], "in use from its admission, with no gap for an eviction")
+        await pool.endUsingAuxiliary(.reranker, "r")
+        _ = try await pool.load(mkModel("d"))
+        XCTAssertEqual(events.withLock { $0 }, ["release"], "ended, it is the LRU victim again")
+    }
+
+    func testUnloadRunsTheAuxiliaryReleaseAndForgetDoesNot() async throws {
+        let pool = ModelPool(maxBytes: 10_000_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: { events.withLock { $0.append("release reranker") } })
+        try await pool.admitAuxiliary(
+            .embedder, auxiliary("e"), load: {},
+            release: { events.withLock { $0.append("release embedder") } })
+        await pool.unload(ModelPool.auxiliaryKey(.reranker, "r"))
+        XCTAssertEqual(events.withLock { $0 }, ["release reranker"])
+        await pool.forgetAuxiliary(.embedder, "e")
+        XCTAssertEqual(events.withLock { $0 }, ["release reranker"], "forget drops the entry without the release")
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, [])
+        await pool.forgetAuxiliary(.reranker, "never-there")
+        await pool.unload("never-there")
+    }
+
+    func testUnloadLeavesTheResidentSetBeforeItsReleaseRuns() async throws {
+        let pool = ModelPool(maxBytes: 10_000_000_000) { _ in StubEngine() }
+        let gate = ReleaseGate()
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: {
+                events.withLock { $0.append("release started") }
+                await gate.wait()
+                events.withLock { $0.append("release finished") }
+            })
+        let unloading = Task { await pool.unload(ModelPool.auxiliaryKey(.reranker, "r")) }
+        await waitUntil { events.withLock { $0 } == ["release started"] }
+        XCTAssertEqual(events.withLock { $0 }, ["release started"], "the release is under way")
+        // A new admission under the same key lands while the release waits.
+        try await pool.admitAuxiliary(.reranker, auxiliary("r"), load: {}, release: {})
+        await gate.open()
+        await unloading.value
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, ["reranker:r"], "the entry admitted during the release is kept")
+    }
+
+    func testFailedAuxiliaryLoadRollsBackItsReservation() async throws {
+        struct Boom: Error {}
+        let pool = ModelPool(maxBytes: 2_500_000_000) { _ in StubEngine() }
+        var threw = false
+        do {
+            try await pool.admitAuxiliary(.reranker, auxiliary("r"), load: { throw Boom() }, release: {})
+        } catch {
+            threw = true
+        }
+        XCTAssertTrue(threw, "the owner's error comes back")
+        let after = await pool.residentModelIDs()
+        XCTAssertEqual(after, [])
+        // A leaked 1 GB reservation would make the second load evict the first.
+        _ = try await pool.load(mkModel("a"))
+        _ = try await pool.load(mkModel("b"))
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, ["a", "b"], "nothing stays reserved for a load that failed")
+    }
+
+    func testAdmitUnderAnExistingKeyReplacesTheEntryWithoutReleasingIt() async throws {
+        // A budget the two admissions would not both fit: without the forget
+        // at the top of admit, the first entry would be evicted (and its
+        // release run) to make room for the second.
+        let pool = ModelPool(maxBytes: 1_500_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: { events.withLock { $0.append("release first") } })
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: { events.withLock { $0.append("release second") } })
+        XCTAssertEqual(events.withLock { $0 }, [], "re-admission is the owner replacing what it already let go of")
+        await pool.unload(ModelPool.auxiliaryKey(.reranker, "r"))
+        XCTAssertEqual(events.withLock { $0 }, ["release second"])
+    }
+
+    func testAChatModelAndARerankerWithTheSameIDAreSeparateEntries() async throws {
+        let pool = ModelPool(maxBytes: 10_000_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        _ = try await pool.load(mkModel("qwen"))
+        await pool.setPinned("qwen", true)
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("qwen"), load: {},
+            release: { events.withLock { $0.append("release") } })
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, ["qwen", "reranker:qwen"])
+        let stillPinned = await pool.isPinned("qwen")
+        XCTAssertTrue(stillPinned, "the reranker's admission leaves the chat entry alone")
+        await pool.forgetAuxiliary(.reranker, "qwen")
+        let chatStays = await pool.residentModelIDs()
+        XCTAssertEqual(chatStays, ["qwen"])
+        let engine = await pool.engine(for: "qwen")
+        XCTAssertNotNil(engine)
+    }
+
+    func testMarkingAnAuxiliaryInUseRefreshesItsLRUClock() async throws {
+        let pool = ModelPool(maxBytes: 2_500_000_000) { _ in StubEngine() }
+        let events = Events(initialState: [])
+        try await pool.admitAuxiliary(
+            .reranker, auxiliary("r"), load: {},
+            release: { events.withLock { $0.append("release") } })
+        _ = try await pool.load(mkModel("a"))
+        _ = await pool.beginUsingAuxiliary(.reranker, "r")
+        await pool.endUsingAuxiliary(.reranker, "r")
+        _ = try await pool.load(mkModel("b"))
+        XCTAssertEqual(events.withLock { $0 }, [], "used after `a`, the reranker is no longer the LRU victim")
+        let resident = await pool.residentModelIDs()
+        XCTAssertEqual(resident, ["b", "reranker:r"])
     }
 }
 

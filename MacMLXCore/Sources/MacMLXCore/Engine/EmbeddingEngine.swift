@@ -31,8 +31,9 @@ public protocol EmbeddingModel: Actor {
 /// pooled, L2-normalized sentence embeddings. Powers the OpenAI-compatible
 /// `/v1/embeddings` endpoint and the bi-encoder `/v1/rerank` MVP.
 ///
-/// - Note: MVP scope — a single engine with no pool. `ModelPool` hard-binds
-///   `any InferenceEngine`, so a dedicated `EmbeddingPool` is a follow-up.
+/// - Note: one engine at a time on the server; in the app the model pool
+///   budgets it as an auxiliary resident (#130), while the CLI's server, which
+///   has no pool, loads it directly.
 public actor EmbeddingEngine: EmbeddingModel {
 
     /// The embedder currently in memory, if any.

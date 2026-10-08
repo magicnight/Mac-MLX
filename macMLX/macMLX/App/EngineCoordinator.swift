@@ -50,7 +50,9 @@ public final class EngineCoordinator {
     /// because we only call `pool.load` when `currentModel` changes;
     /// ModelPool lazily keeps previously-loaded ones resident (subject
     /// to its byte budget) so the next switch-back skips disk read.
-    private let pool: ModelPool
+    /// Internal rather than private so the server's auxiliary residency
+    /// (#130) can be built over it without a main-actor hop per request.
+    let pool: ModelPool
 
     /// ID of the model the GUI currently treats as active. `nil` when
     /// no model has been loaded (or when the last load was for a
@@ -367,9 +369,9 @@ public final class EngineCoordinator {
         }
     }
 
-    /// IDs of every currently-resident model in the pool (sorted).
-    /// Used by the Models tab to render the "loaded" indicator and
-    /// by Settings' pool-stats panel (Task 4).
+    /// Every resident entry in the pool (sorted): chat models under their id,
+    /// the server's reranker and embedder under `reranker:<id>` and
+    /// `embedder:<id>` (#130).
     public func residentModelIDs() async -> [String] {
         await pool.residentModelIDs()
     }

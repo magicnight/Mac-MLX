@@ -148,7 +148,9 @@ struct LocalModelRow: View {
             // Pinning governs eviction from the generation model pool, which
             // never holds a speech model — so the control would write a
             // preference nothing reads. Hidden for the same reason as Load.
-            if !model.isAudio {
+            // A reranker or embedder lives in the pool under its own key
+            // (#130), which this pin does not reach either.
+            if !model.isAudio, model.format != .reranker, model.format != .embedder {
                 Button(action: onTogglePin) {
                     Image(systemName: isPinned ? "pin.fill" : "pin")
                         .foregroundStyle(isPinned ? .orange : .secondary)

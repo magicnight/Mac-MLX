@@ -943,6 +943,15 @@ public actor HummingbirdServer {
     public typealias InFlightHook = @Sendable (_ modelID: String, _ active: Bool) async -> Void
     private let inFlightHook: InFlightHook?
 
+    /// Where the reranker and embedder report their residency (#130): the GUI
+    /// hands in its pool, so their bytes count against the budget and they are
+    /// evicted and swept like chat models. An admission returns with the
+    /// model in use, and a hit marks it in use in one step, or learns that
+    /// the pool has already let the model go and swaps instead; the request
+    /// ends its use when done. `nil` (the CLI, which has no pool) means they
+    /// are loaded directly and nothing accounts for them.
+    private let auxiliaryResidency: (any AuxiliaryResidency)?
+
     /// A2d continuous-batching seam (default `nil` = disabled → every request
     /// takes the legacy single-stream path, byte-for-byte unchanged). When
     /// installed, an OpenAI chat/completions request the ``BatchRoutingPolicy``
@@ -969,10 +978,11 @@ public actor HummingbirdServer {
     private var loadInFlight: Task<Void, Error>?
 
     /// Lazily-created embedding engine for `/v1/embeddings` + `/v1/rerank`
-    /// (v0.5.2). A sibling to `engine` — embedders don't conform to
+    /// (v0.5.3). A sibling to `engine` — embedders don't conform to
     /// `InferenceEngine`. Cold-swapped by `ensureEmbedderLoaded` when a
-    /// request names a different embedder than is currently resident. MVP:
-    /// a single engine, no pool (see `EmbeddingEngine`).
+    /// request names a different embedder than is currently resident. One
+    /// slot, whose residency the pool budgets through `auxiliaryResidency`
+    /// (#130).
     private var embeddingEngine: EmbeddingEngine?
 
     /// Lazily-created cross-encoder reranker for `/v1/rerank` (v0.7). A
@@ -980,9 +990,22 @@ public actor HummingbirdServer {
     /// `.reranker` model, `handleRerank` routes to this joint scorer (backed
     /// by mlx-swift-lm's `MLXRerankers`) instead of the bi-encoder cosine
     /// fallback. Cold-swapped by `ensureRerankerLoaded` when a different
-    /// reranker is requested. Single engine, no pool — matching the embedder
-    /// MVP (see `RerankEngine`).
+    /// reranker is requested. One slot, budgeted like the embedder's (#130).
     private var rerankEngine: RerankEngine?
+
+    /// The ids the two slots hold, kept beside them so a swap and the unload
+    /// door can name what they let go of without an actor hop into the engine.
+    private var embedderResidentID: String?
+    private var rerankResidentID: String?
+
+    /// One token per slot, moved on whenever the slot is emptied or an
+    /// admission begins. The release the pool keeps for an admission carries
+    /// that admission's token and empties the slot only while it still
+    /// matches, so a release for a model already swapped out does nothing,
+    /// and an admission the pool released before the server installed it is
+    /// not installed (#130).
+    private var embedderToken: UInt64 = 0
+    private var rerankToken: UInt64 = 0
 
     /// Lazily-created speech backend for `/v1/audio/transcriptions` +
     /// `/v1/audio/speech` (v0.9 W1a): an `AudioEngine` in production, a third
@@ -1059,6 +1082,11 @@ public actor HummingbirdServer {
     /// this `true`). Read by the server tests to pin the lock contract without
     /// racing an acquire against a timer, which a starved CI runner loses.
     var generationLockIsHeld: Bool { generationLocked }
+
+    /// How many acquirers are parked on the generation lock. Read by the
+    /// residency smoke that stops the server while a request is parked, so
+    /// it triggers the stop only once the request is inside the server.
+    var generationLockWaiterCount: Int { generationWaiters.count }
 
     /// Release the generation lock and hand off to the next live waiter.
     func releaseGenerationLock() {
@@ -1171,6 +1199,7 @@ public actor HummingbirdServer {
         self.modelResolver = { _ in nil }
         self.loadHook = nil
         self.inFlightHook = nil
+        self.auxiliaryResidency = nil
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
         self.batchServing = nil
@@ -1189,6 +1218,7 @@ public actor HummingbirdServer {
         self.modelResolver = modelResolver
         self.loadHook = nil
         self.inFlightHook = nil
+        self.auxiliaryResidency = nil
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
         self.batchServing = nil
@@ -1209,6 +1239,7 @@ public actor HummingbirdServer {
         self.modelResolver = modelResolver
         self.loadHook = loadHook
         self.inFlightHook = nil
+        self.auxiliaryResidency = nil
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
         self.batchServing = nil
@@ -1219,14 +1250,16 @@ public actor HummingbirdServer {
     /// active engine can change out from under it (the GUI's `ModelPool`
     /// mints a new `MLXSwiftEngine` per model) always generates against the
     /// model that's actually loaded. `inFlightHook` (POOL-3) lets the caller
-    /// mark the active model busy in a pool one layer up; `stallTimeoutSeconds`
-    /// (SRV-4) bounds inter-chunk silence during generation — `<= 0` disables
-    /// the watchdog.
+    /// mark the active model busy in a pool one layer up; `auxiliaryResidency`
+    /// (#130) lets that pool budget the reranker and the embedder the server
+    /// keeps; `stallTimeoutSeconds` (SRV-4) bounds inter-chunk silence during
+    /// generation — `<= 0` disables the watchdog.
     public init(
         engineProvider: @escaping @Sendable () async -> (any InferenceEngine)?,
         modelResolver: @escaping ModelResolver = { _ in nil },
         loadHook: LoadHook? = nil,
         inFlightHook: InFlightHook? = nil,
+        auxiliaryResidency: (any AuxiliaryResidency)? = nil,
         apiKey: String? = nil,
         stallTimeoutSeconds: TimeInterval = HummingbirdServer.defaultStallTimeoutSeconds,
         batchServing: (any BatchGenerationServing)? = nil
@@ -1235,6 +1268,7 @@ public actor HummingbirdServer {
         self.modelResolver = modelResolver
         self.loadHook = loadHook
         self.inFlightHook = inFlightHook
+        self.auxiliaryResidency = auxiliaryResidency
         self.apiKey = apiKey
         self.stallTimeoutSeconds = stallTimeoutSeconds
         self.batchServing = batchServing
@@ -1260,16 +1294,22 @@ public actor HummingbirdServer {
     /// Triggers a graceful shutdown of the underlying ServiceGroup and awaits
     /// full teardown so the port is released before this method returns.
     public func stop() async {
-        guard let group = serviceGroup else { return }
-        let task = serverTask
-        serviceGroup = nil
-        serverTask = nil
-        _listeningPort = nil
-        // Trigger graceful shutdown — this signals the ServiceGroup to stop
-        // all its services (including the HTTP server) cleanly.
-        await group.triggerGracefulShutdown()
-        // Await the task so we know the port has been released.
-        _ = try? await task?.value
+        if let group = serviceGroup {
+            let task = serverTask
+            serviceGroup = nil
+            serverTask = nil
+            _listeningPort = nil
+            // Trigger graceful shutdown — this signals the ServiceGroup to stop
+            // all its services (including the HTTP server) cleanly.
+            await group.triggerGracefulShutdown()
+            // Await the task so we know the port has been released.
+            _ = try? await task?.value
+        }
+        // The engines kept for /v1/rerank and /v1/embeddings go with the
+        // server (#130), once nothing is being served: a request still in
+        // flight keeps the engine it confirmed, and one parked on the lock
+        // would otherwise admit and install again after the slots were let go.
+        await releaseAuxiliaryEngines()
     }
 
     // MARK: Private helpers
@@ -1625,6 +1665,8 @@ public actor HummingbirdServer {
         } else {
             body["loaded_model"] = NSNull()
         }
+        body["reranker"] = rerankResidentID.map { $0 as Any } ?? NSNull()
+        body["embedder"] = embedderResidentID.map { $0 as Any } ?? NSNull()
         return try jsonResponseAny(body)
     }
 
@@ -3694,14 +3736,41 @@ public actor HummingbirdServer {
         ])
     }
 
+    /// Body of `POST /x/models/unload`, optional. `model` names what to
+    /// unload: the resident reranker or embedder by id (#130), or the chat
+    /// model. No body, or no `model`, means the chat model.
+    private struct UnloadModelRequest: Decodable {
+        var model: String?
+    }
+
     private func handleUnloadModel(
         request: Request,
         context: BasicRequestContext
     ) async throws -> Response {
-        guard let engine = await engineProvider() else {
-            return try jsonResponse(["status": "unloaded"])
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        var requested: String?
+        if buffer.readableBytes > 0,
+           let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) {
+            do {
+                requested = try JSONDecoder().decode(UnloadModelRequest.self, from: data).model
+            } catch {
+                return errorResponse(
+                    status: .badRequest,
+                    message: "Invalid JSON: \(error.localizedDescription)",
+                    code: "invalid_request_error"
+                )
+            }
+        }
+        if let requested, requested == rerankResidentID || requested == embedderResidentID {
+            return try await unloadAuxiliary(requested)
         }
 
+        // The chat model. A quick answer before the lock for an id that is
+        // not the active model, then the same check again under the lock: a
+        // cold swap that held it may have changed the active model meanwhile.
+        if let requested, await engineProvider()?.loadedModel?.id != requested {
+            return modelNotLoadedResponse(requested)
+        }
         // A2: same lock discipline as handleLoadModel — an unload mutates
         // shared engine/MLX state and must not race an in-flight generation.
         // Throw from acquire = lock NOT held = do not release (embeddings pattern).
@@ -3713,6 +3782,15 @@ public actor HummingbirdServer {
                 message: "Cancelled while waiting for the generation lock",
                 code: "cancelled"
             )
+        }
+        guard let engine = await engineProvider() else {
+            releaseGenerationLock()
+            if let requested { return modelNotLoadedResponse(requested) }
+            return try jsonResponse(["status": "unloaded"])
+        }
+        if let requested, await engine.loadedModel?.id != requested {
+            releaseGenerationLock()
+            return modelNotLoadedResponse(requested)
         }
         // A2d: drain any resident batched cohort before the unload frees the
         // model out from under its live rows (the manual `/x/models/unload`
@@ -3730,6 +3808,48 @@ public actor HummingbirdServer {
             )
         }
         return try jsonResponse(["status": "unloaded"])
+    }
+
+    private func modelNotLoadedResponse(_ modelID: String) -> Response {
+        errorResponse(
+            status: .notFound,
+            message: "Model \(modelID) is not loaded",
+            code: "model_not_loaded"
+        )
+    }
+
+    /// Unload the resident reranker or embedder named by `modelID`, under the
+    /// generation lock like every other engine mutation, and tell the pool it
+    /// is gone (#130). A 404 if it was swapped out between the check and the
+    /// lock. Emptying the slot drops the engine; the drain then frees it.
+    private func unloadAuxiliary(_ modelID: String) async throws -> Response {
+        do {
+            try await acquireGenerationLock()
+        } catch {
+            return errorResponse(
+                status: .internalServerError,
+                message: "Cancelled while waiting for the generation lock",
+                code: "cancelled"
+            )
+        }
+        defer { releaseGenerationLock() }
+        var released: [AuxiliaryKind] = []
+        if rerankResidentID == modelID {
+            clearRerankSlot()
+            released.append(.reranker)
+        }
+        if embedderResidentID == modelID {
+            clearEmbedderSlot()
+            released.append(.embedder)
+        }
+        guard !released.isEmpty else {
+            return modelNotLoadedResponse(modelID)
+        }
+        for kind in released {
+            await auxiliaryResidency?.forget(kind, modelID)
+        }
+        EngineMemory.releaseCachedBuffers()
+        return try jsonResponse(["status": "unloaded", "model": modelID])
     }
 
     // MARK: - Embeddings / rerank (v0.5.2)
@@ -3772,8 +3892,26 @@ public actor HummingbirdServer {
     /// (the pre-#133 shape, since v0.5.3). The returned instance is the one
     /// whose `loadedModel` was checked or that this call loaded.
     private func ensureEmbedderLoaded(_ target: LocalModel) async throws -> EmbeddingEngine {
+        // An engine resident as this call begins is gone before the admission
+        // below, one way or the other: this call clears the slot (a swap, or
+        // a hit the pool refused), or the pool's release did while the
+        // request was suspended on `current.loadedModel` or on `beginUse`,
+        // draining then but freeing nothing, since `current` still held the
+        // engine. Either way Metal is up, and the drain below, after
+        // `current` is out of scope, is what hands the weights back: the
+        // drains key on this, not on what the slot holds by then.
+        let hadResident = embeddingEngine != nil
         if let current = embeddingEngine, await current.loadedModel?.id == target.id {
-            return current
+            // In use from here, in one step with the pool (POOL-3). The pool
+            // may have let the model go already (an eviction or sweep,
+            // whether or not its release has reached this actor): then the
+            // request goes through the swap below and admits afresh, instead
+            // of computing on an engine the pool no longer counts. If the
+            // release has not arrived, the slot is stale and the swap clears
+            // it (the release then finds the token moved on).
+            if await auxiliaryResidency?.beginUse(.embedder, target.id) ?? true {
+                return current
+            }
         }
 
         // Release the resident embedder BEFORE the replacement allocates and
@@ -3782,29 +3920,139 @@ public actor HummingbirdServer {
         // here the generation lock gives both). Otherwise both models are
         // resident for the duration of the load and the peak is their sum
         // (#130). A failed load leaves no embedder resident; the next request
-        // for the previous one simply reloads it.
-        let releasedResident = embeddingEngine != nil
-        if releasedResident {
-            embeddingEngine = nil
+        // for the previous one simply reloads it. The pool is told first, so
+        // it keeps no budget for a model that is gone.
+        if embeddingEngine != nil {
+            let previousID = embedderResidentID
+            clearEmbedderSlot()
+            if let previousID { await auxiliaryResidency?.forget(.embedder, previousID) }
+        }
+        if hadResident {
             EngineMemory.releaseCachedBuffers()
         }
+        // This admission's token: the release the pool keeps carries it, and
+        // only a matching token may empty the slot (`dropEmbedder`).
+        embedderToken &+= 1
+        let token = embedderToken
         let newEngine = EmbeddingEngine()
         do {
-            try await newEngine.load(target)
+            // Through the pool when there is one (#130): it evicts to fit and
+            // reserves the cost before the load allocates, and keeps `release`
+            // as its way to reclaim the engine later. The release captures the
+            // token, never the engine: a pool holding the engine would keep its
+            // weights resident after the slot let go.
+            if let residency = auxiliaryResidency {
+                try await residency.admit(
+                    .embedder, target,
+                    load: { try await newEngine.load(target) },
+                    release: { [weak self] in await self?.dropEmbedder(token: token) })
+            } else {
+                try await newEngine.load(target)
+            }
         } catch {
             // Drain what a part-way failure may have allocated, but only when
-            // this call already released a resident engine: that engine ran
-            // on Metal, so MLX is up. A load that fails before touching MLX
-            // (missing config, unsupported architecture) must never be the
-            // first thing to initialize Metal — the SPM test job has no
-            // metallib and drives exactly that path with bogus directories.
-            if releasedResident {
+            // an engine was resident as this call began (released by this
+            // call, or by the pool meanwhile): that engine ran on Metal, so
+            // MLX is up. A load that fails before touching MLX (missing
+            // config, unsupported architecture) must never be the first
+            // thing to initialize Metal — the SPM test job has no metallib
+            // and drives exactly that path with bogus directories.
+            if hadResident {
                 EngineMemory.releaseCachedBuffers()
             }
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
+        // The slot may have moved on while the admission was out. An
+        // admission in use is neither evicted nor swept, so on a real pool
+        // only an `unload` of this key (no caller today) or a stop that did
+        // not wait for this handler can do it; then the pool holds no entry
+        // for the engine, or must not, and this request runs on it without
+        // installing it.
+        guard embedderToken == token else {
+            // The slot moved on while the admission was out: the pool's own
+            // release (then it holds no entry any more) or the server's stop
+            // (then it still does). Either way the pool keeps nothing for an
+            // engine that is not installed.
+            await auxiliaryResidency?.forget(.embedder, target.id)
+            return newEngine
+        }
         embeddingEngine = newEngine
+        embedderResidentID = target.id
         return newEngine
+    }
+
+    /// Run `work` on the embedder for `target`, in use from its admission or
+    /// hit until this returns, and say whether the engine was orphaned on the
+    /// way: the slot moved past it (an `unload` of its key, or a stop that
+    /// did not wait for this handler), so an admission was never installed,
+    /// or an installed engine was dropped mid-work. The engine is held only
+    /// by this frame, so once it returns the caller can drain and be sure
+    /// the drain finds the weights (#130). A load failure comes back as the
+    /// outcome, not orphaned.
+    private func embedWithEmbedder<T: Sendable>(
+        _ target: LocalModel, _ work: (EmbeddingEngine) async throws -> T
+    ) async -> (outcome: Result<T, any Error>, orphaned: Bool) {
+        let engine: EmbeddingEngine
+        do {
+            engine = try await ensureEmbedderLoaded(target)
+        } catch {
+            return (.failure(error), false)
+        }
+        let outcome: Result<T, any Error>
+        do {
+            outcome = .success(try await work(engine))
+        } catch {
+            outcome = .failure(error)
+        }
+        await auxiliaryResidency?.endUse(.embedder, target.id)
+        return (outcome, embeddingEngine !== engine)
+    }
+
+    /// Same as `embedWithEmbedder`, for the reranker.
+    private func scoreWithReranker<T: Sendable>(
+        _ target: LocalModel, _ work: (RerankEngine) async throws -> T
+    ) async -> (outcome: Result<T, any Error>, orphaned: Bool) {
+        let engine: RerankEngine
+        do {
+            engine = try await ensureRerankerLoaded(target)
+        } catch {
+            return (.failure(error), false)
+        }
+        let outcome: Result<T, any Error>
+        do {
+            outcome = .success(try await work(engine))
+        } catch {
+            outcome = .failure(error)
+        }
+        await auxiliaryResidency?.endUse(.reranker, target.id)
+        return (outcome, rerankEngine !== engine)
+    }
+
+    /// Empty the embedder slot and move its token on, so a release for what
+    /// it held, or an install of what it was about to hold, is refused.
+    private func clearEmbedderSlot() {
+        embeddingEngine = nil
+        embedderResidentID = nil
+        embedderToken &+= 1
+    }
+
+    /// The pool reclaimed the embedder admitted under `token` (budget
+    /// pressure, the idle sweep, an unload through the pool): let go of it if
+    /// that admission is still the one in the slot, or about to be. Runs
+    /// without the generation lock, from wherever the pool is, and must never
+    /// take it: the pool runs a release while a handler holding the lock
+    /// awaits `admit` (admitting one slot can evict the other), so a release
+    /// that waited for the lock would deadlock the server. When the slot
+    /// was the last holder the drain that follows frees the weights; a
+    /// request about to use the engine finds its use refused and swaps,
+    /// draining what it held (`ensureEmbedderLoaded`); one that confirmed
+    /// the engine before an `unload` of its key or a stop that did not wait
+    /// finishes on it and drains itself afterwards, since the engine is then
+    /// orphaned (`embedWithEmbedder`).
+    private func dropEmbedder(token: UInt64) {
+        guard token == embedderToken else { return }
+        clearEmbedderSlot()
+        EngineMemory.releaseCachedBuffers()
     }
 
     /// Make sure `rerankEngine` has `target` resident, cold-swapping when a
@@ -3825,27 +4073,82 @@ public actor HummingbirdServer {
     /// Callers hold the generation lock, and use the returned engine for THIS
     /// request rather than re-reading the slot — see `ensureEmbedderLoaded`.
     private func ensureRerankerLoaded(_ target: LocalModel) async throws -> RerankEngine {
+        // Same as `ensureEmbedderLoaded`: an engine resident now is gone
+        // before the admission, by this call or by the pool's release
+        // meanwhile, and the drains key on that.
+        let hadResident = rerankEngine != nil
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
-            return current
+            // Same as `ensureEmbedderLoaded`: in use in one step, or the pool
+            // has let it go and the swap below admits afresh, draining what
+            // `current` held either way.
+            if await auxiliaryResidency?.beginUse(.reranker, target.id) ?? true {
+                return current
+            }
         }
-        let releasedResident = rerankEngine != nil
-        if releasedResident {
-            rerankEngine = nil
+        if rerankEngine != nil {
+            let previousID = rerankResidentID
+            clearRerankSlot()
+            if let previousID { await auxiliaryResidency?.forget(.reranker, previousID) }
+        }
+        if hadResident {
             EngineMemory.releaseCachedBuffers()
         }
+        rerankToken &+= 1
+        let token = rerankToken
         let newEngine = RerankEngine()
         do {
-            try await newEngine.load(target)
+            if let residency = auxiliaryResidency {
+                try await residency.admit(
+                    .reranker, target,
+                    load: { try await newEngine.load(target) },
+                    release: { [weak self] in await self?.dropReranker(token: token) })
+            } else {
+                try await newEngine.load(target)
+            }
         } catch {
             // Same rule as `ensureEmbedderLoaded`: drain only when Metal is
             // known to be up.
-            if releasedResident {
+            if hadResident {
                 EngineMemory.releaseCachedBuffers()
             }
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
         }
+        guard rerankToken == token else {
+            // Same as `ensureEmbedderLoaded`: the pool keeps nothing for an
+            // engine that is not installed.
+            await auxiliaryResidency?.forget(.reranker, target.id)
+            return newEngine
+        }
         rerankEngine = newEngine
+        rerankResidentID = target.id
         return newEngine
+    }
+
+    /// Same as `clearEmbedderSlot`, for the reranker.
+    private func clearRerankSlot() {
+        rerankEngine = nil
+        rerankResidentID = nil
+        rerankToken &+= 1
+    }
+
+    /// Same as `dropEmbedder`, for the reranker.
+    private func dropReranker(token: UInt64) {
+        guard token == rerankToken else { return }
+        clearRerankSlot()
+        EngineMemory.releaseCachedBuffers()
+    }
+
+    /// Let go of both auxiliary engines: the server is stopping, so the pool
+    /// must keep no budget for them and a release could reach nothing.
+    private func releaseAuxiliaryEngines() async {
+        let rerankID = rerankResidentID
+        let embedderID = embedderResidentID
+        let hadResident = rerankEngine != nil || embeddingEngine != nil
+        clearRerankSlot()
+        clearEmbedderSlot()
+        if let rerankID { await auxiliaryResidency?.forget(.reranker, rerankID) }
+        if let embedderID { await auxiliaryResidency?.forget(.embedder, embedderID) }
+        if hadResident { EngineMemory.releaseCachedBuffers() }
     }
 
     /// `POST /v1/embeddings` — OpenAI-compatible text embeddings. Cold-swaps
@@ -3916,19 +4219,18 @@ public actor HummingbirdServer {
                 code: "cancelled"
             )
         }
-        let embedder: EmbeddingEngine
-        do {
-            embedder = try await ensureEmbedderLoaded(target)
-        } catch {
-            releaseGenerationLock()
-            return loadFailureResponse(error, id: req.model)
+        let (outcome, orphaned) = await embedWithEmbedder(target) { embedder in
+            try await embedder.embed(req.input.values)
         }
+        if orphaned { EngineMemory.releaseCachedBuffers() }
+        releaseGenerationLock()
         let vectors: [[Float]]
-        do {
-            vectors = try await embedder.embed(req.input.values)
-            releaseGenerationLock()
-        } catch {
-            releaseGenerationLock()
+        switch outcome {
+        case .success(let value):
+            vectors = value
+        case .failure(let error as ModelSwapError):
+            return loadFailureResponse(error, id: req.model)
+        case .failure(let error):
             return errorResponse(
                 status: .internalServerError,
                 message: "Embedding failed: \(error.localizedDescription)",
@@ -4043,19 +4345,18 @@ public actor HummingbirdServer {
                 code: "cancelled"
             )
         }
-        let embedder: EmbeddingEngine
-        do {
-            embedder = try await ensureEmbedderLoaded(target)
-        } catch {
-            releaseGenerationLock()
-            return loadFailureResponse(error, id: req.model)
+        let (outcome, orphaned) = await embedWithEmbedder(target) { embedder in
+            try await embedder.embed([req.query] + req.documents)
         }
+        if orphaned { EngineMemory.releaseCachedBuffers() }
+        releaseGenerationLock()
         let embeddings: [[Float]]
-        do {
-            embeddings = try await embedder.embed([req.query] + req.documents)
-            releaseGenerationLock()
-        } catch {
-            releaseGenerationLock()
+        switch outcome {
+        case .success(let value):
+            embeddings = value
+        case .failure(let error as ModelSwapError):
+            return loadFailureResponse(error, id: req.model)
+        case .failure(let error):
             return errorResponse(
                 status: .internalServerError,
                 message: "Embedding failed: \(error.localizedDescription)",
@@ -4108,28 +4409,28 @@ public actor HummingbirdServer {
                 code: "cancelled"
             )
         }
-        let reranker: RerankEngine
-        do {
-            reranker = try await ensureRerankerLoaded(target)
-        } catch {
-            releaseGenerationLock()
-            return loadFailureResponse(error, id: target.id)
+        let (outcome, orphaned) = await scoreWithReranker(target) { reranker in
+            try await reranker.score(query: req.query, documents: req.documents)
         }
+        // The helper's frame was the last holder of an orphaned engine: what
+        // it freed is in MLX's cache now, and nothing else would drain it.
+        if orphaned { EngineMemory.releaseCachedBuffers() }
+        releaseGenerationLock()
         let scores: [Double]
-        do {
-            scores = try await reranker.score(query: req.query, documents: req.documents)
-            releaseGenerationLock()
-        } catch let error as RerankRequestError {
+        switch outcome {
+        case .success(let value):
+            scores = value
+        case .failure(let error as ModelSwapError):
+            return loadFailureResponse(error, id: target.id)
+        case .failure(let error as RerankRequestError):
             // The input, not the server: a listwise model given more
             // documents than it takes, or an input the model refuses.
-            releaseGenerationLock()
             return errorResponse(
                 status: .badRequest,
                 message: error.localizedDescription,
                 code: "invalid_request_error"
             )
-        } catch {
-            releaseGenerationLock()
+        case .failure(let error):
             return errorResponse(
                 status: .internalServerError,
                 message: "Rerank failed: \(error.localizedDescription)",
