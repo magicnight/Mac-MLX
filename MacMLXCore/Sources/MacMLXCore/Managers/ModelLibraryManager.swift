@@ -198,12 +198,15 @@ public actor ModelLibraryManager {
     /// families ship no `tokenizer.json` at all). Running the managed-directory
     /// scan over this root would therefore find nothing.
     ///
-    /// Completeness is judged by EXACTLY the criterion
-    /// `ModelUtils.resolveOrDownloadModel` applies to decide whether its own
-    /// cache entry is usable or must be re-downloaded: at least one non-empty
+    /// Usability is judged by the criterion `ModelUtils.resolveOrDownloadModel`
+    /// applies before it consults its pattern manifest: at least one non-empty
     /// `.safetensors`, plus a `config.json` that parses. Matching it is the
     /// point — listing a directory upstream would consider incomplete would
-    /// offer the user a model that re-downloads the moment they touch it.
+    /// offer the user a model that re-downloads the moment they touch it. A
+    /// snapshot whose manifest does not yet cover a loader's patterns is
+    /// still listed: the load completes it with a listing (two when the Hub no
+    /// longer has the cached commit) and the files the
+    /// Hub names that are not on disk (#135).
     ///
     /// Discovered ids are REPO IDS (`openai/whisper-tiny`), recovered from the
     /// folder name, not directory paths: ``AudioEngine/loadSTT(_:)`` accepts

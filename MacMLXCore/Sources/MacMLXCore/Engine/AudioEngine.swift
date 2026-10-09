@@ -26,8 +26,10 @@ import MLXAudioTTS
 /// (`openai/whisper-tiny`, `mlx-community/Kokoro-82M-4bit`, …) rather than a
 /// `macmlx list` entry. Wiring them into `ModelLibraryManager` is deferred.
 ///
-/// - Note: Architecture-faithful but NOT validated against a real checkpoint
-///   in this environment — no weights were downloaded and no model was run.
+/// - Note: Real checkpoints are exercised only by the gated
+///   `AudioEngineCacheSmokeTests`, through download and load (moonshine-tiny,
+///   SenseVoiceSmall, VyvoTTS-EN-Beta-4bit); no transcription or synthesis
+///   has run against one, and the unit tests run no model.
 public actor AudioEngine {
 
     // MARK: Results
