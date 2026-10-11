@@ -129,6 +129,25 @@ public actor PromptCacheStore {
     /// canonical constant.
     static let coldFormatVersion = ColdIndex.coldFormatVersion
 
+    /// Stamped into every cold file's metadata as `recordVersion` and required
+    /// back on every cold fetch. "2" says the file holds exactly its key's
+    /// positions (#142). A file written before the stamp may hold the stop
+    /// token's position past its key and cannot be told apart from one that
+    /// does not, so a missing or different stamp is rejected and the file
+    /// deleted, as a missing fingerprint is.
+    static let coldRecordVersion = "2"
+
+    /// The first cold format whose files carry the `recordVersion` stamp. A
+    /// store opening an index from before it reclaims every cold file under
+    /// the root, since no fetch will serve an unstamped file again; a later
+    /// bump discards only the index, as before.
+    static let firstStampedColdFormatVersion = 2
+
+    /// Test seam: whether the cold index still records `tokens` for `modelID`.
+    func hasColdRecord(modelID: String, tokens: [Int]) -> Bool {
+        coldEntries[PromptCacheKey(modelID: modelID, tokens: tokens).hashString] != nil
+    }
+
     /// The cold-tier manifest path (`<root>/index.json`). It lives at the cold
     /// root so ``clearAll``'s root wipe removes it, but it is NOT a cache-payload
     /// file: ``pruneColdDirectory`` scopes the byte budget to `*.safetensors`
@@ -182,6 +201,26 @@ public actor PromptCacheStore {
             // BEFORE that prune/the manifest rebuild: at startup nothing is
             // mid-write, so every such temp is unambiguously a crash orphan.
             ColdTierWriter.sweepStaleColdTemporaries(root: root)
+            // A manifest from before the first stamped format (#142) was
+            // written beside cold files without the `recordVersion` stamp,
+            // which no fetch will serve again: every cold file under the
+            // root is reclaimed now, rather than left to count against the
+            // cap until the mtime prune reaches it, and a manifest of the
+            // current format replaces it (an older build sharing the root
+            // rewrites its old index, and the next open here reclaims the
+            // files again: cache lost, never wrong output). A newer or
+            // foreign version is left alone (the rebuild below starts empty
+            // for it). The manifest is decoded once, here, and handed to the
+            // rebuild. (A local URL: touching `self.indexURL` here would end
+            // the initializer's access to the isolated properties set below.)
+            let manifestURL = root.appending(path: "index.json", directoryHint: .notDirectory)
+            var manifest = ColdIndex.load(from: manifestURL)
+            if let found = manifest, found.formatVersion < Self.firstStampedColdFormatVersion {
+                Self.pruneColdDirectory(root: root, capBytes: 0, protecting: nil)
+                let fresh = ColdIndexManifest(formatVersion: Self.coldFormatVersion, entries: [])
+                ColdIndex.write(fresh, to: manifestURL)
+                manifest = fresh
+            }
             Self.pruneColdDirectory(root: root, capBytes: coldCapBytes, protecting: nil)
             // Rebuild the cold trie from the on-disk manifest so cross-session
             // LCP survives this restart. Runs AFTER the prune so a manifest
@@ -190,7 +229,7 @@ public actor PromptCacheStore {
             // is a nonisolated `static` producing locals (an actor's own
             // nonisolated `init` can't call its isolated methods), which `init`
             // then installs; a rebuild that dropped a stale entry is reflushed.
-            let rebuilt = Self.rebuiltColdIndex(root: root)
+            let rebuilt = Self.rebuiltColdIndex(root: root, manifest: manifest)
             coldEntries = rebuilt.entries
             coldTrie = rebuilt.trie
             if rebuilt.changed {
@@ -508,6 +547,14 @@ public actor PromptCacheStore {
     ) -> PromptCacheHit? {
         let reuse = max(0, min(targetReuse, tokenCount - 1))
         let copies = caches.map { $0.copy() }
+        // An entry whose caches hold other than the key's positions would
+        // serve the next turn out of step: after state the key never named
+        // when they hold more, short of it when they hold less. Nothing
+        // records one since #142, and the cold tier rejects files from before
+        // it, so this is a last guard; caches that report no positions (a
+        // `CacheList`) never trip it.
+        let reported = copies.map(\.offset).max() ?? 0
+        if reported > 0, reported != heldCount { return nil }
         let toTrim = heldCount - reuse
         if toTrim > 0 {
             guard MLXLMCommon.canTrimPromptCache(copies) else { return nil }
@@ -573,6 +620,7 @@ public actor PromptCacheStore {
             "modelID": key.modelID,
             "tokenCount": String(key.tokenCount),
             "modelFingerprint": fingerprint,
+            "recordVersion": Self.coldRecordVersion,
         ]
 
         // Dedup (Bugbot #4): a write for this exact content-addressed key is
@@ -796,12 +844,15 @@ public actor PromptCacheStore {
         // it when the stamped fingerprint matches the model currently on disk.
         // Reject-AND-DELETE on any of: a differing fingerprint (weights changed
         // under the same path), a missing stamp (a Wave-1 file predating this key
-        // — auto-migrated away), or a nil current fingerprint (a model with no
-        // readable `config.json` can never safely reuse cold). Deleting reclaims
-        // the now-unusable file instead of re-rejecting it on every future fetch.
+        // — auto-migrated away), a nil current fingerprint (a model with no
+        // readable `config.json` can never safely reuse cold), or a missing or
+        // different `recordVersion` (a file from before #142, which may hold
+        // the stop token's position past its key). Deleting reclaims the
+        // now-unusable file instead of re-rejecting it on every future fetch.
         guard let stored = meta["modelFingerprint"],
             let current = fingerprint,
-            stored == current
+            stored == current,
+            meta["recordVersion"] == Self.coldRecordVersion
         else {
             try? FileManager.default.removeItem(at: url)
             return nil
@@ -897,12 +948,14 @@ public actor PromptCacheStore {
                 continue
             }
             // Weight-identity guard, identical to ``fetchFromCold``: reuse only
-            // when the stamped fingerprint matches the current one. Reject-AND-
-            // delete (and drop the record) on a differing stamp, a missing stamp,
-            // or a nil current fingerprint.
+            // when the stamped fingerprint matches the current one and the
+            // `recordVersion` stamp is current (#142). Reject-AND-delete (and
+            // drop the record) on a differing stamp, a missing stamp, a nil
+            // current fingerprint, or a record stamp that is missing or old.
             guard let stored = meta["modelFingerprint"],
                 let current = fingerprint,
-                stored == current
+                stored == current,
+                meta["recordVersion"] == Self.coldRecordVersion
             else {
                 try? FileManager.default.removeItem(at: url)
                 dropColdRecord(modelID: modelID, tokens: candidate.key)
@@ -956,13 +1009,11 @@ public actor PromptCacheStore {
     /// actor's own nonisolated `init` can call it and install the returned locals
     /// (the actor isn't usable from within its initialiser); MLX-free.
     private static func rebuiltColdIndex(
-        root: URL
+        root: URL, manifest: ColdIndexManifest?
     ) -> (entries: [String: ColdIndexEntry], trie: PromptTrie<ColdPointer>, changed: Bool) {
         let trie = PromptTrie<ColdPointer>()
         var entries: [String: ColdIndexEntry] = [:]
-        let indexURL = root.appending(path: "index.json", directoryHint: .notDirectory)
-        guard let manifest = ColdIndex.load(from: indexURL),
-            manifest.formatVersion == coldFormatVersion
+        guard let manifest, manifest.formatVersion == coldFormatVersion
         else { return (entries, trie, false) }
 
         let fm = FileManager.default

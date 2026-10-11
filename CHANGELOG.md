@@ -128,6 +128,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **A response that ended on a stop token recorded its prompt cache one
+  position long (#142).** mlx-swift-lm's token iterator steps the model on
+  each token before returning it, and its loop breaks on a stop token
+  without yielding it, so once a response ended on EOS the working cache
+  held the stop token's position past the key the engine recorded it under,
+  the prompt plus the generated tokens; a response that ended on
+  `max_tokens` did not. The store trims a hit by the key's length, so a
+  later turn of such a conversation was prefilled one position late (after
+  the stop token's state when the new prompt extended the key, after
+  another token of the old sequence on a partial hit), and every later turn
+  inherited the shift. As old as the prompt cache, on every model that ends
+  its turns on a stop token. The engine now asks the loop for the stop
+  token (`includeStopToken`), keeps it out of the text, the logprobs and the
+  token counts, and records the cache under the key with the stop token
+  appended, so the key names every position the cache holds for every cache
+  kind, hybrids and sliding windows included; a turn whose prompt continues
+  through that same token, as Gemma 4's template renders it, reuses every
+  position the previous turn recorded, and that hit needs no trim. Entries
+  written to the cold tier before this release may hold the extra position
+  and cannot be told apart, so the cold tier's format version is bumped (a
+  store opening an index from before the stamp reclaims every cold file
+  under the root and starts a new index; an older build sharing the
+  directory rewrites its old index, and the next open of this build
+  reclaims the files again, so only cache is lost) and files without the
+  new `recordVersion` stamp are rejected and deleted when touched; a hit
+  whose caches report other than the key's positions is refused as well.
 - **Unloading a chat model gave back almost none of its memory (#136).** The
   engine dropped the model, but MLX keeps freed buffers in its cache and
   gives them back only when the cache passes its limit, an allocation
