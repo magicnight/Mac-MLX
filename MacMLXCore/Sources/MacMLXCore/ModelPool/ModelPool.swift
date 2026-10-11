@@ -1,7 +1,10 @@
 import Foundation
+import os
 
 /// Actor managing multiple resident `InferenceEngine` instances with
-/// LRU + explicit pinning + byte-budget auto-evict. Use cases:
+/// LRU + explicit pinning + byte-budget auto-evict, plus the auxiliary
+/// residents (the server's reranker and embedder, #130) whose bytes it
+/// budgets without holding their engines. Use cases:
 ///
 /// - Swap between chat models without re-reading weights from disk
 /// - External API cold-swap without unloading the GUI's current model
@@ -17,8 +20,35 @@ public actor ModelPool {
 
     // MARK: - State
 
+    /// An unload the pool runs for an entry it reclaims: an engine's
+    /// `unload()`, or the release an auxiliary resident's owner registered.
+    public typealias UnloadAction = @Sendable () async -> Void
+
     /// Currently resident engines, keyed by model ID.
     private var engines: [String: any InferenceEngine] = [:]
+    /// Auxiliary residents (#130), keyed by `auxiliaryKey(_:_:)`: models the
+    /// pool did not load and holds no engine for (the server's reranker and
+    /// embedder), only the action that makes their owner let go. Their
+    /// `entries` row takes part in the byte budget, LRU eviction, the idle
+    /// sweep and in-flight protection like any engine's.
+    private var auxiliaryUnloads: [String: UnloadAction] = [:]
+
+    /// The unload actions a load still has to run, handed to its task. Each
+    /// action is dropped as soon as it has run, so nothing it captured lives
+    /// on into the new allocation (POOL-5 is about memory, and a captured
+    /// engine would keep its weights resident).
+    private final class PendingUnloads: Sendable {
+        private let remaining: OSAllocatedUnfairLock<[UnloadAction]>
+
+        init(_ actions: [UnloadAction]) {
+            remaining = OSAllocatedUnfairLock(initialState: actions)
+        }
+
+        func next() -> UnloadAction? {
+            remaining.withLock { $0.popLast() }
+        }
+    }
+
     /// Bookkeeping keyed by model ID.
     private var entries: [String: PooledEngineEntry] = [:]
     /// In-flight loads so concurrent callers deduplicate.
@@ -65,8 +95,16 @@ public actor ModelPool {
 
     // MARK: - Public
 
+    /// Every resident model: engines under their model id, auxiliary residents
+    /// under `auxiliaryKey(_:_:)`.
     public func residentModelIDs() -> [String] {
-        Array(engines.keys).sorted()
+        Array(entries.keys).sorted()
+    }
+
+    /// The key an auxiliary resident lives under: `"reranker:<model id>"`,
+    /// so a reranker and a chat model with the same id never share an entry.
+    public static func auxiliaryKey(_ kind: AuxiliaryKind, _ modelID: String) -> String {
+        "\(kind.rawValue):\(modelID)"
     }
 
     public func engine(for modelID: String) -> (any InferenceEngine)? {
@@ -87,6 +125,90 @@ public actor ModelPool {
 
     public func isPinned(_ modelID: String) -> Bool {
         entries[modelID]?.isPinned ?? false
+    }
+
+    /// Admit an auxiliary resident (#130): a model the pool does not load
+    /// itself but whose bytes it must account for. Same order as `load(_:)`:
+    /// reclaim idle entries, evict to fit `model`'s cost, reserve that cost,
+    /// unload the victims, and only then run `load` (the owner's, serialised
+    /// by the owner). On success the reservation becomes an entry whose
+    /// unload is `release`; the pool calls `release` when it reclaims the
+    /// entry — under budget pressure, in the idle sweep, or on `unload(_:)`
+    /// — and never otherwise. With `inUse` the entry is in use from the
+    /// moment it exists (the request admitting it is about to compute on it,
+    /// and an eviction between the admission and a separate mark would take
+    /// it), until the owner's `endUsingAuxiliary`. On failure
+    /// the reservation is rolled back and the error rethrown. An entry
+    /// already under this key is dropped without its release first: the
+    /// owner is replacing what it had. An `unload(_:)` of this key while the
+    /// admission is in flight finds no entry yet and does nothing; no caller
+    /// does that.
+    public func admitAuxiliary(
+        _ kind: AuxiliaryKind,
+        _ model: LocalModel,
+        ttlSeconds: Int? = nil,
+        inUse: Bool = false,
+        load: @Sendable () async throws -> Void,
+        release: @escaping UnloadAction
+    ) async throws {
+        let key = Self.auxiliaryKey(kind, model.id)
+        forgetAuxiliary(kind, model.id)
+        sweepIdle()
+        let cost = model.sizeBytes > 0 ? model.sizeBytes : estimateModelSize(at: model.directory)
+        var victims = evict(toFit: cost)
+        pendingBytes[key] = cost
+        // Each victim's unload runs, and is dropped, before the owner's load
+        // allocates (POOL-5), so nothing an action captured lives on.
+        while let victim = victims.popLast() {
+            await victim()
+        }
+        do {
+            try await load()
+        } catch {
+            pendingBytes.removeValue(forKey: key)
+            throw error
+        }
+        pendingBytes.removeValue(forKey: key)
+        auxiliaryUnloads[key] = release
+        entries[key] = PooledEngineEntry(
+            modelID: key,
+            estimatedBytes: cost,
+            ttlSeconds: ttlSeconds
+        )
+        if inUse { beginGenerating(key) }
+    }
+
+    /// Drop an auxiliary resident's entry WITHOUT running its release: the
+    /// owner has already let go of the model (a swap, its unload door, a
+    /// stop). No-op when nothing is resident under that key.
+    public func forgetAuxiliary(_ kind: AuxiliaryKind, _ modelID: String) {
+        let key = Self.auxiliaryKey(kind, modelID)
+        guard auxiliaryUnloads.removeValue(forKey: key) != nil else { return }
+        entries.removeValue(forKey: key)
+    }
+
+    /// POOL-3 for an auxiliary resident: a request is about to compute on it,
+    /// so eviction and the idle sweep spare it until `endUsingAuxiliary`, and
+    /// its LRU clock is refreshed in the same step, so a hit needs no separate
+    /// touch. Returns false, marking nothing, when the pool no longer holds
+    /// the entry: it was evicted or swept and its release is on its way to
+    /// the owner, or has reached it, who must not compute on the model as
+    /// resident. An admission with `inUse` starts in use the same way.
+    public func beginUsingAuxiliary(_ kind: AuxiliaryKind, _ modelID: String) -> Bool {
+        let key = Self.auxiliaryKey(kind, modelID)
+        // Keyed on the release, like `forgetAuxiliary`: an entry under this
+        // key with no release is a chat model whose directory happens to be
+        // named like one, not an auxiliary resident.
+        guard auxiliaryUnloads[key] != nil else { return false }
+        beginGenerating(key)
+        return true
+    }
+
+    /// The request has finished with the model: one end per admission with
+    /// `inUse` or `beginUsingAuxiliary` that returned true (an end for an
+    /// entry the pool has since let go is a no-op).
+    public func endUsingAuxiliary(_ kind: AuxiliaryKind, _ modelID: String) {
+        endGenerating(Self.auxiliaryKey(kind, modelID))
     }
 
     /// Register the start of a generation against `id` (A3). Increments the
@@ -129,10 +251,11 @@ public actor ModelPool {
         if loadTasks[modelID] != nil {
             unloadTombstones.insert(modelID)
         }
-        if let e = engines.removeValue(forKey: modelID) {
-            try? await e.unload()
+        // The entry leaves the resident set before the unload runs, so an
+        // admission under the same key that lands during the await is kept.
+        if let unload = detach(modelID) {
+            await unload()
         }
-        entries.removeValue(forKey: modelID)
     }
 
     /// Return an engine with `model.id` loaded. Reuses an existing
@@ -169,7 +292,9 @@ public actor ModelPool {
         // their engines for us to unload — it no longer fires the unloads
         // itself (POOL-5).
         let cost = model.sizeBytes > 0 ? model.sizeBytes : estimateModelSize(at: model.directory)
-        let victims = evict(toFit: cost)
+        // Straight into the task's queue: this frame keeps no reference to the
+        // victims' actions, which would keep what they captured alive.
+        let pending = PendingUnloads(evict(toFit: cost))
 
         // POOL-4: reserve this load's cost NOW — synchronously, before the
         // first `await` below — so a concurrent `load(_:)` of a DIFFERENT
@@ -190,9 +315,10 @@ public actor ModelPool {
         let task = Task { () throws -> any InferenceEngine in
             // POOL-5: free the evicted engines' memory BEFORE the new engine
             // allocates, so we never transiently hold both resident (double
-            // residency compounds POOL-4's budget accounting).
-            for victim in victims {
-                try? await victim.unload()
+            // residency compounds POOL-4's budget accounting). Each action is
+            // dropped once run, so the task keeps no victim alive.
+            while let victim = pending.next() {
+                await victim()
             }
             let engine = factory(model)
             try await engine.load(model)
@@ -243,15 +369,18 @@ public actor ModelPool {
     }
 
     /// Detach `modelID` from the resident set WITHOUT unloading it, returning
-    /// its engine (if resident). The entry leaves `entries`/`engines`
-    /// synchronously; the caller decides when to perform the async unload —
-    /// the load path (POOL-5) awaits it before allocating the new model,
-    /// while `removeAndUnload` keeps the fire-and-forget shape for the sweep.
+    /// the action that unloads it (if resident): the engine's `unload()`, or
+    /// an auxiliary resident's release. The entry leaves `entries` and its
+    /// table synchronously; the caller decides when to run the action — the
+    /// load path (POOL-5) awaits it before allocating the new model, while
+    /// `removeAndUnload` keeps the fire-and-forget shape for the sweep.
     @discardableResult
-    private func detach(_ modelID: String) -> (any InferenceEngine)? {
-        let engine = engines.removeValue(forKey: modelID)
+    private func detach(_ modelID: String) -> UnloadAction? {
         entries.removeValue(forKey: modelID)
-        return engine
+        if let engine = engines.removeValue(forKey: modelID) {
+            return { try? await engine.unload() }
+        }
+        return auxiliaryUnloads.removeValue(forKey: modelID)
     }
 
     /// Detach `modelID` and fire-and-forget its async unload. Used only by
@@ -261,22 +390,22 @@ public actor ModelPool {
     /// memory-safety benefit. The entry leaves the resident set
     /// synchronously; only the physical free is deferred.
     private func removeAndUnload(_ modelID: String) {
-        if let e = detach(modelID) {
-            Task { try? await e.unload() }
+        if let unload = detach(modelID) {
+            Task { await unload() }
         }
     }
 
     /// Evict LRU non-pinned, non-generating entries until (currentBytes +
-    /// incoming) fits, and RETURN the detached victims' engines so the
-    /// caller (`load`) can `await` their unloads before the new model
-    /// allocates (POOL-5). Skipping `isGenerating` mirrors the guard
+    /// incoming) fits, and RETURN the detached victims' unload actions so
+    /// the caller (`load`, `admitAuxiliary`) can `await` them before the new
+    /// model allocates (POOL-5). Skipping `isGenerating` mirrors the guard
     /// `sweepIdle` already applies (POOL-3) — without it, a concurrent
     /// `load(_:)` (GUI cold-swap, or another server request) could evict a
     /// model out from under an in-flight generation: bytes not actually
     /// freed (ARC keeps weights alive via the generation's captured
     /// container) so the budget is silently violated, and the entry
     /// disappearing feeds POOL-1 stale-ready / SRV-1 bricking.
-    private func evict(toFit incoming: Int64) -> [any InferenceEngine] {
+    private func evict(toFit incoming: Int64) -> [UnloadAction] {
         var target = maxBytes - incoming
         if target < 0 { target = 0 }
 
@@ -287,10 +416,10 @@ public actor ModelPool {
 
         var current = currentResidentBytes()
         var iterator = candidates.makeIterator()
-        var victims: [any InferenceEngine] = []
+        var victims: [UnloadAction] = []
         while current > target, let victim = iterator.next() {
-            if let engine = detach(victim.modelID) {
-                victims.append(engine)
+            if let unload = detach(victim.modelID) {
+                victims.append(unload)
             }
             current -= victim.estimatedBytes
         }

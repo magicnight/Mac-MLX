@@ -462,6 +462,7 @@ public final class AppState {
         let inFlightHook: HummingbirdServer.InFlightHook = { modelID, active in
             await coord.setGenerating(modelID, active)
         }
+        let auxiliaryResidency = PoolAuxiliaryResidency(pool: coord.pool)
         // SRV-5: honour the persisted bearer token on the GUI-launched
         // server too. Previously only the CLI `serve` path passed it, so a
         // user who set `serverAPIKey` still got an unauthenticated GUI
@@ -481,6 +482,7 @@ public final class AppState {
             modelResolver: resolver,
             loadHook: loadHook,
             inFlightHook: inFlightHook,
+            auxiliaryResidency: auxiliaryResidency,
             apiKey: currentSettings.serverAPIKey,
             stallTimeoutSeconds: TimeInterval(currentSettings.generationStallTimeoutSeconds),
             batchServing: batchServing

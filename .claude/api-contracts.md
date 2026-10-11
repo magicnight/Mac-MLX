@@ -109,7 +109,9 @@ Response:
 
 ### POST /x/models/unload
 
-Request:
+Request (optional; `model` names the chat model, or the resident reranker
+or embedder — the two auxiliary engines the pool budgets alongside chat
+models since #130):
 ```json
 {"model": "Qwen3-8B-4bit"}
 ```
@@ -117,6 +119,15 @@ Request:
 Response:
 ```json
 {"status": "unloaded"}
+```
+
+`model` is matched exactly (no aliases); the reranker and embedder slots are
+checked before the chat model. A `model` that is neither the active chat
+model nor the resident reranker or embedder is a 404 (`model_not_loaded`); a
+body that is not a JSON object with an optional string `model` is a 400.
+Unloading the reranker or the embedder answers with the id it dropped:
+```json
+{"status": "unloaded", "model": "ms-marco-MiniLM-L-6-v2"}
 ```
 
 ### GET /x/status
@@ -132,7 +143,9 @@ Response:
   "memory_total_gb": 48.0,
   "uptime_seconds": 3600,
   "requests_total": 42,
-  "tokens_generated_total": 18420
+  "tokens_generated_total": 18420,
+  "reranker": "ms-marco-MiniLM-L-6-v2",
+  "embedder": null
 }
 ```
 

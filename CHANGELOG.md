@@ -319,8 +319,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   single-stream path waits behind a swap for the load's duration (about a
   second for a 4B reranker from the page cache). A swap whose load fails
   leaves no reranker or embedder resident; the next request for the previous
-  model reloads it. The two engines still
-  sit outside the model pool's byte budget; that part of #130 stays open.
+  model reloads it.
+- **The reranker and the embedder now live in the model pool's budget
+  (#130).** The two engines the server keeps for `/v1/rerank` and
+  `/v1/embeddings` were loaded beside the pool and never counted: the pool
+  could fill its budget while a Qwen3-Reranker-8B held 16 GB next to it,
+  and nothing ever unloaded them (no idle sweep, no unload path, only
+  replacement by the next one). Since v0.5.3 for the embedder and v0.9.0
+  for the cross-encoder reranker. In the app, the server now admits each of
+  them to the pool before loading, so the pool evicts to make room and
+  reserves the cost first, exactly as for a chat model; from then on they
+  are least-recently-used candidates for eviction when a bigger model needs
+  the room, are reclaimed, at the next load or admission, once the model's
+  TTL (the same per-model setting chat models use) has run out, and are
+  spared while a request is computing on them, from the admission or the
+  hit that found them resident, marked in one step with the pool; a hit
+  that finds the pool has already let the model go (an eviction or sweep,
+  whether or not its release has reached the server) drains what it held
+  and loads it afresh rather than computing on a model the pool no longer
+  counts. They keep their own keys in
+  the pool, `reranker:<id>` and `embedder:<id>`, so a reranker and a chat
+  model with the same id never share an entry. When the pool lets one go,
+  the server drops it and drains MLX's cache; a release that arrives after
+  the server has already swapped the model out does nothing. Stopping the
+  server lets both go once it has stopped serving. An admission the slot
+  moved past before the engine was installed (a stop that did not wait for
+  the request) is served on the engine it loaded, never installed, and the
+  request drains MLX's cache itself afterwards. `POST /x/models/unload` takes
+  `{"model": id}`, the exact id, and unloads the resident reranker or
+  embedder by it (those two slots are checked first), or the chat model
+  when the id is the active model's or there is no body; an id that is
+  neither is a 404 where it used to unload the chat model regardless, and a
+  body that is not a JSON object with an optional string `model` is a 400
+  where it used to be ignored. `GET /x/status` reports both slots as
+  `reranker` and `embedder`. The Models tab no longer offers to pin a
+  reranker or an embedder, since the pin never reached the pool's entry for
+  them. The CLI's server has no pool and loads them directly, as before, but
+  has the unload door too. Whether the two should share one slot when
+  memory is tight is left where #130 left it.
 - **A sequence-classification head is classified by what `MLXRerankers` can
   do with it, and is never an embedder (#131).** A `*ForSequenceClassification`
   checkpoint whose `model_type` is `bert`, `roberta` or `xlm-roberta` is a
