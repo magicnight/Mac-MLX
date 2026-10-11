@@ -611,6 +611,104 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path))
     }
 
+    /// A hot entry holding more positions than its key is never served (#142):
+    /// nothing records one any more, and the guard keeps a late hit from a
+    /// cache that does, whatever wrote it. An entry whose positions match its
+    /// key is served as before.
+    func testHitRefusesAnEntryWhosePositionsDifferFromItsKey() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot(), maxEntries: 8)
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 3), modelFingerprint: fpA)
+        let late = await store.fetchNearest(modelID: model, tokens: [1, 2, 3], modelFingerprint: fpA)
+        XCTAssertNil(late, "a cache one position past its key is refused")
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 1), modelFingerprint: fpA)
+        let short = await store.fetchNearest(modelID: model, tokens: [1, 2, 3], modelFingerprint: fpA)
+        XCTAssertNil(short, "a cache one position short of its key is refused")
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2), modelFingerprint: fpA)
+        let exact = await store.fetchNearest(modelID: model, tokens: [1, 2, 3], modelFingerprint: fpA)
+        XCTAssertEqual(exact?.reusedTokenCount, 2, "an entry whose positions match its key is served")
+        XCTAssertEqual(offset(exact), 2)
+    }
+
+    /// A cold file without the `recordVersion` stamp (written before #142, so
+    /// it may hold the stop token's position past its key) is rejected AND
+    /// deleted on the next fetch, as a file without a fingerprint is.
+    func testColdRejectsAndDeletesAFileWithoutTheRecordStamp() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 8)
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        try FileManager.default.createDirectory(
+            at: coldFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try savePromptCache(
+            url: coldFile,
+            cache: makeSnapshot(tokenCount: 2).caches,
+            metadata: ["modelID": model, "tokenCount": "2", "modelFingerprint": fpA])
+        let rejected = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNil(rejected, "a file without the record stamp is not served")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path), "and is deleted")
+    }
+
+    /// A cold file the cold trie points to but that lost its record stamp (an
+    /// older process sharing the root rewrote it) is rejected on the trie
+    /// path too: deleted, its record dropped, nothing served.
+    func testColdTrieRejectsAndDeletesAFileWithoutTheRecordStamp() async throws {
+        try requireMLXRuntimeOrSkip()
+        let (root, coldFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coldFile.path))
+        try savePromptCache(
+            url: coldFile,
+            cache: makeSnapshot(tokenCount: 4).caches,
+            metadata: ["modelID": model, "tokenCount": "4", "modelFingerprint": fpA])
+
+        let restarted = PromptCacheStore(root: root)
+        let extended = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpA)
+        XCTAssertNil(extended, "the trie path does not serve a file without the record stamp")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path), "and deletes it")
+        let recorded = await restarted.hasColdRecord(modelID: model, tokens: [1, 2, 3, 4])
+        XCTAssertFalse(recorded, "and drops its record")
+    }
+
+    /// A manifest from before the first stamped format (#142) sits beside
+    /// files that can never be served again: a store opening the root
+    /// reclaims every cold file under it and starts a manifest of the current
+    /// format. A foreign (newer) version is left alone.
+    func testOpeningAnOlderFormatReclaimsItsColdFiles() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let coldFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        try FileManager.default.createDirectory(
+            at: coldFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try savePromptCache(
+            url: coldFile, cache: makeSnapshot(tokenCount: 2).caches,
+            metadata: ["modelID": model, "tokenCount": "2", "modelFingerprint": fpA])
+        let indexURL = root.appending(path: "index.json", directoryHint: .notDirectory)
+        ColdIndex.write(
+            ColdIndexManifest(formatVersion: PromptCacheStore.firstStampedColdFormatVersion - 1, entries: []),
+            to: indexURL)
+
+        _ = PromptCacheStore(root: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coldFile.path), "the older format's files are reclaimed")
+        XCTAssertEqual(ColdIndex.load(from: indexURL)?.formatVersion, ColdIndex.coldFormatVersion)
+
+        let foreignRoot = tmpRoot()
+        let foreignFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: foreignRoot)
+        try FileManager.default.createDirectory(
+            at: foreignFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try savePromptCache(
+            url: foreignFile, cache: makeSnapshot(tokenCount: 2).caches,
+            metadata: ["modelID": model, "tokenCount": "2", "modelFingerprint": fpA])
+        ColdIndex.write(
+            ColdIndexManifest(formatVersion: 999, entries: []),
+            to: foreignRoot.appending(path: "index.json", directoryHint: .notDirectory))
+        _ = PromptCacheStore(root: foreignRoot)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreignFile.path), "a foreign version's files are left alone")
+    }
+
     // MARK: - cold-tier cross-session restart (Wave 2b)
     //
     // A "restart" is simulated by constructing a SECOND ``PromptCacheStore`` over

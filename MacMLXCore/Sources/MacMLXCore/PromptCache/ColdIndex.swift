@@ -42,17 +42,25 @@ struct ColdIndexManifest: Codable, Sendable, Equatable {
 /// unit-testable under bare `swift test`.
 enum ColdIndex {
 
-    /// Stamps the cold-tier on-disk LAYOUT schema. It is the UNION of three
+    /// Stamps the cold-tier on-disk LAYOUT schema. It is the UNION of four
     /// things that must all stay compatible for a persisted cold entry to be
     /// safely reusable across a restart:
     ///   1. mlx-swift-lm's `savePromptCache` / `loadPromptCache` state +
     ///      metaState serialisation (the safetensors payload schema),
     ///   2. ``PromptCacheKey``'s hash construction (how a file is named), and
-    ///   3. this manifest's own JSON schema (``ColdIndexEntry`` fields).
+    ///   3. this manifest's own JSON schema (``ColdIndexEntry`` fields),
+    ///   4. what a file's positions mean: since #142 an entry holds exactly
+    ///      its key's positions and says so with a `recordVersion` stamp in
+    ///      its metadata (``PromptCacheStore/coldRecordVersion``); a file
+    ///      written before may hold the stop token's position past its key,
+    ///      so the fetches reject it, and a store opening a manifest from
+    ///      before this format reclaims every cold file under the root
+    ///      (``PromptCacheStore/firstStampedColdFormatVersion``).
     /// Bump on ANY of those changing. ``PromptCacheStore`` version-gates the
     /// manifest on load: a mismatch discards it wholesale and starts the cold
-    /// trie empty (degraded — exact-hash re-hits still work, never wrong output).
-    static let coldFormatVersion = 1
+    /// trie empty (degraded — exact-hash re-hits of stamped files still work,
+    /// never wrong output).
+    static let coldFormatVersion = 2
 
     /// Decode the manifest at `url`, or `nil` on any failure — an absent file,
     /// a truncated/garbage payload, or a decode error. The read is atomic via

@@ -369,14 +369,17 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// (the wire `usage.promptTokens` adds `reusedPromptTokens` back). This is the
     /// right denominator for prefill tok/s (suffix tokens ÷ suffix time), but a
     /// consumer comparing it to `usage.promptTokens` will see them differ on hits.
-    private static func phaseSummary(
+    static func phaseSummary(
         config: EngineGenerationConfig,
-        completionInfo: GenerateCompletionInfo?
+        completionInfo: GenerateCompletionInfo?,
+        stopTokenCounted: Bool = false
     ) -> GenerationPhaseSummary {
         GenerationPhaseSummary(
             config: config,
             promptTokenCount: completionInfo?.promptTokenCount ?? 0,
-            generationTokenCount: completionInfo?.generationTokenCount ?? 0,
+            // The loop counts the stop token it delivered (`includeStopToken`,
+            // #142); the summary keeps counting the tokens that became text.
+            generationTokenCount: max(0, (completionInfo?.generationTokenCount ?? 0) - (stopTokenCounted ? 1 : 0)),
             promptSeconds: completionInfo?.promptTime,
             generateSeconds: completionInfo?.generateTime
         )
@@ -652,6 +655,90 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// smoke that checks a cancelled response records none.
     var promptCacheResidentCount: Int {
         get async { await promptCacheStore.residentCount }
+    }
+
+    /// What the last text generation did with its cache (#142): the key's
+    /// length (the stop token included when the stream ended on one), the
+    /// positions the cache reported once the stream ended (0 for a layout
+    /// whose caches report none, such as a `CacheList`), whether the stream
+    /// ended on a stop token, and whether the entry was recorded. A test seam,
+    /// reset at the start of every text generation.
+    struct PromptCacheRecord: Equatable, Sendable {
+        var tokenCount: Int
+        var heldPositions: Int
+        var endedOnStopToken: Bool
+        var recorded: Bool
+    }
+
+    private(set) var lastPromptCacheRecord: PromptCacheRecord?
+
+    /// The key a finished text generation records its cache under, or nil
+    /// when nothing may be recorded (#142). mlx-swift-lm's iterator steps the
+    /// model on each token before returning it, and its loop breaks on a stop
+    /// token without yielding it as text; with `includeStopToken` the stop
+    /// token still arrives as the last `.token`, and the engine keeps it out
+    /// of the text but in the key, so the key names every position the cache
+    /// holds whichever way the stream ended: on a stop token, or on its
+    /// budget, where the last token yielded was the last one stepped. A
+    /// stream that reports `.stop` without having delivered the token (a
+    /// loop that no longer delivers it) leaves a cache one position past any
+    /// key this could build, so nothing is recorded; nor without a
+    /// completion, nor after a cancel, nor when a token followed the stop
+    /// token (a loop that no longer breaks on it: the order the cache holds
+    /// is then not the order a key built here would name).
+    static func promptCacheKey(
+        inputTokens: [Int], generatedTokenIDs: [Int], terminalStopToken: Int?,
+        tokenAfterStopToken: Bool = false, stopReason: GenerateStopReason?
+    ) -> [Int]? {
+        guard let stopReason, !tokenAfterStopToken else { return nil }
+        switch stopReason {
+        case .stop:
+            guard let terminalStopToken else { return nil }
+            return inputTokens + generatedTokenIDs + [terminalStopToken]
+        case .length:
+            return inputTokens + generatedTokenIDs + (terminalStopToken.map { [$0] } ?? [])
+        case .cancelled:
+            return nil
+        }
+    }
+
+    /// Per-token bookkeeping of the stop token the loop delivers (#142): the
+    /// first token in the stop set is the terminal one and stays out of the
+    /// text; anything delivered after it, another stop token included, means
+    /// a loop that no longer breaks on it, and the cache is then not recorded
+    /// (`promptCacheKey`). Pure, so a test can drive it.
+    struct StopTokenTracker: Equatable, Sendable {
+        private(set) var terminal: Int?
+        private(set) var tokenAfterTerminal = false
+
+        /// Note `token`; true when it is a stop token to keep out of the text.
+        mutating func note(_ token: Int, isStop: Bool) -> Bool {
+            if terminal != nil { tokenAfterTerminal = true }
+            if isStop {
+                if terminal == nil { terminal = token }
+                return true
+            }
+            return false
+        }
+    }
+
+    /// The model's EOS tokens, built as mlx-swift-lm's `buildStopTokenIds` is:
+    /// the configuration's EOS ids, the tokenizer's, the extra EOS tokens.
+    private static func eosTokenIDs(_ context: ModelContext) -> Set<Int> {
+        var ids = context.configuration.eosTokenIds
+        if let eos = context.tokenizer.eosTokenId { ids.insert(eos) }
+        for token in context.configuration.extraEOSTokens {
+            if let id = context.tokenizer.convertTokenToId(token) { ids.insert(id) }
+        }
+        return ids
+    }
+
+    /// The tokens mlx-swift-lm's loop stops on: the EOS tokens plus the
+    /// tokenizer's unknown token, which the loop stops on the same way.
+    private static func stopTokenIDs(_ context: ModelContext) -> Set<Int> {
+        var ids = eosTokenIDs(context)
+        if let unknown = context.tokenizer.unknownTokenId { ids.insert(unknown) }
+        return ids
     }
 
     /// Apply a LoRA adapter (v0.5+) to the currently-loaded model.
@@ -1142,11 +1229,14 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///    prefix; we prefill only the remaining suffix. On a miss, allocate a
     ///    fresh cache via `model.newCache(...)` and prefill the whole prompt.
     /// 3. Drive the low-level `generateTokensTask(input:cache:...)` call so
-    ///    we see raw token IDs and can `insert` the full sequence
-    ///    `inputTokens + generatedTokenIDs` after the stream ends.
+    ///    we see raw token IDs and can `insert` the full sequence,
+    ///    `inputTokens + generatedTokenIDs` and the stop token the loop
+    ///    delivered, after the stream ends (`promptCacheKey`).
     /// 4. The `KVCache` protocol is class-bound — the same reference we
     ///    passed in is mutated in-place during generation, so at the
-    ///    end we store that same reference under the full token sequence.
+    ///    end we store that same reference under the full token sequence,
+    ///    with the stop token appended when the stream ended on one: the
+    ///    iterator had stepped it before the loop saw it (#142).
     private func runGeneration(
         _ request: GenerateRequest,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
@@ -1386,11 +1476,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             // config EOS ids ∪ the tokenizer's EOS id ∪ any extra stop tokens. The
             // constraint masks every one of these until the document is complete,
             // so the model cannot terminate mid-JSON.
-            var stopTokenIDs = context.configuration.eosTokenIds
-            if let eos = context.tokenizer.eosTokenId { stopTokenIDs.insert(eos) }
-            for token in context.configuration.extraEOSTokens {
-                if let id = context.tokenizer.convertTokenToId(token) { stopTokenIDs.insert(id) }
-            }
+            let stopTokenIDs = Self.eosTokenIDs(context)
             processor = JSONConstraintProcessor(
                 format: responseFormat,
                 inner: innerChain,
@@ -1440,11 +1526,14 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         // The worker task comes back with the stream: the caller waits for it
         // after the stream ends, since it holds the model until it returns.
+        // `includeStopToken`: the loop delivers the stop token it breaks on
+        // as the last `.token`, so the record can name its position (#142).
         return MLXLMCommon.generateTokenTask(
             promptTokenCount: input.text.tokens.size,
             modelConfiguration: context.configuration,
             tokenizer: context.tokenizer,
-            iterator: iterator
+            iterator: iterator,
+            includeStopToken: true
         )
     }
 
@@ -1463,6 +1552,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         responseFormat: ResponseFormat?,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
+        lastPromptCacheRecord = nil
         // Track E — per-request sampling extensions. Any of these forces the
         // hand-assembled `customTokenStream` (constraint / logit_bias / XTC /
         // logprobs share it), which is mutually exclusive with the stock
@@ -1676,7 +1766,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             cache: PromptCacheSnapshot,
             stream: AsyncStream<TokenGeneration>,
             worker: Task<Void, Never>,
-            toolCallFormat: ToolCallFormat?
+            toolCallFormat: ToolCallFormat?,
+            stopTokenIDs: Set<Int>
         ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = try priorCacheBox?.caches
@@ -1709,19 +1800,21 @@ public actor MLXSwiftEngine: InferenceEngine {
                         input: inputBox.value,
                         cache: cache,
                         parameters: generateParams,
-                        context: context
+                        context: context,
+                        includeStopToken: true
                     )
                 }
                 // `ToolCallFormat?` and the worker task are Sendable, so they
                 // ride back out of the actor alongside the cache + stream.
                 return (
                     PromptCacheSnapshot(cache), generation.stream, generation.worker,
-                    context.configuration.toolCallFormat
+                    context.configuration.toolCallFormat, Self.stopTokenIDs(context)
                 )
             }
         let workingCache = setup.cache.caches
         let stream = setup.stream
         let worker = setup.worker
+        let stopTokenIDs = setup.stopTokenIDs
 
         // Only route through the streaming `ToolCallProcessor` when the caller
         // actually requested tools this turn — see `makeToolProcessor` for why
@@ -1734,6 +1827,11 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         var generatedTokenIDs: [Int] = []
+        // The stop token the loop delivers last (`includeStopToken`): in the
+        // cache's key, never in the text, the logprobs or the counts (#142).
+        // A token after it would mean a loop that no longer breaks on it; the
+        // text still flows, the cache is not recorded.
+        var stopTokens = StopTokenTracker()
         var completionInfo: GenerateCompletionInfo?
         // Track E: per-token logprobs accumulated since the last emitted chunk.
         // Each `.token` pops one capture entry (aligned in emission order); the
@@ -1771,6 +1869,12 @@ public actor MLXSwiftEngine: InferenceEngine {
             }
             switch event {
             case .token(let token):
+                if stopTokens.note(token, isStop: stopTokenIDs.contains(token)) {
+                    // The loop breaks right after delivering a stop token, so
+                    // it is the last token. Its capture entry goes with it.
+                    if wantsLogprobs { _ = logprobsSink?.popFirst() }
+                    continue consume
+                }
                 phaseReporter?.noteTokenGenerated()
                 generatedTokenIDs.append(token)
                 if wantsLogprobs, let entry = logprobsSink?.popFirst() {
@@ -1833,24 +1937,48 @@ public actor MLXSwiftEngine: InferenceEngine {
             drainedToolCalls = toolProcessor.toolCalls.map { Self.toolCallRequest(from: $0) }
         }
 
-        // Save the post-generation cache under the extended key. The
-        // same `workingCache` reference has been mutated in-place by the
-        // iterator, so it now reflects prompt + generated tokens. Skipped when
-        // quantizing the KV cache (see `bypassPromptCache`) so a
-        // `QuantizedKVCache` snapshot is never persisted for later plain reuse.
+        // Save the post-generation cache under the extended key. The same
+        // `workingCache` reference has been mutated in-place by the iterator,
+        // so it now reflects the prompt, the generated tokens, and the stop
+        // token when the stream ended on one: the iterator had stepped it
+        // before the loop saw it, so its position is in the cache and belongs
+        // in the key (#142; see `promptCacheKey`). Skipped when quantizing the
+        // KV cache (see `bypassPromptCache`) so a `QuantizedKVCache` snapshot
+        // is never persisted for later plain reuse.
         if !bypassPromptCache {
-            let finalTokens = inputTokens + generatedTokenIDs
-            await promptCacheStore.insert(
-                modelID: modelID,
-                tokens: finalTokens,
-                snapshot: PromptCacheSnapshot(workingCache),
-                modelFingerprint: modelFingerprint
-            )
+            let key = Self.promptCacheKey(
+                inputTokens: inputTokens, generatedTokenIDs: generatedTokenIDs,
+                terminalStopToken: stopTokens.terminal, tokenAfterStopToken: stopTokens.tokenAfterTerminal,
+                stopReason: completionInfo?.stopReason)
+            lastPromptCacheRecord = PromptCacheRecord(
+                tokenCount: key?.count ?? inputTokens.count + generatedTokenIDs.count,
+                heldPositions: workingCache.map(\.offset).max() ?? 0,
+                endedOnStopToken: stopTokens.terminal != nil, recorded: key != nil)
+            if let key {
+                await promptCacheStore.insert(
+                    modelID: modelID,
+                    tokens: key,
+                    snapshot: PromptCacheSnapshot(workingCache),
+                    modelFingerprint: modelFingerprint
+                )
+            } else if stopTokens.tokenAfterTerminal {
+                await LogManager.shared.warning(
+                    "Prompt cache: the loop delivered a token after the stop token, so the "
+                        + "cache holds positions in an order no key names; nothing recorded (#142)",
+                    category: .inference)
+            } else if completionInfo?.stopReason == .stop {
+                await LogManager.shared.warning(
+                    "Prompt cache: the loop reported a stop token it did not deliver, so the "
+                        + "cache holds a position no key names; nothing recorded (#142)",
+                    category: .inference)
+            }
         }
 
         if let reporter = phaseReporter {
             phaseReporter?.complete(
-                summary: Self.phaseSummary(config: reporter.config, completionInfo: completionInfo))
+                summary: Self.phaseSummary(
+                    config: reporter.config, completionInfo: completionInfo,
+                    stopTokenCounted: stopTokens.terminal != nil))
         }
 
         emitFinalChunk(
@@ -1860,6 +1988,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             // Any logprobs for tokens whose text never flushed as its own chunk
             // (e.g. a trailing partial-UTF8 fragment) ride out on the final chunk.
             logprobs: pendingLogprobs.isEmpty ? nil : pendingLogprobs,
+            stopTokenCounted: stopTokens.terminal != nil,
             into: continuation
         )
         continuation.finish()
@@ -2185,6 +2314,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         speculativeDecoding: SpeculativeDecodingUsage? = nil,
         reusedPromptTokens: Int = 0,
         logprobs: [TokenLogprob]? = nil,
+        stopTokenCounted: Bool = false,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) {
         let infoReason: FinishReason
@@ -2204,7 +2334,10 @@ public actor MLXSwiftEngine: InferenceEngine {
             // their reported counts unchanged.
             usage = TokenUsage(
                 promptTokens: info.promptTokenCount + reusedPromptTokens,
-                completionTokens: info.generationTokenCount,
+                // The text path's loop counts the stop token it delivered
+                // (`includeStopToken`, #142); the wire count stays the number
+                // of tokens that became text, as before.
+                completionTokens: max(0, info.generationTokenCount - (stopTokenCounted ? 1 : 0)),
                 // The same reused count, reported on its own so a client can
                 // see how much of the prompt the cache served (0 on a MISS and
                 // on the paths that never consult the cache).
