@@ -249,6 +249,31 @@ final class RerankEngineSmokeTests: XCTestCase {
             format: .reranker, quantization: nil, parameterCount: nil, architecture: nil)
     }
 
+    /// A copy of `directory` whose weights no longer match the model: every
+    /// other file linked in place, and `model.safetensors` rewritten through
+    /// MLX with one tensor renamed, so a load reads and allocates the weights
+    /// and then fails to apply them (`loadWeights` evaluates every tensor
+    /// before `update(parameters:verify:)` rejects the set). Removed when the
+    /// test ends.
+    private func corrupted(_ directory: URL) throws -> URL {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appending(path: "macmlx-broken-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let weights = "model.safetensors"
+        for entry in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        where entry.lastPathComponent != weights {
+            try fm.createSymbolicLink(
+                at: root.appending(path: entry.lastPathComponent), withDestinationURL: entry)
+        }
+        var arrays = try MLX.loadArrays(url: directory.appending(path: weights))
+        let first = try XCTUnwrap(arrays.keys.sorted().first, "the checkpoint has tensors")
+        arrays["renamed." + first] = arrays.removeValue(forKey: first)
+        try MLX.save(arrays: arrays, url: root.appending(path: weights))
+        return root
+    }
+
     private func loadReference() throws -> Reference {
         let url = try XCTUnwrap(
             Bundle.module.url(
@@ -751,6 +776,77 @@ final class RerankEngineSmokeTests: XCTestCase {
         await s.server.stop()
         let afterStop = await residency.events
         XCTAssertEqual(afterStop.last, "forget reranker:qwen", "stopping a server that holds nothing forgets nothing more")
+    }
+
+    /// A cold load that fails after allocating leaves what it read in MLX's
+    /// cache unless the server drains it. The slots used to drain a failed
+    /// load only when they had just released a resident engine; they now
+    /// drain whenever a model has loaded somewhere in the process, the chat
+    /// engine's rule, since Metal is then known to be up. Here the embedder
+    /// loads first (a model has loaded; the reranker slot is empty), a
+    /// reranker whose weights do not match its model is asked for cold and
+    /// fails after reading and allocating them, and the cache is near empty
+    /// afterwards; then the embedder is unloaded through the door and the
+    /// same is done through the embedder slot.
+    func testAColdLoadThatFailsAfterAllocatingIsDrained() async throws {
+        try requireGate()
+        let encoderDir = try resolve(Self.encoder)
+        let embedderDir = try resolve(Self.embedder)
+        let cacheBound = 64 << 20
+        try requireWeights(in: encoderDir, toOutweigh: cacheBound, "ms-marco")
+        try requireWeights(in: embedderDir, toOutweigh: cacheBound, "bge-small")
+        let brokenReranker = localModel(id: "broken-ms", directory: try corrupted(encoderDir))
+        let bge = LocalModel(
+            id: "bge", displayName: "bge", directory: embedderDir, sizeBytes: 0,
+            format: .embedder, quantization: nil, parameterCount: nil, architecture: nil)
+        let brokenEmbedder = LocalModel(
+            id: "broken-bge", displayName: "broken-bge", directory: try corrupted(embedderDir), sizeBytes: 0,
+            format: .embedder, quantization: nil, parameterCount: nil, architecture: nil)
+        let s = try await residencyServer(
+            [brokenReranker.id: brokenReranker, bge.id: bge, brokenEmbedder.id: brokenEmbedder], port: 19_786)
+        do {
+            Memory.clearCache()
+            let embedded = try await s.embed(bge.id)
+            XCTAssertEqual(embedded, 200, "a model has loaded in the process, so Metal is up")
+            // The bound below tells a drain from no drain only if the failed
+            // load allocated first (mlx-swift-lm evaluates every tensor before
+            // the model rejects the set); the peak says it did.
+            var activeBefore = Memory.activeMemory
+            Memory.peakMemory = 0
+            let failed = try await s.rerank(brokenReranker.id)
+            XCTAssertEqual(failed, 500, "weights that do not match the model fail the load after they were read")
+            XCTAssertGreaterThan(
+                Memory.peakMemory - activeBefore, cacheBound,
+                "the failed load allocated what it read before it failed: peak \(Memory.peakMemory) B over \(activeBefore) B active")
+            var resident = try await s.status()["reranker"] as? String
+            XCTAssertNil(resident, "nothing is installed after the failed load")
+            let cachedAfterReranker = Memory.cacheMemory
+            print("[drain-smoke] after the failed cold reranker load: active=\(Memory.activeMemory) cache=\(cachedAfterReranker)")
+            XCTAssertLessThan(
+                cachedAfterReranker, cacheBound,
+                "the failed cold reranker load is drained: \(cachedAfterReranker) B left in MLX's cache")
+
+            let (unloadStatus, _) = try await s.post("/x/models/unload", ["model": "bge"])
+            XCTAssertEqual(unloadStatus, 200, "the embedder slot is emptied for the cold case")
+            activeBefore = Memory.activeMemory
+            Memory.peakMemory = 0
+            let failedEmbedder = try await s.embed(brokenEmbedder.id)
+            XCTAssertEqual(failedEmbedder, 500, "the same through the embedder slot")
+            XCTAssertGreaterThan(
+                Memory.peakMemory - activeBefore, cacheBound,
+                "the failed load allocated what it read before it failed: peak \(Memory.peakMemory) B over \(activeBefore) B active")
+            resident = try await s.status()["embedder"] as? String
+            XCTAssertNil(resident, "nothing is installed after the failed load")
+            let cachedAfterEmbedder = Memory.cacheMemory
+            print("[drain-smoke] after the failed cold embedder load: active=\(Memory.activeMemory) cache=\(cachedAfterEmbedder)")
+            XCTAssertLessThan(
+                cachedAfterEmbedder, cacheBound,
+                "the failed cold embedder load is drained: \(cachedAfterEmbedder) B left in MLX's cache")
+        } catch {
+            await s.server.stop()
+            throw error
+        }
+        await s.server.stop()
     }
 
     /// A release that beats the install: the pool lets the admission go

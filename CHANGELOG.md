@@ -128,6 +128,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **A reranker, embedder or speech model whose load into an empty slot
+  failed part-way kept its allocations in MLX's cache.** The server's two
+  auxiliary slots and the audio engine drained a failed load only when they
+  had just released a resident model, so a cold load that failed after
+  allocating (for a reranker or embedder, weights that do not match the
+  model: mlx-swift-lm reads and evaluates every tensor before the model
+  rejects the set; for a speech model, a tokenizer or codec that fails after
+  the weights were evaluated) left what it had read in the cache, and
+  nothing in the server drained it until a later swap, unload or stop, or
+  the next plain generation's own clear. They now drain under the chat
+  engine's rule (#136): whenever a model has loaded somewhere in the
+  process, so Metal is known to be up. A load that fails after allocating
+  before any model has loaded in the process is still not drained, since
+  Metal may not be up, and a load that fails before touching MLX still
+  never initializes it.
 - **A response that ended on a stop token recorded its prompt cache one
   position long (#142).** mlx-swift-lm's token iterator steps the model on
   each token before returning it, and its loop breaks on a stop token
