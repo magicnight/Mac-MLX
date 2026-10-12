@@ -3899,7 +3899,8 @@ public actor HummingbirdServer {
         // draining then but freeing nothing, since `current` still held the
         // engine. Either way Metal is up, and the drain below, after
         // `current` is out of scope, is what hands the weights back: the
-        // drains key on this, not on what the slot holds by then.
+        // drains key on this (the one in the catch also on a model having
+        // loaded anywhere in the process), not on what the slot holds by then.
         let hadResident = embeddingEngine != nil
         if let current = embeddingEngine, await current.loadedModel?.id == target.id {
             // In use from here, in one step with the pool (POOL-3). The pool
@@ -3950,14 +3951,17 @@ public actor HummingbirdServer {
                 try await newEngine.load(target)
             }
         } catch {
-            // Drain what a part-way failure may have allocated, but only when
-            // an engine was resident as this call began (released by this
-            // call, or by the pool meanwhile): that engine ran on Metal, so
-            // MLX is up. A load that fails before touching MLX (missing
-            // config, unsupported architecture) must never be the first
-            // thing to initialize Metal — the SPM test job has no metallib
-            // and drives exactly that path with bogus directories.
-            if hadResident {
+            // Drain what a part-way failure may have allocated (weights read
+            // and evaluated before the model rejected them), but only when
+            // Metal is known to be up: an engine was resident as this call
+            // began (released by this call, or by the pool meanwhile), or a
+            // model has loaded somewhere in this process, the chat engine's
+            // rule (#136). A load that fails before touching MLX (missing
+            // config, unsupported architecture) on a process that has never
+            // loaded a model must never be the first thing to initialize
+            // Metal — the SPM test job has no metallib and drives exactly
+            // that path with bogus directories.
+            if hadResident || EngineMemory.hasLoadedAModel {
                 EngineMemory.releaseCachedBuffers()
             }
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)
@@ -4075,7 +4079,8 @@ public actor HummingbirdServer {
     private func ensureRerankerLoaded(_ target: LocalModel) async throws -> RerankEngine {
         // Same as `ensureEmbedderLoaded`: an engine resident now is gone
         // before the admission, by this call or by the pool's release
-        // meanwhile, and the drains key on that.
+        // meanwhile, and the drains key on that (the catch's also on a model
+        // having loaded anywhere in the process).
         let hadResident = rerankEngine != nil
         if let current = rerankEngine, await current.loadedModel?.id == target.id {
             // Same as `ensureEmbedderLoaded`: in use in one step, or the pool
@@ -4108,7 +4113,7 @@ public actor HummingbirdServer {
         } catch {
             // Same rule as `ensureEmbedderLoaded`: drain only when Metal is
             // known to be up.
-            if hadResident {
+            if hadResident || EngineMemory.hasLoadedAModel {
                 EngineMemory.releaseCachedBuffers()
             }
             throw ModelSwapError.loadFailed(id: target.id, reason: error.localizedDescription)

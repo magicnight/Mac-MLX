@@ -34,9 +34,10 @@ enum EngineMemory {
     /// A model finished loading somewhere in this process (a chat model, an
     /// embedder, a reranker or a speech model), so Metal is up and a drain is
     /// safe even on an engine that never held a model: the pool loads every
-    /// model into a fresh engine, and a load that fails after allocating there
-    /// would otherwise never be drained (#136). Never set under `swift test`,
-    /// where no model loads.
+    /// model into a fresh engine, the server's reranker and embedder slots do
+    /// too, the audio engine loads into an empty slot, and a load that fails
+    /// after allocating there would otherwise never be drained (#136). Never
+    /// set under `swift test`, where no model loads.
     static var hasLoadedAModel: Bool {
         loadedAModel.withLock { $0 }
     }

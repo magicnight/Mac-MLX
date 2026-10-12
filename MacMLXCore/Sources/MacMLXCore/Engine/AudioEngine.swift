@@ -243,7 +243,8 @@ public actor AudioEngine {
         // Drop the old model first: two resident audio models plus an LLM is
         // more memory than a swap needs to hold. Then hand MLX's cached buffers
         // back, as the embedder/reranker swaps do (#130) — only when something
-        // was resident, so a failed first load never touches MLX.
+        // was resident, so a failed cold load on a process where no model has
+        // loaded never touches MLX.
         let releasedResident = sttModel != nil
         if releasedResident {
             sttModel = nil
@@ -255,8 +256,10 @@ public actor AudioEngine {
             model = try await STT.loadModel(modelRepo: modelID, cache: Self.hubCache)
         } catch {
             // A load that fails part-way leaves its allocations in the cache;
-            // drain again, but only if MLX was already up (a resident model).
-            if releasedResident { EngineMemory.releaseCachedBuffers() }
+            // drain again, but only if MLX is known to be up: a model was
+            // resident here, or has loaded somewhere in this process (the
+            // chat engine's rule, #136).
+            if releasedResident || EngineMemory.hasLoadedAModel { EngineMemory.releaseCachedBuffers() }
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
         sttModel = model
@@ -295,7 +298,8 @@ public actor AudioEngine {
             box = SpeechModelBox(
                 model: try await TTS.loadModel(modelRepo: modelID, cache: Self.hubCache))
         } catch {
-            if releasedResident { EngineMemory.releaseCachedBuffers() }
+            // Same rule as the speech-to-text load above.
+            if releasedResident || EngineMemory.hasLoadedAModel { EngineMemory.releaseCachedBuffers() }
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
         ttsModel = box
