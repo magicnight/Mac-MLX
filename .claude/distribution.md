@@ -513,11 +513,19 @@ back from the old file (today Sparkle's; the CLI's swift-argument-parser is
 the same case on that side), and resolve again: Xcode keeps every pin that
 satisfies the manifests and rewrites only the origin hash, which is how the
 committed file was made, and a pin it re-adds lands on the newest release
-that day. Run `scripts/check-lockfile-parity.py` on the CLI's and the app's
-lockfiles, read the diff for a package that moved without being asked, and
-commit all three. A Core floor the pins already satisfy changes nothing in
-the app's lockfile, origin hash included (probed with swift-jinja's floor
-raised from 2.4.2 to 2.4.3 under the 2.5.1 pin).
+that day. Keep SwiftPM's own JSON style when editing a lockfile by hand or
+by script (sorted keys, pins sorted by identity, two-space indent,
+`"key" : value` with the spaces, `/` unescaped, a trailing newline), or the
+diff is the whole file and the next resolve rewrites it. Run
+`scripts/check-lockfile-parity.py` on the CLI's and the app's lockfiles,
+read the diff for a package that moved without being asked, and commit all
+three. A change to Core's manifest alone never moves the app's origin
+hash (probed with swift-jinja's floor raised from 2.4.2 to 2.4.3 under the
+2.5.1 pin, and seen again when swift-huggingface's floor rose to 0.11.0
+past the 0.9.0 pin): the hash covers the workspace's own package
+references. When the pins still satisfy the new floor nothing else changes
+either; when they do not, only the pins that must move change, as
+swift-huggingface's did in that second case.
 
 ### A probe that passes has proved nothing until it reached the kernel
 

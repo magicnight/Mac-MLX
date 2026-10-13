@@ -128,6 +128,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **A cached audio snapshot is certified against the whole repository
+  listing.** The fork's completeness check read `listFiles`, which returns
+  only the first page of a Hub tree listing, so a repository past one page
+  would have been certified against a partial listing, and a pattern only
+  a later page names recorded as having no file and never fetched. The
+  fork now reads every page through `listAllTree`, still as one bounded
+  attempt in which only the first page tells "not found" from "failed"; the
+  snapshot download's own listing is still the library's single request,
+  so a fresh fetch of such a repository brings the first page's files; the
+  next resolve completes what a loader's own patterns name, while files
+  only the default patterns name, weights included, do not come from a
+  later page. The audio repositories the smokes load list on one page
+  (SenseVoiceSmall has six entries), so none of them was affected; the
+  fork's tests put a pattern's file on each page, fail a later page, 404 a
+  later page at a cached commit, and fetch a paged repository fresh (#149).
 - **The DMG ships the dependency graph the tests ran on.** The app's
   workspace lockfile was gitignored, so a release archive on a fresh runner
   took the newest release each manifest allowed on the day: v0.9.0 shipped
@@ -140,8 +155,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   record; and `scripts/check-lockfile-parity.py`, run on
   the CLI's and the app's lockfiles in CI and in the local gate, fails when
   any package MacMLXCore pins is pinned differently or left out, as does
-  `AppLockfileParityTests` inside Xcode. swift-huggingface stays at 0.9.0
-  in all three roots; moving it is its own change.
+  `AppLockfileParityTests` inside Xcode. swift-huggingface then moved to
+  0.13.0 in all three roots with the fork's listing fix (see Changed), by
+  the procedure the fix documents.
 - **A reranker, embedder or speech model whose load into an empty slot
   failed part-way kept its allocations in MLX's cache.** The server's two
   auxiliary slots and the audio engine drained a failed load only when they
@@ -509,9 +525,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   covered. Adopting `.balanced` is a separate, measured change.
 - mlx-audio-swift moves from upstream v0.1.3 to a fork
   (`magicnight/mlx-audio-swift`, branch `v0.1.5-macmlx`): upstream v0.1.5
-  plus the cache fixes under Fixed, because no released version keeps audio
-  downloads in the cache it is given, completes a cached snapshot by the
-  Hub's listing, or sends its token-bearing clients to `HF_ENDPOINT`. With
+  plus the cache and listing fixes under Fixed, because no released version
+  keeps audio downloads in the cache it is given, completes a cached
+  snapshot by the Hub's listing, reads that listing past its first page, or
+  sends its token-bearing clients to `HF_ENDPOINT`. With
   it come upstream's v0.1.4 and v0.1.5 changes, among them Spark-TTS and
   Breeze TTS 2, quantized Whisper and Voxtral checkpoints loading,
   Nemotron's English streaming checkpoints, Fish Speech streamed
@@ -526,9 +543,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `qwen2` and upstream tells it apart by the repo name alone. No test here
   runs audio inference, so none of this is exercised; the two gated cache
   smokes, which load moonshine-tiny and VyvoTTS with its SNAC codec through
-  the new pin, passed. Nothing else in the dependency graph moves:
-  mlx-swift-lm stays at 3.32.3 and mlx-swift at the controlled fork's
-  1026d23.
+  the new pin, passed. With the fork's paged listing comes
+  swift-huggingface 0.13.0 in every root's lockfile, where 0.9.0 had been:
+  the fork needs 0.11.0 for `listAllTree`, and 0.13.0 is the newest release
+  below the breaking 1.0.0. The fork's ModelUtils suite and the gated cache
+  smokes (moonshine-tiny, VyvoTTS with SNAC, and SenseVoiceSmall, whose
+  `am.mvn` and `*.bpe.model` reach the app cache only through the listing)
+  ran at that version. mlx-swift-lm stays at 3.32.3 and mlx-swift at the
+  controlled fork's 1026d23.
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE

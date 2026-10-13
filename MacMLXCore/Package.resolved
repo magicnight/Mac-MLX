@@ -1,5 +1,5 @@
 {
-  "originHash" : "7d83048e7b78d3e7cac8fac9aa19a296cec1a7afae01e8118771cd8fb74063e3",
+  "originHash" : "8b5c0eecb98a9c3a93b0baade20a745bf7cbdeaf7c359a150e11a99e94cac2f6",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -33,7 +33,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/magicnight/mlx-audio-swift.git",
       "state" : {
-        "revision" : "7d7d44acff38018cd68a7cdea8f0ab461edcb1b3"
+        "revision" : "504b338c8f8e7f2bebd1e7eb973a5cc64630dcae"
       }
     },
     {
@@ -166,8 +166,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/huggingface/swift-huggingface.git",
       "state" : {
-        "revision" : "b721959445b617d0bf03910b2b4aced345fd93bf",
-        "version" : "0.9.0"
+        "revision" : "f0a0cb43cb1b402d2bbf6fb10d8981328c449c48",
+        "version" : "0.13.0"
       }
     },
     {
