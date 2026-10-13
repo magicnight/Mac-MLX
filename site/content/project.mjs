@@ -35,7 +35,7 @@ export const project = Object.freeze({
   downloadURL: "https://github.com/magicnight/mac-mlx/releases/latest",
   currentVersion: "0.9.0",
   releaseDate: "2026-08-28",
-  lastVerified: "2026-08-28",
+  lastVerified: "2026-10-13",
   licenseURL: "https://www.apache.org/licenses/LICENSE-2.0",
   operatingSystem: "macOS 14.0+ on Apple Silicon",
   locales,

@@ -35,9 +35,9 @@ test("home metadata is localized, reciprocal, Markdown-addressable, and uses sta
     assert.equal(website["@id"], "https://macmlx.app/#website");
     assert.equal(software["@id"], "https://macmlx.app/#software");
     assert.equal(project.currentVersion, "0.9.0");
-    assert.equal(project.lastVerified, "2026-08-28");
+    assert.equal(project.lastVerified, "2026-10-13");
     assert.equal(software.softwareVersion, "0.9.0");
-    assert.equal(software.dateModified, "2026-08-28");
+    assert.equal(software.dateModified, "2026-10-13");
     assert.equal(software.codeRepository, project.repositoryURL);
     assert.equal(software.downloadUrl, project.downloadURL);
     assert.equal(software.offers.price, "0");
@@ -67,7 +67,7 @@ test("article metadata emits TechArticle and breadcrumbs, with visible FAQ data 
 });
 
 test("the site builder uses centralized metadata exactly once in every HTML document", async () => {
-  const { documents } = await prepareSite({ today: "2026-08-28" });
+  const { documents } = await prepareSite({ today: "2026-10-13" });
   assert.equal(documents.size, 34);
   for (const [path, html] of documents) {
     const socialLocale = path.startsWith("/zh/") ? "zh" : "en";
@@ -81,7 +81,7 @@ test("the site builder uses centralized metadata exactly once in every HTML docu
 });
 
 test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current hierarchy", async () => {
-  const { documents } = await prepareSite({ today: "2026-08-28" });
+  const { documents } = await prepareSite({ today: "2026-10-13" });
   const nested = pages.filter((page) => page.paths.en.split("/").filter(Boolean).length > 1);
   for (const page of nested) {
     for (const locale of ["en", "zh-Hans"]) {
@@ -103,7 +103,7 @@ test("nested article DOM and JSON-LD breadcrumbs share Home, parent, and current
 });
 
 test("the v0.9.0 release page exposes immutable release identity with localized canonical metadata", async () => {
-  const { documents } = await prepareSite({ today: "2026-08-28" });
+  const { documents } = await prepareSite({ today: "2026-10-13" });
   const releasePage = pages.find((page) => page.id === "release-v0-9-0");
   assert.ok(releasePage);
 
@@ -117,7 +117,7 @@ test("the v0.9.0 release page exposes immutable release identity with localized 
     const article = graph.find((node) => node["@type"] === "TechArticle");
     const softwareRelease = graph.find((node) => node["@type"] === "SoftwareApplication");
     const breadcrumbs = graph.find((node) => node["@type"] === "BreadcrumbList");
-    assert.equal(article.dateModified, "2026-08-28");
+    assert.equal(article.dateModified, "2026-10-13");
     assert.equal(new URL(article.mainEntityOfPage).pathname, path);
     assert.equal(softwareRelease["@id"], "https://github.com/magicnight/mac-mlx/releases/tag/v0.9.0#software-release");
     assert.equal(softwareRelease.url, "https://github.com/magicnight/mac-mlx/releases/tag/v0.9.0");
@@ -134,7 +134,7 @@ test("the v0.9.0 release page exposes immutable release identity with localized 
 });
 
 test("historical release entities keep version-specific immutable metadata", async () => {
-  const { documents } = await prepareSite({ today: "2026-08-28" });
+  const { documents } = await prepareSite({ today: "2026-10-13" });
   for (const [id, version, datePublished] of [
     ["release-v0-7-0", "0.7.0", "2026-07-18"],
     ["release-v0-6-2", "0.6.2", "2026-07-11"],
@@ -148,7 +148,7 @@ test("historical release entities keep version-specific immutable metadata", asy
       const graph = jsonLD(documents.get(path))["@graph"];
       const article = graph.find((node) => node["@type"] === "TechArticle");
       const softwareRelease = graph.find((node) => node["@type"] === "SoftwareApplication");
-      assert.equal(article.dateModified, "2026-08-28");
+      assert.equal(article.dateModified, "2026-10-13");
       assert.equal(softwareRelease["@id"], `https://github.com/magicnight/mac-mlx/releases/tag/v${version}#software-release`);
       assert.equal(softwareRelease.url, `https://github.com/magicnight/mac-mlx/releases/tag/v${version}`);
       assert.equal(softwareRelease.softwareVersion, version);
