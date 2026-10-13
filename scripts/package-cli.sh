@@ -50,14 +50,17 @@ echo "==> Building ${CLI_NAME} ${TAG} (xcodebuild Release, arm64)"
     # around the pipeline keeps a grep "no match" — or the build failure itself —
     # from tripping errexit before we can read PIPESTATUS.
     set +e
+    # -onlyUsePackageVersionsFromResolvedFile: the tarball ships the graph in
+    # the committed CLI lockfile, which CI holds to MacMLXCore's (#149).
     xcodebuild \
         -scheme "$CLI_NAME" \
         -configuration Release \
         -destination 'platform=macOS,arch=arm64' \
         -skipPackagePluginValidation \
+        -onlyUsePackageVersionsFromResolvedFile \
         -derivedDataPath ".xcodebuild" \
         build \
-        | grep -E "BUILD (SUCCEEDED|FAILED)|error:"
+        | grep -E "BUILD (SUCCEEDED|FAILED)|error:|Could not resolve|resolved file"
     xcodebuild_status=${PIPESTATUS[0]}
     set -e
     if [[ "$xcodebuild_status" -ne 0 ]]; then

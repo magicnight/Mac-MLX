@@ -177,11 +177,12 @@ Triggers on: `v*.*.*` tags
 
 Four jobs on `macos-26`: `website` (static site build and tests, the
 runner's Node), and with Xcode 26.4.1 pinned `spm` (`swift test` for
-MacMLXCore and macmlx-cli, the lockfiles unchanged by resolve,
-`macmlx --version`), `metal` (the full MacMLXCore suite under
-`xcodebuild test`; strict numeric parity is skipped on the runners'
-paravirtualized Metal), `app` (unsigned Debug build, the app resolved the
-controlled mlx-swift fork at the pinned revision, `macMLXTests`).
+MacMLXCore and macmlx-cli, the lockfiles unchanged by resolve, the CLI's
+lockfile in parity with MacMLXCore's, `macmlx --version`), `metal` (the full
+MacMLXCore suite under `xcodebuild test`; strict numeric parity is skipped
+on the runners' paravirtualized Metal), `app` (unsigned Debug build from the
+committed workspace lockfile only, that lockfile tracked, unchanged by the
+build and in parity with MacMLXCore's, `macMLXTests`).
 
 `scripts/ci-local.sh [website] [spm] [metal] [app]` runs the same jobs with
 the same commands on a developer machine, in a fresh worktree of the commit
@@ -480,9 +481,43 @@ the gap invisible: the fixes were verified in a graph the shipped product did
 not use.
 
 The declaration tests (`CLIForkPinTests`, `AppForkPinTests`) guard against the
-declaration being dropped. They do not prove the resolution honored it, so CI
-also asserts the app's resolved `Package.resolved` names the fork. When adding
-a fourth root, add both.
+declaration being dropped. They do not prove the resolution honored it, and a
+declaration pins one package while a root resolves a whole graph: the app's
+workspace lockfile was gitignored until 2026-10, so a release archive on a
+fresh runner took the newest release each manifest allowed on the day, and the
+v0.9.0 DMG shipped swift-jinja 2.4.2 while every chat-template test had run on
+the 2.3.6 both committed lockfiles pinned (#149). So every root's lockfile is committed (the
+app's at `macMLX/macMLX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`),
+`scripts/check-lockfile-parity.py` holds the CLI's and the app's to
+`MacMLXCore`'s in CI and in `scripts/ci-local.sh`, `AppLockfileParityTests`
+does the same inside Xcode, and the app's CI build and `scripts/build.sh`'s
+archive pass `-onlyUsePackageVersionsFromResolvedFile`, so a lockfile the
+manifests have outgrown fails the build instead of being rewritten. Parity
+with `MacMLXCore`'s lockfile subsumes the old check that the app resolved the
+fork: Core's lockfile names the fork at the revision Core pins, and the spm
+job keeps it fresh. When adding a fourth root, add all three: the declaration,
+its test, and the lockfile under the parity check.
+
+#### Moving a dependency
+
+Moving a dependency moves three lockfiles. Change the manifest, then
+`swift package --package-path MacMLXCore resolve`, the same for `macmlx-cli`,
+and for the app `xcodebuild -resolvePackageDependencies -project
+macMLX/macMLX.xcodeproj -scheme macMLX`, without the flag: with it the stale
+lockfile is an error, which is what CI and the archive are meant to see. A
+plain resolve takes the newest release the new requirement allows, so the
+app can land on a different release from Core's (it did, 1.3.5 against
+Core's 1.3.4, in the probe that proved the flag). When it does, copy
+`MacMLXCore/Package.resolved` over the app's lockfile, put the app-only pins
+back from the old file (today Sparkle's; the CLI's swift-argument-parser is
+the same case on that side), and resolve again: Xcode keeps every pin that
+satisfies the manifests and rewrites only the origin hash, which is how the
+committed file was made, and a pin it re-adds lands on the newest release
+that day. Run `scripts/check-lockfile-parity.py` on the CLI's and the app's
+lockfiles, read the diff for a package that moved without being asked, and
+commit all three. A Core floor the pins already satisfy changes nothing in
+the app's lockfile, origin hash included (probed with swift-jinja's floor
+raised from 2.4.2 to 2.4.3 under the 2.5.1 pin).
 
 ### A probe that passes has proved nothing until it reached the kernel
 

@@ -15,12 +15,19 @@ echo "==> Archiving $APP_NAME $VERSION"
 # -skipPackagePluginValidation: mlx-swift 0.31.x ships a "CudaBuild"
 # SwiftPM build-tool plugin that xcodebuild otherwise fails validating
 # in a non-interactive CI archive. No-op on Apple Silicon / Metal.
+# -onlyUsePackageVersionsFromResolvedFile: the DMG ships the graph in the
+# committed workspace lockfile, which CI holds to MacMLXCore's. Without it a
+# fresh runner takes the newest release each manifest allows on the day, which
+# is how v0.9.0 shipped swift-jinja 2.4.2 after every chat-template test ran
+# on 2.3.6 (#149).
+# A lockfile the manifests have outgrown fails the archive instead.
 xcodebuild \
     -project "macMLX/${APP_NAME}.xcodeproj" \
     -scheme "$APP_NAME" \
     -configuration Release \
     -archivePath "build/${APP_NAME}.xcarchive" \
     -skipPackagePluginValidation \
+    -onlyUsePackageVersionsFromResolvedFile \
     MARKETING_VERSION="$VERSION" \
     CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER:-1}" \
     CODE_SIGN_IDENTITY="" \

@@ -7,7 +7,8 @@
 # commit before pushing it. The jobs run in a throwaway worktree of the
 # commit under test, as CI runs in a fresh checkout: uncommitted and
 # untracked files in this checkout are not part of the run, and nothing
-# gitignored (the app's Package.resolved, say) carries over between runs.
+# gitignored in the tree carries over between runs; the caches under
+# CI_LOCAL_CACHE (DerivedData, SwiftPM scratch) do, by design.
 #
 # Usage: scripts/ci-local.sh [website] [spm] [metal] [app]    (default: all four)
 #
@@ -195,6 +196,10 @@ job_spm() {
         echo "Run 'swift package --package-path <pkg> resolve' and commit the result."
         return 1
     fi
+    # The CLI ships its own graph; every package MacMLXCore pins, it must pin
+    # the same way (#149), as ci.yml checks.
+    echo "### lockfile parity"
+    python3 scripts/check-lockfile-parity.py macmlx-cli/Package.resolved
     echo "### macmlx --version"
     swift run --package-path macmlx-cli --scratch-path "$cli" macmlx --version
 }
@@ -219,64 +224,45 @@ job_metal() {
 }
 
 job_app() {
-    xcodebuild \
+    # -onlyUsePackageVersionsFromResolvedFile: the app's workspace lockfile is
+    # committed and is the graph that builds; a lockfile the manifests have
+    # outgrown fails here instead of being rewritten, as it does for the
+    # release archive in scripts/build.sh.
+    if ! xcodebuild \
         -project macMLX/macMLX.xcodeproj \
         -scheme macMLX \
         -configuration Debug \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
+        -onlyUsePackageVersionsFromResolvedFile \
         -derivedDataPath "$DERIVED_APP" \
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGNING_ALLOWED=NO \
-        build
-
-    # The app must resolve the controlled mlx-swift fork at the revision
-    # MacMLXCore pins: the same check as ci.yml, its messages without the
-    # `::error::` prefix. The lockfile it reads is gitignored and the tree is
-    # fresh, so the build above resolved it, as on CI.
-    local resolved=macMLX/macMLX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
-    if [ ! -f "$resolved" ]; then
-        echo "error: $resolved is missing — the app never resolved its packages."
+        build; then
+        echo "error: the app build failed. If the log says 'an out-of-date resolved file was detected', a manifest moved past the committed app lockfile: resolve it without the flag ('xcodebuild -resolvePackageDependencies -project macMLX/macMLX.xcodeproj -scheme macMLX'), check it with scripts/check-lockfile-parity.py, and commit it (.claude/distribution.md, 'Moving a dependency')."
         return 1
     fi
-    python3 - "$resolved" MacMLXCore/Package.swift <<'PY'
-import json, re, sys
 
-manifest = open(sys.argv[2]).read()
-match = re.search(
-    r'magicnight/mlx-swift\.git".*?revision:\s*"([0-9a-f]+)"', manifest, re.S)
-if not match:
-    print("error: MacMLXCore/Package.swift no longer pins the fork by revision.")
-    sys.exit(1)
-declared = match.group(1)
-
-pins = json.load(open(sys.argv[1]))
-pins = pins.get("pins") or pins.get("object", {}).get("pins", [])
-for pin in pins:
-    location = pin.get("location") or pin.get("repositoryURL", "")
-    if "mlx-swift" not in location or "mlx-swift-lm" in location:
-        continue
-    if "magicnight/mlx-swift" not in location:
-        print(
-            f"error: the app resolved {location} instead of "
-            "magicnight/mlx-swift. It would ship without the fork's "
-            "cherry-picks."
-        )
-        sys.exit(1)
-    resolved = pin.get("state", {}).get("revision", "")
-    if resolved != declared:
-        print(
-            f"error: the app resolved the fork at {resolved}, but "
-            f"MacMLXCore pins {declared}. A stale resolution ships "
-            "cherry-picks that were never tested together."
-        )
-        sys.exit(1)
-    print(f"app resolved the fork at the pinned revision {resolved}")
-    sys.exit(0)
-print("error: the app's resolved graph names no mlx-swift at all.")
-sys.exit(1)
-PY
+    # The app ships the graph in its workspace lockfile. That file is
+    # committed, must come through the build unchanged, and must pin every
+    # package MacMLXCore pins the same way (#149): the same checks as ci.yml,
+    # its messages without the `::error::` prefix. Parity with Core's lockfile
+    # also proves the resolution honoured the mlx-swift fork declaration, the
+    # check this step used to make on its own: Core's lockfile names the fork
+    # at the revision Core pins, and the spm job keeps it fresh.
+    echo "### app lockfile"
+    local resolved=macMLX/macMLX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+    if ! git ls-files --error-unmatch "$resolved" >/dev/null 2>&1; then
+        echo "error: $resolved is not committed — the app would resolve a graph of its own."
+        return 1
+    fi
+    if ! git diff --exit-code -- "$resolved"; then
+        echo "error: $resolved changed during the build — the committed app lockfile is stale."
+        echo "Resolve the app's packages in Xcode (or 'xcodebuild -resolvePackageDependencies') and commit the result."
+        return 1
+    fi
+    python3 scripts/check-lockfile-parity.py "$resolved"
 
     # App-target unit tests: the app is the TEST_HOST, so it is ad-hoc signed
     # here (an unsigned bundle will not launch), as in ci.yml.
@@ -286,6 +272,7 @@ PY
         -configuration Debug \
         -destination 'platform=macOS' \
         -skipPackagePluginValidation \
+        -onlyUsePackageVersionsFromResolvedFile \
         -derivedDataPath "$DERIVED_APP" \
         -resultBundlePath "$LOGS/app.xcresult"
 }
@@ -322,7 +309,10 @@ PY
             # `macmlx --version` prints the bare version on its own line.
             grep -o '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][^ ]*$' "$log" | tail -1 | sed 's/^/macmlx --version: /'
         fi
-        grep -o 'app resolved the fork at the pinned revision [0-9a-f]\{7\}' "$log" | head -1
+        # The parity script's verdict on this root's lockfile (the CLI's in the
+        # spm job, the app's in the app job): every package Core pins, pinned
+        # the same way, which for the app also means the fork at Core's revision.
+        grep -o '[^ ]*Package.resolved: every one of the [0-9]* packages [^;]*' "$log" | head -1
     } 2>/dev/null | paste -sd ';' - | sed 's/;/; /g'
 }
 

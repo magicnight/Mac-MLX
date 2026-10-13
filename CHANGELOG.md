@@ -128,6 +128,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **The DMG ships the dependency graph the tests ran on.** The app's
+  workspace lockfile was gitignored, so a release archive on a fresh runner
+  took the newest release each manifest allowed on the day: v0.9.0 shipped
+  swift-jinja 2.4.2 while every chat-template test had run on the 2.3.6
+  that MacMLXCore's and the CLI's lockfiles pinned, and the next DMG would
+  have taken swift-huggingface 0.13.0 under an audio cache path that has
+  only ever run on 0.9.0 (#149). The lockfile is committed now, pinned to
+  MacMLXCore's graph plus Sparkle; the release archive, the CLI tarball
+  build and the app's CI build use only the versions their lockfiles
+  record; and `scripts/check-lockfile-parity.py`, run on
+  the CLI's and the app's lockfiles in CI and in the local gate, fails when
+  any package MacMLXCore pins is pinned differently or left out, as does
+  `AppLockfileParityTests` inside Xcode. swift-huggingface stays at 0.9.0
+  in all three roots; moving it is its own change.
 - **A reranker, embedder or speech model whose load into an empty slot
   failed part-way kept its allocations in MLX's cache.** The server's two
   auxiliary slots and the audio engine drained a failed load only when they
