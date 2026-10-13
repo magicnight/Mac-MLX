@@ -33,7 +33,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/magicnight/mlx-audio-swift.git",
       "state" : {
-        "revision" : "da4cd79efe76af57e4fbe78ce995c7f287aa56e3"
+        "revision" : "7d7d44acff38018cd68a7cdea8f0ab461edcb1b3"
       }
     },
     {

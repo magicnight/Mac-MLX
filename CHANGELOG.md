@@ -231,9 +231,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   once the audio entry below moved the load under the generation lock, a
   first use that stalled every chat, embeddings and rerank request for the
   length of that download (in v0.9.0 it ran beside them). The controlled
-  fork of mlx-audio-swift now passes the cache through those loaders (the
-  six STT loaders are reported upstream as Blaizzy/mlx-audio-swift#279; the
-  TTS half is not) and carries upstream's
+  fork of mlx-audio-swift now passes the cache through those loaders (both
+  halves are reported upstream on Blaizzy/mlx-audio-swift#279) and carries
+  upstream's
   pending fix for the completeness check (Blaizzy/mlx-audio-swift#257),
   reworked: a cached snapshot counted as complete as soon as it held weights
   and a config, so a loader that asks for more than the first resolve
@@ -270,7 +270,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   codec, Echo's Fish codec, Irodori's text tokenizer), Kokoro's and Kitten's
   grapheme-to-phoneme model, 9 MB (Blaizzy/mlx-audio-swift#242), and, for a
   non-English Kokoro voice, its 83 MB byT5 grapheme-to-phoneme model or a
-  lexicon of up to 24 MB.
+  lexicon of up to 24 MB. The fork's token-bearing Hub clients now follow
+  `HF_ENDPOINT` like the plain one.
 - **SenseVoice loaded without its CMVN file and tokenizer in v0.9.0.** Its
   snapshot was fetched with the default patterns and counted as complete,
   so the loader found neither `am.mvn` nor the `.bpe.model`, which upstream
@@ -492,11 +493,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (checked by reading, not by an output comparison, which this project cannot
   run). Gemma3Text's prefill was reworked upstream on its own and is not
   covered. Adopting `.balanced` is a separate, measured change.
-- mlx-audio-swift is pinned to a fork (`magicnight/mlx-audio-swift`,
-  v0.1.3 plus two one-line compatibility commits and the cache fixes under
-  Fixed) because no released version keeps audio downloads in the cache it
-  is given (upstream v0.1.5 builds against mlx-swift-lm 3.32.3, which the
-  compatibility commits were for, but has neither fix).
+- mlx-audio-swift moves from upstream v0.1.3 to a fork
+  (`magicnight/mlx-audio-swift`, branch `v0.1.5-macmlx`): upstream v0.1.5
+  plus the cache fixes under Fixed, because no released version keeps audio
+  downloads in the cache it is given, completes a cached snapshot by the
+  Hub's listing, or sends its token-bearing clients to `HF_ENDPOINT`. With
+  it come upstream's v0.1.4 and v0.1.5 changes, among them Spark-TTS and
+  Breeze TTS 2, quantized Whisper and Voxtral checkpoints loading,
+  Nemotron's English streaming checkpoints, Fish Speech streamed
+  progressively, OmniVoice's seed, cancellation and progress, the Chatterbox
+  emotion override, the Voxtral streaming front end, the Qwen3-ASR mel front
+  end and batched padding, the FireRedASR2 beam search and the FireRedASR2
+  and SenseVoice fbank scaling, and v0.1.5's own rework of text-to-speech
+  generation for Swift 6 `sending` (the Llama and Qwen3 voices through a new
+  `TTSGenerationCache`, Marvis's caches built directly, Parakeet compiled
+  with its weights as inputs). The audio model registry lists Breeze; Spark
+  loads by repo id over the API but is not listed, since its config says
+  `qwen2` and upstream tells it apart by the repo name alone. No test here
+  runs audio inference, so none of this is exercised; the two gated cache
+  smokes, which load moonshine-tiny and VyvoTTS with its SNAC codec through
+  the new pin, passed. Nothing else in the dependency graph moves:
+  mlx-swift-lm stays at 3.32.3 and mlx-swift at the controlled fork's
+  1026d23.
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE

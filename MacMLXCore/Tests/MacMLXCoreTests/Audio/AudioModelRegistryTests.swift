@@ -28,9 +28,18 @@ struct AudioModelRegistryTests {
         #expect(AudioModelRegistry.format(forModelType: modelType) == .audioSTT)
     }
 
-    @Test(arguments: ["kokoro", "csm", "chatterbox", "kitten_tts", "orpheus"])
+    @Test(arguments: ["kokoro", "csm", "chatterbox", "kitten_tts", "orpheus", "breeze", "spark_tts"])
     func knownTTSTypesClassifyAsTTS(_ modelType: String) {
         #expect(AudioModelRegistry.format(forModelType: modelType) == .audioTTS)
+    }
+
+    /// Spark-TTS's config says `qwen2` (its loader decodes a Qwen2
+    /// configuration) and upstream resolves it to Spark by the repo name
+    /// alone; classification is config-driven, so a Spark checkpoint stays
+    /// unlisted and a bare `qwen2` is never badged as speech.
+    @Test
+    func qwen2StaysUnclassified() {
+        #expect(AudioModelRegistry.format(forModelType: "qwen2") == nil)
     }
 
     /// The honest gate. An audio checkpoint whose family neither loader

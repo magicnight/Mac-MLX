@@ -20,11 +20,15 @@ import Foundation
 /// config says nothing recognisable acquire a badge on the strength of its
 /// name alone. Config-driven only.
 ///
-/// - Note: The two key sets are verified DISJOINT (24 STT keys, 34 TTS keys,
-///   empty intersection) against the pinned revision, which is what makes
+/// - Note: The two key sets are verified DISJOINT (24 STT keys, 38 TTS keys,
+///   empty intersection) against the pinned revision (7d7d44a: upstream
+///   v0.1.5 plus the fork's cache commits), which is what makes
 ///   ``format(forModelType:)`` a total function rather than a priority order.
 ///   ``sttAndTTSTypesAreDisjoint`` re-checks it so a dependency bump that
 ///   introduced an overlap fails a test instead of silently mis-routing.
+///   One upstream rule is not mirrored, by the discipline above: a `qwen2`
+///   config whose repo name contains "spark" dispatches to Spark-TTS, so a
+///   Spark checkpoint loads by repo id but is not listed here.
 public enum AudioModelRegistry {
 
     /// Directory `mlx-audio-swift` nests its downloads under, inside whatever
@@ -86,6 +90,8 @@ public enum AudioModelRegistry {
     /// managed model directory never reaches this code. Do not reuse this set
     /// to classify arbitrary directories.
     static let ttsModelTypes: Set<String> = [
+        "breeze",
+        "breeze_tts",
         "chatterbox",
         "chatterbox_tts",
         "chatterbox_turbo",
@@ -120,6 +126,8 @@ public enum AudioModelRegistry {
         "sesame",
         "soprano",
         "soprano_tts",
+        "spark",
+        "spark_tts",
     ]
 
     /// Whether the two registries share no key, so a resolved `model_type`

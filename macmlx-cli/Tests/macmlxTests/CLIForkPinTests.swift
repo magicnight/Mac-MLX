@@ -64,9 +64,9 @@ struct CLIForkPinTests {
     @Test("Core pins the mlx-audio-swift fork by revision")
     func corePinsAudioForkByRevision() throws {
         // The fork's branch carries the cache fixes (#135) that no upstream
-        // release has (v0.1.5 builds against mlx-swift-lm 3.32.3 but still
-        // downloads beside the cache it is given). A `from:` here would let
-        // a resolve wander back to an upstream tag without them.
+        // release has (the fork sits on v0.1.5, which still downloads beside
+        // the cache it is given). A `from:` here would let a resolve wander
+        // back to an upstream tag without them.
         let core = try Self.manifest("MacMLXCore/Package.swift")
         let audioURL = "https://github.com/magicnight/mlx-audio-swift.git"
         guard let range = core.range(of: audioURL) else {
