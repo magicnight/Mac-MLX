@@ -2,7 +2,7 @@ const repository = "https://github.com/magicnight/mac-mlx";
 const release = `${repository}/releases/tag/v0.9.0`;
 const tagged = (path) => `${repository}/blob/v0.9.0/${path}`;
 const main = (path) => `${repository}/blob/main/${path}`;
-const verified = "2026-08-28";
+const verified = "2026-10-13";
 
 function fact(id, status, sinceVersion, pageIds, sources, en, zh, attributes = {}) {
   return Object.freeze({
@@ -128,8 +128,8 @@ export const facts = Object.freeze([
     { title: "OCR model recognition", summary: "Dedicated OCR checkpoints receive an OCR badge distinct from the generic Vision badge, and GLM-OCR is verified end-to-end.", detail: "GLM-OCR loads through the stock VLM path with no new model code and reads image text back. The badge is intentionally narrow: it appears only on a model that actually loads, so an OCR family that is detected but not yet ported, such as dots_ocr or deepseek-ocr, earns no badge. This is model recognition, not a universal OCR-quality claim." },
     { title: "OCR 模型识别", summary: "专用 OCR 检查点会获得区别于通用 Vision 徽章的 OCR 徽章，且 GLM-OCR 已端到端验证。", detail: "GLM-OCR 通过原有 VLM 路径加载，无需新增模型代码，并能读回图像文字。该徽章刻意保持克制：仅出现在真正能加载的模型上，因此被检测到但尚未移植的 OCR 家族（如 dots_ocr 或 deepseek-ocr）不会获得徽章。这是模型识别，而非通用 OCR 质量声明。" }),
   fact("paged-kv", "planned", "future", ["architecture"], [roadmap],
-    { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released; the shipped cache reuses exact full prefixes only." },
-    { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未发布；已交付的缓存仅复用完整精确前缀。" }),
+    { title: "Paged KV, block sharing, and CoW", summary: "Paged allocation, shared blocks, and copy-on-write branching are planned.", detail: "None of these cache-virtualization features is released; the shipped cache reuses exact token prefixes only, trimmed to the longest common prefix, without shared blocks." },
+    { title: "分页 KV、块共享与 CoW", summary: "分页分配、共享块与写时复制分支处于规划阶段。", detail: "这些缓存虚拟化能力均未发布；已交付的缓存仅复用精确的 token 前缀（裁剪至最长公共前缀），没有共享块。" }),
   fact("adaptive-memory-guard", "planned", "future", ["architecture"], [roadmap],
     { title: "Unified adaptive memory guard", summary: "A feedback controller across cache, model pool, and concurrency is planned.", detail: "Released memory probes and pool caps are separate mechanisms and must not be described as this guard." },
     { title: "统一自适应内存守卫", summary: "跨缓存、模型池与并发的反馈控制器处于规划阶段。", detail: "已发布的内存探针和模型池上限是独立机制，不能称为该守卫。" }),

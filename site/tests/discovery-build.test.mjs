@@ -7,7 +7,7 @@ import test from "node:test";
 import { prepareSite, validateSocialAssets } from "../../scripts/build-public-site.mjs";
 
 test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404 outputs", async () => {
-  const { documents, markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-08-28" });
+  const { documents, markdownDocuments, discoveryFiles } = await prepareSite({ today: "2026-10-13" });
   assert.equal(markdownDocuments.size, 34);
   assert.deepEqual([...discoveryFiles.keys()], [
     "llms.txt", "llms-full.txt", "zh/llms.txt", "zh/llms-full.txt",
@@ -17,7 +17,7 @@ test("prepared site contains all Markdown, GEO, sitemap, robots, and noindex 404
   const llms = discoveryFiles.get("llms.txt");
   const llmsFull = discoveryFiles.get("llms-full.txt");
   assert.equal(sitemap.match(/<url>/g)?.length, 34);
-  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-9-0\/<\/loc>[\s\S]*?<lastmod>2026-08-28<\/lastmod>/);
+  assert.match(sitemap, /<loc>https:\/\/macmlx\.app\/releases\/v0-9-0\/<\/loc>[\s\S]*?<lastmod>2026-10-13<\/lastmod>/);
   assert.doesNotMatch(sitemap, /404/);
   assert.match(llms, /Latest release: v0\.9\.0/);
   assert.match(llmsFull, /### continuous-batching[\s\S]*?- Status: released[\s\S]*?- Title: Eligibility-gated continuous batching/);
