@@ -116,8 +116,8 @@ let package = Package(
         // is 6.0. That is legal — a dependency may use a newer tools version than
         // its consumer; only the toolchain in use has to be new enough to parse it.
         // mlx-audio-swift v0.1.5 plus the commits on the fork's branch
-        // `v0.1.5-macmlx`, all of them about where audio models land and
-        // where their requests go (#135):
+        // `v0.1.5-macmlx`, all of them about where audio models land, where
+        // their requests go and what the Hub's listing certifies (#135, #149):
         // upstream's pending PR Blaizzy/mlx-audio-swift#257, so a cached
         // snapshot counts as complete only when it holds the files a loader's
         // patterns name, reworked so the Hub's listing is what certifies a
@@ -127,28 +127,39 @@ let package = Package(
         // loaders and the TTS loaders that fetched without it: Chatterbox and
         // OmniVoice (their whole model, Chatterbox's S3 tokenizer with it),
         // the Llama and Qwen3 voices and Echo (their codecs); the token
-        // clients follow `HF_ENDPOINT` like the plain one. Reported upstream
-        // in Blaizzy/mlx-audio-swift#279 and on #257. Nothing else differs
-        // from the upstream tag; the two small compatibility commits the
-        // v0.1.3 base needed for mlx-swift-lm 3.32.3 are upstream's own since
-        // v0.1.5. The previous pin is tagged `v0.1.3-macmlx-1` on the fork.
+        // clients follow `HF_ENDPOINT` like the plain one (the cache fixes are
+        // reported upstream in Blaizzy/mlx-audio-swift#279 and on #257); and
+        // the listing is read to its last page through `listAllTree`
+        // (swift-huggingface 0.11.0 and later), where `listFiles` returned the
+        // first; the snapshot download's own listing is still the library's
+        // single request, so a fresh fetch of a repository past one page
+        // brings the first page's files, the next resolve completes what a
+        // loader's own patterns name, and files only the default patterns
+        // name, weights included, do not come from a later page. Nothing
+        // else differs from the upstream tag; the two small compatibility
+        // commits the v0.1.3 base needed for mlx-swift-lm 3.32.3 are
+        // upstream's own since v0.1.5. The previous pin is tagged
+        // `v0.1.3-macmlx-1` on the fork.
         // Drop the fork once a release passes the cache through, completes a
         // cached snapshot by the Hub's listing rather than by what a load
-        // asked for, and sends its token clients to `HF_ENDPOINT` too. Pinned
-        // by revision so it can never drift.
+        // asked for, reads that listing past its first page, and sends its
+        // token clients to `HF_ENDPOINT` too. Pinned by revision so it can
+        // never drift.
         .package(
             url: "https://github.com/magicnight/mlx-audio-swift.git",
-            revision: "7d7d44acff38018cd68a7cdea8f0ab461edcb1b3"),
-        // Already resolved transitively (mlx-audio-swift pins
-        // `.upToNextMajor(from: "0.8.1")`, currently 0.9.0). Declared directly
-        // with the SAME requirement — so no new version is introduced — purely
-        // because `AudioEngine` has to name `HubCache` to redirect audio model
+            revision: "504b338c8f8e7f2bebd1e7eb973a5cc64630dcae"),
+        // Already resolved transitively (the mlx-audio-swift fork requires
+        // `.upToNextMajor(from: "0.11.0")`). Declared directly with the SAME
+        // requirement — so no new version is introduced — purely because
+        // `AudioEngine` has to name `HubCache` to redirect audio model
         // downloads into `~/.mac-mlx/`, and Swift does not re-export it through
-        // MLXAudioSTT/TTS. Held at 0.9.0 by every root's lockfile (#149); on a
-        // move to 0.11.0 or later, switch the fork's completeness listing in
-        // MLXAudioCore/ModelUtils from `listFiles`, which returns one page, to
-        // `listAllTree`.
-        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.8.1"),
+        // MLXAudioSTT/TTS. The floor is the fork's: its completeness listing
+        // reads every page of a repository tree through `listAllTree`, which
+        // 0.11.0 added. Every root's lockfile holds the package at 0.13.0
+        // (#149); 1.0.0 is a breaking release (`HTTPClientError`, `Provider`,
+        // `Capability` and `Bucket.Region` become structs, swift-xet 1.0 is
+        // required) and needs its own pass.
+        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.11.0"),
     ],
     targets: [
         // Runtime bridge to Apple's private IOReport framework (silicon metrics,

@@ -21,8 +21,8 @@ import Foundation
 /// name alone. Config-driven only.
 ///
 /// - Note: The two key sets are verified DISJOINT (24 STT keys, 38 TTS keys,
-///   empty intersection) against the pinned revision (7d7d44a: upstream
-///   v0.1.5 plus the fork's cache commits), which is what makes
+///   empty intersection) against the pinned revision (504b338: upstream
+///   v0.1.5 plus the fork's cache and listing commits), which is what makes
 ///   ``format(forModelType:)`` a total function rather than a priority order.
 ///   ``sttAndTTSTypesAreDisjoint`` re-checks it so a dependency bump that
 ///   introduced an overlap fails a test instead of silently mis-routing.
