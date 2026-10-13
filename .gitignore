@@ -15,9 +15,11 @@ DerivedData/
 .build/
 .swiftpm/
 Packages/
-# Xcode-workspace shared SwiftPM state (editor config + Package.resolved) —
-# per-developer, not reproducible CI input. `.build/` already covers builds.
-**/xcshareddata/swiftpm/
+# Xcode-workspace shared SwiftPM editor state (registries, mirrors) is
+# per-developer. The workspace's Package.resolved is not: it is the graph the
+# app ships, and CI holds it to MacMLXCore's lockfile (#149).
+**/xcshareddata/swiftpm/*
+!**/xcshareddata/swiftpm/Package.resolved
 
 # Python — uv managed
 __pycache__/

@@ -144,7 +144,10 @@ let package = Package(
         // with the SAME requirement — so no new version is introduced — purely
         // because `AudioEngine` has to name `HubCache` to redirect audio model
         // downloads into `~/.mac-mlx/`, and Swift does not re-export it through
-        // MLXAudioSTT/TTS.
+        // MLXAudioSTT/TTS. Held at 0.9.0 by every root's lockfile (#149); on a
+        // move to 0.11.0 or later, switch the fork's completeness listing in
+        // MLXAudioCore/ModelUtils from `listFiles`, which returns one page, to
+        // `listAllTree`.
         .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.8.1"),
     ],
     targets: [

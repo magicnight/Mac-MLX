@@ -64,12 +64,16 @@ Minimum pre-push verification:
 swift test --package-path MacMLXCore
 swift test --package-path macmlx-cli
 
-# SwiftUI app
+# SwiftUI app, from the committed workspace lockfile only, as CI builds it
 xcodebuild -project macMLX/macMLX.xcodeproj -scheme macMLX \
-           -configuration Debug -destination 'platform=macOS' build
+           -configuration Debug -destination 'platform=macOS' \
+           -skipPackagePluginValidation \
+           -onlyUsePackageVersionsFromResolvedFile build
 ```
 
-All three must succeed before `git push`. To run the whole CI pipeline here
+All three must succeed before `git push`. Moving a dependency moves three
+lockfiles (MacMLXCore's, the CLI's and the app's) and CI holds the last two to
+the first; `.claude/distribution.md`, "Moving a dependency", has the steps. To run the whole CI pipeline here
 instead — the same four jobs as `ci.yml`, with the same commands, in a
 fresh worktree of the commit under test — use `scripts/ci-local.sh` (pick
 jobs with `scripts/ci-local.sh website spm`; `CI_LOCAL_REF=<sha>` tests

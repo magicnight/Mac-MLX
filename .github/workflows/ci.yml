@@ -131,6 +131,11 @@ jobs:
             exit 1
           fi
 
+      # The CLI ships its own graph; every package MacMLXCore pins, it must pin
+      # the same way, or the Homebrew tarball runs code the tests did not (#149).
+      - name: The CLI lockfile agrees with MacMLXCore's
+        run: python3 scripts/check-lockfile-parity.py --github macmlx-cli/Package.resolved
+
       - name: Smoke-run macmlx --version
         run: swift run --package-path macmlx-cli macmlx --version
 
@@ -210,7 +215,7 @@ jobs:
           path: |
             ~/Library/Developer/Xcode/DerivedData
             ~/Library/Caches/org.swift.swiftpm
-          key: xcode-${{ runner.os }}-${{ hashFiles('MacMLXCore/Package.resolved', 'macMLX/macMLX.xcodeproj/project.pbxproj') }}
+          key: xcode-${{ runner.os }}-${{ hashFiles('MacMLXCore/Package.resolved', 'macMLX/macMLX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'macMLX/macMLX.xcodeproj/project.pbxproj') }}
           restore-keys: |
             xcode-${{ runner.os }}-
 
@@ -223,67 +228,48 @@ jobs:
           # "CudaBuild" SwiftPM build-tool plugin. xcodebuild otherwise
           # fails validating the (unsigned) plugin in CI. The plugin is
           # a no-op on Apple Silicon / Metal — CUDA never builds here.
+          # -onlyUsePackageVersionsFromResolvedFile: the app's workspace
+          # lockfile is committed and is the graph that builds; a lockfile
+          # the manifests have outgrown fails here instead of being
+          # rewritten, as it does for the release archive (scripts/build.sh).
           xcodebuild \
             -project macMLX/macMLX.xcodeproj \
             -scheme macMLX \
             -configuration Debug \
             -destination 'platform=macOS' \
             -skipPackagePluginValidation \
+            -onlyUsePackageVersionsFromResolvedFile \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build || {
+              echo "::error::The app build failed. If the log says 'an out-of-date resolved file was detected', a manifest moved past the committed app lockfile: resolve it without the flag ('xcodebuild -resolvePackageDependencies -project macMLX/macMLX.xcodeproj -scheme macMLX'), check it with scripts/check-lockfile-parity.py and commit it (.claude/distribution.md, 'Moving a dependency')."
+              exit 1
+            }
 
       # The app resolved upstream mlx-swift for months while MacMLXCore's own
       # tests resolved the fork, so every cherry-pick was verified in a graph
-      # the shipped app did not use. `AppForkPinTests` guards the declaration;
-      # this guards the outcome, which is the part that actually ships. The
-      # lockfile is gitignored, so it can only be checked after a resolve —
-      # which the build step above has just done.
-      - name: The app resolved the controlled mlx-swift fork
+      # the shipped app did not use; and until #149 the app's lockfile was
+      # gitignored, so a release archive took the newest release each manifest
+      # allowed on the day (v0.9.0 shipped swift-jinja 2.4.2 after every
+      # chat-template test ran on 2.3.6). The lockfile is committed now: it must come through the
+      # build unchanged and pin every package MacMLXCore pins the same way,
+      # which also proves the resolution honoured the fork declaration that
+      # `AppForkPinTests` guards (Core's lockfile names the fork at the
+      # revision Core pins, and the spm job keeps that lockfile fresh).
+      - name: The app ships the graph the tests ran on
         run: |
           RESOLVED=macMLX/macMLX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
-          if [ ! -f "$RESOLVED" ]; then
-            echo "::error::$RESOLVED is missing — the app never resolved its packages."
+          if ! git ls-files --error-unmatch "$RESOLVED" >/dev/null 2>&1; then
+            echo "::error::$RESOLVED is not committed — the app would resolve a graph of its own."
             exit 1
           fi
-          python3 - "$RESOLVED" MacMLXCore/Package.swift <<'PY'
-          import json, re, sys
-
-          manifest = open(sys.argv[2]).read()
-          match = re.search(
-              r'magicnight/mlx-swift\.git".*?revision:\s*"([0-9a-f]+)"', manifest, re.S)
-          if not match:
-              print("::error::MacMLXCore/Package.swift no longer pins the fork by revision.")
-              sys.exit(1)
-          declared = match.group(1)
-
-          pins = json.load(open(sys.argv[1]))
-          pins = pins.get("pins") or pins.get("object", {}).get("pins", [])
-          for pin in pins:
-              location = pin.get("location") or pin.get("repositoryURL", "")
-              if "mlx-swift" not in location or "mlx-swift-lm" in location:
-                  continue
-              if "magicnight/mlx-swift" not in location:
-                  print(
-                      f"::error::The app resolved {location} instead of "
-                      "magicnight/mlx-swift. It would ship without the fork's "
-                      "cherry-picks."
-                  )
-                  sys.exit(1)
-              resolved = pin.get("state", {}).get("revision", "")
-              if resolved != declared:
-                  print(
-                      f"::error::The app resolved the fork at {resolved}, but "
-                      f"MacMLXCore pins {declared}. A stale resolution ships "
-                      "cherry-picks that were never tested together."
-                  )
-                  sys.exit(1)
-              print(f"app resolved the fork at the pinned revision {resolved}")
-              sys.exit(0)
-          print("::error::The app's resolved graph names no mlx-swift at all.")
-          sys.exit(1)
-          PY
+          if ! git diff --exit-code -- "$RESOLVED"; then
+            echo "::error::$RESOLVED changed during the build — the committed app lockfile is stale."
+            echo "Resolve the app's packages in Xcode (or 'xcodebuild -resolvePackageDependencies') and commit the result."
+            exit 1
+          fi
+          python3 scripts/check-lockfile-parity.py --github "$RESOLVED"
 
       # App-target unit tests. NOT gated on Metal, and deliberately so: the
       # suite drives BenchmarkViewModel against a scripted stub engine, so no
@@ -301,4 +287,5 @@ jobs:
             -scheme macMLXTests \
             -configuration Debug \
             -destination 'platform=macOS' \
-            -skipPackagePluginValidation
+            -skipPackagePluginValidation \
+            -onlyUsePackageVersionsFromResolvedFile
