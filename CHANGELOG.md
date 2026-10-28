@@ -377,6 +377,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `TemplateProcessing`, which honours the flag, and were not affected.
 
 ### Changed
+- **Hummingbird 2.28.0 and Sparkle 2.10.1.** Hummingbird 2.26.0 fixed three
+  denial-of-service advisories in 2.25.1 and earlier (GHSA-wqpw-qq6j-p4x2,
+  GHSA-62cf-93wq-244m, GHSA-97r6-mq85-c3rv). None of them reaches macMLX: the
+  server uses no `FileMiddleware`, `MediaType` or URL-encoded form decoding,
+  and the parser defect behind the first one, which 2.25.0 also hits when it
+  parses a URI ending in a three-byte UTF-8 character such as `€`, cannot be
+  reached over HTTP/1, because SwiftNIO answers a request line with raw
+  non-ASCII bytes with a 400 before Hummingbird sees it. One default changes
+  with the move: since 2.25.1 the server rejects a request whose headers add
+  up to more than 80 KiB, down from 1 MiB, and accepts up to 1,000 header
+  fields instead of 256; macMLX keeps the defaults. The move brings
+  swift-nio-ssl 2.37.5, swift-nio-http2 1.46.0, swift-http-types 1.8.0 and
+  swift-distributed-tracing 1.7.2, and with it swift-service-context 1.5.1:
+  tracing 1.7 took over the `ServiceContextModule` target, and next to
+  swift-service-context 1.3.0, which still declares it, Xcode refuses to
+  resolve the graph. Sparkle 2.10.1 fixes an update installing before the
+  app quits when the app sits in an NFC-encoded path.
 - **Swapping the reranker or the embedder releases the resident model before
   loading the replacement, and drains MLX's buffer cache in between (#130).**
   The old order loaded the new engine first, so both models were resident for

@@ -5012,7 +5012,7 @@ public actor HummingbirdServer {
     ///
     /// The type is read off the dependencies rather than assumed. `Request.body`
     /// is a `RequestBody`, an `AsyncSequence` with `Element == ByteBuffer`
-    /// (hummingbird 2.25.0, `HummingbirdCore/Request/RequestBody.swift:17,59`),
+    /// (hummingbird 2.28.0, `HummingbirdCore/Request/RequestBody.swift:17,59`),
     /// so `collect(upTo:)` resolves to SwiftNIO's
     /// `extension AsyncSequence where Element == ByteBuffer` overload
     /// (swift-nio 2.101.2, `NIOCore/AsyncAwaitSupport.swift:480`), whose only
