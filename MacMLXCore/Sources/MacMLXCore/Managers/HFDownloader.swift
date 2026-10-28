@@ -392,15 +392,16 @@ public actor HFDownloader {
 
     /// Total size of all files in the model repo, in bytes.
     ///
-    /// HF's `/api/models/{id}` endpoint omits `size` for LFS-backed
-    /// files (which is where all the multi-GB weights live), so summing
-    /// `siblings[*].size` gives zero for most real models. We fall back
-    /// to HEAD on `/{id}/resolve/main/{path}` for any sibling without a
-    /// declared size; HF responds with `x-linked-size` (LFS blob size
-    /// before CDN redirect) or `content-length`. Weight-file filter
-    /// keeps the request count bounded — configs/tokenisers are small
-    /// and sometimes declared, so their absence doesn't matter.
-    public func sizeBytes(for modelID: String) async throws -> Int64 {
+    /// HF's `/api/models/{id}` endpoint declares no `size` for any
+    /// sibling, so summing `siblings[*].size` gives zero for real
+    /// models. We fall back to HEAD on `/{id}/resolve/main/{path}` for
+    /// every sibling without a declared size; HF redirects, and the
+    /// final response carries the file's `content-length`.
+    ///
+    /// Returns nil when any of those HEADs fails: a sum without the
+    /// weights reads as a few KB for a multi-GB model, and the library
+    /// caches it for a week (`HFSizeCache`).
+    public func sizeBytes(for modelID: String) async throws -> Int64? {
         let files = try await files(for: modelID)
         // Step 1: declared sizes we already have.
         var total: Int64 = files.compactMap(\.size).reduce(0, +)
@@ -446,14 +447,16 @@ public actor HFDownloader {
             }
             return collected
         }
+        guard fetched.count == missing.count else { return nil }
         total += fetched.reduce(0, +)
         return total
     }
 
     /// Issue a HEAD against `{baseURL}/{modelID}/resolve/main/{path}` and
     /// return the bytes count. Tries `x-linked-size` first (LFS), falls
-    /// back to `content-length`. Returns nil on any failure so the
-    /// caller can silently proceed.
+    /// back to `content-length` on a 2xx (an empty file is a real 0).
+    /// Returns nil on any failure, including an error status, whose
+    /// `content-length` is the error body's.
     private static func headSize(
         session: URLSession,
         baseURL: URL,
@@ -463,10 +466,15 @@ public actor HFDownloader {
         let url = baseURL.appending(path: "\(modelID)/resolve/main/\(path)")
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
-        // Ask HF not to follow the LFS redirect — we want the header,
-        // not the payload. HF honours this via the Accept header; most
-        // public-CDN blobs set x-linked-size on the 302 itself.
+        // HF sets x-linked-size on the redirect, but URLSession follows
+        // it and hands back the final response, so the size usually
+        // comes from content-length.
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // URLSession asks for gzip/br on its own, and HF compresses text
+        // files (.gitattributes, vocab.json) with no content-length at
+        // all. Without this, nearly every repository has a file that
+        // cannot be sized, and `sizeBytes` returns nil for it.
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         do {
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
@@ -474,9 +482,9 @@ public actor HFDownloader {
                let parsed = Int64(linkedSize) {
                 return parsed
             }
-            if let contentLength = http.value(forHTTPHeaderField: "content-length"),
-               let parsed = Int64(contentLength),
-               parsed > 0 {
+            if (200..<300).contains(http.statusCode),
+               let contentLength = http.value(forHTTPHeaderField: "content-length"),
+               let parsed = Int64(contentLength) {
                 return parsed
             }
             return nil

@@ -175,7 +175,8 @@ struct HFDownloaderTests {
         let downloader = HFDownloader(urlSession: makeMockSession())
         let total = try await downloader.sizeBytes(for: "mlx-community/all-declared")
 
-        #expect(total == 512 + 2048 + 4_294_967_296)
+        let expected: Int64 = 512 + 2048 + 4_294_967_296
+        #expect(total == expected)
         #expect(headCount.withLock { $0 } == 0)
     }
 
@@ -227,7 +228,7 @@ struct HFDownloaderTests {
         defer { MockURLProtocol.handler = nil }
 
         let downloader = HFDownloader(urlSession: makeMockSession())
-        let result = OSAllocatedUnfairLock<Result<Int64, any Error>?>(initialState: nil)
+        let result = OSAllocatedUnfairLock<Result<Int64?, any Error>?>(initialState: nil)
         Task.detached {
             do {
                 let total = try await downloader.sizeBytes(for: "mlx-community/undeclared")
@@ -267,5 +268,79 @@ struct HFDownloaderTests {
         #expect(files.count == 1)
         #expect(files[0].path == "config.json")
         #expect(files[0].size == nil)
+    }
+
+    /// One HEAD answered with a 503. Its 15-byte error body used to be read
+    /// as the file's size, and a HEAD that failed outright dropped the file
+    /// from the sum; either way the total came out short, and the library
+    /// caches it for a week. No total at all is the honest answer.
+    @Test func sizeBytesIsNilWhenAHeadFails() async throws {
+        let total = try await sizeBytesWithHeads(declared: 512, heads: [
+            "model-1-of-4.safetensors": (200, ["x-linked-size": "4000"]),
+            "model-2-of-4.safetensors": (200, ["x-linked-size": "4000"]),
+            "model-3-of-4.safetensors": (503, ["content-length": "15"]),
+            "model-4-of-4.safetensors": (200, ["x-linked-size": "4000"]),
+            "tokenizer.json": (200, ["x-linked-size": "24"]),
+        ])
+        #expect(total == nil)
+    }
+
+    /// A file that really is empty answers 200 with `content-length: 0`.
+    /// That is a size, not a failure, so it must not cost the whole total.
+    @Test func sizeBytesCountsAnEmptyFileAsZero() async throws {
+        let total = try await sizeBytesWithHeads(declared: 512, heads: [
+            "model-1-of-3.safetensors": (200, ["x-linked-size": "4000"]),
+            "model-2-of-3.safetensors": (200, ["x-linked-size": "4000"]),
+            "model-3-of-3.safetensors": (200, ["x-linked-size": "4000"]),
+            "tokenizer.json": (200, ["x-linked-size": "24"]),
+            "empty.txt": (200, ["content-length": "0"]),
+        ])
+        let expected: Int64 = 512 + 12_000 + 24
+        #expect(total == expected)
+    }
+
+    /// Text files are what the Hub compresses, and every repository has
+    /// some (.gitattributes at least). Unless the HEAD asks for identity,
+    /// they come back without a content-length and the total is lost.
+    @Test func sizeBytesSizesTextFilesTheHubWouldCompress() async throws {
+        let total = try await sizeBytesWithHeads(declared: 512, heads: [
+            "model.safetensors": (200, ["content-length": "4000"]),
+            ".gitattributes": (200, ["content-length": "1570"]),
+            "vocab.json": (200, ["content-length": "2776833"]),
+        ])
+        let expected: Int64 = 512 + 4000 + 1570 + 2_776_833
+        #expect(total == expected)
+    }
+
+    /// Runs `sizeBytes(for:)` for a repository with one declared file and
+    /// the given undeclared ones, each HEAD answered with its status and
+    /// headers. Like the Hub, a HEAD that doesn't ask for identity gets
+    /// a compressed response: no content-length, `content-encoding: br`.
+    private func sizeBytesWithHeads(
+        declared: Int64, heads: [String: (status: Int, headers: [String: String])]
+    ) async throws -> Int64? {
+        var siblings = [#"{"rfilename": "config.json", "size": \#(declared)}"#]
+        siblings += heads.keys.sorted().map { #"{"rfilename": "\#($0)"}"# }
+        let json = Data(#"{"id": "mlx-community/heads", "siblings": [\#(siblings.joined(separator: ","))]}"#.utf8)
+
+        MockURLProtocol.handler = { request in
+            let url = request.url ?? URL(string: "https://example.com")!
+            guard request.httpMethod == "HEAD", let head = heads[url.lastPathComponent] else {
+                return (httpResponse(url: url, statusCode: 200), json)
+            }
+            var headers = head.headers
+            if request.value(forHTTPHeaderField: "Accept-Encoding") != "identity",
+               headers.removeValue(forKey: "content-length") != nil {
+                headers["content-encoding"] = "br"
+            }
+            let response = HTTPURLResponse(
+                url: url, statusCode: head.status, httpVersion: nil, headerFields: headers
+            ) ?? httpResponse(url: url, statusCode: head.status)
+            return (response, Data())
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let downloader = HFDownloader(urlSession: makeMockSession())
+        return try await downloader.sizeBytes(for: "mlx-community/heads")
     }
 }

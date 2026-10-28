@@ -83,7 +83,11 @@ public actor HFSizeCache {
         guard !loaded else { return }
         loaded = true
         guard let data = try? Data(contentsOf: fileURL) else { return }
-        if let decoded = try? JSONDecoder().decode(Payload.self, from: data) {
+        // Must match `flush()`'s encoder, or every read fails and the
+        // next `put` overwrites the file with a single entry.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let decoded = try? decoder.decode(Payload.self, from: data) {
             payload = decoded
         }
     }
