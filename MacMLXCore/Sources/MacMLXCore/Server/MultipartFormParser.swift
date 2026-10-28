@@ -3,7 +3,7 @@ import Foundation
 /// A minimal, dependency-free `multipart/form-data` reader for the one shape
 /// macMLX needs: a handful of small text fields plus a single uploaded file.
 ///
-/// Why hand-written: Hummingbird 2.25 ships no multipart product, and
+/// Why hand-written: Hummingbird (2.28.0) ships no multipart product, and
 /// `vapor/multipart-kit` 5.x is still pre-release — the pinning policy in
 /// `Package.swift` keeps beta dependencies out of the graph. The subset here is
 /// small enough to be fully unit-tested, which is the trade that makes it

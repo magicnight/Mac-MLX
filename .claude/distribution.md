@@ -516,7 +516,12 @@ committed file was made, and a pin it re-adds lands on the newest release
 that day. Keep SwiftPM's own JSON style when editing a lockfile by hand or
 by script (sorted keys, pins sorted by identity, two-space indent,
 `"key" : value` with the spaces, `/` unescaped, a trailing newline), or the
-diff is the whole file and the next resolve rewrites it. Run
+diff is the whole file and the next resolve rewrites it. Resolve the app even
+when Core and the CLI resolved cleanly: with Hummingbird 2.28.0, `swift
+package resolve` accepted a graph in which swift-distributed-tracing 1.7 and
+the swift-service-context 1.3.0 pin both declared a `ServiceContextModule`
+target, and Xcode's resolve rejected it. The fix was moving that pin too
+(`swift package update swift-service-context` moves only that package). Run
 `scripts/check-lockfile-parity.py` on the CLI's and the app's lockfiles,
 read the diff for a package that moved without being asked, and commit all
 three. A change to Core's manifest alone never moves the app's origin
