@@ -310,14 +310,24 @@ final class ModelLibraryViewModel {
         // `hfModels`, so a stale fetch can't write a size into a row
         // belonging to the superseded result set.
         enrichTask?.cancel()
+        // The search state is set here, synchronously, and never by a task
+        // that has been cancelled: every cancellation happens in this method,
+        // which then owns the state. A cancelled task returns without touching
+        // it, so the empty-query branch clears the spinner itself; otherwise
+        // clearing the field mid-search left "Searching Hugging Face…" up
+        // until the next search. Setting it inside the task would let a task
+        // cancelled before it first ran turn the spinner back on afterwards.
         guard !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty else {
+            searchTask = nil
+            isSearchingHF = false
+            hfError = nil
             hfModels = []
             return
         }
         let query = searchQuery
+        isSearchingHF = true
+        hfError = nil
         searchTask = Task {
-            isSearchingHF = true
-            hfError = nil
             do {
                 let results = try await downloader.search(query: query, limit: 20)
                 guard !Task.isCancelled else { return }
@@ -364,15 +374,20 @@ final class ModelLibraryViewModel {
             let maxInflight = 4
             var iterator = missingIDs.makeIterator()
 
-            func enqueue() {
-                guard let next = iterator.next() else { return }
+            // Returns whether it started a fetch. The fill loop below has
+            // to stop when the list runs out: with fewer models to size than
+            // `maxInflight`, `inflight` never reaches the cap, and a loop on
+            // the cap alone spun the main actor forever (#143).
+            func enqueue() -> Bool {
+                guard let next = iterator.next() else { return false }
                 inflight += 1
                 group.addTask {
                     let size = try? await downloader.sizeBytes(for: next)
                     return (next, size)
                 }
+                return true
             }
-            while inflight < maxInflight { enqueue() }
+            while inflight < maxInflight, enqueue() {}
 
             while let (id, size) = await group.next() {
                 inflight -= 1
@@ -386,7 +401,7 @@ final class ModelLibraryViewModel {
                     }
                     await cache.put(id, size: size)
                 }
-                if !Task.isCancelled { enqueue() }
+                if !Task.isCancelled { _ = enqueue() }
             }
         }
     }

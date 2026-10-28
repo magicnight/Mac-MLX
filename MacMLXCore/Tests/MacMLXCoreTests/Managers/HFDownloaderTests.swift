@@ -179,6 +179,72 @@ struct HFDownloaderTests {
         #expect(headCount.withLock { $0 } == 0)
     }
 
+    /// Two files without a declared size, fewer than the four HEADs the
+    /// fetch runs at once. The fill loop used to wait for four HEADs to
+    /// start and never returned once the files ran out, holding the actor
+    /// (#143).
+    @Test func sizeBytesHeadsFewerUndeclaredFilesThanItsConcurrencyCap() async throws {
+        let total = try #require(await sizeBytesWithDeadline(
+            declared: 512, undeclared: ["model.safetensors": 1000, "tokenizer.json": 24]))
+        let expected: Int64 = 512 + 1000 + 24
+        #expect(total == expected)
+    }
+
+    /// Six undeclared files: four HEADs start, and each one that finishes
+    /// has to start the next.
+    @Test func sizeBytesHeadsMoreUndeclaredFilesThanItsConcurrencyCap() async throws {
+        let undeclared = Dictionary(uniqueKeysWithValues: (1...6).map {
+            ("model-\($0)-of-6.safetensors", Int64($0) * 100)
+        })
+        let total = try #require(await sizeBytesWithDeadline(declared: 512, undeclared: undeclared))
+        let expected: Int64 = 512 + 100 + 200 + 300 + 400 + 500 + 600
+        #expect(total == expected)
+    }
+
+    /// Runs `sizeBytes(for:)` for a repository with one declared file and the
+    /// given undeclared ones, answered by HEAD with `x-linked-size`. The call
+    /// runs detached and is polled for up to 60 s, so a fill loop that spins
+    /// on the downloader's actor fails the test instead of hanging the run;
+    /// the spinning actor is that test's own downloader.
+    private func sizeBytesWithDeadline(
+        declared: Int64, undeclared: [String: Int64]
+    ) async throws -> Int64? {
+        var siblings = [#"{"rfilename": "config.json", "size": \#(declared)}"#]
+        siblings += undeclared.keys.sorted().map { #"{"rfilename": "\#($0)"}"# }
+        let json = Data(#"{"id": "mlx-community/undeclared", "siblings": [\#(siblings.joined(separator: ","))]}"#.utf8)
+
+        MockURLProtocol.handler = { request in
+            let url = request.url ?? URL(string: "https://example.com")!
+            guard request.httpMethod == "HEAD" else {
+                return (httpResponse(url: url, statusCode: 200), json)
+            }
+            let size = undeclared[url.lastPathComponent].map(String.init) ?? "0"
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: nil,
+                headerFields: ["x-linked-size": size])!
+            return (response, Data())
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let downloader = HFDownloader(urlSession: makeMockSession())
+        let result = OSAllocatedUnfairLock<Result<Int64, any Error>?>(initialState: nil)
+        Task.detached {
+            do {
+                let total = try await downloader.sizeBytes(for: "mlx-community/undeclared")
+                result.withLock { $0 = .success(total) }
+            } catch {
+                result.withLock { $0 = .failure(error) }
+            }
+        }
+        let deadline = ContinuousClock.now + .seconds(60)
+        while ContinuousClock.now < deadline {
+            if let outcome = result.withLock({ $0 }) { return try outcome.get() }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("sizeBytes(for:) did not return within 60 s")
+        return nil
+    }
+
     @Test func filesSingleSiblingNoSize() async throws {
         let json = """
         {

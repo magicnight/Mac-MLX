@@ -419,8 +419,13 @@ public actor HFDownloader {
             let maxInflight = 4
             var iterator = missing.makeIterator()
 
-            func enqueue() {
-                guard let file = iterator.next() else { return }
+            // Returns whether it started a HEAD. The fill loop has to stop
+            // when the files run out: with fewer unsized files than
+            // `maxInflight`, a loop on the cap alone never ends and holds
+            // this actor for good; the search's size enrichment had the
+            // same loop on the main actor (#143).
+            func enqueue() -> Bool {
+                guard let file = iterator.next() else { return false }
                 inflight += 1
                 group.addTask {
                     await Self.headSize(
@@ -430,13 +435,14 @@ public actor HFDownloader {
                         path: file.path
                     )
                 }
+                return true
             }
-            while inflight < maxInflight { enqueue() }
+            while inflight < maxInflight, enqueue() {}
             var collected: [Int64] = []
             while let size = await group.next() {
                 inflight -= 1
                 if let size { collected.append(size) }
-                enqueue()
+                _ = enqueue()
             }
             return collected
         }
