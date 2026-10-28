@@ -128,6 +128,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **Searching Hugging Face in the Model Library could freeze the app
+  (#143).** After a search, the library fills in download sizes, up to four
+  at a time. When only one to three results still needed a size, the loop
+  that starts those fetches never finished, and it ran on the main thread.
+  That was the ordinary case while typing: every keystroke searches again,
+  sizes the session already fetched are filled in from memory, and
+  consecutive results mostly overlap, so pausing on `llama-3` and then
+  typing `.` left a single new result to size. A search whose list held
+  one to three results froze it on its own. The same loop in the size
+  lookup held the downloader, and every later search and download, on a
+  repository with one to three files of undeclared size. Both date from
+  v0.3.6. Clearing the search field while a search was running also left
+  "Searching Hugging Face…" up until the next search.
 - **A cached audio snapshot is certified against the whole repository
   listing.** The fork's completeness check read `listFiles`, which returns
   only the first page of a Hub tree listing, so a repository past one page
