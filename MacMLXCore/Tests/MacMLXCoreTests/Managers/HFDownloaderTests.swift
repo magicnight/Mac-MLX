@@ -90,14 +90,19 @@ struct HFDownloaderTests {
         }
         """.data(using: .utf8)!
 
+        let queries = OSAllocatedUnfairLock<[String?]>(initialState: [])
         MockURLProtocol.handler = { request in
             let url = request.url ?? URL(string: "https://example.com")!
+            queries.withLock { $0.append(url.query()) }
             return (httpResponse(url: url, statusCode: 200), json)
         }
         defer { MockURLProtocol.handler = nil }
 
         let downloader = HFDownloader(urlSession: makeMockSession())
         let files = try await downloader.files(for: "mlx-community/Qwen3-8B-4bit")
+        // Only the size lookup asks for `?blobs=true`; a download needs the
+        // paths, not the sizes.
+        #expect(queries.withLock { $0 } == [nil])
 
         #expect(files.count == 2)
         #expect(files[0].path == "config.json")
@@ -147,37 +152,95 @@ struct HFDownloaderTests {
         }
     }
 
-    @Test func sizeBytesUsesDeclaredSiblings() async throws {
-        // Siblings all have explicit sizes — sizeBytes should sum them
-        // directly and never HEAD anything.
-        let json = """
+    /// The Hub sizes every sibling, weights included, only when the
+    /// listing is asked for with `?blobs=true`. The mock answers like it,
+    /// so the sum is right only if the parameter went out, and no HEAD is
+    /// needed for it. The weights' `size` here is the pointer's, as a
+    /// mirror might declare it; `lfs.size` is the file's.
+    @Test func sizeBytesReadsSizesFromTheBlobsListing() async throws {
+        let sized = """
         {
-          "id": "mlx-community/all-declared",
+          "id": "mlx-community/blobs",
           "siblings": [
             {"rfilename": "config.json", "size": 512},
-            {"rfilename": "tokenizer.json", "size": 2048},
-            {"rfilename": "model.safetensors", "size": 4294967296}
+            {"rfilename": "tokenizer.json", "size": 2048,
+             "lfs": {"size": 2048, "sha256": "ab", "pointerSize": 133}},
+            {"rfilename": "model.safetensors", "size": 134,
+             "lfs": {"size": 4294967296, "sha256": "cd", "pointerSize": 134}}
           ]
         }
-        """.data(using: .utf8)!
+        """
+        let plain = """
+        {
+          "id": "mlx-community/blobs",
+          "siblings": [
+            {"rfilename": "config.json"},
+            {"rfilename": "tokenizer.json"},
+            {"rfilename": "model.safetensors"}
+          ]
+        }
+        """
 
-        // Count requests so we can assert no HEAD traffic was issued.
         let headCount = OSAllocatedUnfairLock<Int>(initialState: 0)
         MockURLProtocol.handler = { request in
             let url = request.url ?? URL(string: "https://example.com")!
             if request.httpMethod == "HEAD" {
                 headCount.withLock { $0 += 1 }
+                return (httpResponse(url: url, statusCode: 404), Data())
             }
-            return (httpResponse(url: url, statusCode: 200), json)
+            let blobs = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.contains(URLQueryItem(name: "blobs", value: "true")) ?? false
+            return (httpResponse(url: url, statusCode: 200), Data((blobs ? sized : plain).utf8))
         }
         defer { MockURLProtocol.handler = nil }
 
         let downloader = HFDownloader(urlSession: makeMockSession())
-        let total = try await downloader.sizeBytes(for: "mlx-community/all-declared")
+        let total = try await downloader.sizeBytes(for: "mlx-community/blobs")
 
         let expected: Int64 = 512 + 2048 + 4_294_967_296
         #expect(total == expected)
         #expect(headCount.withLock { $0 } == 0)
+    }
+
+    /// A mirror that ignores `?blobs=true` answers with the plain listing.
+    /// Every sibling it leaves unsized is then sized by one HEAD.
+    @Test func sizeBytesHeadsWhatAListingWithoutSizesLeavesOut() async throws {
+        let json = Data("""
+        {
+          "id": "mlx-community/mirror",
+          "siblings": [
+            {"rfilename": "config.json"},
+            {"rfilename": "model.safetensors"}
+          ]
+        }
+        """.utf8)
+        let sizes: [String: String] = ["config.json": "512", "model.safetensors": "4000"]
+
+        let heads = OSAllocatedUnfairLock<[String]>(initialState: [])
+        let listings = OSAllocatedUnfairLock<[URL]>(initialState: [])
+        MockURLProtocol.handler = { request in
+            let url = request.url ?? URL(string: "https://example.com")!
+            guard request.httpMethod == "HEAD" else {
+                listings.withLock { $0.append(url) }
+                return (httpResponse(url: url, statusCode: 200), json)
+            }
+            heads.withLock { $0.append(url.lastPathComponent) }
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: nil,
+                headerFields: ["x-linked-size": sizes[url.lastPathComponent] ?? "0"])!
+            return (response, Data())
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let downloader = HFDownloader(urlSession: makeMockSession())
+        let total = try await downloader.sizeBytes(for: "mlx-community/mirror")
+
+        let expected: Int64 = 512 + 4000
+        #expect(total == expected)
+        #expect(heads.withLock { $0 }.sorted() == ["config.json", "model.safetensors"])
+        let listing = try #require(listings.withLock { $0 }.first)
+        #expect(listing.path() == "/api/models/mlx-community/mirror")
+        #expect(listing.query() == "blobs=true")
     }
 
     /// Two files without a declared size, fewer than the four HEADs the

@@ -393,16 +393,19 @@ public actor HFDownloader {
     /// Total size of all files in the model repo, in bytes.
     ///
     /// HF's `/api/models/{id}` endpoint declares no `size` for any
-    /// sibling, so summing `siblings[*].size` gives zero for real
-    /// models. We fall back to HEAD on `/{id}/resolve/main/{path}` for
-    /// every sibling without a declared size; HF redirects, and the
-    /// final response carries the file's `content-length`.
+    /// sibling unless asked with `?blobs=true`, which sizes every one,
+    /// LFS and Xet weights included, in the same single request. A
+    /// mirror that ignores the parameter (`setBaseURL`, the endpoint
+    /// setting) still answers without sizes, so we fall back to HEAD on
+    /// `/{id}/resolve/main/{path}` for every sibling left unsized; HF
+    /// redirects, and the final response carries the file's
+    /// `content-length`.
     ///
     /// Returns nil when any of those HEADs fails: a sum without the
     /// weights reads as a few KB for a multi-GB model, and the library
     /// caches it for a week (`HFSizeCache`).
     public func sizeBytes(for modelID: String) async throws -> Int64? {
-        let files = try await files(for: modelID)
+        let files = try await sizedFiles(for: modelID)
         // Step 1: declared sizes we already have.
         var total: Int64 = files.compactMap(\.size).reduce(0, +)
 
@@ -450,6 +453,23 @@ public actor HFDownloader {
         guard fetched.count == missing.count else { return nil }
         total += fetched.reduce(0, +)
         return total
+    }
+
+    /// `files(for:)` with `?blobs=true`, which makes the Hub declare each
+    /// sibling's size. Only `sizeBytes(for:)` reads the sizes: a download
+    /// needs the paths and the commit, so `files(for:)` and
+    /// `downloadMeta(for:)` keep the plain listing.
+    private func sizedFiles(for modelID: String) async throws -> [HFRemoteFile] {
+        let url = baseURL.appending(path: "api/models/\(modelID)")
+            .appending(queryItems: [URLQueryItem(name: "blobs", value: "true")])
+        let data = try await fetchData(from: url)
+        let envelope = try JSONDecoder.huggingFace.decode(ModelDetailsEnvelope.self, from: data)
+        // The Hub declares the same number in both, but a mirror that put
+        // the pointer's size in `size` would size each shard at ~134
+        // bytes and never fall back to HEAD.
+        return envelope.siblings.map { sibling in
+            HFRemoteFile(path: sibling.rfilename, size: sibling.lfs?.size ?? sibling.size, lfs: false)
+        }
     }
 
     /// Issue a HEAD against `{baseURL}/{modelID}/resolve/main/{path}` and
@@ -1045,6 +1065,12 @@ private struct ModelDetailsEnvelope: Decodable {
 
     struct SiblingEntry: Decodable {
         let rfilename: String
+        let size: Int64?
+        /// Only in a `?blobs=true` listing, for LFS-backed files.
+        let lfs: LFSEntry?
+    }
+
+    struct LFSEntry: Decodable {
         let size: Int64?
     }
 }

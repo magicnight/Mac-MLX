@@ -390,6 +390,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `TemplateProcessing`, which honours the flag, and were not affected.
 
 ### Changed
+- **Model Library sizes come from one request per result.** The size shown
+  for a Hugging Face search result used to take a HEAD request for every
+  file in the repository, about 200 for a 20-result search. The repository
+  listing is now asked for with `?blobs=true`, which carries every file's
+  size, weights included. Gated repositories, whose HEADs the Hub refuses
+  without a token, now get a size too. A mirror that leaves sizes out of
+  that listing still gets one HEAD per file it did not size.
 - **Hummingbird 2.28.0 and Sparkle 2.10.1.** Hummingbird 2.26.0 fixed three
   denial-of-service advisories in 2.25.1 and earlier (GHSA-wqpw-qq6j-p4x2,
   GHSA-62cf-93wq-244m, GHSA-97r6-mq85-c3rv). None of them reaches macMLX: the
