@@ -34,13 +34,16 @@ enum HistoryBoundary: Equatable, Sendable {
 
     /// Decide the boundary for one request.
     ///
+    /// Only the prefix check guards correctness, and it is complete: the key
+    /// stored is `promptTokens[0..<boundary]` and the cache is computed from
+    /// exactly those tokens, so any prefix is a valid entry. Whether it is
+    /// also where the next turn's prompt diverges is what the render is for,
+    /// and a render that disagreed with generation's would only cost the
+    /// reuse.
+    ///
     /// - Parameters:
     ///   - historyTokens: the request's chat rendered without the generation
     ///     prompt.
-    ///   - renderedPromptTokens: the same chat rendered through the same call
-    ///     with the generation prompt. It must equal `promptTokens`, or the
-    ///     boundary render is not the render generation used and nothing is
-    ///     known about where its history ends.
     ///   - promptTokens: the prompt the engine is about to prefill.
     ///   - reusedTokenCount: how many leading prompt tokens the prompt cache
     ///     already served (0 on a miss).
@@ -50,13 +53,9 @@ enum HistoryBoundary: Equatable, Sendable {
     ///   ``minimumBoundarySnapshotTokens`` beyond the reused prefix.
     static func decide(
         historyTokens: [Int],
-        renderedPromptTokens: [Int],
         promptTokens: [Int],
         reusedTokenCount: Int
     ) -> HistoryBoundary {
-        guard renderedPromptTokens == promptTokens else {
-            return .skip(reason: "the generation-prompt render differs from the prompt")
-        }
         let boundary = historyTokens.count
         guard boundary < promptTokens.count else {
             return .skip(reason: "the history render (\(boundary) tokens) does not end before the prompt does")

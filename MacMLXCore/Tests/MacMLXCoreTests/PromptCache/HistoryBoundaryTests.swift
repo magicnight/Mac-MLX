@@ -25,8 +25,7 @@ struct HistoryBoundaryTests {
     func snapshotsAQualifyingBoundary() {
         let (history, prompt) = Self.prompt(history: 600)
         let decision = HistoryBoundary.decide(
-            historyTokens: history, renderedPromptTokens: prompt,
-            promptTokens: prompt, reusedTokenCount: 100)
+            historyTokens: history, promptTokens: prompt, reusedTokenCount: 100)
         #expect(decision == .snapshot(boundary: 600))
     }
 
@@ -34,8 +33,7 @@ struct HistoryBoundaryTests {
     func snapshotsOnAMiss() {
         let (history, prompt) = Self.prompt(history: Self.minimum)
         let decision = HistoryBoundary.decide(
-            historyTokens: history, renderedPromptTokens: prompt,
-            promptTokens: prompt, reusedTokenCount: 0)
+            historyTokens: history, promptTokens: prompt, reusedTokenCount: 0)
         #expect(decision == .snapshot(boundary: Self.minimum))
     }
 
@@ -44,8 +42,7 @@ struct HistoryBoundaryTests {
         let (history, prompt) = Self.prompt(history: 1_000)
         let reused = 1_000 - Self.minimum + 1
         let decision = HistoryBoundary.decide(
-            historyTokens: history, renderedPromptTokens: prompt,
-            promptTokens: prompt, reusedTokenCount: reused)
+            historyTokens: history, promptTokens: prompt, reusedTokenCount: reused)
         guard case .skip = decision else {
             Issue.record("expected a skip, got \(decision)")
             return
@@ -53,8 +50,7 @@ struct HistoryBoundaryTests {
         // Exactly the minimum qualifies.
         #expect(
             HistoryBoundary.decide(
-                historyTokens: history, renderedPromptTokens: prompt,
-                promptTokens: prompt, reusedTokenCount: reused - 1)
+                historyTokens: history, promptTokens: prompt, reusedTokenCount: reused - 1)
                 == .snapshot(boundary: 1_000))
     }
 
@@ -65,22 +61,7 @@ struct HistoryBoundaryTests {
         // full turn-1 prompt diverges from turn 2 on its last token.
         history[history.count - 1] = 99_999
         let decision = HistoryBoundary.decide(
-            historyTokens: history, renderedPromptTokens: prompt,
-            promptTokens: prompt, reusedTokenCount: 0)
-        guard case .skip = decision else {
-            Issue.record("expected a skip, got \(decision)")
-            return
-        }
-    }
-
-    @Test("A generation-prompt render that differs from the prompt is skipped")
-    func skipsWhenTheRenderIsNotGenerations() {
-        let (history, prompt) = Self.prompt(history: 600)
-        var rendered = prompt
-        rendered[rendered.count - 1] += 1
-        let decision = HistoryBoundary.decide(
-            historyTokens: history, renderedPromptTokens: rendered,
-            promptTokens: prompt, reusedTokenCount: 0)
+            historyTokens: history, promptTokens: prompt, reusedTokenCount: 0)
         guard case .skip = decision else {
             Issue.record("expected a skip, got \(decision)")
             return
@@ -95,14 +76,12 @@ struct HistoryBoundaryTests {
         let whole = Array(0..<600)
         #expect(
             HistoryBoundary.decide(
-                historyTokens: whole, renderedPromptTokens: whole,
-                promptTokens: whole, reusedTokenCount: 0)
+                historyTokens: whole, promptTokens: whole, reusedTokenCount: 0)
                 != .snapshot(boundary: 600))
         let longer = whole + [7]
         #expect(
             HistoryBoundary.decide(
-                historyTokens: longer, renderedPromptTokens: whole,
-                promptTokens: whole, reusedTokenCount: 0)
+                historyTokens: longer, promptTokens: whole, reusedTokenCount: 0)
                 != .snapshot(boundary: 601))
     }
 
@@ -149,8 +128,7 @@ struct HistoryBoundaryTests {
         let (history, prompt) = Self.prompt(history: 600)
         for reused in [600, 601] {
             let decision = HistoryBoundary.decide(
-                historyTokens: history, renderedPromptTokens: prompt,
-                promptTokens: prompt, reusedTokenCount: reused)
+                historyTokens: history, promptTokens: prompt, reusedTokenCount: reused)
             guard case .skip = decision else {
                 Issue.record("reused \(reused): expected a skip, got \(decision)")
                 return

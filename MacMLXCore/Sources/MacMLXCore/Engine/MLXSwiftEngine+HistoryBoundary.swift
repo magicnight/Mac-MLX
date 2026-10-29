@@ -14,15 +14,16 @@ extension MLXSwiftEngine {
     /// Where to split this request's prefill, decided from the chat rendered
     /// with and without the generation prompt.
     ///
-    /// Both renders mirror upstream `LLMUserInputProcessor.prepare`, the one
+    /// The render mirrors upstream `LLMUserInputProcessor.prepare`, the one
     /// that produced `promptTokens`: the message generator the factory chose
     /// (the configuration's, else the model's, else the default) over the same
     /// `UserInput` (messages, tools, template kwargs), then the resident
-    /// tokenizer's chat template, chat-template override included. They differ
-    /// only in `addGenerationPrompt`. The render with it must reproduce
-    /// `promptTokens` exactly, which ``HistoryBoundary/decide`` checks, so a
-    /// render path that ever drifts from generation's costs the snapshot, never
-    /// correctness: any prefix of the prompt is a valid cache to store.
+    /// tokenizer's chat template, chat-template override included, through the
+    /// same call generation's render goes through, with `addGenerationPrompt`
+    /// false. ``HistoryBoundary/decide`` accepts it only as an exact prefix of
+    /// `promptTokens`, so a render that ever drifted from generation's would
+    /// cost the snapshot, never correctness: any prefix of the prompt is a
+    /// valid cache to store.
     ///
     /// Returns `.skip` without rendering when `cache` can always be trimmed
     /// (see ``cacheNeedsHistorySnapshot(_:)``) or no boundary could clear the
@@ -54,15 +55,11 @@ extension MLXSwiftEngine {
             ?? DefaultMessageGenerator()
         let messages = generator.generate(from: input)
         do {
-            let rendered = try tokenizer.applyChatTemplate(
-                messages: messages, tools: input.tools, additionalContext: input.additionalContext,
-                addGenerationPrompt: true)
             let history = try tokenizer.applyChatTemplate(
                 messages: messages, tools: input.tools, additionalContext: input.additionalContext,
                 addGenerationPrompt: false)
             return HistoryBoundary.decide(
-                historyTokens: history, renderedPromptTokens: rendered,
-                promptTokens: promptTokens, reusedTokenCount: reusedTokenCount)
+                historyTokens: history, promptTokens: promptTokens, reusedTokenCount: reusedTokenCount)
         } catch {
             return .skip(reason: "rendering the history failed: \(error)")
         }

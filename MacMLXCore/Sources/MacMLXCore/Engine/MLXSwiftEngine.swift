@@ -1035,8 +1035,11 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     /// The `UserInput` `request` renders from — the one place generation
     /// (`runGeneration`) and `countPromptTokens` build it, so a count renders
-    /// the very prompt generation would.
-    private static func userInput(for request: GenerateRequest, isVLM: Bool) -> UserInput {
+    /// the very prompt generation would. `logsDroppedInputs` is false for a
+    /// second build of the same request, so its notes (dropped images, dropped tool specs) are logged once.
+    private static func userInput(
+        for request: GenerateRequest, isVLM: Bool, logsDroppedInputs: Bool = true
+    ) -> UserInput {
         // Map our ChatMessage array to MLXLMCommon Chat.Message array.
         // For VLM models, fold each message's `images` into the `Chat.Message`
         // image bag — the VLM's `UserInputProcessor` injects image tokens at
@@ -1049,7 +1052,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 images = msg.images.map { .url($0.fileURL) }
             } else {
                 images = []
-                if !msg.images.isEmpty {
+                if logsDroppedInputs, !msg.images.isEmpty {
                     Task.detached { [count = msg.images.count] in
                         await LogManager.shared.debug(
                             "Dropping \(count) image attachment(s) on text-only model — load a VLM (Qwen-VL, Gemma-3, SmolVLM, …) to use images.",
@@ -1065,7 +1068,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         // shape. Non-object elements are dropped (never force-cast) with a
         // debug note so a malformed spec degrades instead of crashing.
         let toolSpecs = request.tools.map { Self.toolSpecs(from: $0) }
-        if let requested = request.tools, let converted = toolSpecs,
+        if logsDroppedInputs, let requested = request.tools, let converted = toolSpecs,
            converted.count < requested.count {
             Task.detached { [dropped = requested.count - converted.count] in
                 await LogManager.shared.debug(
@@ -1454,7 +1457,8 @@ public actor MLXSwiftEngine: InferenceEngine {
                 lmInput: lmInput,
                 // A second copy of the same `UserInput`: `prepare` consumed the
                 // first, and the history-boundary snapshot renders it again.
-                historyInput: Self.userInput(for: request, isVLM: false),
+                // The first build already logged anything it dropped.
+                historyInput: Self.userInput(for: request, isVLM: false, logsDroppedInputs: false),
                 container: container,
                 generateParams: generateParams,
                 sampling: params,
