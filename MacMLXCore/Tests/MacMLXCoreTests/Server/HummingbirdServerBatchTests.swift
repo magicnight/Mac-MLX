@@ -10,7 +10,8 @@ import Testing
 // the scheduler with a scripted `BatchInferenceCore`. The real engine→scheduler
 // construction is a separate wave; here the seam is a deterministic echo.
 //
-// Port assignments (19_800 range, spaced by 10):
+// Port assignments (19_800 range, spaced by 10; the tools tests sit on the 5s
+// between them):
 //   batchableRequestServedBySeamNotEngine          : 19_800
 //   draftModelRequestBypassesBatch                 : 19_810
 //   seamRefusalFallsBackToEngine                   : 19_820
@@ -19,8 +20,11 @@ import Testing
 //   streamingBatchRequestStreamsViaSeam             : 19_850
 //   coldSwapDrainsSeamBeforeSwap                   : 19_860
 //   markInFlightTrackedForBatchRequest              : 19_870
+//   toolsRequestBypassesBatch                       : 19_875
 //   loadEndpointDrainsSeamBeforeLoad                : 19_880
+//   toolChoiceNoneRequestStillBatches               : 19_885
 //   unloadEndpointDrainsSeamBeforeUnload            : 19_890
+//   emptyToolsArrayStillBatches                     : 19_895
 //   concurrentSameModelDifferentPromptsNoCrossTalk  : 19_900
 //   streamingBatchRequestHonorsIncludeUsage         : 20_800
 
@@ -210,6 +214,81 @@ struct HummingbirdServerBatchTests {
         #expect(try chatContent(data) == "stub-response", "a draft-model request must use the legacy engine path")
         let submitted = await seam.submittedModels()
         #expect(submitted.isEmpty, "the seam must NOT be consulted for a speculative request")
+    }
+
+    /// A request offering tools bypasses the seam: the batched responders do no
+    /// tool-call parsing, so the engine's single-stream path must answer it.
+    @Test
+    func toolsRequestBypassesBatch() async throws {
+        let seam = StubBatchServing()
+        let engine = try await loadedEngine(id: "m")
+        let server = HummingbirdServer(engineProvider: { engine }, batchServing: seam)
+        let port = try await server.start(preferredPort: 19_875)
+
+        var body = chatBody("m")
+        body["tools"] = [[
+            "type": "function",
+            "function": [
+                "name": "get_weather",
+                "parameters": ["type": "object", "properties": [String: Any]()],
+            ],
+        ]]
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(try chatContent(data) == "stub-response", "a tools request must use the legacy engine path")
+        let submitted = await seam.submittedModels()
+        #expect(submitted.isEmpty, "the seam must NOT be consulted for a request offering tools")
+    }
+
+    /// With `tool_choice: "none"` the server drops the tools before building the
+    /// request, so nothing needs parsing and the request may batch as usual.
+    @Test
+    func toolChoiceNoneRequestStillBatches() async throws {
+        let seam = StubBatchServing()
+        let server = HummingbirdServer(
+            engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
+            batchServing: seam)
+        let port = try await server.start(preferredPort: 19_885)
+
+        var body = chatBody("m")
+        body["tools"] = [[
+            "type": "function",
+            "function": [
+                "name": "get_weather",
+                "parameters": ["type": "object", "properties": [String: Any]()],
+            ],
+        ]]
+        body["tool_choice"] = "none"
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(try chatContent(data) == "batch:m", "tool_choice none leaves nothing to parse, so the seam serves it")
+    }
+
+    /// An empty `tools` array offers nothing to call, so it batches like a request
+    /// without tools — matching the engine, which runs no tool-call parser for
+    /// `tools: []` on the single-stream path either.
+    @Test
+    func emptyToolsArrayStillBatches() async throws {
+        let seam = StubBatchServing()
+        let server = HummingbirdServer(
+            engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
+            batchServing: seam)
+        let port = try await server.start(preferredPort: 19_895)
+
+        var body = chatBody("m")
+        body["tools"] = [Any]()
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: body)
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(try chatContent(data) == "batch:m", "an empty tools array leaves nothing to parse, so the seam serves it")
     }
 
     /// When the seam REFUSES (returns nil — e.g. a VLM / uncoverable resident

@@ -50,6 +50,11 @@ public enum BatchRoutingPolicy {
     ///     flag (rather than five arguments) because they share the same "route to
     ///     single-stream" consequence; the caller ORs them together.
     ///
+    ///   - hasTools: the request offers tools (after `tool_choice: "none"` has
+    ///     dropped them). The batched responders emit text only — tool-call
+    ///     parsing lives on the single-stream path — so a batched tool request
+    ///     would hand its calls back as raw text instead of `tool_calls`.
+    ///
     /// - Note: mlx-lm's `is_batchable` also excludes a per-request `seed`. macMLX
     ///   has no per-request `seed` request field yet (see
     ///   `ChatCompletionRequest`), so there is nothing to gate on today. Add a
@@ -59,9 +64,10 @@ public enum BatchRoutingPolicy {
         batchingEnabled: Bool,
         hasDraftModel: Bool,
         hasResponseFormat: Bool,
-        hasUnbatchableSamplingFeature: Bool = false
+        hasUnbatchableSamplingFeature: Bool = false,
+        hasTools: Bool = false
     ) -> Bool {
         batchingEnabled && !hasDraftModel && !hasResponseFormat
-            && !hasUnbatchableSamplingFeature
+            && !hasUnbatchableSamplingFeature && !hasTools
     }
 }

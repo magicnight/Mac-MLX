@@ -280,6 +280,10 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// tokenizer's `Sendable` shape at the `UserInput` boundary. Default nil
     /// and (being optional) decoded via the synthesised `decodeIfPresent`, so
     /// existing serialized requests keep decoding.
+    ///
+    /// - Important: A non-empty `tools` routes the request to the single-stream
+    ///   path (`BatchRoutingPolicy.shouldAttemptBatch(hasTools:)`): tool-call
+    ///   parsing runs only there, and the batched responders stream text only.
     public var tools: [JSONValue]?
     /// Model id of a draft model to speculate with (D1 — classic per-request
     /// draft-model speculative decoding, mirrors mlx-lm Python server's

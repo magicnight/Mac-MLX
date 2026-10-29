@@ -1919,7 +1919,8 @@ public actor HummingbirdServer {
         // endpoint keeps the existing single-stream path untouched.
         // Track E: any per-request sampling/adapter feature the batched step
         // evaluator can't honor forces the single-stream path (see
-        // `BatchRoutingPolicy`).
+        // `BatchRoutingPolicy`), and so does a request offering tools, whose
+        // calls only the single-stream responders parse.
         let hasUnbatchableSamplingFeature =
             params.logitBias != nil
             || params.logprobs
@@ -1930,7 +1931,8 @@ public actor HummingbirdServer {
             batchingEnabled: batchServing != nil,
             hasDraftModel: genRequest.draftModelID != nil,
             hasResponseFormat: genRequest.responseFormat != nil,
-            hasUnbatchableSamplingFeature: hasUnbatchableSamplingFeature
+            hasUnbatchableSamplingFeature: hasUnbatchableSamplingFeature,
+            hasTools: !(genRequest.tools?.isEmpty ?? true)
         ) {
             // MEDIUM#3: resolve the in-flight key the same alias-aware way the
             // single-stream path does (mirrors the resolve at ~line 1897) — the

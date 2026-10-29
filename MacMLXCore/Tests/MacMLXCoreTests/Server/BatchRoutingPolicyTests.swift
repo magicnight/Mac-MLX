@@ -58,6 +58,16 @@ struct BatchRoutingPolicyTests {
     }
 
     @Test
+    func toolsForceSequentialEvenWithSeam() {
+        // The batched responders emit text only: tool-call parsing lives on the
+        // single-stream path, so a request offering tools must take it or its
+        // calls come back as raw text instead of `tool_calls`.
+        #expect(!BatchRoutingPolicy.shouldAttemptBatch(
+            batchingEnabled: true, hasDraftModel: false, hasResponseFormat: false,
+            hasTools: true))
+    }
+
+    @Test
     func unbatchableFlagDefaultsFalseKeepsPlainBatching() {
         // The new parameter defaults to false, so pre-Track-E call sites (and a
         // plain request) still attempt the batched path unchanged.

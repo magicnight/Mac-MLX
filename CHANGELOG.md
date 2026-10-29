@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A tool-calling request that arrived while another request was being served on a model the continuous batcher covers (the dense Qwen 2/3, Llama and Gemma families) could be batched, and the batched path never parsed tool calls, so the call came back as plain text in `content` instead of `tool_calls`. A request that offers tools now always takes the single-stream path; `tool_choice: "none"` and `tools: []` still batch, since there is nothing to parse. A lone request on an idle server was never affected (the batcher hands it to the single-stream path), which is why this survived since v0.6: it takes concurrency, such as an agent running subagents. The cost is that concurrent tool-using agents now queue on the single-stream path instead of batching, until the batched path learns to parse tool calls. Covered by stub tests; I have no batch-covered checkpoint locally to reproduce it on real weights.
+
 ## [0.10.0] - 2026-10-29
 
 Structured output learns the schemas Apple's Foundation Models client sends,
