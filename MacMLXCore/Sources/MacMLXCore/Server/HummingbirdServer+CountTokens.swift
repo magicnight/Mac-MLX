@@ -21,12 +21,20 @@ extension HummingbirdServer {
     /// resolved and loaded as for a generation, under the generation lock
     /// (`beginGeneration`): a count waits behind an in-flight generation,
     /// and may cold-swap the model. An unknown model is a 404, an engine that
-    /// cannot count a 501, all in Anthropic's error envelope.
+    /// cannot count a 501, all in Anthropic's error envelope. The body limit
+    /// is `/v1/messages`'s (`anthropicBodyLimitBytes`), since a count is sent
+    /// with the same replayed session.
     func handleAnthropicCountTokens(
         request: Request,
         context: BasicRequestContext
     ) async throws -> Response {
-        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        let buffer: ByteBuffer
+        do {
+            buffer = try await request.body.collect(upTo: Self.anthropicBodyLimitBytes)
+        } catch {
+            guard Self.isUploadTooLarge(error) else { throw error }
+            return anthropicBodyTooLargeResponse()
+        }
         guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
             return anthropicErrorResponse(status: .badRequest, message: "Empty request body", type: "invalid_request_error")
         }

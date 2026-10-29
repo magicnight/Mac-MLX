@@ -250,9 +250,12 @@ Request (the fields acted on):
 - Accepted and ignored: `metadata`, `output_config` (`effort` is not mapped),
   `context_management`, `safeguards`, `cache_control`, `top_k`,
   `stop_sequences`, `service_tier`.
+- Body limit 64 MB (`anthropicBodyLimitBytes`), not the 2 MB route default
+  chat uses: Claude Code replays the whole session every turn.
 - Errors use Anthropic's envelope, `{"type": "error", "error": {"type",
   "message"}}`: 400 `invalid_request_error` (bad JSON, missing `max_tokens`,
-  bad `tool_choice`, a broken tool history), 404 `not_found_error` (unknown
+  bad `tool_choice`, a broken tool history), 413 `request_too_large` (a body
+  over the limit), 404 `not_found_error` (unknown
   model, before the stream opens when streaming), 500 `api_error` (a failed
   load or generation), 504 on a stall. The bearer-auth 401 keeps the OpenAI
   shape.
@@ -286,8 +289,8 @@ generation tokenizes it.
 ```
 
 The model is resolved and loaded as for a generation, under the generation
-lock, so a count waits behind an in-flight generation. Errors as on
-`/v1/messages`: 400, 404 for an unknown model, and 501 `api_error` ("token
+lock, so a count waits behind an in-flight generation. The body limit and
+errors are `/v1/messages`'s: 400, 413, 404 for an unknown model, and 501 `api_error` ("token
 counting is not supported by this engine") for an engine without counting.
 
 ### GET /v1/models

@@ -3294,7 +3294,15 @@ public actor HummingbirdServer {
         request: Request,
         context: BasicRequestContext
     ) async throws -> Response {
-        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        let buffer: ByteBuffer
+        do {
+            buffer = try await request.body.collect(upTo: Self.anthropicBodyLimitBytes)
+        } catch {
+            // Only the ceiling is a 413 (see `isUploadTooLarge`); anything else
+            // takes Hummingbird's own error path, as on the other routes.
+            guard Self.isUploadTooLarge(error) else { throw error }
+            return anthropicBodyTooLargeResponse()
+        }
         guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
             return anthropicErrorResponse(
                 status: .badRequest,
@@ -3322,6 +3330,23 @@ public actor HummingbirdServer {
             return try await anthropicNonStreamingResponse(
                 genRequest: genRequest, showsThinking: showsThinking, exposeCacheFigures: exposeCacheFigures)
         }
+    }
+
+    /// Ceiling on a `/v1/messages` or `/v1/messages/count_tokens` body.
+    /// Claude Code is stateless toward macMLX and replays the whole session
+    /// every turn — tool results, file contents, screenshots — so the
+    /// route-wide 2 MB `context.maxUploadSize` would turn a long session into
+    /// a permanent 413. The same ceiling as `/v1/responses`.
+    static let anthropicBodyLimitBytes = 64 * 1024 * 1024
+
+    /// The 413 for a body over `anthropicBodyLimitBytes`, in Anthropic's
+    /// envelope with its own error type for it, `request_too_large`.
+    func anthropicBodyTooLargeResponse() -> Response {
+        anthropicErrorResponse(
+            status: .contentTooLarge,
+            message: "Request body exceeds the \(Self.anthropicBodyLimitBytes)-byte limit.",
+            type: "request_too_large"
+        )
     }
 
     /// The `GenerateRequest` an Anthropic Messages body asks for. Shared by

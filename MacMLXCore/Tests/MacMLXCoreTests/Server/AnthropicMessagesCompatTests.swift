@@ -27,6 +27,8 @@ import Testing
 //   unknownModelStreamingIsAnAnthropic404             : 22_330
 //   loadFailureIsAnAnthropic500                       : 22_360
 //   missingMaxTokensIs400                             : 22_390
+//   bodyOverTwoMegabytesIsAccepted                    : 22_660
+//   bodyOverTheLimitIsAnAnthropic413                  : 22_690
 
 @Suite("AnthropicMessagesCompat")
 struct AnthropicMessagesCompatTests {
@@ -111,6 +113,10 @@ struct AnthropicMessagesCompatTests {
     /// POSTs to `/v1/messages?beta=true`, the URL Claude Code uses, with its
     /// version and beta headers.
     private func post(port: Int, body: [String: Any]) async throws -> (Data, HTTPURLResponse) {
+        try await post(port: port, data: JSONSerialization.data(withJSONObject: body))
+    }
+
+    private func post(port: Int, data body: Data) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: try #require(URL(string: "http://127.0.0.1:\(port)/v1/messages?beta=true")))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -118,7 +124,7 @@ struct AnthropicMessagesCompatTests {
         request.setValue(
             "mid-conversation-system-2026-04-07,interleaved-thinking-2025-05-14",
             forHTTPHeaderField: "anthropic-beta")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = body
         let (data, response) = try await URLSession.shared.data(for: request)
         return (data, try #require(response as? HTTPURLResponse))
     }
@@ -543,6 +549,41 @@ struct AnthropicMessagesCompatTests {
         #expect(response.statusCode == 400)
         let error = try #require(try json(data)["error"] as? [String: Any])
         #expect(error["message"] as? String == "`max_tokens` is required.")
+        #expect(captured == nil)
+    }
+
+    // MARK: Body limit
+
+    @Test
+    func bodyOverTwoMegabytesIsAccepted() async throws {
+        // A long Claude Code session replays more than the 2 MB route default.
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 22_660)
+        let big = String(repeating: "a", count: 2 * 1024 * 1024 + 4096)
+        let (data, response) = try await post(port: port, body: [
+            "model": Self.model, "max_tokens": 64, "messages": [["role": "user", "content": big]],
+        ])
+        let captured = await engine.capturedRequest
+        await server.stop()
+
+        #expect(response.statusCode == 200, "\(String(decoding: data.prefix(300), as: UTF8.self))")
+        #expect(captured?.messages.first?.content.count == big.count)
+    }
+
+    @Test
+    func bodyOverTheLimitIsAnAnthropic413() async throws {
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 22_690)
+        let (data, response) = try await post(
+            port: port, data: Data(count: HummingbirdServer.anthropicBodyLimitBytes + 1))
+        let captured = await engine.capturedRequest
+        await server.stop()
+
+        #expect(response.statusCode == 413)
+        let body = try json(data)
+        #expect(body["type"] as? String == "error")
+        let error = try #require(body["error"] as? [String: Any])
+        #expect(error["type"] as? String == "request_too_large")
         #expect(captured == nil)
     }
 }
