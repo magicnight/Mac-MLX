@@ -25,4 +25,18 @@ struct EngineColdRootTests {
         }
         #expect(first != second, "one directory per engine")
     }
+
+    @Test("A test engine whose cold tier stayed empty removes its directory")
+    func anEmptyTestRootIsRemovedWithItsEngine() async throws {
+        var engine: MLXSwiftEngine? = MLXSwiftEngine(promptCache: PromptCacheConfig(coldEnabled: false))
+        let root = try #require(await engine?.promptCacheRoot)
+        #expect(FileManager.default.fileExists(atPath: root.path), "the store creates its root")
+        engine = nil
+        // Polled: the last reference may be released a moment after this one.
+        let deadline = Date(timeIntervalSinceNow: 60)
+        while FileManager.default.fileExists(atPath: root.path), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
 }

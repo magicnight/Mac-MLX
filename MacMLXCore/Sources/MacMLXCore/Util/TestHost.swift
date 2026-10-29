@@ -7,8 +7,14 @@ import Foundation
 /// `swift test` helper. Code that would touch the user's real data under
 /// `~/.mac-mlx` by default asks this to pick a throwaway location instead,
 /// so a test cannot reach that data unless it passes the real location
-/// explicitly. Always false in the app and the CLI.
+/// explicitly.
+///
+/// Detected in Debug builds only, the configuration both `swift test` and
+/// `xcodebuild test` build. A Release build always answers false, so a
+/// shipped app or CLI can never mistake itself for a test runner and stop
+/// persisting the user's data.
 enum TestHost {
+    #if DEBUG
     static let isActive: Bool = {
         let process = ProcessInfo.processInfo
         return NSClassFromString("XCTestCase") != nil
@@ -16,4 +22,7 @@ enum TestHost {
             || process.environment["XCTestSessionIdentifier"] != nil
             || ["xctest", "swiftpm-testing-helper"].contains(process.processName)
     }()
+    #else
+    static let isActive = false
+    #endif
 }

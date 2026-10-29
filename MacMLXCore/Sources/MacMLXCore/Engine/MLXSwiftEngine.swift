@@ -349,9 +349,25 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// passes it to ``init(siliconObserver:promptCache:promptCacheRoot:)``.
     static func defaultPromptCacheRoot() -> URL {
         guard TestHost.isActive else { return DataRoot.macMLX("kv-cache") }
-        return FileManager.default.temporaryDirectory
-            .appending(path: "macmlx-test-kv-cache", directoryHint: .isDirectory)
-            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        return testPromptCacheParent.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    }
+
+    /// Where ``defaultPromptCacheRoot()`` puts a test engine's cold tier.
+    private static let testPromptCacheParent = FileManager.default.temporaryDirectory
+        .appending(path: "macmlx-test-kv-cache", directoryHint: .isDirectory)
+
+    /// A test engine whose cold tier stayed empty removes the directory
+    /// ``defaultPromptCacheRoot()`` gave it, so unit tests that build engines
+    /// by the hundred leave nothing behind. Only under a test runner and
+    /// only that directory; one holding files is left for the test that
+    /// wrote them.
+    deinit {
+        guard TestHost.isActive else { return }
+        let root = promptCacheStore.root
+        guard root.deletingLastPathComponent().standardizedFileURL == Self.testPromptCacheParent.standardizedFileURL,
+            (try? FileManager.default.contentsOfDirectory(atPath: root.path))?.isEmpty == true
+        else { return }
+        try? FileManager.default.removeItem(at: root)
     }
 
     /// Test seam: the directory this engine's cold tier lives under.
