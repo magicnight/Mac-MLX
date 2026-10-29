@@ -172,7 +172,7 @@ private struct LegacyCompletionRequest: Decodable, Sendable {
 /// parts (`text` and `image_url`). The decoder tries the string form
 /// first; on failure it falls through to an array of parts so we don't
 /// reject older clients that send a bare string.
-private enum MultimodalContent: Decodable, Sendable {
+enum MultimodalContent: Decodable, Sendable {
     case string(String)
     case parts([Part])
 
@@ -234,7 +234,7 @@ private enum MultimodalContent: Decodable, Sendable {
     /// Best-effort base64 data-URL → on-disk image. Returns nil on
     /// any malformed input or unsupported MIME so callers can simply
     /// drop the part.
-    private static func decodeDataURL(_ urlStr: String) -> ImageAttachment? {
+    static func decodeDataURL(_ urlStr: String) -> ImageAttachment? {
         guard urlStr.hasPrefix("data:") else { return nil }
         let body = urlStr.dropFirst("data:".count)
         let split = body.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
@@ -618,14 +618,14 @@ private struct AnthropicImageSource: Decodable, Sendable {
 /// message. The handler maps it to an HTTP 400 (project rule: no silent
 /// degradation — a half-formed tool turn would otherwise trip a chat-template
 /// pairing assertion downstream).
-private struct ToolHistoryDecodeError: Error {
+struct ToolHistoryDecodeError: Error {
     let message: String
 }
 
 /// Parse an OpenAI `function.arguments` JSON string into the internal arguments
 /// object. An empty or absent string means "no arguments" (`[:]`); a non-empty
 /// string that is not a JSON object is malformed (throws → 400).
-private func decodeToolArgumentsJSON(_ raw: String?, tool: String) throws -> [String: JSONValue] {
+func decodeToolArgumentsJSON(_ raw: String?, tool: String) throws -> [String: JSONValue] {
     guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
         return [:]
     }
@@ -667,7 +667,7 @@ private func toolCallRequest(fromOpenAI call: OpenAIToolCall) throws -> ToolCall
 ///     one turn).
 /// Every violation throws `ToolHistoryDecodeError` (→ HTTP 400) rather than
 /// reaching the chat template half-formed.
-private func validateToolCallPairing(_ messages: [ChatMessage]) throws {
+func validateToolCallPairing(_ messages: [ChatMessage]) throws {
     var everIssuedCallIDs: Set<String> = []
     var awaitingResultCallIDs: Set<String> = []
     for message in messages {
@@ -969,7 +969,7 @@ public actor HummingbirdServer {
     /// non-streaming; an in-band error frame then close for streaming).
     /// `<= 0` disables the watchdog. Stall-based, NOT total-duration: a long
     /// generation that keeps producing tokens is never killed.
-    private let stallTimeoutSeconds: TimeInterval
+    let stallTimeoutSeconds: TimeInterval
 
     /// In-flight cold-swap Task, if any. Guards against thrashing when
     /// two requests for different models arrive at once: the second one
@@ -1104,7 +1104,7 @@ public actor HummingbirdServer {
     /// a non-throwing return — the caller MUST `releaseGenerationLock()` on
     /// every exit path (via `defer`). Any thrown error releases the lock first,
     /// so a failure never leaks it.
-    private func beginGeneration(_ requestedID: String) async throws -> any InferenceEngine {
+    func beginGeneration(_ requestedID: String) async throws -> any InferenceEngine {
         try await acquireGenerationLock()
         // Race guard: if a release handed us ownership but our task was
         // concurrently cancelled, drop the lock instead of generating under a
@@ -1128,7 +1128,7 @@ public actor HummingbirdServer {
 
     /// Mark/unmark the active model in-flight one layer up (POOL-3). Best
     /// effort — a nil hook (CLI/tests) is a no-op.
-    private func markInFlight(_ modelID: String, _ active: Bool) async {
+    func markInFlight(_ modelID: String, _ active: Bool) async {
         await inFlightHook?(modelID, active)
     }
 
@@ -1136,7 +1136,7 @@ public actor HummingbirdServer {
     /// `Response` (`model_not_found` / `load_failed`). Shared by every
     /// OpenAI + Anthropic response path — each now calls `beginGeneration`
     /// directly (SRV-2 moved the swap under the generation lock).
-    private func openAIStyleSwapErrorResponse(_ err: ModelSwapError) -> Response {
+    func openAIStyleSwapErrorResponse(_ err: ModelSwapError) -> Response {
         switch err {
         case .modelNotFound(let id):
             return errorResponse(
@@ -1387,7 +1387,7 @@ public actor HummingbirdServer {
     // MARK: Counters
 
     private func incrementRequest() { requestCount += 1 }
-    private func incrementTokens(_ n: Int) { tokenCount += n }
+    func incrementTokens(_ n: Int) { tokenCount += n }
 
     // MARK: Router
 
@@ -2447,7 +2447,7 @@ public actor HummingbirdServer {
 
     /// Errors surfaced by `ensureModelLoaded`. Internal — handler maps
     /// them onto OpenAI-style HTTP codes.
-    private enum ModelSwapError: Error {
+    enum ModelSwapError: Error {
         case modelNotFound(id: String)
         case loadFailed(id: String, reason: String)
     }
@@ -2467,7 +2467,7 @@ public actor HummingbirdServer {
     /// check and the real (locked) resolve+load inside the closure still
     /// surfaces as an in-band error frame — expected, and harmless, since
     /// SRV-2's atomicity is unchanged.
-    private func canResolveModel(_ requestedID: String) async -> Bool {
+    func canResolveModel(_ requestedID: String) async -> Bool {
         if await engineProvider()?.loadedModel?.id == requestedID {
             return true
         }
@@ -2570,7 +2570,7 @@ public actor HummingbirdServer {
     /// `additionalContext`. Alias-aware (A5): a request that names the model
     /// by its user-facing alias resolves to the backing directory id before
     /// the per-model params are loaded, mirroring the swap resolver above.
-    private func templateKwargs(for modelID: String) async -> [String: JSONValue]? {
+    func templateKwargs(for modelID: String) async -> [String: JSONValue]? {
         let store = ModelParametersStore()
         let resolvedID = await store.modelID(forAlias: modelID) ?? modelID
         let params = await store.load(for: resolvedID)
@@ -5112,7 +5112,7 @@ public actor HummingbirdServer {
         )
     }
 
-    private func jsonResponseAny(_ dict: [String: Any]) throws -> Response {
+    func jsonResponseAny(_ dict: [String: Any]) throws -> Response {
         let data = try JSONSerialization.data(withJSONObject: dict)
         var headers = HTTPFields()
         headers[.contentType] = "application/json; charset=utf-8"
@@ -5123,7 +5123,7 @@ public actor HummingbirdServer {
         )
     }
 
-    private func errorResponse(
+    func errorResponse(
         status: HTTPResponse.Status,
         message: String,
         code: String
@@ -5184,7 +5184,7 @@ public actor HummingbirdServer {
 /// deadline. `.stalled` means `stallTimeout` elapsed with no new chunk —
 /// an inter-chunk GAP, not total duration, so a long generation that keeps
 /// producing tokens is never killed.
-private enum GenerationStep {
+enum GenerationStep {
     case chunk(GenerateChunk)
     case finished
     case stalled
@@ -5197,7 +5197,7 @@ private enum GenerationStep {
 /// call is ever in flight on a given box at a time (`nextGenerationStep`
 /// awaits it to completion — including via cancellation — before another
 /// caller could invoke `next()` again).
-private final class ChunkIteratorBox: @unchecked Sendable {
+final class ChunkIteratorBox: @unchecked Sendable {
     private var iterator: AsyncThrowingStream<GenerateChunk, Error>.AsyncIterator
     init(_ stream: AsyncThrowingStream<GenerateChunk, Error>) {
         self.iterator = stream.makeAsyncIterator()
@@ -5219,7 +5219,7 @@ private final class ChunkIteratorBox: @unchecked Sendable {
 /// iteration as terminated and invoke its `onTermination` handler — which
 /// is how `MLXSwiftEngine.generate` (POOL-2) learns to stop the underlying
 /// generation instead of burning GPU on an abandoned request.
-private func nextGenerationStep(
+func nextGenerationStep(
     _ box: ChunkIteratorBox,
     stallTimeout: TimeInterval
 ) async throws -> GenerationStep {
@@ -5259,7 +5259,7 @@ private func nextGenerationStep(
 /// fails to serialise degrades to `"{}"` rather than failing the whole
 /// response. Free function (not actor-isolated) so it runs inside the
 /// `ResponseBody` streaming closure — mirrors `writeAnthropicSSE`.
-private func openAIToolArgumentsJSON(_ arguments: [String: JSONValue]) -> String {
+func openAIToolArgumentsJSON(_ arguments: [String: JSONValue]) -> String {
     let sendable = arguments.mapValues { $0.toSendable() }
     guard let data = try? JSONSerialization.data(withJSONObject: sendable) else {
         return "{}"
