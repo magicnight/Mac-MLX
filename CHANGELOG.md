@@ -84,6 +84,67 @@ dependency graph its tests ran on.
   prompt, so it is withheld from requests that carry an `Origin` header
   (cross-origin browser callers, which the server otherwise answers without
   credentials); native clients see it.
+
+### Fixed
+- **A vision model's patch embedding could be padded with a stray value
+  instead of zero.** When a convolution's channel count is not a multiple of 16, MLX
+  pads the channels from a zero scalar that it freed as soon as the work was
+  queued, before the GPU read it; a scalar created in that window got the
+  same buffer and became the padding (`ml-explore/mlx#4660`). The vision
+  encoders of Qwen2-VL, Qwen2.5-VL, Qwen3-VL and GLM-OCR open with a
+  3-channel `Conv3d`, which takes that path, and the generation loop
+  evaluates asynchronously. Reproduced here: a 3-channel conv3d of ones
+  under `asyncEval`, followed by a few scalar allocations, returned 128
+  instead of 24 in 297 of 300 runs, and the 2D sibling 144 instead of 72 in
+  300 of 300. It was not reproduced through a real VLM checkpoint, and how
+  often the window opens during an image prefill was not measured. Carried
+  on the fork with a regression test.
+- **Batched long-context decode attention read the first request's keys for
+  every request** in one kernel: `sdpa_vector_2pass_1_gqa`, chosen for a
+  single query with no mask, a GQA factor of exactly 8, head dim 64 or 128
+  and at least 8192 keys, offset its keys and values by head but not by
+  batch (`ml-explore/mlx#4431`). Reproduced here at batch 2: row 0 matched a
+  plain attention reference and row 1 was off by 0.61. No macMLX path
+  reaches it today: single-stream decode has batch 1, and batched decode
+  always passes the array mask the batch cache builds, which selects a
+  different kernel. Carried on the fork with a regression test so a later
+  batching change cannot walk into it.
+- **A quantized KV cache stored all-negative groups with the wrong scale.**
+  GPU affine quantization started its running maximum at 0, so a group
+  whose values were all negative was quantized over `[min, 0]` rather than
+  its real range, with a coarser scale and a larger reconstruction error
+  than the CPU path gives (`ml-explore/mlx#4775`, on mlx main and in no
+  release yet). macMLX quantizes on the GPU whenever a request sets
+  `kv_bits`, one group per `kv_group_size` slice of a head. Reproduced here:
+  unit-spaced negative grids came back off by 1.0 at every group size and
+  bit width, where the CPU path restores them exactly. The effect on a real
+  model's output was not measured. Carried on the fork with a regression
+  test.
+- **Gemma 2 ran without a causal mask, and in a batch without its padding
+  mask.** mlx-swift-lm 3.32.3's Gemma 2 builds its mask with the overload of
+  `createAttentionMask` that never asks the cache, and adds that boolean mask
+  to the attention scores instead of applying it: +1 where a key is visible,
+  +0 where it lies in the future, so nothing was masked. Every prompt longer
+  than one token was prefilled with each position also attending to the
+  positions after it; one-token decode steps, which get no mask, were right.
+  And because the mask never came from the cache, a Gemma 2 request decoded
+  beside a longer one in continuous batching also attended to the
+  zero-filled left-pad columns the cache's mask exists to hide. macMLX now
+  loads `gemma2` checkpoints through its own copy of the model
+  (`Gemma2OverlayModel`, same parameter names and weights), which takes the
+  mask from the cache and applies a boolean mask by selection, as mlx-lm
+  does; that type is on the batching allowlist and upstream's `Gemma2Model`
+  is refused. Upstream fixed the same defect on its main branch after 3.32.3
+  (ml-explore/mlx-swift-lm#728), so the copy goes when a release carrying it
+  is adopted, which a test expecting 3.32.3's model to disagree with itself
+  will flag. The other six allowlisted architectures (Gemma, Gemma 3, Gemma
+  4, Qwen 2, Qwen 3, Llama) take every mask from the cache at 3.32.3. On
+  tiny random-weight models with TF32 off, a whole-prompt prefill now matches
+  token-by-token decode to 3e-6, where upstream's was off by up to 11, and a
+  two-prompt ragged cohort matches each prompt decoded alone to 3e-6, where
+  upstream's padded row was off by 1.58. Verified on random weights only; no
+  real Gemma 2 checkpoint was run here. Gemma 2 had been on the batching
+  allowlist since continuous batching shipped in v0.6.0.
 - **Structured output no longer runs away on whitespace.** JSON permits any
   amount of whitespace between tokens, so a constrained decode could spin:
   after `{` the automaton accepted spaces, tabs and newlines forever, and a
@@ -132,61 +193,6 @@ dependency graph its tests ran on.
   earlier triage had excluded by title). Fixed by the new base.
 - Kernels now compile under the Metal 4.1 language version that core
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
-
-### Fixed
-- **A vision model's patch embedding could be padded with a stray value
-  instead of zero.** When a convolution's channel count is not a multiple of 16, MLX
-  pads the channels from a zero scalar that it freed as soon as the work was
-  queued, before the GPU read it; a scalar created in that window got the
-  same buffer and became the padding (`ml-explore/mlx#4660`). The vision
-  encoders of Qwen2-VL, Qwen2.5-VL, Qwen3-VL and GLM-OCR open with a
-  3-channel `Conv3d`, which takes that path, and the generation loop
-  evaluates asynchronously. Reproduced here: a 3-channel conv3d of ones
-  under `asyncEval`, followed by a few scalar allocations, returned 128
-  instead of 24 in 297 of 300 runs, and the 2D sibling 144 instead of 72 in
-  300 of 300. It was not reproduced through a real VLM checkpoint, and how
-  often the window opens during an image prefill was not measured. Carried
-  on the fork with a regression test.
-- **Batched long-context decode attention read the first request's keys for
-  every request** in one kernel: `sdpa_vector_2pass_1_gqa`, chosen for a
-  single query with no mask, a GQA factor of exactly 8, head dim 64 or 128
-  and at least 8192 keys, offset its keys and values by head but not by
-  batch (`ml-explore/mlx#4431`). Reproduced here at batch 2: row 0 matched a
-  plain attention reference and row 1 was off by 0.61. No macMLX path
-  reaches it today: single-stream decode has batch 1, and batched decode
-  always passes the array mask the batch cache builds, which selects a
-  different kernel. Carried on the fork with a regression test so a later
-  batching change cannot walk into it.
-- **A quantized KV cache stored all-negative groups with the wrong scale.**
-  GPU affine quantization started its running maximum at 0, so a group
-  whose values were all negative was quantized over `[min, 0]` rather than
-  its real range, with a coarser scale and a larger reconstruction error
-  than the CPU path gives (`ml-explore/mlx#4775`, on mlx main and in no
-  release yet). macMLX quantizes on the GPU whenever a request sets
-  `kv_bits`, one group per `kv_group_size` slice of a head. Reproduced here:
-  unit-spaced negative grids came back off by 1.0 at every group size and
-  bit width, where the CPU path restores them exactly. The effect on a real
-  model's output was not measured. Carried on the fork with a regression
-  test.
-- **Gemma 2 requests decoded in a batch attended to their batchmates' left
-  padding.** Continuous batching prefills each request on its own and merges
-  it into the running cohort, left-padding the shorter rows with zero-filled
-  key/value columns; every decode step relies on the cache's mask to hide
-  them. mlx-swift-lm's Gemma 2 builds its mask without asking the cache, with
-  the overload of `createAttentionMask` that returns no mask for a single
-  token, so whenever a Gemma 2 request decoded beside a longer one, each of
-  its steps also attended to the pad columns: wrong tokens, no error. Gemma 2
-  had been on the batching allowlist since continuous batching shipped in
-  v0.6.0. It is off it now, and Gemma 2 requests are served one at a time on
-  the single-stream path, as any unlisted architecture is; a request with no
-  concurrent company was never batched and was not affected. The other six
-  allowlisted architectures (Gemma, Gemma 3, Gemma 4, Qwen 2, Qwen 3, Llama)
-  take every mask from the cache, at mlx-swift-lm 3.32.3. A new test builds
-  tiny random-weight instances of all seven and decodes a two-prompt ragged
-  cohort batched and each prompt alone: with TF32 off the six agree to 3.4e-6
-  and Gemma 2's padded row is off by 1.58, its unpadded row by 2.4e-6; the
-  production batch core refuses Gemma 2. This was not reproduced on a real
-  Gemma 2 checkpoint, since none is available here.
 - **Searching Hugging Face in the Model Library could freeze the app
   (#143).** After a search, the library fills in download sizes, up to four
   at a time. When only one to three results still needed a size, the loop
