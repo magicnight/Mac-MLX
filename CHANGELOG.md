@@ -118,7 +118,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   next turn reuses everything up to there. On Qwen3.6-27B-4bit, the second
   turn of a 1.7k-token tool loop reuses 1,662 of 1,712 prompt tokens and
   takes 1.0 s instead of 2.8 s, and that of a 7.2k-token one reuses 7,222
-  of 7,272 and takes 1.1 s, against 9.2 s for the cold first turn; Mellum2
+  of 7,272 and takes 1.2 s instead of 9.9 s (each against the same prompt
+  run cold, 24 tokens generated); Mellum2
   reuses 1,594 of 1,632. On these models a turn keeps one cache entry, not
   two: after the snapshot, the turn's own entry is not stored, since it
   could serve only a prompt that repeats it exactly, which these templates

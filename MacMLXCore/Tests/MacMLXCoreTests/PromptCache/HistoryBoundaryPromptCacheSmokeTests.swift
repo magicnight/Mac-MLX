@@ -392,7 +392,8 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
     /// The SSD tier at an agent session's size: a history whose snapshot is
     /// larger than the in-memory tier, with the cold tier on. The snapshot goes
     /// straight to disk, turn 2 is served from disk without promoting it, and
-    /// no turn writes more than one file. Prints each turn's writes.
+    /// no turn writes more than one file. Prints each turn's writes, and turn
+    /// 2's prompt run cold as the baseline for its time.
     func testAHistoryLargerThanTheInMemoryTierIsServedFromTheSSDTier() async throws {
         let model = try modelDirectory()
         let root = temporaryRoot()
@@ -412,16 +413,21 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
         await engine.drainPromptCacheWrites()
         let turn2Writes = Self.writes(since: files, under: root)
         let turn2Resident = await engine.promptCacheResidentCount
+        // The baseline: the same turn-2 prompt, cold and in one piece.
+        let cold = try await coldRun(engine, turn2, snapshots: false)
 
         let label = "[history-boundary] \(model.id) SSD tier:"
         print("\(label) turn 1 \(Self.describe(first)); boundary \(boundary); writes \(turn1Writes) bytes; hot entries \(turn1Resident)")
         print("\(label) turn 2 \(Self.describe(warm)); writes \(turn2Writes) bytes; hot entries \(turn2Resident)")
+        print("\(label) turn 2 cold \(Self.describe(cold))")
         XCTAssertEqual(turn1Writes.count, 1, "turn 1 writes the snapshot once")
         XCTAssertGreaterThan(
             turn1Writes.first ?? 0, PromptCacheConfig.defaultHotBytes, "the snapshot is larger than the in-memory tier")
         XCTAssertEqual(turn1Resident, 0, "the snapshot never enters the in-memory tier")
         XCTAssertEqual(warm.cachedPromptTokens, boundary, "turn 2 reuses the snapshot from the SSD tier")
         XCTAssertLessThanOrEqual(turn2Writes.count, 1, "turn 2 writes at most its own entry")
+        XCTAssertEqual(cold.cachedPromptTokens, 0, "the baseline is cold")
+        XCTAssertLessThan(warm.seconds, cold.seconds, "turn 2 from the SSD tier beats its own cold prefill")
     }
 
     /// What the one render the snapshot adds costs at an agent session's
@@ -452,32 +458,35 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
 
     // MARK: - Cold-tier files
 
+    /// A cold file's size and creation time. A write lands as a fresh file
+    /// renamed into place, so a new creation time is a write; a modification
+    /// time is not, since a hit served from disk moves it without writing.
     private struct ColdFile {
         let size: Int
-        let modified: Date
+        let created: Date
     }
 
     /// The cold tier's safetensors files under `root`, by path.
     private static func coldFiles(under root: URL) -> [String: ColdFile] {
         var files: [String: ColdFile] = [:]
-        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        let keys: [URLResourceKey] = [.fileSizeKey, .creationDateKey]
         guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys) else {
             return files
         }
         for case let url as URL in walker where url.pathExtension == "safetensors" {
             let values = try? url.resourceValues(forKeys: Set(keys))
             files[url.path] = ColdFile(
-                size: values?.fileSize ?? 0, modified: values?.contentModificationDate ?? .distantPast)
+                size: values?.fileSize ?? 0, created: values?.creationDate ?? .distantPast)
         }
         return files
     }
 
     /// Sizes of the files written under `root` since `before`: new ones, and
-    /// ones whose modification time moved; largest first.
+    /// ones created again; largest first.
     private static func writes(since before: [String: ColdFile], under root: URL) -> [Int] {
         coldFiles(under: root).compactMap { path, now in
             guard let old = before[path] else { return now.size }
-            return old.modified == now.modified ? nil : now.size
+            return old.created == now.created ? nil : now.size
         }.sorted(by: >)
     }
 }
