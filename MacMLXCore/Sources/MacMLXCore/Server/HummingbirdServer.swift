@@ -936,6 +936,7 @@ private func decodeAnthropicMessages(_ messages: [AnthropicMessage]) throws -> [
 ///   POST /v1/chat/completions  (non-streaming + SSE streaming)
 ///   POST /v1/responses         (OpenAI Responses API, stateless)
 ///   POST /v1/messages          (Anthropic Messages API)
+///   POST /v1/messages/count_tokens
 ///   POST /x/models/load
 ///   POST /x/models/unload
 ///
@@ -1561,6 +1562,14 @@ public actor HummingbirdServer {
         router.post("/v1/messages") { request, context -> Response in
             await server.incrementRequest()
             return try await server.handleAnthropicMessages(request: request, context: context)
+        }
+
+        // POST /v1/messages/count_tokens — Anthropic token counting: the
+        // prompt `/v1/messages` would render for the same body, counted by
+        // the engine (see HummingbirdServer+CountTokens.swift).
+        router.post("/v1/messages/count_tokens") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleAnthropicCountTokens(request: request, context: context)
         }
 
         // POST /v1/responses — OpenAI Responses API (v0.11). Codex and other
