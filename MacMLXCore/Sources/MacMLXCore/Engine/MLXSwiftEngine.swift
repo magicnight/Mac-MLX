@@ -329,13 +329,34 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///     ``PromptCacheConfig``'s safe production defaults (bounded hot bytes,
     ///     bounded cold disk, cold tier on); the GUI + CLI construction sites
     ///     override it with the user's persisted `Settings` values.
+    ///
+    /// The cold tier lives under ``defaultPromptCacheRoot()``.
     public init(
         siliconObserver: SiliconEngineObserver? = nil,
         promptCache: PromptCacheConfig = PromptCacheConfig()
     ) {
         self.init(
             siliconObserver: siliconObserver, promptCache: promptCache,
-            promptCacheRoot: DataRoot.macMLX("kv-cache"))
+            promptCacheRoot: Self.defaultPromptCacheRoot())
+    }
+
+    /// Where an engine keeps its prompt cache's cold tier unless told
+    /// otherwise: `~/.mac-mlx/kv-cache`, except in a test runner
+    /// (``TestHost``), where every engine gets a fresh directory of its own
+    /// under the temporary directory. Building a store sweeps and prunes its
+    /// root and `clearPromptCache()` deletes it, so a test engine on the real
+    /// root wiped the user's cache. A test that means to use the real root
+    /// passes it to ``init(siliconObserver:promptCache:promptCacheRoot:)``.
+    static func defaultPromptCacheRoot() -> URL {
+        guard TestHost.isActive else { return DataRoot.macMLX("kv-cache") }
+        return FileManager.default.temporaryDirectory
+            .appending(path: "macmlx-test-kv-cache", directoryHint: .isDirectory)
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    }
+
+    /// Test seam: the directory this engine's cold tier lives under.
+    var promptCacheRoot: URL {
+        get async { await promptCacheStore.root }
     }
 
     /// Test seam: the same engine with its prompt cache's cold tier under

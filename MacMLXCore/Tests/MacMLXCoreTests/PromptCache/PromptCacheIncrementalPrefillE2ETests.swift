@@ -78,8 +78,15 @@ final class PromptCacheIncrementalPrefillE2ETests: XCTestCase {
             parameterCount: nil, architecture: nil)
 
         // Warm engine accumulates cache; oracle engine is cleared each turn.
-        let warm = MLXSwiftEngine()
-        let oracle = MLXSwiftEngine()
+        // Each engine's cold tier under a directory of its own: the oracle's
+        // `clearPromptCache()` deletes its root.
+        let roots = [0, 1].map { _ in
+            FileManager.default.temporaryDirectory
+                .appending(path: "incremental-prefill-\(UUID().uuidString)", directoryHint: .isDirectory)
+        }
+        addTeardownBlock { for root in roots { try? FileManager.default.removeItem(at: root) } }
+        let warm = MLXSwiftEngine(promptCacheRoot: roots[0])
+        let oracle = MLXSwiftEngine(promptCacheRoot: roots[1])
         try await warm.load(model)
         try await oracle.load(model)
 

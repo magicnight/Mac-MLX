@@ -66,7 +66,8 @@ public actor PromptCacheStore {
         let isTrimmable: Bool
     }
 
-    private let root: URL
+    /// The cold tier's directory. Internal for the engine's test seam.
+    let root: URL
     private let maxEntries: Int
     private let maxBytes: Int
     private let coldCapBytes: Int
