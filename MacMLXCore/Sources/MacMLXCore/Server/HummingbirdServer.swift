@@ -446,6 +446,13 @@ private struct AnthropicToolChoice: Decodable, Sendable {
 /// array of `{type:"text", text}` blocks (the SDK's structured form).
 /// `text` flattens both into the single system-prompt string macMLX's
 /// engine expects.
+///
+/// A block carrying Claude Code's billing header
+/// (`x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;`) is left
+/// out. It is Anthropic billing metadata, not an instruction, and it differs
+/// between sessions (the version suffix changes); as the first text of the
+/// system prompt it would keep a new session from reusing any cached prompt
+/// — system prompt and tools — from an earlier one.
 private enum AnthropicSystem: Decodable, Sendable {
     case string(String)
     case blocks([AnthropicBlock])
@@ -459,14 +466,23 @@ private enum AnthropicSystem: Decodable, Sendable {
         self = .blocks(try container.decode([AnthropicBlock].self))
     }
 
-    /// Concatenated text of the system blocks (or the bare string).
+    /// The prefix that marks a billing-header block, after any leading
+    /// whitespace.
+    static let billingHeaderPrefix = "x-anthropic-billing-header:"
+
+    /// Concatenated text of the system blocks (or the bare string), without
+    /// a billing-header block.
     var text: String {
         switch self {
         case .string(let s):
             return s
         case .blocks(let blocks):
-            return blocks.compactMap { $0.type == "text" ? $0.text : nil }
-                .joined(separator: "\n")
+            return blocks.compactMap { block -> String? in
+                guard block.type == "text", let text = block.text else { return nil }
+                let isBillingHeader = text.drop(while: \.isWhitespace).hasPrefix(Self.billingHeaderPrefix)
+                return isBillingHeader ? nil : text
+            }
+            .joined(separator: "\n")
         }
     }
 }
@@ -3354,6 +3370,8 @@ public actor HummingbirdServer {
     /// very prompt generation would: same turns, system placement, tools,
     /// template kwargs and images.
     ///
+    /// - The top-level `system` loses Claude Code's billing-header block (see
+    ///   `AnthropicSystem`), so it is the same from one session to the next.
     /// - The top-level `system` and any `role:"system"` turns go through
     ///   `MidConversationSystemFolding`: `system` first, then the leading
     ///   system turns, form the system prompt; a later system turn stays at

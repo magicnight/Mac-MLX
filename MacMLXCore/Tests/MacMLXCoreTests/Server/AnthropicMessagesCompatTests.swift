@@ -29,6 +29,8 @@ import Testing
 //   missingMaxTokensIs400                             : 22_390
 //   bodyOverTwoMegabytesIsAccepted                    : 22_660
 //   bodyOverTheLimitIsAnAnthropic413                  : 22_690
+//   billingHeaderIsNotPartOfTheSystemPrompt           : 22_720
+//   systemTurnStringAndBlocksFoldTheSame              : 22_750
 
 @Suite("AnthropicMessagesCompat")
 struct AnthropicMessagesCompatTests {
@@ -232,8 +234,8 @@ struct AnthropicMessagesCompatTests {
 
         #expect(response.statusCode == 200)
         let request = try #require(captured)
-        #expect(request.systemPrompt
-            == "x-anthropic-billing-header: cc_version=2.1\nYou are Claude Code.\nTool use rules.")
+        // The billing header is not part of the prompt.
+        #expect(request.systemPrompt == "You are Claude Code.\nTool use rules.")
         try #require(request.messages.map(\.role) == [.user])
         #expect(request.messages[0].content == "<system-reminder>skills</system-reminder>\n"
             + "<system-reminder>context</system-reminder>\nRun echo hi\n\n"
@@ -301,6 +303,59 @@ struct AnthropicMessagesCompatTests {
         #expect(captured?.messages.first?.content
             == "hi\n\na string system turn\n\n[image omitted from a system message]")
         #expect(captured?.messages.first?.images.isEmpty == true)
+    }
+
+    @Test
+    func billingHeaderIsNotPartOfTheSystemPrompt() async throws {
+        // Claude Code's billing header differs between sessions; it must not
+        // change the prompt, or no session reuses another's cached prompt.
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 22_720)
+        func systemPrompt(billing: String) async throws -> String? {
+            _ = try await post(port: port, body: [
+                "model": Self.model, "max_tokens": 64,
+                "system": [
+                    ["type": "text", "text": billing],
+                    ["type": "text", "text": "You are Claude Code."],
+                    ["type": "text", "text": "Mentions x-anthropic-billing-header: but is kept."],
+                ],
+                "messages": [["role": "user", "content": "hi"]],
+            ])
+            return await engine.capturedRequest?.systemPrompt
+        }
+        let first = try await systemPrompt(
+            billing: "x-anthropic-billing-header: cc_version=2.1.296.e86; cc_entrypoint=claude-desktop;")
+        let second = try await systemPrompt(
+            billing: "  x-anthropic-billing-header: cc_version=2.1.296.cf4; cc_entrypoint=claude-desktop;")
+        await server.stop()
+
+        #expect(first == "You are Claude Code.\nMentions x-anthropic-billing-header: but is kept.")
+        #expect(second == first)
+    }
+
+    @Test
+    func systemTurnStringAndBlocksFoldTheSame() async throws {
+        // Claude Code sends its reminder turn as blocks on one request and as a
+        // string on the next; the conversation must render the same.
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 22_750)
+        let reminder = "<system-reminder>CLAUDE.md and memory</system-reminder>"
+        func messages(_ systemContent: Any) async throws -> [String] {
+            _ = try await post(port: port, body: [
+                "model": Self.model, "max_tokens": 64,
+                "messages": [
+                    ["role": "user", "content": [["type": "text", "text": "Run echo hi"]]],
+                    ["role": "system", "content": systemContent],
+                ],
+            ])
+            return await engine.capturedRequest?.messages.map(\.content) ?? []
+        }
+        let blocks = try await messages([["type": "text", "text": reminder, "cache_control": ["type": "ephemeral"]]])
+        let string = try await messages(reminder)
+        await server.stop()
+
+        #expect(blocks == ["Run echo hi\n\n\(reminder)"])
+        #expect(string == blocks)
     }
 
     // MARK: Thinking

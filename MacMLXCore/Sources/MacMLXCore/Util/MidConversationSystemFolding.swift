@@ -26,6 +26,10 @@
 /// an earlier one, and never the system prompt once the conversation has
 /// begun — so the rendering of a history is a prefix of the rendering of that
 /// history extended, except that its last message may grow by appended text.
+/// One case goes further: when the user turn merged into an opened turn
+/// carries images, the last message gains them too, and a VLM's template may
+/// render them ahead of the text, so that message's tokens can shift from
+/// where its images go. It is still only the last message.
 /// (Folding into the NEXT user turn would move a trailing reminder from one
 /// turn to another as the conversation grows and re-prefill everything after
 /// the system prompt every turn.)

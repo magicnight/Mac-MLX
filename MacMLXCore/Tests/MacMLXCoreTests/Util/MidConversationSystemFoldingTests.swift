@@ -203,6 +203,23 @@ struct MidConversationSystemFoldingTests {
         #expect(messages[3].content == "permissions changed\n\nnow list files")
     }
 
+    /// A user turn merged into the turn a system turn opened brings its
+    /// images. The text only grows by appending, but a VLM's template may
+    /// render the images ahead of the text, so the rendered tokens of that
+    /// last message can shift. Only the last message: every earlier one is
+    /// unchanged, which `expectPrefixStable` still checks.
+    @Test
+    func mergedUserTurnWithImagesOnlyChangesTheLastMessage() throws {
+        let history = [user("a"), toolCall("c1"), toolResult("c1", "r"), system("note")]
+        let next = ChatMessage(role: .user, content: "look", images: [image])
+        expectPrefixStable(history, extendedBy: [next])
+
+        let (_, messages) = MidConversationSystemFolding.fold(history + [next])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
+        #expect(messages[3].content == "note\n\nlook")
+        #expect(messages[3].images == [image])
+    }
+
     /// Every split point of one mixed conversation keeps the property.
     @Test
     func everySplitOfAMixedConversationIsPrefixStable() {
