@@ -116,15 +116,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   prompt and at least 256 tokens past what the cache already served), and
   the next turn reuses everything up to there. On Qwen3.6-27B-4bit, the
   second turn of a 1.7k-token tool loop reuses 1,662 of 1,712 prompt tokens
-  and takes 1.0 s instead of 2.8 s; Mellum2 reuses 1,594 of 1,632. The cost
-  is a second cache entry per turn on these models: 263 MB for those 1,662
-  tokens on Qwen3.6-27B (about 150 MB of it the fixed linear-attention
-  state, then 64 KB a token) and 69 MB on Mellum2. The in-memory tier is
-  still 512 MiB, and the turn's own entry is what it drops first: on
-  Qwen3.6-27B the two no longer fit side by side past about 1,700 tokens,
-  and past about 5,800 the snapshot alone does not fit and is served from
-  the SSD tier instead. Models whose cache can be trimmed are unaffected:
-  the turn's own entry replaces the snapshot as before.
+  and takes 1.0 s instead of 2.8 s; Mellum2 reuses 1,594 of 1,632. On these
+  models a turn now keeps one cache entry instead of two: after the
+  snapshot, the turn's own entry is no longer stored, since it could serve
+  only a prompt that repeats it exactly, which these templates never send,
+  and even then a trim these caches cannot do. The snapshot costs about what
+  that entry did: 263 MB for 1,662 tokens on Qwen3.6-27B (about 150 MB of it
+  the fixed linear-attention state, then 64 KB a token), 69 MB on Mellum2.
+  The in-memory tier is still 512 MiB, so on Qwen3.6-27B a history past
+  about 5,800 tokens is served from the SSD tier. Gemma 4, whose template
+  repeats the turn verbatim, no longer reuses the previous turn's generated
+  tokens once the prompt is past its 512-token sliding window, only its
+  history. Models whose cache can be trimmed are
+  unaffected: the turn's own entry replaces the snapshot as before.
+- A prompt-cache entry promoted back from the SSD tier always returned as
+  the least-kept class, whatever it had been demoted as. It now keeps its
+  class (stored in the file's metadata; files written before return as
+  before).
 - `/v1/messages` dropped `role:"system"` turns inside `messages`. Claude Code
   sends its reminders that way (your CLAUDE.md, memory and skills, after the
   first user turn, and a context-usage note at the end of later requests),
