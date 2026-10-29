@@ -111,8 +111,13 @@ Request (the fields acted on; anything else is accepted and ignored):
   prompt (joined with a blank line); a later one is folded in place
   (`MidConversationSystemFolding`): appended to the user turn just before
   it, or, after an assistant or tool turn, opening a user turn there that a
-  user message right after it joins. Earlier turns never change, so the
-  prompt cache keeps serving them. Consecutive `function_call` /
+  user message right after it joins. Earlier turns never change, so folding
+  does not force them to be prefilled again; whether the prompt cache hits
+  across agent turns depends on the engine (today it often does not on
+  hybrid or sliding-window models, whose cache cannot be trimmed back to
+  the shared prefix). When the user turn merged into an opened one carries
+  images, a VLM may render them before the text, so that last message's
+  tokens can shift; earlier messages still do not. Consecutive `function_call` /
   `custom_tool_call` items, with an assistant message directly before them,
   form one assistant turn; `*_call_output` items become tool turns.
   `reasoning` items are dropped. Content parts: `input_text`, `output_text`,
@@ -231,6 +236,10 @@ Request (the fields acted on):
 ```
 
 - `max_tokens` is required (400 without it).
+- A top-level `system` text block whose text starts (after leading
+  whitespace) with `x-anthropic-billing-header:` is dropped: Claude Code's
+  billing metadata, which differs between sessions and would keep a new
+  session from reusing a cached system prompt.
 - `system` (string or text blocks, joined with a newline) and the
   `role:"system"` turns in `messages` are placed by
   `MidConversationSystemFolding`, `system` first: system turns before the
@@ -265,7 +274,9 @@ Response content, in order: a `thinking` block (`{"type": "thinking",
 (starting at the first non-whitespace answer text; left out when the model
 only called tools), then one `tool_use` block per call. `usage` is
 `{"input_tokens", "output_tokens", "cache_read_input_tokens"}`, with
-`input_tokens` the uncached part of the prompt.
+`input_tokens` the uncached part of the prompt; `cache_read_input_tokens` is
+left out (and `input_tokens` is the whole prompt) for a request carrying an
+`Origin` header, as on chat.
 
 Streaming events: `message_start` (usage `input_tokens: 0` — the count is
 known only at the end), then each block as `content_block_start` → deltas →

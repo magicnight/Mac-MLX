@@ -119,12 +119,19 @@ it at macMLX with a tool-calling model:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
-export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
-export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
 export ANTHROPIC_API_KEY=sk-local   # any value
 # With bearer auth on, set ANTHROPIC_AUTH_TOKEN to the key instead.
+export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
+export ANTHROPIC_DEFAULT_OPUS_MODEL=Qwen3.6-27B-4bit
+export ANTHROPIC_DEFAULT_SONNET_MODEL=Qwen3.6-27B-4bit
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=Qwen3.6-27B-4bit
+# Older name of the Haiku setting, for older Claude Code versions.
+export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
 claude
 ```
+
+Map every alias: one left unmapped makes Claude Code request a `claude-*`
+model id, which macMLX answers with a 404.
 
 ## Inference engines
 

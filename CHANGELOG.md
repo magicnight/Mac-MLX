@@ -31,8 +31,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   place it was sent: it is appended to the user turn just before it, or,
   after an assistant turn or a tool output, starts a user turn of its own
   that a user message right after it joins. Earlier turns are never
-  rewritten, so the prompt cache keeps serving them from one turn to the
-  next. A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
+  rewritten, so folding no longer forces them to be prefilled again; whether
+  the prompt cache actually serves them on the next turn depends on the
+  engine, and today it often does not on hybrid (linear-attention) or
+  sliding-window models. A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
   is appended to the description the model sees. Bodies up to 64 MB are
   accepted, since the whole conversation is sent every turn.
 
@@ -85,12 +87,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
   ```bash
   export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
-  export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
-  export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
   export ANTHROPIC_API_KEY=sk-local   # any value
   # With bearer auth on, set ANTHROPIC_AUTH_TOKEN to the key instead.
+  export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
+  export ANTHROPIC_DEFAULT_OPUS_MODEL=Qwen3.6-27B-4bit
+  export ANTHROPIC_DEFAULT_SONNET_MODEL=Qwen3.6-27B-4bit
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL=Qwen3.6-27B-4bit
+  # Older name of the Haiku setting, for older Claude Code versions.
+  export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
   claude
   ```
+
+  Map every alias: one left unmapped makes Claude Code request a `claude-*`
+  model id, which macMLX answers with a 404.
 
 ### Fixed
 
@@ -107,7 +116,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   OpenAI's error shape; both now use Anthropic's (`not_found_error`,
   `api_error`). And a thinking model's reply that went straight to a tool
   call opened a text block holding only the blank lines after `</think>`;
-  the text block now starts at the first non-whitespace text.
+  the text block now starts at the first non-whitespace text. More
+  generally, a `/v1/messages` reply's leading whitespace is now dropped, as
+  on `/v1/responses`.
+- Claude Code's first `system` block is billing metadata
+  (`x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;`) whose
+  version suffix differs between sessions. At the very start of the system
+  prompt it kept a new session from reusing the cached system prompt and
+  tools of an earlier one. `/v1/messages` and `count_tokens` now leave that
+  block out; no other block is touched.
 - `/v1/messages` rejected a body over 2 MB with a 413. Claude Code sends the
   whole session every turn, tool results and file contents included, so a
   long session would hit that limit for good. `/v1/messages` and

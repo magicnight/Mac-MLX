@@ -113,12 +113,18 @@ macMLX，并选一个会调用工具的模型：
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
-export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
-export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
 export ANTHROPIC_API_KEY=sk-local   # 任意值
 # 开启 bearer 鉴权时，改为把 key 设给 ANTHROPIC_AUTH_TOKEN。
+export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
+export ANTHROPIC_DEFAULT_OPUS_MODEL=Qwen3.6-27B-4bit
+export ANTHROPIC_DEFAULT_SONNET_MODEL=Qwen3.6-27B-4bit
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=Qwen3.6-27B-4bit
+# Haiku 设置的旧名字，给较旧的 Claude Code 用。
+export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
 claude
 ```
+
+每个别名都要映射：漏掉一个，Claude Code 就会去请求某个 `claude-*` 模型 id，macMLX 会回 404。
 
 ## 推理引擎
 
