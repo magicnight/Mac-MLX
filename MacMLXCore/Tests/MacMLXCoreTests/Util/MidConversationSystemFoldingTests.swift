@@ -46,13 +46,13 @@ struct MidConversationSystemFoldingTests {
     }
 
     @Test
-    func systemTurnAfterAUserTurnIsAppendedToIt() {
+    func systemTurnAfterAUserTurnIsAppendedToIt() throws {
         let first = ChatMessage(role: .user, content: "question", images: [image])
         let (prompt, messages) = MidConversationSystemFolding.fold([
             system("lead"), first, system("note 1"), system("note 2"), assistant("b"),
         ])
         #expect(prompt == "lead")
-        #expect(messages.map(\.role) == [.user, .assistant])
+        try #require(messages.map(\.role) == [.user, .assistant])
         #expect(messages[0].content == "question\n\nnote 1\n\nnote 2")
         // The folded turn is the same turn: id and images survive.
         #expect(messages[0].id == first.id)
@@ -60,32 +60,32 @@ struct MidConversationSystemFoldingTests {
     }
 
     @Test
-    func systemTurnAfterAnAssistantTurnOpensAUserTurn() {
+    func systemTurnAfterAnAssistantTurnOpensAUserTurn() throws {
         let (prompt, messages) = MidConversationSystemFolding.fold([
             user("a"), assistant("b"), system("late"),
         ])
         #expect(prompt == nil)
-        #expect(messages.map(\.role) == [.user, .assistant, .user])
+        try #require(messages.map(\.role) == [.user, .assistant, .user])
         #expect(messages.map(\.content) == ["a", "b", "late"])
     }
 
     @Test
-    func systemTurnAfterAToolTurnOpensAUserTurn() {
+    func systemTurnAfterAToolTurnOpensAUserTurn() throws {
         let (_, messages) = MidConversationSystemFolding.fold([
             user("a"), toolCall("c1"), toolResult("c1", "out"), system("<total_tokens>1</total_tokens>"),
         ])
-        #expect(messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
         #expect(messages[2].content == "out")
         #expect(messages[3].content == "<total_tokens>1</total_tokens>")
     }
 
     @Test
-    func userTurnDirectlyAfterAnOpenedTurnIsMergedIntoIt() {
+    func userTurnDirectlyAfterAnOpenedTurnIsMergedIntoIt() throws {
         let next = ChatMessage(role: .user, content: "question", images: [image])
         let (_, messages) = MidConversationSystemFolding.fold([
             user("a"), assistant("b"), system("note 1"), system("note 2"), next, user("separate"),
         ])
-        #expect(messages.map(\.role) == [.user, .assistant, .user, .user])
+        try #require(messages.map(\.role) == [.user, .assistant, .user, .user])
         #expect(messages[2].content == "note 1\n\nnote 2\n\nquestion")
         // The merged turn is the user turn: its id and images.
         #expect(messages[2].id == next.id)
@@ -95,12 +95,12 @@ struct MidConversationSystemFoldingTests {
     }
 
     @Test
-    func systemTurnAfterALeadingAssistantTurnNeverReachesThePrompt() {
+    func systemTurnAfterALeadingAssistantTurnNeverReachesThePrompt() throws {
         let (prompt, messages) = MidConversationSystemFolding.fold([
             system("lead"), assistant("b"), system("late"),
         ])
         #expect(prompt == "lead")
-        #expect(messages.map(\.role) == [.assistant, .user])
+        try #require(messages.map(\.role) == [.assistant, .user])
         #expect(messages.map(\.content) == ["b", "late"])
     }
 
@@ -172,7 +172,7 @@ struct MidConversationSystemFoldingTests {
     /// system turn carrying its reminder; the second replays both and adds the
     /// assistant tool call, the tool result, and a trailing system turn.
     @Test
-    func claudeCodeTurnsArePrefixStable() {
+    func claudeCodeTurnsArePrefixStable() throws {
         let turn1 = [user("block 1\nblock 2\nblock 3"), system("<system-reminder>CLAUDE.md…</system-reminder>")]
         let turn2Additions = [toolCall("toolu_1"), toolResult("toolu_1", "hi"), system("<total_tokens>9</total_tokens>")]
         let turn3Additions = [assistant("Done."), user("next task"), system("<system-reminder>…</system-reminder>")]
@@ -181,7 +181,7 @@ struct MidConversationSystemFoldingTests {
 
         // The reminder stays in the first user turn on every turn.
         let (_, messages) = MidConversationSystemFolding.fold(turn1 + turn2Additions)
-        #expect(messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
         #expect(messages[0].content.hasSuffix("CLAUDE.md…</system-reminder>"))
         #expect(messages[3].content == "<total_tokens>9</total_tokens>")
     }
@@ -189,7 +189,7 @@ struct MidConversationSystemFoldingTests {
     /// Codex: developer items lead (the system prompt), and a later one arrives
     /// after a tool output, before the next user message.
     @Test
-    func codexDeveloperItemsArePrefixStable() {
+    func codexDeveloperItemsArePrefixStable() throws {
         let turn1 = [system("dev one"), system("dev two"), user("Run echo")]
         let turn2Additions = [toolCall("call_1"), toolResult("call_1", "hi\n"), system("permissions changed")]
         let turn3Additions = [user("now list files"), toolCall("call_2"), toolResult("call_2", "a b")]
@@ -199,7 +199,7 @@ struct MidConversationSystemFoldingTests {
 
         let (prompt, messages) = MidConversationSystemFolding.fold(turn1 + turn2Additions + turn3Additions)
         #expect(prompt == "dev one\n\ndev two")
-        #expect(messages.map(\.role) == [.user, .assistant, .tool, .user, .assistant, .tool])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user, .assistant, .tool])
         #expect(messages[3].content == "permissions changed\n\nnow list files")
     }
 

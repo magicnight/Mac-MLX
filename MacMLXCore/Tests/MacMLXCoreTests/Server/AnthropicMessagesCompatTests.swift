@@ -228,7 +228,7 @@ struct AnthropicMessagesCompatTests {
         let request = try #require(captured)
         #expect(request.systemPrompt
             == "x-anthropic-billing-header: cc_version=2.1\nYou are Claude Code.\nTool use rules.")
-        #expect(request.messages.map(\.role) == [.user])
+        try #require(request.messages.map(\.role) == [.user])
         #expect(request.messages[0].content == "<system-reminder>skills</system-reminder>\n"
             + "<system-reminder>context</system-reminder>\nRun echo hi\n\n"
             + "<system-reminder>CLAUDE.md and memory</system-reminder>")
@@ -258,7 +258,7 @@ struct AnthropicMessagesCompatTests {
 
         #expect(response.statusCode == 200)
         let request = try #require(captured)
-        #expect(request.messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(request.messages.map(\.role) == [.user, .assistant, .tool, .user])
         // The first turn renders as it did on turn one: the reminder stays put.
         #expect(request.messages[0].content == "Run echo hi\n\n<system-reminder>memory</system-reminder>")
         // Replayed thinking is ignored; the call and its result pair up.

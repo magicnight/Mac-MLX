@@ -188,7 +188,7 @@ struct ResponsesInputTranslatorTests {
             ],
         ])
         #expect(translation.systemPrompt == nil)
-        #expect(translation.messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(translation.messages.map(\.role) == [.user, .assistant, .tool, .user])
         #expect(translation.messages[0].content == "one\n\nafter user")
         #expect(translation.messages[3].content == "after tool")
     }
