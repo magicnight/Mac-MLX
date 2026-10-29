@@ -124,7 +124,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   version suffix differs between sessions. At the very start of the system
   prompt it kept a new session from reusing the cached system prompt and
   tools of an earlier one. `/v1/messages` and `count_tokens` now leave that
-  block out; no other block is touched.
+  block out when `system` is sent as blocks, as Claude Code sends it (a
+  plain-string `system` is left alone); no other block is touched. Whether
+  a later session then hits the cache still depends on the model: hybrid
+  and sliding-window caches can't be trimmed back to the shared prefix.
 - `/v1/messages` rejected a body over 2 MB with a 413. Claude Code sends the
   whole session every turn, tool results and file contents included, so a
   long session would hit that limit for good. `/v1/messages` and

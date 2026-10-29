@@ -236,7 +236,8 @@ Request (the fields acted on):
 ```
 
 - `max_tokens` is required (400 without it).
-- A top-level `system` text block whose text starts (after leading
+- A top-level `system` text block (blocks form only; a plain-string
+  `system` is left alone) whose text starts (after leading
   whitespace) with `x-anthropic-billing-header:` is dropped: Claude Code's
   billing metadata, which differs between sessions and would keep a new
   session from reusing a cached system prompt.
