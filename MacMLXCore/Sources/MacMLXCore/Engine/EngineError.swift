@@ -39,6 +39,10 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
     /// expected `owner/name` shape (see `AudioEngine.repoIDHint(_:kind:)`), so
     /// `errorDescription` returns it verbatim instead of prefixing it again.
     case invalidAudioModelID(reason: String)
+    /// The engine cannot count a prompt's tokens (`countPromptTokens`'s
+    /// protocol default). Distinct from `unsupportedOperation` so
+    /// `/v1/messages/count_tokens` can answer 501 rather than 500.
+    case tokenCountingUnsupported
 
     public var errorDescription: String? {
         switch self {
@@ -66,6 +70,8 @@ public enum EngineError: LocalizedError, Equatable, Sendable {
             return "Audio processing failed: \(reason)"
         case .invalidAudioModelID(let reason):
             return reason
+        case .tokenCountingUnsupported:
+            return "token counting is not supported by this engine"
         }
     }
 }

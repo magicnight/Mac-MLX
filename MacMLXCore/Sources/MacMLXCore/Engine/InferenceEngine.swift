@@ -54,6 +54,14 @@ public protocol InferenceEngine: Actor {
     /// Streaming callers seed `ReasoningStreamSplitter` with this to
     /// classify that first token correctly. Default false.
     func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool
+
+    /// How many tokens the prompt `request` renders to — the chat template
+    /// applied exactly as `generate` applies it, tools and images included,
+    /// so the count equals the prompt length a cold-cache generation of the
+    /// same request reports (`TokenUsage.promptTokens`). Serves Anthropic's
+    /// `POST /v1/messages/count_tokens`. The default throws
+    /// `EngineError.tokenCountingUnsupported`.
+    func countPromptTokens(_ request: GenerateRequest) async throws -> Int
 }
 
 extension InferenceEngine {
@@ -69,5 +77,12 @@ extension InferenceEngine {
     /// MLX engine overrides this by applying the chat template.
     public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
         false
+    }
+
+    /// Default for engines that can't render the prompt (test stubs, future
+    /// CPU/Python engines): counting is unsupported. The MLX engine overrides
+    /// this by applying the chat template.
+    public func countPromptTokens(_ request: GenerateRequest) async throws -> Int {
+        throw EngineError.tokenCountingUnsupported
     }
 }
