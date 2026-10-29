@@ -333,9 +333,22 @@ public actor MLXSwiftEngine: InferenceEngine {
         siliconObserver: SiliconEngineObserver? = nil,
         promptCache: PromptCacheConfig = PromptCacheConfig()
     ) {
+        self.init(
+            siliconObserver: siliconObserver, promptCache: promptCache,
+            promptCacheRoot: DataRoot.macMLX("kv-cache"))
+    }
+
+    /// Test seam: the same engine with its prompt cache's cold tier under
+    /// `promptCacheRoot`, so a test that clears or fills the cold tier never
+    /// touches the user's `~/.mac-mlx/kv-cache`.
+    init(
+        siliconObserver: SiliconEngineObserver? = nil,
+        promptCache: PromptCacheConfig = PromptCacheConfig(),
+        promptCacheRoot: URL
+    ) {
         self.siliconObserver = siliconObserver
         self.promptCacheStore = PromptCacheStore(
-            root: DataRoot.macMLX("kv-cache"),
+            root: promptCacheRoot,
             maxEntries: promptCache.maxEntries,
             maxBytes: promptCache.hotBytes,
             coldCapBytes: promptCache.coldCapBytes,
@@ -687,6 +700,24 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Test seam for ``historyBoundarySnapshotsEnabled``.
     func setHistoryBoundarySnapshotsEnabled(_ enabled: Bool) {
         historyBoundarySnapshotsEnabled = enabled
+    }
+
+    /// Test seam: when set, a text generation splits its prefill at this
+    /// many prompt tokens instead of the rendered history boundary (when it
+    /// lies inside the part still to prefill), whatever the gain. A
+    /// real-weights test uses it to replay, cold, the exact prefill a cache-
+    /// warm turn ran, and expect the warm turn's output bit for bit.
+    private(set) var forcedHistoryBoundary: Int?
+
+    /// Test seam for ``forcedHistoryBoundary``.
+    func setForcedHistoryBoundary(_ boundary: Int?) {
+        forcedHistoryBoundary = boundary
+    }
+
+    /// Test seam: wait for the prompt cache's cold-tier writes in flight, so
+    /// a test can count what a turn wrote.
+    func drainPromptCacheWrites() async {
+        await promptCacheStore.drainInFlight()
     }
 
     /// The key a finished text generation records its cache under, or nil
@@ -1823,6 +1854,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         // while the engine loop below drains it (one entry per emitted token). The
         // sink is Sendable (locked internally).
         let logprobsSink = wantsLogprobs ? LogprobsCaptureProcessor.Sink() : nil
+        let forcedBoundary = forcedHistoryBoundary
 
         let setup: (
             cache: PromptCacheSnapshot,
@@ -1846,10 +1878,18 @@ public actor MLXSwiftEngine: InferenceEngine {
                 var history: HistoryBoundarySnapshot?
                 var historySkip: String?
                 if let historyInput = inputBox.value.history {
-                    switch Self.historyBoundary(
-                        for: historyInput, cache: cache, context: context, promptTokens: inputTokens,
-                        reusedTokenCount: reusedPromptTokens)
-                    {
+                    let decision: HistoryBoundary
+                    if let forcedBoundary {
+                        decision =
+                            forcedBoundary > reusedPromptTokens && forcedBoundary < inputTokens.count
+                            ? .snapshot(boundary: forcedBoundary)
+                            : .skip(reason: "the forced boundary \(forcedBoundary) is outside the prefill")
+                    } else {
+                        decision = Self.historyBoundary(
+                            for: historyInput, cache: cache, context: context, promptTokens: inputTokens,
+                            reusedTokenCount: reusedPromptTokens)
+                    }
+                    switch decision {
                     case .snapshot(let boundary):
                         let split = boundary - reusedPromptTokens
                         let suffix = generationInput.text.tokens
