@@ -16,6 +16,14 @@ final class BatchModelAllowlistTests: XCTestCase {
         XCTAssertFalse(BatchModelAllowlist.contains(try TinyRandomLanguageModel.gemma2.make()))
     }
 
+    /// `gemma2` checkpoints load as macMLX's corrected Gemma 2, which takes its
+    /// mask from the cache; see Gemma2OverlayTests and the ragged parity suite.
+    func testGemma2OverlayIsAllowlisted() throws {
+        try requireMLXRuntimeOrSkip()
+        XCTAssertTrue(
+            BatchModelAllowlist.contains(try TinyRandomLanguageModel.gemma2Overlay.make()))
+    }
+
     func testEveryOtherTinyArchitectureIsAllowlisted() throws {
         try requireMLXRuntimeOrSkip()
         for architecture in TinyRandomLanguageModel.allCases where architecture != .gemma2 {

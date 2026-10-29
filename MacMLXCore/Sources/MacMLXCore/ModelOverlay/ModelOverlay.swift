@@ -140,6 +140,18 @@ public enum ModelOverlay {
             return InternLM3Model(config)
         }
 
+        // Gemma 2 — macMLX's corrected copy of upstream's `Gemma2Model` (see
+        // `Models/Gemma2Overlay.swift`). Upstream ships `gemma2`, but its
+        // prefill mask is a boolean ADDED to the scores (so prompts are not
+        // causal) and never comes from the cache (so ragged batches attend to
+        // left padding). This registration replaces upstream's entry, the
+        // `hunyuan_v1_dense` precedent; delete it once upstream fixes the mask.
+        await LLMTypeRegistry.shared.registerModelType("gemma2") { data in
+            let config = try JSONDecoder.json5()
+                .decode(Gemma2OverlayConfiguration.self, from: data)
+            return Gemma2OverlayModel(config)
+        }
+
         // --- Theoretical tier -------------------------------------------------
         // Near-zero-engineering registrations: each maps a new `model_type`
         // onto an existing, parity-tested Swift architecture. They are verified

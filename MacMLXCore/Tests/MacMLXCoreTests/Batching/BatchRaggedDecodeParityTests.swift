@@ -17,10 +17,11 @@ import XCTest
 /// the shorter row is left-padded by the merge, so a model whose attention
 /// mask does not come from the cache's `makeMask` attends to those zero-filled
 /// pad columns at every decode step and its logits move, with no error. That
-/// is how Gemma 2 is wired in mlx-swift-lm 3.32.3, and why it is off the
-/// allowlist: ``testGemma2RaggedDecodeAttendsToLeftPadding`` pins the
-/// divergence, so a release that fixes it fails here and the model can be
-/// reconsidered.
+/// is how upstream's `Gemma2Model` is wired in mlx-swift-lm 3.32.3, and why it
+/// is off the allowlist: ``testGemma2RaggedDecodeAttendsToLeftPadding`` pins
+/// the divergence, so a release that fixes it fails here and the model can be
+/// reconsidered. `gemma2` checkpoints load as macMLX's `Gemma2OverlayModel`,
+/// which takes its mask from the cache and is checked with the allowlisted set.
 ///
 /// The decode inputs are teacher-forced (the same tokens for both runs), so
 /// one early argmax flip cannot cascade into a comparison of different
@@ -33,8 +34,9 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
 
     /// MLX runs float32 matmuls as TF32 on M5 by default (`MLX_ENABLE_TF32`),
     /// and the `[2, 1]` batched forward and the `[1, 1]` standalone one do not
-    /// lose the same mantissa bits. Measured on an M5 over these seven models:
-    /// with TF32 off the worst row is 3.4e-6, with it on 0.018. The gate is the
+    /// lose the same mantissa bits. Measured on an M5 over the first seven
+    /// models: with TF32 off the worst row is 3.4e-6, with it on 0.018 (the
+    /// Gemma 2 overlay, added later: 3.0e-6 with TF32 off). The gate is the
     /// project's 1e-4 with TF32 off and about three times the TF32 worst case
     /// with it on; Gemma 2's left-padded row is off by 1.58 either way. For the
     /// tight gate:
@@ -46,7 +48,7 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
         ProcessInfo.processInfo.environment["MLX_ENABLE_TF32"] == "0" ? 1e-4 : 0.05
 
     private let allowlisted: [TinyRandomLanguageModel] = [
-        .gemma, .gemma3Text, .gemma4Text, .qwen2, .qwen3, .llama,
+        .gemma, .gemma2Overlay, .gemma3Text, .gemma4Text, .qwen2, .qwen3, .llama,
     ]
 
     // MARK: - Allowlisted architectures

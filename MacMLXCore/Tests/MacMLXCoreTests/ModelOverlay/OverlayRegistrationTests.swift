@@ -174,6 +174,30 @@ struct OverlayRegistrationTests {
             """,
             matches: { $0 is HunyuanV1DenseModel }),
 
+        // Gemma 2 → macMLX `Gemma2OverlayModel`. The stock registry has its own
+        // `gemma2` (upstream's `Gemma2Model`, whose prefill mask is not causal);
+        // `registerAll` replaces it, and this case asserts the overlay is what
+        // the factory resolves.
+        Case(
+            modelType: "gemma2",
+            configJSON: """
+            {
+              "model_type": "gemma2",
+              "vocab_size": 64,
+              "hidden_size": 32,
+              "num_hidden_layers": 2,
+              "intermediate_size": 64,
+              "num_attention_heads": 4,
+              "num_key_value_heads": 2,
+              "head_dim": 8,
+              "rms_norm_eps": 1e-6,
+              "attn_logit_softcapping": 50.0,
+              "final_logit_softcapping": 30.0,
+              "query_pre_attn_scalar": 8
+            }
+            """,
+            matches: { $0 is Gemma2OverlayModel }),
+
         // Cohere2 (Command R7B) → macMLX `Cohere2Model`.
         Case(
             modelType: "cohere2",

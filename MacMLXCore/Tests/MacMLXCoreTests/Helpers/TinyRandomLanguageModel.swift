@@ -6,9 +6,12 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 
+@testable import MacMLXCore
+
 /// Tiny random-weight instances of the `MLXLLM` text architectures the batched
-/// decode path has to reason about, built from a minimal configuration JSON so a
-/// test can run a real forward pass without a checkpoint on disk.
+/// decode path has to reason about, plus macMLX's Gemma 2 overlay, built from a
+/// minimal configuration JSON so a test can run a real forward pass without a
+/// checkpoint on disk.
 ///
 /// Every instance is 2 layers, hidden size 32, 4 query / 2 KV heads of width 8,
 /// a 64-token vocabulary, float32, and a fixed seed, so two calls build the same
@@ -22,6 +25,9 @@ import MLXNN
 enum TinyRandomLanguageModel: String, CaseIterable {
     case gemma
     case gemma2
+    /// macMLX's corrected Gemma 2 (``Gemma2OverlayModel``), built from the same
+    /// configuration as `.gemma2` so the two differ only in the mask.
+    case gemma2Overlay
     case gemma3Text
     case gemma4Text
     case qwen2
@@ -42,10 +48,11 @@ enum TinyRandomLanguageModel: String, CaseIterable {
                 , "model_type": "gemma", "head_dim": 8
                 """#))
         case .gemma2:
-            model = Gemma2Model(try decode(Gemma2Configuration.self, Self.common + #"""
-                , "head_dim": 8, "attn_logit_softcapping": 50.0,
-                "final_logit_softcapping": 30.0, "query_pre_attn_scalar": 8
-                """#))
+            model = Gemma2Model(
+                try decode(Gemma2Configuration.self, Self.common + Self.gemma2Fragment))
+        case .gemma2Overlay:
+            model = Gemma2OverlayModel(
+                try decode(Gemma2OverlayConfiguration.self, Self.common + Self.gemma2Fragment))
         case .gemma3Text:
             model = Gemma3TextModel(try decode(Gemma3TextConfiguration.self, Self.common + #"""
                 , "model_type": "gemma3_text", "head_dim": 8, "query_pre_attn_scalar": 8,
@@ -81,6 +88,12 @@ enum TinyRandomLanguageModel: String, CaseIterable {
         "num_attention_heads": 4, "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
         "vocab_size": \(vocabularySize)
         """
+
+    /// The Gemma 2 keys, shared by upstream's `Gemma2Model` and the overlay.
+    private static let gemma2Fragment = #"""
+        , "head_dim": 8, "attn_logit_softcapping": 50.0,
+        "final_logit_softcapping": 30.0, "query_pre_attn_scalar": 8
+        """#
 
     private func decode<Configuration: Decodable>(
         _ type: Configuration.Type, _ body: String
