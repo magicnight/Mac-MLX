@@ -73,6 +73,12 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
     /// The same parity through the production core: ``ModelBatchInferenceCore``
     /// admits both rows (B=1 prefill + merge) and decodes them batched; each
     /// row's tokens must equal the standalone argmax on the same inputs.
+    ///
+    /// A different token is accepted only as a near-tie: the standalone logit of
+    /// the batched token must sit within `tolerance` of the standalone maximum.
+    /// Under M5's default TF32 the Gemma 2 overlay's random weights have one
+    /// such step (two logits 0.0017 apart, under the 0.011 TF32 rounding);
+    /// with TF32 off the 1e-4 bound leaves no room for one.
     func testModelBatchInferenceCoreMatchesStandaloneGreedyOnARaggedCohort() throws {
         try requireTrustworthyMetalOrSkip()
         for architecture in allowlisted {
@@ -89,11 +95,20 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
                 for row in batched.indices { batched[row].append(next[row]) }
             }
             let standalone = try [shortPrompt, longPrompt].map { prompt in
-                try standaloneLogits(model, prompt: prompt).map(argmax)
+                try standaloneLogits(model, prompt: prompt)
             }
-            XCTAssertEqual(
-                batched, standalone,
-                "\(architecture): ragged batched greedy tokens must match standalone decode")
+            for row in batched.indices {
+                XCTAssertEqual(batched[row].count, standalone[row].count)
+                for (step, (token, logits)) in zip(batched[row], standalone[row]).enumerated() {
+                    let expected = argmax(logits)
+                    guard token != expected else { continue }
+                    let gap = (logits[expected] - logits[token]).item(Float.self)
+                    XCTAssertLessThan(
+                        gap, tolerance,
+                        "\(architecture) row \(row) step \(step): ragged batched greedy picked "
+                            + "\(token), standalone \(expected), \(gap) apart")
+                }
+            }
         }
     }
 
