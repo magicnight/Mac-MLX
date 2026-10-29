@@ -14,7 +14,7 @@ before(async () => {
   ({ documents: generatedDocuments } = await prepareSite());
 });
 
-test("the build emits all 34 localized HTML documents", async () => {
+test("the build emits all 36 localized HTML documents", async () => {
   documents = new Map();
   for (const route of routes) {
     for (const [locale, path] of Object.entries(route.paths)) {
@@ -22,7 +22,7 @@ test("the build emits all 34 localized HTML documents", async () => {
       documents.set(`${route.id}:${locale}`, generatedDocuments.get(path));
     }
   }
-  assert.equal(documents.size, 34);
+  assert.equal(documents.size, 36);
 });
 
 test("every article is localized, answer-first, semantic, source-linked, and cross-locale", () => {
@@ -36,7 +36,7 @@ test("every article is localized, answer-first, semantic, source-linked, and cro
       assert.match(html, /class="article-body"/);
       assert.match(html, /class="content-section sources"/);
       assert.match(html, /class="related-pages"/);
-      assert.match(html, /<time datetime="2026-10-13">2026-10-13<\/time>/);
+      assert.match(html, /<time datetime="2026-10-29">2026-10-29<\/time>/);
       assert.match(html, /class="site-header"/);
       assert.match(html, /class="site-footer"/);
       assert.match(html, new RegExp(`<link rel="canonical" href="https:\/\/macmlx\\.app${path.replaceAll("/", "\\/")}">`));
@@ -54,7 +54,7 @@ test("generated content exposes the audited facts and exact visible structures",
   const vlm = documents.get("vision-language-models:en");
   const faq = documents.get("faq:en");
   const compare = documents.get("compare:en");
-  const release = documents.get("release-v0-9-0:en");
+  const release = documents.get("release-v0-10-0:en");
   assert.match(architecture, /separate processes keep separate in-memory engine instances/);
   assert.match(architecture, /data-status="released"/);
   assert.match(architecture, /data-status="planned"/);
@@ -113,7 +113,7 @@ test("repeated content builds are byte-identical", async () => {
 });
 
 test("build validation uses an injectable actual UTC date without changing rendered dates", async () => {
-  await assert.doesNotReject(prepareSite({ today: "2026-10-13" }));
+  await assert.doesNotReject(prepareSite({ today: "2026-10-29" }));
   await assert.rejects(prepareSite({ today: "2026-12-05" }), /stale (?:competitor|fact)/);
-  assert.match(generatedDocuments.get("/architecture/"), /2026-10-13/);
+  assert.match(generatedDocuments.get("/architecture/"), /2026-10-29/);
 });

@@ -286,13 +286,13 @@
           </article>
 
           <article class="release-column release-current reveal">
-            <div class="release-head"><span data-en="Current release" data-zh="当前版本">Current release</span><strong data-en="v{{currentVersion}} · Aug 28, 2026" data-zh="v{{currentVersion}} · 2026年8月28日">v{{currentVersion}} · Aug 28, 2026</strong></div>
-            <h3 data-en="v0.9 adds audio and a real reranker" data-zh="v0.9 新增音频与真正的重排器">v0.9 adds audio and a real reranker</h3>
+            <div class="release-head"><span data-en="Current release" data-zh="当前版本">Current release</span><strong data-en="v{{currentVersion}} · Oct 29, 2026" data-zh="v{{currentVersion}} · 2026年10月29日">v{{currentVersion}} · Oct 29, 2026</strong></div>
+            <h3 data-en="v0.10 speaks Foundation Models schemas and frees memory" data-zh="v0.10 适配 Foundation Models Schema 并真正释放内存">v0.10 speaks Foundation Models schemas and frees memory</h3>
             <ul>
-              <li data-en="Speech to text and text to speech run in-process on MLX, with no Python and no Core ML detour" data-zh="语音转文字与文字转语音在进程内基于 MLX 运行，不需要 Python，也不绕道 Core ML">Speech to text and text to speech run in-process on MLX, with no Python and no Core ML detour</li>
-              <li data-en="A true cross-encoder scores each query-document pair jointly, with bi-encoder cosine kept as the fallback" data-zh="真正的交叉编码器对每个查询-文档对联合打分，双编码器余弦保留为回退路径">A true cross-encoder scores each query-document pair jointly, with bi-encoder cosine kept as the fallback</li>
-              <li data-en="Transcription is a cancellable chat attachment, and assistant messages gained a speech button" data-zh="转写以可取消的聊天附件形式提供，助手消息新增朗读按钮">Transcription is a cancellable chat attachment, and assistant messages gained a speech button</li>
-              <li data-en="The app finally links the patched MLX engine, so this DMG carries its correctness fixes" data-zh="应用终于链接了补丁版 MLX 引擎，这个 DMG 才真正携带其正确性修复">The app finally links the patched MLX engine, so this DMG carries its correctness fixes</li>
+              <li data-en="Structured output accepts the nested, referenced, and range-bounded schemas Foundation Models sends for @Generable types" data-zh="结构化输出接受 Foundation Models 为 @Generable 类型发送的嵌套、引用与数值范围 Schema">Structured output accepts the nested, referenced, and range-bounded schemas Foundation Models sends for @Generable types</li>
+              <li data-en="Unloading a model now gives its memory back, and in the app rerankers and embedders count against the pool budget" data-zh="卸载模型现会真正归还内存，应用中的重排器与嵌入模型也计入模型池预算">Unloading a model now gives its memory back, and in the app rerankers and embedders count against the pool budget</li>
+              <li data-en="/v1/rerank moves to MLXRerankers, with BERT and Qwen3 rerankers checked on real checkpoints" data-zh="/v1/rerank 改用 MLXRerankers，BERT 与 Qwen3 重排器已在真实检查点上核验">/v1/rerank moves to MLXRerankers, with BERT and Qwen3 rerankers checked on real checkpoints</li>
+              <li data-en="The DMG is built from committed lockfiles, so it ships the dependency graph its tests ran on" data-zh="DMG 依据已提交的 lockfile 构建，交付的依赖图与测试所用一致">The DMG is built from committed lockfiles, so it ships the dependency graph its tests ran on</li>
             </ul>
             <a href="{{repositoryURL}}/releases/tag/v{{currentVersion}}" data-en="View v{{currentVersion}} release ↗" data-zh="查看 v{{currentVersion}} 版本 ↗">View v{{currentVersion}} release ↗</a>
           </article>
