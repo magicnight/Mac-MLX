@@ -210,6 +210,48 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(shorter?.reusedTokenCount, 2)
     }
 
+    /// The history-boundary snapshot on a cache that cannot be trimmed: turn 1
+    /// stores its history `B` as `.user` and its record `C` (prompt +
+    /// generated tokens) as `.assistant`. Turn 2 extends `B` but leaves `C`
+    /// inside the generation prompt, so `C` shares more tokens yet needs a
+    /// trim it cannot have; the `B` entry serves turn 2 whole through the
+    /// shorter branch, and `C` is still recorded.
+    func testHybridHistoryBoundaryServesTheNextTurnPastADivergingRecord() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot())
+        let history = [1, 2, 3, 4]
+        let turn1Record = history + [50, 51, 60, 61]  // generation prompt, generated
+        let turn2 = history + [50, 52, 70, 71, 50]  // re-rendered turn, new message
+        await store.insert(
+            modelID: model, tokens: history,
+            snapshot: makeHybridSnapshot(tokenCount: history.count), cacheType: .user)
+        await store.insert(
+            modelID: model, tokens: turn1Record,
+            snapshot: makeHybridSnapshot(tokenCount: turn1Record.count))
+        let resident = await store.residentCount
+        XCTAssertEqual(resident, 2, "a non-trimmable record does not collapse the boundary entry")
+
+        let hit = await store.fetchNearest(modelID: model, tokens: turn2)
+        XCTAssertEqual(hit?.reusedTokenCount, history.count)
+    }
+
+    /// The boundary entry is `.user`, so a count budget that has to drop one
+    /// of a turn's two entries drops the `.assistant` record, never the entry
+    /// the next turn reuses.
+    func testHistoryBoundaryEntryOutlivesTheTurnRecordUnderBudget() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot(), maxEntries: 1, coldEnabled: false)
+        let history = [1, 2, 3, 4]
+        await store.insert(
+            modelID: model, tokens: history,
+            snapshot: makeHybridSnapshot(tokenCount: history.count), cacheType: .user)
+        await store.insert(
+            modelID: model, tokens: history + [50, 51],
+            snapshot: makeHybridSnapshot(tokenCount: 6))
+        let hit = await store.fetchNearest(modelID: model, tokens: history + [50, 52])
+        XCTAssertEqual(hit?.reusedTokenCount, history.count)
+    }
+
     // MARK: - copy-on-fetch isolation
 
     func testFetchedSnapshotIsIndependentCopy() async throws {

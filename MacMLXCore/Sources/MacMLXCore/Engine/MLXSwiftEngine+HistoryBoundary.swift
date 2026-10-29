@@ -1,0 +1,121 @@
+// Copyright © 2026 macMLX. English comments only.
+
+import Foundation
+import MLX
+import MLXLLM
+import MLXLMCommon
+
+/// The history-boundary prompt-cache snapshot (see ``HistoryBoundary``): the
+/// render that finds the boundary and the prefill that stops at it. Both run
+/// inside `runLLMGeneration`'s `container.perform`, against the resident
+/// model's own context.
+extension MLXSwiftEngine {
+
+    /// Where to split this request's prefill, decided from the chat rendered
+    /// with and without the generation prompt.
+    ///
+    /// Both renders mirror upstream `LLMUserInputProcessor.prepare`, the one
+    /// that produced `promptTokens`: the message generator the factory chose
+    /// (the configuration's, else the model's, else the default) over the same
+    /// `UserInput` (messages, tools, template kwargs), then the resident
+    /// tokenizer's chat template, chat-template override included. They differ
+    /// only in `addGenerationPrompt`. The render with it must reproduce
+    /// `promptTokens` exactly, which ``HistoryBoundary/decide`` checks, so a
+    /// render path that ever drifts from generation's costs the snapshot, never
+    /// correctness: any prefix of the prompt is a valid cache to store.
+    ///
+    /// Returns `.skip` without rendering when no boundary could clear the
+    /// minimum gain, and when the tokenizer is not the swift-transformers
+    /// bridge, has no chat template, or the render throws.
+    static func historyBoundary(
+        for input: UserInput,
+        context: ModelContext,
+        promptTokens: [Int],
+        reusedTokenCount: Int
+    ) -> HistoryBoundary {
+        // B < prompt and B - reused >= minimum together need more than the
+        // minimum still to prefill; short of that, skip the two renders.
+        guard promptTokens.count - reusedTokenCount > HistoryBoundary.minimumBoundarySnapshotTokens else {
+            return .skip(
+                reason: "\(promptTokens.count - reusedTokenCount) tokens to prefill, "
+                    + "not more than \(HistoryBoundary.minimumBoundarySnapshotTokens)")
+        }
+        guard let tokenizer = context.tokenizer as? TokenizerBridge else {
+            return .skip(reason: "the resident tokenizer cannot render without the generation prompt")
+        }
+        let generator =
+            context.configuration.messageGenerator
+            ?? (context.model as? LLMModel)?.messageGenerator(tokenizer: context.tokenizer)
+            ?? DefaultMessageGenerator()
+        let messages = generator.generate(from: input)
+        do {
+            let rendered = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext,
+                addGenerationPrompt: true)
+            let history = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext,
+                addGenerationPrompt: false)
+            return HistoryBoundary.decide(
+                historyTokens: history, renderedPromptTokens: rendered,
+                promptTokens: promptTokens, reusedTokenCount: reusedTokenCount)
+        } catch {
+            return .skip(reason: "rendering the history failed: \(error)")
+        }
+    }
+
+    /// Prefill `tokens` into `cache` and evaluate it, generating nothing.
+    ///
+    /// mlx-swift-lm 3.32.3 has no public prefill-only entry point, so this
+    /// builds a `TokenIterator` over the slice: its initializer runs the
+    /// model's own chunked prefill with `prefill` (the chunking generation
+    /// uses), then steps the last token, which puts every one of `tokens` into
+    /// `cache`. The token it samples (greedy, no processor, so no random state
+    /// is drawn) is dropped, and the iterator with it; `cache` is mutated in
+    /// place. The cache state is evaluated before returning — the sampled
+    /// token alone would not force a recurrent layer's next state — so a copy
+    /// taken now holds computed arrays rather than a graph over the prefill.
+    ///
+    /// - Returns: the wall time the prefill took, which the caller adds to the
+    ///   request's prompt time.
+    static func prefillHistory(
+        _ tokens: MLXArray,
+        into cache: [any KVCache],
+        context: ModelContext,
+        prefill: PrefillParameters
+    ) throws -> TimeInterval {
+        let start = Date.timeIntervalSinceReferenceDate
+        _ = try TokenIterator(
+            input: LMInput(tokens: tokens),
+            model: context.model,
+            cache: cache,
+            processor: nil,
+            sampler: ArgMaxSampler(),
+            prefill: prefill
+        )
+        eval(cache.flatMap { $0.state })
+        return Date.timeIntervalSinceReferenceDate - start
+    }
+
+    /// `info` with the boundary prefill counted as prompt work: the iterator
+    /// that reported it prefilled only the tokens after the boundary, so the
+    /// tokens and time spent before it are added back. `cachedPromptTokens` is
+    /// untouched; a boundary prefill is computed, not served from the cache.
+    static func completionInfo(
+        _ info: GenerateCompletionInfo, addingPrefillOf tokens: Int, seconds: TimeInterval
+    ) -> GenerateCompletionInfo {
+        GenerateCompletionInfo(
+            promptTokenCount: info.promptTokenCount + tokens,
+            cachedPromptTokenCount: info.cachedPromptTokenCount,
+            generationTokenCount: info.generationTokenCount,
+            promptTime: info.promptTime + seconds,
+            generationTime: info.generateTime,
+            stopReason: info.stopReason,
+            proposedDraftTokens: info.proposedDraftTokens,
+            acceptedDraftTokens: info.acceptedDraftTokens,
+            passthroughReason: info.passthroughReason,
+            speculativeDecodingTelemetry: info.speculativeDecodingTelemetry,
+            rejectedToolCallCount: info.rejectedToolCallCount,
+            recoveredToolCallCount: info.recoveredToolCallCount
+        )
+    }
+}

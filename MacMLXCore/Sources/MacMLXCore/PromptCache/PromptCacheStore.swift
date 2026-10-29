@@ -1190,7 +1190,7 @@ public actor PromptCacheStore {
 
     /// Byte footprint of a KV snapshot: sum of its serialised `state` arrays,
     /// matching how mlx-swift-lm's wired-memory accounting measures a cache.
-    private static func cacheBytes(_ caches: [any KVCache]) -> Int {
+    static func cacheBytes(_ caches: [any KVCache]) -> Int {
         caches.flatMap { $0.state }.reduce(0) { $0 + $1.nbytes }
     }
 }

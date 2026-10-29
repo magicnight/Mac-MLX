@@ -672,6 +672,17 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     private(set) var lastPromptCacheRecord: PromptCacheRecord?
 
+    /// Whether a text generation may split its prefill at the history
+    /// boundary and store the cache there (see ``HistoryBoundary``). Always on
+    /// in production; a test seam, so a real-weights test can run its cold
+    /// reference as one unsplit prefill.
+    private(set) var historyBoundarySnapshotsEnabled = true
+
+    /// Test seam for ``historyBoundarySnapshotsEnabled``.
+    func setHistoryBoundarySnapshotsEnabled(_ enabled: Bool) {
+        historyBoundarySnapshotsEnabled = enabled
+    }
+
     /// The key a finished text generation records its cache under, or nil
     /// when nothing may be recorded (#142). mlx-swift-lm's iterator steps the
     /// model on each token before returning it, and its loop breaks on a stop
@@ -1435,6 +1446,9 @@ public actor MLXSwiftEngine: InferenceEngine {
             try await ensureDraftContainer(requestedDraftModelID: request.draftModelID)
             try await runLLMGeneration(
                 lmInput: lmInput,
+                // A second copy of the same `UserInput`: `prepare` consumed the
+                // first, and the history-boundary snapshot renders it again.
+                historyInput: Self.userInput(for: request, isVLM: false),
                 container: container,
                 generateParams: generateParams,
                 sampling: params,
@@ -1564,8 +1578,15 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Text-only path: tokenise, look up the prompt cache, prefill only
     /// the new suffix, and stream tokens. Saves the extended cache back
     /// to `promptCacheStore` once the stream completes.
+    ///
+    /// When the prompt's history boundary qualifies (see ``HistoryBoundary``,
+    /// rendered from `historyInput`), the prefill stops there first, a copy of
+    /// the cache is stored under the history's tokens, and generation resumes
+    /// from the boundary, so the next turn of an agent loop reuses everything
+    /// up to it even on a cache that cannot be trimmed.
     private func runLLMGeneration(
         lmInput: LMInput,
+        historyInput: UserInput,
         container: ModelContainer,
         generateParams: GenerateParameters,
         sampling: GenerationParameters,
@@ -1773,8 +1794,15 @@ public actor MLXSwiftEngine: InferenceEngine {
         // non-Sendable value by `consuming` it into the actor.
         let tokenizer = await container.tokenizer
         let priorCacheBox: PromptCacheSnapshot? = priorCache.map { PromptCacheSnapshot($0) }
-        // `promptInput` is the suffix to prefill (full prompt on a miss).
-        let inputBox = NonSendableBox(promptInput)
+        // `promptInput` is the suffix to prefill (full prompt on a miss); the
+        // history input rides along for the boundary render, nil when the
+        // prompt cache is bypassed, since a snapshot would never be stored
+        // (or when a test turned snapshots off).
+        let inputBox = NonSendableBox(
+            (
+                prompt: promptInput,
+                history: bypassPromptCache || !historyBoundarySnapshotsEnabled ? nil : Optional(historyInput)
+            ))
         // Captured into the perform closure for a constrained / custom-sampling
         // generation. The cache is Sendable (`@unchecked` behind a lock);
         // `responseFormat`, `logitBias`, the XTC params and `modelID` are value
@@ -1791,11 +1819,43 @@ public actor MLXSwiftEngine: InferenceEngine {
             stream: AsyncStream<TokenGeneration>,
             worker: Task<Void, Never>,
             toolCallFormat: ToolCallFormat?,
-            stopTokenIDs: Set<Int>
+            stopTokenIDs: Set<Int>,
+            history: HistoryBoundarySnapshot?,
+            historySkip: String?
         ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = try priorCacheBox?.caches
                     ?? context.model.newCache(parameters: generateParams)
+
+                // History boundary: prefill `[reused, boundary)` into the
+                // working cache, keep an evaluated copy of it, and hand the
+                // generation only `[boundary, end)`. `cache` is the same
+                // instances either way, so the record after the stream is
+                // unchanged.
+                var generationInput = inputBox.value.prompt
+                var history: HistoryBoundarySnapshot?
+                var historySkip: String?
+                if let historyInput = inputBox.value.history {
+                    switch Self.historyBoundary(
+                        for: historyInput, context: context, promptTokens: inputTokens,
+                        reusedTokenCount: reusedPromptTokens)
+                    {
+                    case .snapshot(let boundary):
+                        let split = boundary - reusedPromptTokens
+                        let suffix = generationInput.text.tokens
+                        let seconds = try Self.prefillHistory(
+                            suffix[..<split], into: cache, context: context,
+                            prefill: generateParams.prefill)
+                        let copies = cache.map { $0.copy() }
+                        eval(copies.flatMap { $0.state })
+                        history = HistoryBoundarySnapshot(
+                            boundary: boundary, prefilledTokens: split, seconds: seconds,
+                            snapshot: PromptCacheSnapshot(copies))
+                        generationInput = LMInput(tokens: suffix[split...])
+                    case .skip(let reason):
+                        historySkip = reason
+                    }
+                }
                 let generation: (stream: AsyncStream<TokenGeneration>, worker: Task<Void, Never>)
                 if usesCustomPipeline {
                     // Track C constraint AND the Track E sampling extensions
@@ -1804,7 +1864,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     // the same raw-token task the plain path uses so all downstream
                     // streaming/detokenization is byte-for-byte the same.
                     generation = try Self.customTokenStream(
-                        input: inputBox.value,
+                        input: generationInput,
                         cache: cache,
                         generateParams: generateParams,
                         context: context,
@@ -1821,7 +1881,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     // Stock parameter-driven path — the ONLY LLM path that honors
                     // `kv_bits` (via `generateParams`).
                     generation = try MLXLMCommon.generateTokensTask(
-                        input: inputBox.value,
+                        input: generationInput,
                         cache: cache,
                         parameters: generateParams,
                         context: context,
@@ -1832,10 +1892,37 @@ public actor MLXSwiftEngine: InferenceEngine {
                 // ride back out of the actor alongside the cache + stream.
                 return (
                     PromptCacheSnapshot(cache), generation.stream, generation.worker,
-                    context.configuration.toolCallFormat, Self.stopTokenIDs(context)
+                    context.configuration.toolCallFormat, Self.stopTokenIDs(context),
+                    history, historySkip
                 )
             }
         let workingCache = setup.cache.caches
+        if let history = setup.history {
+            // Stored now, while the generation runs: the snapshot holds the
+            // prompt's first `boundary` tokens and nothing after, so it is
+            // valid whatever the stream does next, a cancel included. `.user`
+            // so the classified LRU drops the `.assistant` record of the turn
+            // first.
+            await promptCacheStore.insert(
+                modelID: modelID,
+                tokens: Array(inputTokens[..<history.boundary]),
+                snapshot: history.snapshot,
+                cacheType: .user,
+                modelFingerprint: modelFingerprint
+            )
+            await LogManager.shared.debug(
+                "Prompt cache history boundary — stored \(history.boundary)/\(inputTokens.count) tokens "
+                    + "(reused \(reusedPromptTokens), prefilled \(history.prefilledTokens) in "
+                    + "\(String(format: "%.3f", history.seconds)) s, "
+                    + "\(PromptCacheStore.cacheBytes(history.snapshot.caches)) bytes, model=\(modelID))",
+                category: .inference
+            )
+        } else if let reason = setup.historySkip {
+            await LogManager.shared.debug(
+                "Prompt cache history boundary — no snapshot: \(reason) (model=\(modelID))",
+                category: .inference
+            )
+        }
         let stream = setup.stream
         let worker = setup.worker
         let stopTokenIDs = setup.stopTokenIDs
@@ -1928,7 +2015,12 @@ public actor MLXSwiftEngine: InferenceEngine {
                     }
                 }
             case .info(let info):
-                completionInfo = info
+                // The boundary prefill ran before the iterator that reports
+                // this; count it, so usage and the phase summary cover the
+                // whole prefill as they did before the split.
+                completionInfo = setup.history.map {
+                    Self.completionInfo(info, addingPrefillOf: $0.prefilledTokens, seconds: $0.seconds)
+                } ?? info
             }
         }
 
