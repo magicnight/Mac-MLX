@@ -98,10 +98,17 @@ struct ResponsesOutputBuilderTests {
 
         let reasoning = ResponsesOutputBuilder.reasoningItem(id: "rs_1", text: "think")
         #expect(reasoning["type"] as? String == "reasoning")
-        #expect((reasoning["summary"] as? [Any])?.isEmpty == true)
         let parts = try #require(reasoning["content"] as? [[String: Any]])
         #expect(parts.first?["type"] as? String == "reasoning_text")
         #expect(parts.first?["text"] as? String == "think")
+        // Mirrored as the one summary part, which is what clients display.
+        let summary = try #require(reasoning["summary"] as? [[String: Any]])
+        #expect(summary.count == 1)
+        #expect(summary.first?["type"] as? String == "summary_text")
+        #expect(summary.first?["text"] as? String == "think")
+        let added = ResponsesOutputBuilder.reasoningItem(id: "rs_1", text: nil)
+        #expect((added["summary"] as? [Any])?.isEmpty == true)
+        #expect((added["content"] as? [Any])?.isEmpty == true)
     }
 
     @Test

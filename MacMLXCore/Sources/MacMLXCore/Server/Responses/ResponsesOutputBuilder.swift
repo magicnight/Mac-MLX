@@ -20,20 +20,26 @@ enum ResponsesOutputBuilder {
     // MARK: - Items
 
     /// A `reasoning` item. The reasoning is the model's raw chain of thought,
-    /// so it goes into `content` as `reasoning_text`. `summary` is empty:
-    /// macMLX writes no summaries. An empty `text` gives empty `content`
-    /// (the shape `response.output_item.added` carries).
+    /// so it goes into `content` as `reasoning_text`; the same text is also
+    /// its one `summary_text` part, because clients that show reasoning show
+    /// the summary (Codex 0.162 prints `summary` and ignores raw
+    /// `reasoning_text` unless told to). A nil `text` gives an empty `summary`
+    /// and `content` (the shape `response.output_item.added` carries).
     static func reasoningItem(id: String, text: String?) -> [String: Any] {
         [
             "type": "reasoning",
             "id": id,
-            "summary": [] as [[String: Any]],
+            "summary": text.map { [summaryTextPart($0)] } ?? [],
             "content": text.map { [reasoningTextPart($0)] } ?? [],
         ]
     }
 
     static func reasoningTextPart(_ text: String) -> [String: Any] {
         ["type": "reasoning_text", "text": text]
+    }
+
+    static func summaryTextPart(_ text: String) -> [String: Any] {
+        ["type": "summary_text", "text": text]
     }
 
     /// The assistant's visible text as a `message` item. A nil `text` gives

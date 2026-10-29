@@ -266,8 +266,9 @@ struct ResponsesEndpointTests {
         let events = try events(data)
         #expect(events.map(\.type) == [
             "response.created", "response.in_progress",
-            "response.output_item.added", "response.content_part.added",
-            "response.reasoning_text.delta",
+            "response.output_item.added", "response.reasoning_summary_part.added", "response.content_part.added",
+            "response.reasoning_summary_text.delta", "response.reasoning_text.delta",
+            "response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
             "response.reasoning_text.done", "response.content_part.done", "response.output_item.done",
             "response.output_item.added", "response.content_part.added",
             "response.output_text.delta",
@@ -277,6 +278,10 @@ struct ResponsesEndpointTests {
         let reasoningDelta = try #require(events.first { $0.type == "response.reasoning_text.delta" })
         #expect(reasoningDelta.payload["delta"] as? String == "a")
         #expect(reasoningDelta.payload["output_index"] as? Int == 0)
+        let summaryDelta = try #require(events.first { $0.type == "response.reasoning_summary_text.delta" })
+        #expect(summaryDelta.payload["delta"] as? String == "a")
+        #expect(summaryDelta.payload["summary_index"] as? Int == 0)
+        #expect(summaryDelta.payload["item_id"] as? String == reasoningDelta.payload["item_id"] as? String)
         let textDelta = try #require(events.first { $0.type == "response.output_text.delta" })
         #expect(textDelta.payload["delta"] as? String == "b")
         #expect(textDelta.payload["output_index"] as? Int == 1)
@@ -284,6 +289,7 @@ struct ResponsesEndpointTests {
         #expect(outputTypes(done) == ["reasoning", "message"])
         let reasoning = try #require((done["output"] as? [[String: Any]])?.first)
         #expect(((reasoning["content"] as? [[String: Any]])?.first)?["text"] as? String == "a")
+        #expect(((reasoning["summary"] as? [[String: Any]])?.first)?["text"] as? String == "a")
     }
 
     @Test

@@ -192,7 +192,8 @@ extension HummingbirdServer {
     /// `response.in_progress` go out before the generation lock is taken, so
     /// a client waiting behind another generation (or a cold swap) sees the
     /// response start. Reasoning and text stream as their own items while
-    /// chunks arrive; tool calls, which the engine reports on the terminal
+    /// chunks arrive — reasoning as both its summary part and its
+    /// `reasoning_text` content (see `ResponsesOutputBuilder.reasoningItem`); tool calls, which the engine reports on the terminal
     /// chunk, follow as whole items; exactly one terminal event ends the
     /// stream. An unknown model is a 404 before any byte is sent; a failure
     /// once the stream is open is `response.failed`.
@@ -236,6 +237,12 @@ extension HummingbirdServer {
                         ? ResponsesOutputBuilder.reasoningItem(id: openID, text: nil)
                         : ResponsesOutputBuilder.messageItem(id: openID, text: nil),
                 ])
+                if reasoning {
+                    try emit("response.reasoning_summary_part.added", [
+                        "item_id": openID, "output_index": index, "summary_index": 0,
+                        "part": ResponsesOutputBuilder.summaryTextPart(""),
+                    ])
+                }
                 try emit("response.content_part.added", [
                     "item_id": openID, "output_index": index, "content_index": 0,
                     "part": reasoning
@@ -248,6 +255,13 @@ extension HummingbirdServer {
                 let index = output.count
                 let item: [String: Any]
                 if reasoning {
+                    try emit("response.reasoning_summary_text.done", [
+                        "item_id": openID, "output_index": index, "summary_index": 0, "text": openText,
+                    ])
+                    try emit("response.reasoning_summary_part.done", [
+                        "item_id": openID, "output_index": index, "summary_index": 0,
+                        "part": ResponsesOutputBuilder.summaryTextPart(openText),
+                    ])
                     try emit("response.reasoning_text.done", [
                         "item_id": openID, "output_index": index, "content_index": 0, "text": openText,
                     ])
@@ -281,11 +295,20 @@ extension HummingbirdServer {
                     try openItem(reasoning: reasoning)
                 }
                 openText += text
-                var payload: [String: Any] = [
-                    "item_id": openID, "output_index": output.count, "content_index": 0, "delta": text,
-                ]
-                if !reasoning { payload["logprobs"] = [] as [Any] }
-                try emit(reasoning ? "response.reasoning_text.delta" : "response.output_text.delta", payload)
+                let index = output.count
+                if reasoning {
+                    try emit("response.reasoning_summary_text.delta", [
+                        "item_id": openID, "output_index": index, "summary_index": 0, "delta": text,
+                    ])
+                    try emit("response.reasoning_text.delta", [
+                        "item_id": openID, "output_index": index, "content_index": 0, "delta": text,
+                    ])
+                } else {
+                    try emit("response.output_text.delta", [
+                        "item_id": openID, "output_index": index, "content_index": 0, "delta": text,
+                        "logprobs": [] as [Any],
+                    ])
+                }
             }
             func emitToolCall(_ call: ToolCallRequest) throws {
                 let isCustom = ResponsesOutputBuilder.isCustomToolCall(call, toolNames: toolNames)
