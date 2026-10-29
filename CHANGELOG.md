@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-29
+
+Structured output learns the schemas Apple's Foundation Models client sends,
+unloading a model finally gives its memory back, and the DMG ships the
+dependency graph its tests ran on.
+
 ### Added
 - **Nested JSON schemas in `response_format`.** Structured output now
   accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
@@ -141,6 +147,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   repository with one to three files of undeclared size. Both date from
   v0.3.6. Clearing the search field while a search was running also left
   "Searching Hugging Face…" up until the next search.
+- **Model Library sizes were kept for one launch only, and a failed size
+  lookup could report a model at a few KB.** The size cache
+  (`~/.mac-mlx/hf-cache/sizes.json`) was written with ISO 8601 dates and read
+  back expecting numeric ones, so every read failed silently, each launch
+  started empty, and the first new size overwrote the file. Sizes now survive
+  a restart for the seven days the cache promises. A file whose size had to
+  be asked for with a HEAD dropped out of the sum when that HEAD failed, and
+  one answered with an error status counted the error body, a few bytes, so
+  a model whose weights met a 404 or 503 came out at a few KB. A result now
+  shows no size unless every file got one, a HEAD counts only on a 2xx, and
+  it asks for the uncompressed length, since the Hub otherwise sends text
+  files compressed with no `content-length`.
 - **A cached audio snapshot is certified against the whole repository
   listing.** The fork's completeness check read `listFiles`, which returns
   only the first page of a Hub tree listing, so a repository past one page
