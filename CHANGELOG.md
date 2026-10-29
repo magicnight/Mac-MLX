@@ -103,32 +103,42 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Agent turns now reuse the previous turn's history on hybrid
-  (linear-attention) and sliding-window models. Codex and Claude Code send
-  the whole conversation every turn, and the cache entry a turn left behind
-  (its prompt and what it generated) is not a prefix of the next turn on
-  Qwen3.5/3.6 and Mellum2, whose templates drop reasoning from history;
-  on Qwen3.6 the prompt itself is not one either, since the next turn
-  renders the `<think>` that opened the reply differently. Serving the
-  shared part needed a trim those caches cannot do, so every agent turn
-  prefilled the whole conversation again. The engine now also stores the
-  cache at the end of the last message before the generation prompt (the
-  chat rendered without it, kept only when that is an exact prefix of the
-  prompt and at least 256 tokens past what the cache already served), and
-  the next turn reuses everything up to there. On Qwen3.6-27B-4bit, the
-  second turn of a 1.7k-token tool loop reuses 1,662 of 1,712 prompt tokens
-  and takes 1.0 s instead of 2.8 s; Mellum2 reuses 1,594 of 1,632. On these
-  models a turn now keeps one cache entry instead of two: after the
-  snapshot, the turn's own entry is no longer stored, since it could serve
-  only a prompt that repeats it exactly, which these templates never send,
-  and even then a trim these caches cannot do. The snapshot costs about what
-  that entry did: 263 MB for 1,662 tokens on Qwen3.6-27B (about 150 MB of it
-  the fixed linear-attention state, then 64 KB a token), 69 MB on Mellum2.
-  The in-memory tier is still 512 MiB, so on Qwen3.6-27B a history past
-  about 5,800 tokens is served from the SSD tier. Gemma 4, whose template
+  (linear-attention, e.g. Qwen3.6) and sliding-window (e.g. Mellum2) models.
+  Codex and Claude Code send the whole conversation every turn, and the
+  cache entry a turn left behind (its prompt and what it generated) is not
+  a prefix of the next turn on Qwen3.6 and Mellum2, whose templates drop
+  reasoning from history; on Qwen3.6 the prompt itself is not one either,
+  since the next turn renders the `<think>` that opened the reply
+  differently. Serving the shared part needed a trim those caches cannot
+  do, so every agent turn prefilled the whole conversation again. On a
+  model whose cache has such a layer, the engine now also stores the cache
+  at the end of the last message before the generation prompt (the chat
+  rendered without it, kept only when that is an exact prefix of the prompt
+  and at least 256 tokens past what the cache already served), and the
+  next turn reuses everything up to there. On Qwen3.6-27B-4bit, the second
+  turn of a 1.7k-token tool loop reuses 1,662 of 1,712 prompt tokens and
+  takes 1.0 s instead of 2.8 s, and that of a 7.2k-token one reuses 7,222
+  of 7,272 and takes 1.1 s, against 9.2 s for the cold first turn; Mellum2
+  reuses 1,594 of 1,632. On these models a turn keeps one cache entry, not
+  two: after the snapshot, the turn's own entry is not stored, since it
+  could serve only a prompt that repeats it exactly, which these templates
+  never send, and even then a trim these caches cannot do. The snapshot
+  costs about what that entry did: 263 MB for 1,662 tokens on Qwen3.6-27B
+  (about 150 MB of it the fixed linear-attention state, then 64 KB a token),
+  69 MB on Mellum2. Past about 5,800 tokens on Qwen3.6-27B it is larger than
+  the 512 MiB in-memory tier and is written once to the SSD tier and served
+  from there. A turn whose history adds fewer than 256 tokens takes no
+  snapshot and still stores its own entry. Rendering the history costs
+  about 160 ms at 17k tokens on Qwen3.6. Gemma 4 E4B, whose template
   repeats the turn verbatim, no longer reuses the previous turn's generated
   tokens once the prompt is past its 512-token sliding window, only its
-  history. Models whose cache can be trimmed are
-  unaffected: the turn's own entry replaces the snapshot as before.
+  history. A model whose cache is all plain or quantized attention layers,
+  none sliding-window, takes no snapshot: its turn's own entry serves the
+  next turn's history through a trim, as before.
+- Prompt-cache entries larger than the in-memory tier now go straight to
+  the SSD tier, once, and are served from it without being promoted.
+  Before, such an entry evicted every other in-memory entry and then
+  itself, and each later hit promoted it only to evict and rewrite it.
 - A prompt-cache entry promoted back from the SSD tier always returned as
   the least-kept class, whatever it had been demoted as. It now keeps its
   class (stored in the file's metadata; files written before return as

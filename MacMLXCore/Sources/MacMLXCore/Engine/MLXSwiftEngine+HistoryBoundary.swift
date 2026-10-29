@@ -135,14 +135,15 @@ extension MLXSwiftEngine {
     ///
     /// Not when this turn stored a snapshot and `caches` cannot be trimmed.
     /// Such an entry serves only a prompt that extends it exactly, and the
-    /// templates the snapshot is for (Qwen3.5/3.6, Mellum2) never re-render a
+    /// templates the snapshot is for (Qwen3.6, Mellum2) never re-render a
     /// turn that way; even an exact retry needs a one-token trim these caches
     /// refuse. It would cost as much as the snapshot (about 1.2 GB on
-    /// Qwen3.6-27B at 17k tokens), push the snapshot out of the in-memory tier
-    /// and double the SSD writes of every turn. A template that does re-render
-    /// the turn verbatim (Gemma 4) loses only the reuse of the generated
-    /// tokens; the snapshot still serves its history. A trimmable cache keeps
-    /// recording the entry, which replaces the snapshot on insert as before.
+    /// Qwen3.6-27B at 17k tokens) and double the memory or SSD writes of every
+    /// turn. A template that does re-render the turn verbatim (Gemma 4 E4B,
+    /// once past its 512-token sliding window) loses only the reuse of the
+    /// generated tokens; the snapshot still serves its history. A cache that
+    /// can still be trimmed (a sliding window not yet filled) keeps recording
+    /// the entry, which replaces the snapshot on insert.
     static func recordsTurnEntry(historySnapshotStored: Bool, caches: [any KVCache]) -> Bool {
         !historySnapshotStored || MLXLMCommon.canTrimPromptCache(caches)
     }

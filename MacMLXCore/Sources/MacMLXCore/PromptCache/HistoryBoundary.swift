@@ -7,7 +7,7 @@
 /// replay the whole conversation every turn. The entry the engine records
 /// after a turn — the prompt, the generated tokens and the stop token — is not
 /// a prefix of the next turn's prompt on templates that render a previous
-/// assistant turn differently from how the model produced it (Qwen3.5/3.6 and
+/// assistant turn differently from how the model produced it (Qwen3.6 and
 /// Mellum2 drop reasoning from history), and the full prompt is not one either
 /// when the generation prompt itself is re-rendered (Qwen3.6 opens `<think>`
 /// `\n` and closes the same turn as `<think>` `\n\n` `</think>`). Serving the
