@@ -105,6 +105,14 @@ struct HistoryBoundaryTests {
                 != .snapshot(boundary: 601))
     }
 
+    @Test("A cold file promotes with the class it was demoted with, old files as assistant")
+    func promotesWithTheStoredCacheType() {
+        #expect(PromptCacheStore.promotedCacheType(["cacheType": "user"]) == .user)
+        #expect(PromptCacheStore.promotedCacheType(["cacheType": "system"]) == .system)
+        #expect(PromptCacheStore.promotedCacheType([:]) == .assistant)
+        #expect(PromptCacheStore.promotedCacheType(["cacheType": "bogus"]) == .assistant)
+    }
+
     @Test("A boundary the cache already reached is skipped")
     func skipsWhenTheCacheAlreadyServedTheBoundary() {
         // The exact repeat of a turn: the previous snapshot is a strict prefix

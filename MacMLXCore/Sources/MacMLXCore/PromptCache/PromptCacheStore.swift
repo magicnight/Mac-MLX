@@ -280,6 +280,13 @@ public actor PromptCacheStore {
         Set(inFlight.keys)
     }
 
+    /// The eviction class of the hot entry stored under exactly `tokens`, or
+    /// nil when the hot tier holds none. Test-only: lets a test see that a
+    /// promotion from the cold tier keeps the class the entry was demoted with.
+    func hotCacheType(modelID: String, tokens: [Int]) -> PromptCacheType? {
+        trie.get(model: modelID, tokens: tokens)?.cacheType
+    }
+
     /// Snapshot of the current cold-tier index records, keyed by hash.
     /// Test-only: lets a test verify a deduped re-demote (Bugbot #4) left the
     /// ORIGINAL record byte-identical (``ColdIndexEntry`` is `Equatable`,
@@ -573,7 +580,7 @@ public actor PromptCacheStore {
         nBytes -= entry.nbytes
         demoteToCold(
             modelID: key.modelID, tokens: key.tokens, caches: entry.caches,
-            fingerprint: entry.fingerprint)
+            fingerprint: entry.fingerprint, cacheType: entry.cacheType)
         return true
     }
 
@@ -597,7 +604,8 @@ public actor PromptCacheStore {
     /// so the `insert` → `store` → `evictOne` chain and `insert`'s public
     /// signature are untouched.
     func demoteToCold(
-        modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?
+        modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?,
+        cacheType: PromptCacheType = .assistant
     ) {
         // Master opt-in: a disabled cold tier makes this a pure hot cache.
         // Check first, before any filesystem or serialisation work, so the
@@ -621,6 +629,9 @@ public actor PromptCacheStore {
             "tokenCount": String(key.tokenCount),
             "modelFingerprint": fingerprint,
             "recordVersion": Self.coldRecordVersion,
+            // Restored on promotion (``promotedCacheType``), so an entry keeps
+            // its eviction class across a round trip through the cold tier.
+            "cacheType": cacheType.rawValue,
         ]
 
         // Dedup (Bugbot #4): a write for this exact content-addressed key is
@@ -867,8 +878,8 @@ public actor PromptCacheStore {
         // Promote back into the hot tier under the SAME (validated) fingerprint,
         // so a later re-eviction demotes it with the correct stamp.
         store(
-            modelID: modelID, tokens: tokens, caches: restored, cacheType: .assistant,
-            fingerprint: current)
+            modelID: modelID, tokens: tokens, caches: restored,
+            cacheType: Self.promotedCacheType(meta), fingerprint: current)
         // Hot ⊕ cold disjoint: the entry now lives in the hot tier, so drop its
         // cold index record + trie node. The safetensors file stays as the
         // content-addressed backing (a re-eviction rewrites the record).
@@ -979,11 +990,20 @@ public actor PromptCacheStore {
             // drop the cold record + node so the tiers stay disjoint.
             store(
                 modelID: modelID, tokens: candidate.key, caches: restored,
-                cacheType: .assistant, fingerprint: current)
+                cacheType: Self.promotedCacheType(meta), fingerprint: current)
             dropColdRecord(modelID: modelID, tokens: candidate.key)
             return hit
         }
         return nil
+    }
+
+    /// The eviction class a cold file was demoted with, read back from its
+    /// `cacheType` metadata. Files written before the key existed carry none
+    /// and promote as `.assistant`, the class every promotion used before.
+    /// An additive key: older readers ignore it, and the `recordVersion` and
+    /// format stamps are unchanged.
+    static func promotedCacheType(_ meta: [String: String]) -> PromptCacheType {
+        meta["cacheType"].flatMap(PromptCacheType.init(rawValue:)) ?? .assistant
     }
 
     /// Drop a cold entry's ``coldTrie`` node and ``coldEntries`` record together,

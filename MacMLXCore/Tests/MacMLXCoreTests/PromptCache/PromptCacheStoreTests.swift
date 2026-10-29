@@ -252,6 +252,27 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(hit?.reusedTokenCount, history.count)
     }
 
+    /// A `.user` entry demoted to the cold tier comes back as `.user`, so a
+    /// promoted history-boundary snapshot keeps its eviction priority.
+    func testColdPromotionKeepsTheCacheType() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot(), maxEntries: 1)
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            cacheType: .user, modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            cacheType: .user, modelFingerprint: fpA)
+        await store.drainInFlight()
+        let demoted = await store.hotCacheType(modelID: model, tokens: [1, 2])
+        XCTAssertNil(demoted, "[1,2] was demoted to the cold tier")
+
+        let hit = await store.fetchNearest(modelID: model, tokens: [1, 2, 9], modelFingerprint: fpA)
+        XCTAssertEqual(hit?.reusedTokenCount, 2)
+        let promoted = await store.hotCacheType(modelID: model, tokens: [1, 2])
+        XCTAssertEqual(promoted, .user)
+    }
+
     // MARK: - copy-on-fetch isolation
 
     func testFetchedSnapshotIsIndependentCopy() async throws {
