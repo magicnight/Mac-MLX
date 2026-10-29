@@ -341,7 +341,7 @@ final class PromptCacheColdPruneTests: XCTestCase {
         // nothing is written. A non-nil fingerprint isolates the `coldEnabled`
         // guard from the separate nil-fingerprint spill skip.
         await store.demoteToCold(
-            modelID: "M", tokens: [1, 2, 3], caches: [], fingerprint: "test-fp")
+            modelID: "M", tokens: [1, 2, 3], caches: [], fingerprint: "test-fp", cacheType: .assistant)
 
         let file = PromptCacheKey(modelID: "M", tokens: [1, 2, 3]).shardedFileURL(under: root)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))

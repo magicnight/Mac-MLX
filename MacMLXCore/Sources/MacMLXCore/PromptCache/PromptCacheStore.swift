@@ -319,6 +319,13 @@ public actor PromptCacheStore {
     /// enforce both budgets. The store takes ownership of `caches` — callers
     /// that also hand the same state out to a generator must pass an
     /// independent copy.
+    ///
+    /// An entry larger than the whole hot tier (`maxBytes`) never enters it:
+    /// admitted, it would evict every other entry and then itself, and each
+    /// later hit would promote it only to evict and rewrite it again. It goes
+    /// straight to the cold tier instead, one write, with the hot tier left
+    /// as it was. The cold fetches likewise serve such an entry from what
+    /// they loaded without promoting it (``fitsHotTier(_:)``).
     private func store(
         modelID: String, tokens: [Int], caches: [any KVCache], cacheType: PromptCacheType,
         fingerprint: String?
@@ -329,6 +336,12 @@ public actor PromptCacheStore {
             cacheType: cacheType,
             fingerprint: fingerprint
         )
+        guard entry.nbytes <= maxBytes else {
+            demoteToCold(
+                modelID: modelID, tokens: tokens, caches: caches, fingerprint: fingerprint,
+                cacheType: cacheType)
+            return
+        }
         let key = PromptCacheEntryKey(modelID: modelID, tokens: tokens)
 
         nBytes += entry.nbytes
@@ -605,7 +618,7 @@ public actor PromptCacheStore {
     /// signature are untouched.
     func demoteToCold(
         modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?,
-        cacheType: PromptCacheType = .assistant
+        cacheType: PromptCacheType
     ) {
         // Master opt-in: a disabled cold tier makes this a pure hot cache.
         // Check first, before any filesystem or serialisation work, so the
@@ -801,6 +814,12 @@ public actor PromptCacheStore {
             .appending(path: "\(hash).safetensors", directoryHint: .notDirectory)
     }
 
+    /// Whether an entry of `caches` may live in the hot tier: no larger than
+    /// the tier's whole byte budget (see ``store``).
+    private func fitsHotTier(_ caches: [any KVCache]) -> Bool {
+        Self.cacheBytes(caches) <= maxBytes
+    }
+
     /// Exact-key cold lookup. Restores the on-disk snapshot for `tokens`,
     /// promotes it back into the hot tier, and — like an exact hot hit — hands
     /// the caller an independent copy trimmed back one token so a suffix
@@ -812,10 +831,11 @@ public actor PromptCacheStore {
     /// restored caches internally, so the pristine `restored` array is what gets
     /// promoted while the returned hit owns a separate, trimmed copy. Promotion
     /// is skipped when the entry can't be served (`makeHit == nil`, e.g. a
-    /// non-trimmable hybrid cache), since caching it hot would never help.
-    /// Provenance isn't persisted in the cold tier, so the promoted entry
-    /// re-enters as `.assistant` (the most-evictable, correct-by-default class
-    /// for a speculatively restored prefix).
+    /// non-trimmable hybrid cache), since caching it hot would never help, and
+    /// when the entry is larger than the hot tier (``fitsHotTier(_:)``): then
+    /// the hit is served from what was loaded and the cold record stays, so
+    /// nothing is rewritten. A promoted entry re-enters with the class it was
+    /// demoted with, read from the file (``promotedCacheType(_:)``).
     ///
     /// `loadPromptCache` still reads synchronously on this executor (~1.3 ms —
     /// cheap; moving the READ off-actor is Stage 3c, deferred). The Stage 3a
@@ -875,6 +895,9 @@ public actor PromptCacheStore {
                 caches: restored, heldCount: tokens.count,
                 targetReuse: tokens.count - 1, tokenCount: tokens.count)
         else { return nil }
+        // An entry the hot tier cannot hold is served from disk as it is: its
+        // cold record stays and nothing is rewritten.
+        guard fitsHotTier(restored) else { return hit }
         // Promote back into the hot tier under the SAME (validated) fingerprint,
         // so a later re-eviction demotes it with the correct stamp.
         store(
@@ -986,6 +1009,9 @@ public actor PromptCacheStore {
                     caches: restored, heldCount: candidate.heldCount,
                     targetReuse: candidate.targetReuse, tokenCount: tokens.count)
             else { continue }
+            // An entry the hot tier cannot hold is served from disk as it is:
+            // its cold record stays and nothing is rewritten.
+            guard fitsHotTier(restored) else { return hit }
             // Promote into the hot tier under the validated fingerprint, then
             // drop the cold record + node so the tiers stay disjoint.
             store(
