@@ -657,6 +657,12 @@ public actor MLXSwiftEngine: InferenceEngine {
         get async { await promptCacheStore.residentCount }
     }
 
+    /// Test seam: bytes held by the prompt cache's in-memory tier, for the
+    /// gated smoke that measures what a history-boundary snapshot costs.
+    var promptCacheResidentBytes: Int {
+        get async { await promptCacheStore.residentBytes }
+    }
+
     /// What the last text generation did with its cache (#142): the key's
     /// length (the stop token included when the stream ended on one), the
     /// positions the cache reported once the stream ended (0 for a layout
