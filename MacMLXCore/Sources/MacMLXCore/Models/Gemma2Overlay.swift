@@ -157,7 +157,24 @@ final class Gemma2OverlayAttention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache {
+        // `kv_bits` turns the cache into a `QuantizedKVCache`, whose
+        // `update(keys:values:)` is a fatalError; the stock router sends it to
+        // quantized SDPA instead, which cannot soft-cap the scores. Read the
+        // quantized cache back as dense keys and values so the soft-capped
+        // path below serves it (upstream's Gemma 2 aborts here).
+        if let quantized = cache as? QuantizedKVCacheProtocol {
+            let dtype = keys.dtype
+            let (quantizedKeys, quantizedValues) = quantized.updateQuantized(
+                keys: keys, values: values)
+            keys = dequantized(
+                quantizedKeys.0, scales: quantizedKeys.1, biases: quantizedKeys.2,
+                groupSize: quantized.groupSize, bits: quantized.bits, mode: quantized.mode
+            ).asType(dtype)
+            values = dequantized(
+                quantizedValues.0, scales: quantizedValues.1, biases: quantizedValues.2,
+                groupSize: quantized.groupSize, bits: quantized.bits, mode: quantized.mode
+            ).asType(dtype)
+        } else if let cache {
             (keys, values) = cache.update(keys: keys, values: values)
         }
         let keyLength = keys.dim(2)

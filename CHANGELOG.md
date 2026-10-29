@@ -144,7 +144,12 @@ dependency graph its tests ran on.
   two-prompt ragged cohort matches each prompt decoded alone to 3e-6, where
   upstream's padded row was off by 1.58. Verified on random weights only; no
   real Gemma 2 checkpoint was run here. Gemma 2 had been on the batching
-  allowlist since continuous batching shipped in v0.6.0.
+  allowlist since continuous batching shipped in v0.6.0. The copy also no
+  longer aborts the process when `kv_bits` is set: the quantized cache that
+  setting swaps in has no plain update, which upstream's Gemma 2 called, so
+  the copy reads the quantized keys and values back dense for its
+  soft-capped attention (checked against the unquantized cache on random
+  weights).
 - **Structured output no longer runs away on whitespace.** JSON permits any
   amount of whitespace between tokens, so a constrained decode could spin:
   after `{` the automaton accepted spaces, tabs and newlines forever, and a

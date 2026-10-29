@@ -77,7 +77,7 @@ final class Gemma2OverlayTests: XCTestCase {
         let uncached = model(input, cache: nil)
         let cached = model(input, cache: try model.newCache(parameters: nil))
         let error = abs(uncached - cached).max().item(Float.self)
-        XCTAssertLessThan(error, 1e-6, "the cache must not change the prefill (\(error))")
+        XCTAssertLessThan(error, tolerance, "the cache must not change the prefill (\(error))")
     }
 
     /// A symbolic `.causal` mask and the equivalent boolean array give the same
@@ -130,6 +130,49 @@ final class Gemma2OverlayTests: XCTestCase {
             uniqueKeysWithValues: overlay.parameters().flattened().map { ($0.0, $0.1.shape) })
         XCTAssertFalse(upstreamShapes.isEmpty)
         XCTAssertEqual(overlayShapes, upstreamShapes)
+    }
+
+    // MARK: - Quantized KV cache
+
+    /// `kv_bits` swaps each layer's cache for a `QuantizedKVCache` once the
+    /// prompt is past `quantizedKVStart`, and that cache's plain `update` is a
+    /// fatalError, which took the process down under upstream's Gemma 2. The
+    /// overlay reads it back dense instead: decoding after the swap must not
+    /// abort and must stay close to decoding on the unquantized cache (8-bit
+    /// keys and values, so close rather than equal). Head dim 32 so the cache
+    /// can quantize at group size 32.
+    func testDecodeOnAQuantizedKVCacheMatchesTheDenseCache() throws {
+        try requireMLXRuntimeOrSkip()
+        MLXRandom.seed(5)
+        let configuration = try JSONDecoder().decode(
+            Gemma2OverlayConfiguration.self,
+            from: Data(#"""
+                { "hidden_size": 32, "num_hidden_layers": 2, "intermediate_size": 64,
+                "num_attention_heads": 4, "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
+                "vocab_size": 64, "head_dim": 32, "attn_logit_softcapping": 50.0,
+                "final_logit_softcapping": 30.0, "query_pre_attn_scalar": 32 }
+                """#.utf8))
+        let model = Gemma2OverlayModel(configuration)
+        eval(model.parameters().flattened().map { $0.1 })
+        let input = MLXArray(prompt.map { Int32($0) }, [1, prompt.count])
+        let next = MLXArray([Int32(5)], [1, 1])
+
+        let dense = try model.newCache(parameters: nil)
+        _ = model(input, cache: dense)
+        let denseLogits = model(next, cache: dense)[0, -1]
+
+        let simple = try model.newCache(parameters: nil)
+        _ = model(input, cache: simple)
+        let quantized: [KVCache] = try simple.map { cache in
+            let plain = try XCTUnwrap(cache as? KVCacheSimple)
+            return try plain.toQuantized(groupSize: 32, bits: 8)
+        }
+        let quantizedLogits = model(next, cache: quantized)[0, -1]
+
+        XCTAssertTrue(quantized.allSatisfy { $0 is QuantizedKVCacheProtocol })
+        let error = abs(denseLogits - quantizedLogits).max().item(Float.self)
+        let scale = abs(denseLogits).max().item(Float.self)
+        XCTAssertLessThan(error, 0.05 * scale, "8-bit cache drifted by \(error) on logits up to \(scale)")
     }
 
     // MARK: - Helpers

@@ -55,7 +55,7 @@ open /Applications/macMLX.app
 自 v0.1 MVP 起发了十八个版本，按领域。**这一节记录最新的已发布状态——
 新功能先落到这里，再到下面路线图加一行。**
 
-- **引擎与模型** —— 进程内 MLX Swift 引擎（文本 + 16 种 VLM 架构，带 OCR 模型识别，模型到约 70B）；**连续批处理**（并发客户端下聚合吞吐 2.5–3.2×，只在真实并发时启用）；分层 KV prompt cache（RAM + SSD），跨 agent 轮次**最长公共前缀复用**；**投机解码**（draft 模型 + 接受率遥测）；带 LRU 淘汰的多模型池、LoRA adapter 推理、MCP server（`macmlx mcp serve`）；纯 Swift 架构移植——**DeepSeek V3.2**、**Mellum2**、Solar-Open、GLM-5.1——以外部 overlay 注册并对 Python 参考实现数值对齐（[支持分级](docs/model-support.md)）。运行在受控的 mlx-swift fork 上，携带**五条**已合入上游的修复，下个上游版本即撤。
+- **引擎与模型** —— 进程内 MLX Swift 引擎（文本 + 16 种 VLM 架构，带 OCR 模型识别，模型到约 70B）；**连续批处理**（并发客户端下聚合吞吐 2.5–3.2×，只在真实并发时启用）；分层 KV prompt cache（RAM + SSD），跨 agent 轮次**最长公共前缀复用**；**投机解码**（draft 模型 + 接受率遥测）；带 LRU 淘汰的多模型池、LoRA adapter 推理、MCP server（`macmlx mcp serve`）；纯 Swift 架构移植——**DeepSeek V3.2**、**Mellum2**、Solar-Open、GLM-5.1——以外部 overlay 注册并对 Python 参考实现数值对齐（[支持分级](docs/model-support.md)）。运行在受控的 mlx-swift fork 上，携带**五条**已合入上游的修复，等某个 mlx-swift 发布版所带的 core 包含全部五条后即撤。
 - **下载** —— 跨取消和退出的断点续传、实时速度/ETA、HuggingFace 镜像源、Hub commit 更新检测。
 - **聊天** —— 对话侧栏（重命名、删除、回溯）、流式 Markdown、逐消息操作、按模型参数面板、可折叠 `<think>` 推理块。
 - **音频** —— 基于 `mlx-audio-swift` 的进程内语音转文字与文字转语音（`POST /v1/audio/transcriptions`、`POST /v1/audio/speech`，OpenAI 形态，格式如实申报）；app 内转写是聊天输入框里可取消的附件，朗读是每条回复上的按钮；音频检查点在模型库有独立扫描。已单元测试，尚未在本机真实检查点上验证。
