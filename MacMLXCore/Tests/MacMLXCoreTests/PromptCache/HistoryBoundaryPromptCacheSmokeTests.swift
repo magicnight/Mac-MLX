@@ -41,11 +41,23 @@ import enum MacMLXCore.JSONValue
 /// the model rates equally: on Qwen3.6 the 23rd token of turn 2 is " let" or
 /// " confirm", logprob -1.5 for both in the warm run, 0.375 apart in the cold
 /// one, and the texts part there. So up to the first token the runs disagree
-/// on, every chosen token's logprob, and every top-5 alternative both runs
-/// list, must agree within `logprobTolerance`; at that token each run's choice
-/// must be within `nearTieTolerance` of the other run's choice in its own
-/// distribution; after it the continuations differ and are not compared. A
-/// split that feeds a position twice or skips one fails these bounds.
+/// on, every chosen token's logprob must agree within `logprobTolerance` and
+/// every top-5 alternative both runs list, outside the far tail, within
+/// `alternativeTolerance`; at
+/// that token each run's choice must be within `nearTieTolerance` of the other
+/// run's choice in its own distribution; after it the continuations differ
+/// and are not compared.
+///
+/// Measured on Qwen3.6 with the split fed one position twice
+/// (`suffix[(split - 1)...]`) and with one position skipped
+/// (`suffix[(split + 1)...]`): both fail the bitwise oracle (the oracle's
+/// turn 2 reads " confirm this", the warm turn " let them"). Turn 1 split
+/// against unsplit fails the near-tie rule on both: the skipped position
+/// flips token 10 with the unsplit run's choice 3.25 above the split run's,
+/// and the doubled one, whose text does not change, moves alternatives above
+/// the floor by up to 3.375. Unmutated, the largest such difference is 1.375
+/// (turn 1) and 0.375 (turn 2), and no chosen token's logprob moves by more
+/// than 0.125.
 ///
 /// It runs twice: on the stock decode path, then on the hand-built pipeline
 /// (`logprobs`, the run the comparisons are made on). Both decode greedily
@@ -79,6 +91,18 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
     /// Bound on the logprob difference between two runs before they first
     /// disagree: two bf16 steps at the logits' magnitude (measured: one).
     private let logprobTolerance: Float = 0.25
+
+    /// Bound on the difference of a top-5 alternative both runs list, before
+    /// they first disagree. Alternatives move more than the chosen token
+    /// (measured: up to 1.375 unmutated; with a position doubled, 3.375 among
+    /// alternatives above `alternativeFloor`).
+    private let alternativeTolerance: Float = 2.0
+
+    /// Alternatives both runs put below this logprob (e^-8, about 3e-4) are
+    /// not compared: that far down the tail bf16 rounding alone moves them
+    /// by whole units (Mellum2 measured 2.625 at -16 on a token whose choice
+    /// had probability 1).
+    private let alternativeFloor: Float = -8
 
     /// Bound on the gap, in one run's distribution, between its own greedy
     /// token and the other run's at the first token they disagree on: four
@@ -259,9 +283,11 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
                 abs(a.logprob - b.logprob), logprobTolerance,
                 "\(label) token \(position) \(a.token.debugDescription): \(a.logprob) against \(b.logprob)")
             for alternative in a.topLogprobs {
-                guard let other = b.topLogprobs.first(where: { $0.token == alternative.token }) else { continue }
+                guard let other = b.topLogprobs.first(where: { $0.token == alternative.token }),
+                    max(alternative.logprob, other.logprob) >= alternativeFloor
+                else { continue }
                 XCTAssertLessThanOrEqual(
-                    abs(alternative.logprob - other.logprob), logprobTolerance,
+                    abs(alternative.logprob - other.logprob), alternativeTolerance,
                     "\(label) token \(position), alternative \(alternative.token.debugDescription): "
                         + "\(alternative.logprob) against \(other.logprob)")
             }
@@ -406,7 +432,7 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
         let model = try modelDirectory()
         let loaded = try await HuggingFaceTokenizerLoader().load(from: model.url)
         let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
-        let request = turns(modelID: model.id, logprobs: false, sections: 108).turn2
+        let request = turns(modelID: model.id, logprobs: false, sections: 120).turn2
         var seconds: [Double] = []
         var count = 0
         for _ in 0..<5 {
