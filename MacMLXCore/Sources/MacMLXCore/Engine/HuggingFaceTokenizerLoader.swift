@@ -103,26 +103,38 @@ struct TokenizerBridge: MLXLMCommon.Tokenizer, @unchecked Sendable {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
+        try applyChatTemplate(
+            messages: messages, tools: tools, additionalContext: additionalContext,
+            addGenerationPrompt: true)
+    }
+
+    /// The protocol requirement above with the generation prompt made a
+    /// choice. `MLXLMCommon.Tokenizer` always renders with the generation
+    /// prompt; the history-boundary prompt-cache snapshot (see
+    /// ``HistoryBoundary``) also needs the same chat rendered without it, the
+    /// way the next turn will render this turn's messages. Both renders go
+    /// through this one call, so they differ in nothing but the flag.
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
+        addGenerationPrompt: Bool
+    ) throws -> [Int] {
         do {
-            if let chatTemplateOverride {
-                // `.literal` wins over the config template in swift-transformers.
-                // Called through the `any Tokenizer` existential, so every
-                // parameter of the protocol requirement must be explicit (no
-                // default args): `addGenerationPrompt: true`, `truncation: false`,
-                // `maxLength: nil`, and the tools/additionalContext threading all
-                // match the non-override call below exactly — only the template
-                // SOURCE differs.
-                return try upstream.applyChatTemplate(
-                    messages: messages,
-                    chatTemplate: .literal(chatTemplateOverride),
-                    addGenerationPrompt: true,
-                    truncation: false,
-                    maxLength: nil,
-                    tools: tools,
-                    additionalContext: additionalContext)
-            }
+            // `.literal` wins over the config template in swift-transformers;
+            // `nil` selects the checkpoint's own. Called through the
+            // `any Tokenizer` existential, so every parameter of the protocol
+            // requirement is explicit (no default args): `truncation: false`
+            // and `maxLength: nil` are what swift-transformers' own
+            // `applyChatTemplate(messages:tools:additionalContext:)` passes.
             return try upstream.applyChatTemplate(
-                messages: messages, tools: tools, additionalContext: additionalContext)
+                messages: messages,
+                chatTemplate: chatTemplateOverride.map { .literal($0) },
+                addGenerationPrompt: addGenerationPrompt,
+                truncation: false,
+                maxLength: nil,
+                tools: tools,
+                additionalContext: additionalContext)
         } catch let tokenizerError as Tokenizers.TokenizerError {
             if case .chatTemplate = tokenizerError {
                 throw MLXLMCommon.TokenizerError.missingChatTemplate
