@@ -9,6 +9,47 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **OpenAI Responses API: `POST /v1/responses`.** Codex, and any other client
+  that speaks the Responses API, can run its agent loop against macMLX: text,
+  streamed reasoning, function tools (Codex's namespaced tools included, with
+  the `namespace` field on the call so Codex dispatches it), `custom`
+  freeform tools, multi-turn tool results, structured output through
+  `text.format` (the same schema subset and 400s as `response_format`), and
+  usage with prompt-cache hits. Streaming follows OpenAI's event sequence,
+  from `response.created` to one terminal `response.completed`,
+  `response.incomplete` (at `max_output_tokens`) or `response.failed`. The
+  reasoning item streams as `reasoning_text` and, because Codex prints only
+  reasoning summaries (it ignores raw `reasoning_text` unless
+  `show_raw_agent_reasoning` is set), also as one summary part with the same
+  text. `reasoning.effort` `"none"` or `"minimal"` turns a thinking
+  template's `enable_thinking` off. A `system` or `developer` item after the
+  first turn is folded into the next user turn, since many chat templates
+  accept a system turn only first.
+
+  It is stateless: macMLX stores no responses, so `store` is ignored
+  (responses report `"store": false`), and `previous_response_id`,
+  `item_reference` items, `background` and file ids are a 400 — send the
+  whole conversation in `input`, as Codex does. There is no `GET` or
+  `DELETE /v1/responses/{id}`. Hosted tools (`web_search`, `file_search`,
+  `code_interpreter`, `mcp`, …) are not offered to the model and are ignored
+  rather than rejected, since Codex always declares `web_search`. Reasoning
+  items sent back in `input` are dropped, so the model does not see its
+  earlier reasoning yet, and no `encrypted_content` is returned.
+  `tool_choice` other than `"none"` and `parallel_tool_calls` are echoed, not
+  enforced. Images must be base64 data URLs.
+
+  To use it from Codex, add a provider to `~/.codex/config.toml`:
+
+  ```toml
+  model = "Qwen3.6-27B-4bit"
+  model_provider = "macmlx"
+  [model_providers.macmlx]
+  name = "macMLX"
+  base_url = "http://127.0.0.1:8000/v1"
+  wire_api = "responses"
+  ```
+
 ### Fixed
 
 - A tool-calling request that arrived while another request was being served on a model the continuous batcher covers (the dense Qwen 2/3, Llama and Gemma families) could be batched, and the batched path never parsed tool calls, so the call came back as plain text in `content` instead of `tool_calls`. A request that offers tools now always takes the single-stream path; `tool_choice: "none"` and `tools: []` still batch, since there is nothing to parse. A lone request on an idle server was never affected (the batcher hands it to the single-stream path), which is why this survived since v0.6: it takes concurrency, such as an agent running subagents. The cost is that concurrent tool-using agents now queue on the single-stream path instead of batching, until the batched path learns to parse tool calls. Covered by stub tests; I have no batch-covered checkpoint locally to reproduce it on real weights.

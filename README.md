@@ -62,7 +62,7 @@ roadmap entry below.**
 - **Downloads** — resumable across cancels and app quits, live speed/ETA, HuggingFace mirror support, Hub-commit update detection.
 - **Chat** — conversation sidebar (rename, delete, rewind), streaming Markdown, per-message actions, per-model Parameters Inspector, collapsible `<think>` reasoning blocks.
 - **Audio** — speech-to-text and text-to-speech in-process on MLX through `mlx-audio-swift` (`POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, OpenAI-shaped, with formats reported honestly); in the app, transcription is a cancellable attachment in the chat composer and playback is a button on each reply; audio checkpoints get their own model-library scan. Unit-tested, not yet validated against real checkpoints on our hardware.
-- **API** — always-on OpenAI-compatible server plus Ollama (NDJSON) and Anthropic (`/v1/messages`) compatibility; **structured output** (`response_format` json_object / JSON-schema subset with nested objects, arrays, `$ref`, any root type, Unicode literals and numeric bounds, constrained decoding); `tools` pass-through with `tool_calls` responses; `logit_bias`, `logprobs`, `stream_options.include_usage` with prompt-cache hits in usage, XTC sampler, per-request LoRA adapters, KV-cache quantization; `max_completion_tokens`; `/v1/embeddings` + `/v1/rerank` (mlx-swift-lm's `MLXRerankers` when the checkpoint is a reranker — encoder cross-encoders, Qwen3 rerankers, Jina v3 — bi-encoder fallback otherwise), rerankers and embedders counted in the model pool's memory budget and unloadable by id, optional bearer auth, model aliases + idle TTL, `reasoning_content` separation, model cold-swap by ID, stall watchdog, CORS + probe endpoints; concurrent clients batch onto one model instead of queuing serially (requests that offer tools take the single-stream path, since tool calls are only parsed there).
+- **API** — always-on OpenAI-compatible server plus the OpenAI Responses API (`/v1/responses`, stateless — Codex runs against it), Ollama (NDJSON) and Anthropic (`/v1/messages`) compatibility; **structured output** (`response_format` json_object / JSON-schema subset with nested objects, arrays, `$ref`, any root type, Unicode literals and numeric bounds, constrained decoding); `tools` pass-through with `tool_calls` responses; `logit_bias`, `logprobs`, `stream_options.include_usage` with prompt-cache hits in usage, XTC sampler, per-request LoRA adapters, KV-cache quantization; `max_completion_tokens`; `/v1/embeddings` + `/v1/rerank` (mlx-swift-lm's `MLXRerankers` when the checkpoint is a reranker — encoder cross-encoders, Qwen3 rerankers, Jina v3 — bi-encoder fallback otherwise), rerankers and embedders counted in the model pool's memory budget and unloadable by id, optional bearer auth, model aliases + idle TTL, `reasoning_content` separation, model cold-swap by ID, stall watchdog, CORS + probe endpoints; concurrent clients batch onto one model instead of queuing serially (requests that offer tools take the single-stream path, since tool calls are only parsed there).
 - **CLI** — native ANSI dashboards for `pull` / `serve` / `run`, PID coordination shared with the GUI.
 - **Activity, Benchmark & Logs tabs** — a live **Activity panel** with sudoless Apple-Silicon readouts (GPU occupancy, memory bandwidth, thermal/memory pressure, per-rail power) and the current inference **bottleneck** with advice, fusing hardware counters with the engine's own prefill/decode phase (the signal an external monitor can't reach); Benchmark's local tok/s · TTFT · peak memory with a community leaderboard, now attributing each run's decode bottleneck; a Pulse-backed log viewer with MLX stdout/stderr teed in.
 
@@ -95,6 +95,21 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"Qwen3-8B-4bit","messages":[{"role":"user","content":"Hi"}]}'
 ```
+
+**Codex** talks to the Responses API (`/v1/responses`). Add macMLX as a
+provider in `~/.codex/config.toml`, with a tool-calling model:
+
+```toml
+model = "Qwen3.6-27B-4bit"
+model_provider = "macmlx"
+[model_providers.macmlx]
+name = "macMLX"
+base_url = "http://127.0.0.1:8000/v1"
+wire_api = "responses"
+```
+
+macMLX keeps no responses, so a client must send the whole conversation each
+turn (Codex does); `previous_response_id` is rejected.
 
 ## Inference engines
 
