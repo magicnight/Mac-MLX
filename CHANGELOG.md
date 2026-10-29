@@ -31,10 +31,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   place it was sent: it is appended to the user turn just before it, or,
   after an assistant turn or a tool output, starts a user turn of its own
   that a user message right after it joins. Earlier turns are never
-  rewritten, so folding no longer forces them to be prefilled again; whether
-  the prompt cache actually serves them on the next turn depends on the
-  engine, and today it often does not on hybrid (linear-attention) or
-  sliding-window models. A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
+  rewritten, so folding no longer forces them to be prefilled again, and the
+  prompt cache serves them on the next turn on hybrid (linear-attention) and
+  sliding-window models too (see Fixed). A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
   is appended to the description the model sees. Bodies up to 64 MB are
   accepted, since the whole conversation is sent every turn.
 
@@ -103,6 +102,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Agent turns now reuse the previous turn's history on hybrid
+  (linear-attention) and sliding-window models. Codex and Claude Code send
+  the whole conversation every turn, and the cache entry a turn left behind
+  (its prompt and what it generated) is not a prefix of the next turn on
+  Qwen3.5/3.6 and Mellum2, whose templates drop reasoning from history;
+  on Qwen3.6 the prompt itself is not one either, since the next turn
+  renders the `<think>` that opened the reply differently. Serving the
+  shared part needed a trim those caches cannot do, so every agent turn
+  prefilled the whole conversation again. The engine now also stores the
+  cache at the end of the last message before the generation prompt (the
+  chat rendered without it, kept only when that is an exact prefix of the
+  prompt and at least 256 tokens past what the cache already served), and
+  the next turn reuses everything up to there. On Qwen3.6-27B-4bit, the
+  second turn of a 1.7k-token tool loop reuses 1,662 of 1,712 prompt tokens
+  and takes 1.0 s instead of 2.8 s; Mellum2 reuses 1,594 of 1,632. The cost
+  is a second cache entry per turn on these models: 263 MB for those 1,662
+  tokens on Qwen3.6-27B (about 150 MB of it the fixed linear-attention
+  state, then 64 KB a token) and 69 MB on Mellum2. The in-memory tier is
+  still 512 MiB, and the turn's own entry is what it drops first: on
+  Qwen3.6-27B the two no longer fit side by side past about 1,700 tokens,
+  and past about 5,800 the snapshot alone does not fit and is served from
+  the SSD tier instead. Models whose cache can be trimmed are unaffected:
+  the turn's own entry replaces the snapshot as before.
 - `/v1/messages` dropped `role:"system"` turns inside `messages`. Claude Code
   sends its reminders that way (your CLAUDE.md, memory and skills, after the
   first user turn, and a context-usage note at the end of later requests),

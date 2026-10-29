@@ -112,10 +112,11 @@ Request (the fields acted on; anything else is accepted and ignored):
   (`MidConversationSystemFolding`): appended to the user turn just before
   it, or, after an assistant or tool turn, opening a user turn there that a
   user message right after it joins. Earlier turns never change, so folding
-  does not force them to be prefilled again; whether the prompt cache hits
-  across agent turns depends on the engine (today it often does not on
-  hybrid or sliding-window models, whose cache cannot be trimmed back to
-  the shared prefix). When the user turn merged into an opened one carries
+  does not force them to be prefilled again. The engine also stores the
+  cache at the end of each request's last message before the generation
+  prompt (its history boundary), so the next turn reuses everything up to
+  there, on hybrid and sliding-window models too, whose caches cannot be
+  trimmed back to a shared prefix. When the user turn merged into an opened one carries
   images, a VLM may render them before the text, so that last message's
   tokens can shift; earlier messages still do not. Consecutive `function_call` /
   `custom_tool_call` items, with an assistant message directly before them,
