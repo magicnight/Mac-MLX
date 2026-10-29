@@ -882,6 +882,7 @@ private func decodeAnthropicMessages(_ messages: [AnthropicMessage]) throws -> [
 ///   GET  /v1/models
 ///   GET  /x/status
 ///   POST /v1/chat/completions  (non-streaming + SSE streaming)
+///   POST /v1/responses         (OpenAI Responses API, stateless)
 ///   POST /x/models/load
 ///   POST /x/models/unload
 ///
@@ -1485,6 +1486,15 @@ public actor HummingbirdServer {
         router.post("/v1/messages") { request, context -> Response in
             await server.incrementRequest()
             return try await server.handleAnthropicMessages(request: request, context: context)
+        }
+
+        // POST /v1/responses — OpenAI Responses API (v0.11). Codex and other
+        // Responses clients POST here; translated statelessly onto the same
+        // GenerateRequest and single-stream path as chat completions (see
+        // HummingbirdServer+Responses.swift).
+        router.post("/v1/responses") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleResponses(request: request, context: context)
         }
 
         // POST /v1/embeddings — OpenAI-compatible text embeddings (v0.5.2).
