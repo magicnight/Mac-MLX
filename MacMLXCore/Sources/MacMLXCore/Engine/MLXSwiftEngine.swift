@@ -1843,7 +1843,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 var historySkip: String?
                 if let historyInput = inputBox.value.history {
                     switch Self.historyBoundary(
-                        for: historyInput, context: context, promptTokens: inputTokens,
+                        for: historyInput, cache: cache, context: context, promptTokens: inputTokens,
                         reusedTokenCount: reusedPromptTokens)
                     {
                     case .snapshot(let boundary):

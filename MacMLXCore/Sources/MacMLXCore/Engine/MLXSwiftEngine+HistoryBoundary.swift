@@ -24,15 +24,20 @@ extension MLXSwiftEngine {
     /// render path that ever drifts from generation's costs the snapshot, never
     /// correctness: any prefix of the prompt is a valid cache to store.
     ///
-    /// Returns `.skip` without rendering when no boundary could clear the
+    /// Returns `.skip` without rendering when `cache` can always be trimmed
+    /// (see ``cacheNeedsHistorySnapshot(_:)``) or no boundary could clear the
     /// minimum gain, and when the tokenizer is not the swift-transformers
     /// bridge, has no chat template, or the render throws.
     static func historyBoundary(
         for input: UserInput,
+        cache: [any KVCache],
         context: ModelContext,
         promptTokens: [Int],
         reusedTokenCount: Int
     ) -> HistoryBoundary {
+        guard cacheNeedsHistorySnapshot(cache) else {
+            return .skip(reason: "every layer of the cache can be trimmed")
+        }
         // B < prompt and B - reused >= minimum together need more than the
         // minimum still to prefill; short of that, skip the two renders.
         guard promptTokens.count - reusedTokenCount > HistoryBoundary.minimumBoundarySnapshotTokens else {
@@ -61,6 +66,37 @@ extension MLXSwiftEngine {
         } catch {
             return .skip(reason: "rendering the history failed: \(error)")
         }
+    }
+
+    /// Whether `caches` contain a layer that refuses a trim now or can come to
+    /// refuse one: a sliding-window `RotatingKVCache` (once past its window),
+    /// an `ArraysCache` such as the `MambaCache` of a linear-attention layer,
+    /// or any cache that reports itself untrimmable. `CacheList`s are searched
+    /// to their leaves.
+    ///
+    /// A cache of only `KVCacheSimple` / `QuantizedKVCache` layers can always
+    /// be trimmed, so the turn's own entry already serves every prefix of it,
+    /// the next turn's history included, through a trim; a snapshot there
+    /// would only duplicate it, and at agent sizes (about 2.2 GB for a dense
+    /// 8B at 17k tokens) cost a second SSD write per turn.
+    static func cacheNeedsHistorySnapshot(_ caches: [any KVCache]) -> Bool {
+        var needs = false
+        for cache in caches {
+            if let list = cache as? CacheList {
+                // `mapChildren` walks every leaf; each is returned unchanged.
+                list.mapChildren { leaf in
+                    if leafRefusesTrim(leaf) { needs = true }
+                    return leaf
+                }
+            } else if leafRefusesTrim(cache) {
+                needs = true
+            }
+        }
+        return needs
+    }
+
+    private static func leafRefusesTrim(_ cache: any KVCache) -> Bool {
+        cache is RotatingKVCache || cache is ArraysCache || !cache.isTrimmable
     }
 
     /// Prefill `tokens` into `cache` and evaluate it, generating nothing.

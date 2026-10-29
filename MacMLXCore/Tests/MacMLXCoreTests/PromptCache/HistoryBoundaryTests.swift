@@ -117,6 +117,23 @@ struct HistoryBoundaryTests {
         #expect(MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: false, caches: plain))
     }
 
+    @Test("Only a cache that can refuse a trim takes a snapshot")
+    func snapshotsOnlyCachesThatCanRefuseATrim() {
+        // Empty caches: what decides is the cache type.
+        let cases: [(String, [any KVCache], Bool)] = [
+            ("dense", [KVCacheSimple(), KVCacheSimple()], false),
+            ("quantized", [QuantizedKVCache(groupSize: 64, bits: 4), KVCacheSimple()], false),
+            ("all-trimmable list", [CacheList(KVCacheSimple(), KVCacheSimple())], false),
+            ("sliding window", [KVCacheSimple(), RotatingKVCache(maxSize: 512)], true),
+            ("linear attention", [MambaCache(), KVCacheSimple()], true),
+            ("arrays", [ArraysCache(size: 2)], true),
+            ("hybrid list", [CacheList(MambaCache(), KVCacheSimple())], true),
+        ]
+        for (name, caches, expected) in cases {
+            #expect(MLXSwiftEngine.cacheNeedsHistorySnapshot(caches) == expected, "\(name)")
+        }
+    }
+
     @Test("A cold file promotes with the class it was demoted with, old files as assistant")
     func promotesWithTheStoredCacheType() {
         #expect(PromptCacheStore.promotedCacheType(["cacheType": "user"]) == .user)
