@@ -59,7 +59,7 @@ open /Applications/macMLX.app
 - **下载** —— 跨取消和退出的断点续传、实时速度/ETA、HuggingFace 镜像源、Hub commit 更新检测。
 - **聊天** —— 对话侧栏（重命名、删除、回溯）、流式 Markdown、逐消息操作、按模型参数面板、可折叠 `<think>` 推理块。
 - **音频** —— 基于 `mlx-audio-swift` 的进程内语音转文字与文字转语音（`POST /v1/audio/transcriptions`、`POST /v1/audio/speech`，OpenAI 形态，格式如实申报）；app 内转写是聊天输入框里可取消的附件，朗读是每条回复上的按钮；音频检查点在模型库有独立扫描。已单元测试，尚未在本机真实检查点上验证。
-- **API** —— 常驻 OpenAI 兼容服务器，外加 Ollama（NDJSON）与 Anthropic（`/v1/messages`）兼容；**结构化输出**（`response_format` json_object / JSON-schema 子集：嵌套对象、数组、`$ref`、任意根类型、Unicode 字面量与数值范围，约束解码）；`tools` 透传与 `tool_calls` 响应；`logit_bias`、`logprobs`、`stream_options.include_usage`（usage 里带 prompt-cache 命中数）、`max_completion_tokens`、XTC 采样、按请求 LoRA adapter、KV cache 量化；`/v1/embeddings` + `/v1/rerank`（检查点是重排器时走 mlx-swift-lm 的 `MLXRerankers`——编码器交叉编码器、Qwen3 reranker、Jina v3——否则回退 bi-encoder），重排器与嵌入模型计入模型池内存预算、可按 id 卸载、可选 bearer 鉴权、模型别名 + 闲置 TTL、`reasoning_content` 分离、按 ID 冷换模型、停滞看门狗、CORS + 探测端点；并发客户端批到同一模型上而不是串行排队（带 tools 的请求走单流路径，因为工具调用只在那条路径上解析）。
+- **API** —— 常驻 OpenAI 兼容服务器，外加 OpenAI Responses API（`/v1/responses`，无状态——Codex 可直接接入）、Ollama（NDJSON）与 Anthropic（`/v1/messages`）兼容；**结构化输出**（`response_format` json_object / JSON-schema 子集：嵌套对象、数组、`$ref`、任意根类型、Unicode 字面量与数值范围，约束解码）；`tools` 透传与 `tool_calls` 响应；`logit_bias`、`logprobs`、`stream_options.include_usage`（usage 里带 prompt-cache 命中数）、`max_completion_tokens`、XTC 采样、按请求 LoRA adapter、KV cache 量化；`/v1/embeddings` + `/v1/rerank`（检查点是重排器时走 mlx-swift-lm 的 `MLXRerankers`——编码器交叉编码器、Qwen3 reranker、Jina v3——否则回退 bi-encoder），重排器与嵌入模型计入模型池内存预算、可按 id 卸载、可选 bearer 鉴权、模型别名 + 闲置 TTL、`reasoning_content` 分离、按 ID 冷换模型、停滞看门狗、CORS + 探测端点；并发客户端批到同一模型上而不是串行排队（带 tools 的请求走单流路径，因为工具调用只在那条路径上解析）。
 - **CLI** —— `pull` / `serve` / `run` 的原生 ANSI 仪表盘、与 GUI 共享 PID 协调。
 - **Activity、Benchmark 与 Logs 标签页** —— 实时 **Activity 面板**，免 sudo 读取 Apple Silicon 指标（GPU 占用、内存带宽、热/内存压力、分路功耗）并给出当前推理**瓶颈**与建议，把硬件计数器与引擎自身的 prefill/decode 相位融合（外部监控工具拿不到的信号）；Benchmark 的本机 tok/s · TTFT · 峰值内存 + 社区排行榜，现在还给每轮标注 decode 瓶颈归因；Pulse 日志查看器，MLX stdout/stderr 已转入。
 
@@ -90,6 +90,23 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"Qwen3-8B-4bit","messages":[{"role":"user","content":"你好"}]}'
 ```
+
+**Codex** 走 Responses API（`/v1/responses`）。在 `~/.codex/config.toml` 里把
+macMLX 加成一个 provider，并选一个会调用工具的模型：
+
+```toml
+model = "Qwen3.6-27B-4bit"
+model_provider = "macmlx"
+[model_providers.macmlx]
+name = "macMLX"
+base_url = "http://127.0.0.1:8000/v1"
+wire_api = "responses"
+# 仅在开启 bearer 鉴权时需要：Codex 会把这个环境变量的值作为 key 发送。
+# env_key = "MACMLX_API_KEY"
+```
+
+macMLX 不保存任何 response，客户端每一轮都要发送完整对话（Codex 本来就这么做）；
+`previous_response_id` 会被拒绝。请求逐个处理，所以 Codex 的子 agent 会排队，而不是并行运行。
 
 ## 推理引擎
 
