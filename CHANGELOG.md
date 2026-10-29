@@ -134,6 +134,40 @@ dependency graph its tests ran on.
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **A vision model's patch embedding could be padded with a stray value
+  instead of zero.** When a convolution's channel count is not a multiple of 16, MLX
+  pads the channels from a zero scalar that it freed as soon as the work was
+  queued, before the GPU read it; a scalar created in that window got the
+  same buffer and became the padding (`ml-explore/mlx#4660`). The vision
+  encoders of Qwen2-VL, Qwen2.5-VL, Qwen3-VL and GLM-OCR open with a
+  3-channel `Conv3d`, which takes that path, and the generation loop
+  evaluates asynchronously. Reproduced here: a 3-channel conv3d of ones
+  under `asyncEval`, followed by a few scalar allocations, returned 128
+  instead of 24 in 297 of 300 runs, and the 2D sibling 144 instead of 72 in
+  300 of 300. It was not reproduced through a real VLM checkpoint, and how
+  often the window opens during an image prefill was not measured. Carried
+  on the fork with a regression test.
+- **Batched long-context decode attention read the first request's keys for
+  every request** in one kernel: `sdpa_vector_2pass_1_gqa`, chosen for a
+  single query with no mask, a GQA factor of exactly 8, head dim 64 or 128
+  and at least 8192 keys, offset its keys and values by head but not by
+  batch (`ml-explore/mlx#4431`). Reproduced here at batch 2: row 0 matched a
+  plain attention reference and row 1 was off by 0.61. No macMLX path
+  reaches it today: single-stream decode has batch 1, and batched decode
+  always passes the array mask the batch cache builds, which selects a
+  different kernel. Carried on the fork with a regression test so a later
+  batching change cannot walk into it.
+- **A quantized KV cache stored all-negative groups with the wrong scale.**
+  GPU affine quantization started its running maximum at 0, so a group
+  whose values were all negative was quantized over `[min, 0]` rather than
+  its real range, with a coarser scale and a larger reconstruction error
+  than the CPU path gives (`ml-explore/mlx#4775`, on mlx main and in no
+  release yet). macMLX quantizes on the GPU whenever a request sets
+  `kv_bits`, one group per `kv_group_size` slice of a head. Reproduced here:
+  unit-spaced negative grids came back off by 1.0 at every group size and
+  bit width, where the CPU path restores them exactly. The effect on a real
+  model's output was not measured. Carried on the fork with a regression
+  test.
 - **Gemma 2 requests decoded in a batch attended to their batchmates' left
   padding.** Continuous batching prefills each request on its own and merges
   it into the running cohort, left-padding the shorter rows with zero-filled
@@ -586,8 +620,10 @@ dependency graph its tests ran on.
   model is not supported (see `docs/model-support.md`).
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
-  the fork used to carry are in that base, so it now carries two:
-  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3. The
+  the fork used to carry are in that base, so it carries two of those,
+  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3, plus
+  three fixes the release scan found (`mlx#4660`, `mlx#4431`, `mlx#4775`,
+  under Fixed): five in all, at the fork's 420dd05. The
   cross-thread evaluation abort that kept the fork on the old core is gone —
   0.32.3 registers every stream globally — and `CrossThreadEvalTripwireTests`
   now guards against regressing it rather than predicting it.
@@ -624,7 +660,7 @@ dependency graph its tests ran on.
   smokes (moonshine-tiny, VyvoTTS with SNAC, and SenseVoiceSmall, whose
   `am.mvn` and `*.bpe.model` reach the app cache only through the listing)
   ran at that version. mlx-swift-lm stays at 3.32.3 and mlx-swift at the
-  controlled fork's 1026d23.
+  controlled fork's 420dd05.
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE

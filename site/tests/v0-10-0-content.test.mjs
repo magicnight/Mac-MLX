@@ -143,7 +143,11 @@ test("measured v0.10.0 claims keep their scope", () => {
   assert.match(pool.en.detail, /not OpenAI-compatible model management/);
 
   const fork = both("mlx-fork-0-32-3");
-  for (const issue of ["mlx#3922", "mlx#4009", "mlx#4372"]) assert.match(`${fork.en.summary} ${fork.en.detail}`, new RegExp(issue));
+  for (const issue of ["mlx#3922", "mlx#4009", "mlx#4372", "mlx#4660", "mlx#4431", "mlx#4775"]) assert.match(`${fork.en.summary} ${fork.en.detail}`, new RegExp(issue));
+  assert.match(fork.en.summary, /now carries five of its own/);
+  assert.match(fork.en.detail, /no macMLX path selects today/);
+  assert.match(fork.en.detail, /none through a real checkpoint/);
+  assert.match(fork.zh.detail, /均未通过真实检查点复现/);
   assert.match(fork.en.detail, /checked by reading rather than by an output comparison/);
   assert.match(fork.en.detail, /Gemma3Text's separately reworked prefill is not covered/);
   assert.match(fork.en.detail, /not a performance claim/);
