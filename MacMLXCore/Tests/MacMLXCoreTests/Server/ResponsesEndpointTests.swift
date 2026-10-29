@@ -27,6 +27,7 @@ import Testing
 //   batchSeamIsNeverConsulted                       : 21_490
 //   engineErrorIsResponseFailed                     : 21_520
 //   stallIsResponseFailed                           : 21_550
+//   whitespaceBeforeAToolCallMakesNoMessageItem     : 21_580
 
 @Suite("ResponsesEndpoint")
 struct ResponsesEndpointTests {
@@ -258,6 +259,7 @@ struct ResponsesEndpointTests {
         let (server, port) = try await start(ScriptedEngine(chunks: [
             GenerateChunk(text: "a"),
             GenerateChunk(text: "</think>"),
+            GenerateChunk(text: "\n\n"),
             GenerateChunk(text: "b", finishReason: .stop, usage: TokenUsage(promptTokens: 1, completionTokens: 3)),
         ], opensThink: true), port: 21_160)
         let (data, _) = try await post(port: port, body: streamRequest())
@@ -353,6 +355,23 @@ struct ResponsesEndpointTests {
         #expect(item["call_id"] as? String == "call_abc123")
         #expect(item["arguments"] as? String == "{\"city\":\"Paris\"}")
         #expect(outputTypes(try terminalResponse(events)) == ["function_call"])
+    }
+
+    /// A thinking model ends its reasoning with blank lines before the call;
+    /// they do not make a message item.
+    @Test
+    func whitespaceBeforeAToolCallMakesNoMessageItem() async throws {
+        let (server, port) = try await start(ScriptedEngine(chunks: [
+            GenerateChunk(text: "plan</think>"), GenerateChunk(text: "\n\n"), toolChunk([weatherCall]),
+        ], opensThink: true), port: 21_580)
+        let (streamData, _) = try await post(port: port, body: streamRequest(["tools": [weatherTool]]))
+        let (bodyData, _) = try await post(port: port, body: ["model": Self.model, "input": "hi", "tools": [weatherTool]])
+        await server.stop()
+
+        #expect(outputTypes(try terminalResponse(try events(streamData))) == ["reasoning", "function_call"])
+        let body = try json(bodyData)
+        #expect(outputTypes(body) == ["reasoning", "function_call"])
+        #expect(body["output_text"] as? String == "")
     }
 
     @Test

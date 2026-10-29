@@ -159,6 +159,8 @@ extension HummingbirdServer {
             failure = error.localizedDescription
         }
         incrementTokens(usage?.completionTokens ?? 0)
+        // As in the stream: the answer starts at its first non-whitespace text.
+        answer = String(answer.drop(while: \.isWhitespace))
 
         var output: [[String: Any]] = []
         if !reasoning.isEmpty {
@@ -287,8 +289,15 @@ extension HummingbirdServer {
                 openIsReasoning = nil
             }
             // Text of one kind continues the open item, or closes it and opens
-            // a new one — normally one reasoning item, then the message.
+            // a new one — normally one reasoning item, then the message. A
+            // message opens on its first non-whitespace text: the blank lines
+            // a thinking model emits after `</think>` are not an answer, and a
+            // tool-only turn must not gain a whitespace message item.
             func stream(_ text: String, reasoning: Bool) throws {
+                var text = text
+                if !reasoning, openIsReasoning != false {
+                    text = String(text.drop(while: \.isWhitespace))
+                }
                 guard !text.isEmpty else { return }
                 if openIsReasoning != reasoning {
                     try closeItem()
