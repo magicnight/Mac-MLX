@@ -106,10 +106,13 @@ model_provider = "macmlx"
 name = "macMLX"
 base_url = "http://127.0.0.1:8000/v1"
 wire_api = "responses"
+# Only with bearer auth on: Codex sends this variable's value as the key.
+# env_key = "MACMLX_API_KEY"
 ```
 
 macMLX keeps no responses, so a client must send the whole conversation each
-turn (Codex does); `previous_response_id` is rejected.
+turn (Codex does); `previous_response_id` is rejected. Requests are served
+one at a time, so Codex sub-agents queue rather than run in parallel.
 
 ## Inference engines
 

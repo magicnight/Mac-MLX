@@ -122,6 +122,18 @@ Request (the fields acted on; anything else is accepted and ignored):
 - `text.format` is rebuilt as the chat `response_format` and decoded by
   `ResponseFormatDecoder`; with tools or images it is a 400, as on chat.
 - `reasoning.effort` `"none"`/`"minimal"` sets `enable_thinking=false`.
+- `max_output_tokens` absent → 32768 (`responsesDefaultMaxOutputTokens`), not
+  the chat path's 2048: Codex never sends it, and a thinking model spends
+  2048 before its tool call. An explicit value is honored.
+- Body limit 64 MB (`responsesBodyLimitBytes`, 413 `request_too_large`
+  above it), not the 2 MB route default chat uses: the whole conversation
+  is replayed every turn.
+- A custom tool's `format.definition` is appended to its description as
+  `Input format (<syntax>):\n<definition>`.
+- In a tool output, a non-text part becomes a placeholder line
+  (`[image omitted: macMLX does not pass images in tool results]`,
+  `[<type> omitted]`); an image on a system/developer item becomes
+  `[image omitted from a system message]`.
 - 400 (`invalid_request_error`): bad JSON, missing `model` or `input`,
   non-null `previous_response_id`, `background: true`, `item_reference`
   items, `input_file`/`input_audio` parts, an `input_image` that is a URL or
@@ -155,9 +167,14 @@ The message item is left out when the model only called tools. A freeform
 tool's call is a `custom_tool_call` (`ctc_…`) with `input` instead of
 `arguments`. `status` is `completed` for a stop or tool call, `incomplete`
 with `incomplete_details.reason: "max_output_tokens"` at the length cap, and
-`failed` with `error: {"code": "server_error", "message"}` when generation
-fails or stalls (still HTTP 200). `cached_tokens` is 0 for a request with an
-`Origin` header, as on chat.
+`failed` with `error: {"code", "message"}` when generation fails or stalls
+(still HTTP 200): `code` is `server_error`, or `model_not_found` /
+`load_failed` for a cold swap that fails after the stream opened. The engine
+reports no distinct context-overflow error, so there is no
+`context_length_exceeded`. A message item cut off by the length cap or a
+failure has `status: "incomplete"`. `cached_tokens` is 0 for a request with
+an `Origin` header, as on chat. Requests are served one at a time (the
+generation lock), so concurrent agents queue.
 
 Streaming (`text/event-stream`, frames `event: <type>\ndata: <json>\n\n`, every
 payload with `type` and a `sequence_number` from 0, no `[DONE]`). Every event

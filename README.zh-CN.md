@@ -101,10 +101,12 @@ model_provider = "macmlx"
 name = "macMLX"
 base_url = "http://127.0.0.1:8000/v1"
 wire_api = "responses"
+# 仅在开启 bearer 鉴权时需要：Codex 会把这个环境变量的值作为 key 发送。
+# env_key = "MACMLX_API_KEY"
 ```
 
 macMLX 不保存任何 response，客户端每一轮都要发送完整对话（Codex 本来就这么做）；
-`previous_response_id` 会被拒绝。
+`previous_response_id` 会被拒绝。请求逐个处理，所以 Codex 的子 agent 会排队，而不是并行运行。
 
 ## 推理引擎
 

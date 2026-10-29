@@ -23,9 +23,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   reasoning summaries (it ignores raw `reasoning_text` unless
   `show_raw_agent_reasoning` is set), also as one summary part with the same
   text. `reasoning.effort` `"none"` or `"minimal"` turns a thinking
-  template's `enable_thinking` off. A `system` or `developer` item after the
-  first turn is folded into the next user turn, since many chat templates
-  accept a system turn only first.
+  template's `enable_thinking` off. Without `max_output_tokens` (Codex sends
+  none, and has no setting to send one) a response may run to 32,768 tokens,
+  not the chat path's 2,048, so a long think still reaches its tool call. A
+  `system` or `developer` item after the first turn is folded into the next
+  user turn, since many chat templates accept a system turn only first. A
+  custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
+  is appended to the description the model sees. Bodies up to 64 MB are
+  accepted, since the whole conversation is sent every turn.
 
   It is stateless: macMLX stores no responses, so `store` is ignored
   (responses report `"store": false`), and `previous_response_id`,
@@ -37,7 +42,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   items sent back in `input` are dropped, so the model does not see its
   earlier reasoning yet, and no `encrypted_content` is returned.
   `tool_choice` other than `"none"` and `parallel_tool_calls` are echoed, not
-  enforced. Images must be base64 data URLs.
+  enforced. Images must be base64 data URLs; an image in a tool output or a
+  system message reaches the model as a placeholder line saying it was left
+  out. Requests are served one at a time, so Codex sub-agents queue behind
+  each other rather than run in parallel.
 
   To use it from Codex, add a provider to `~/.codex/config.toml`:
 
@@ -48,6 +56,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   name = "macMLX"
   base_url = "http://127.0.0.1:8000/v1"
   wire_api = "responses"
+  # Only with bearer auth on: Codex sends this variable's value as the key.
+  # env_key = "MACMLX_API_KEY"
   ```
 
 ### Fixed
