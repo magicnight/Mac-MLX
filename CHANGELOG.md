@@ -134,6 +134,25 @@ dependency graph its tests ran on.
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
 
 ### Fixed
+- **Gemma 2 requests decoded in a batch attended to their batchmates' left
+  padding.** Continuous batching prefills each request on its own and merges
+  it into the running cohort, left-padding the shorter rows with zero-filled
+  key/value columns; every decode step relies on the cache's mask to hide
+  them. mlx-swift-lm's Gemma 2 builds its mask without asking the cache, with
+  the overload of `createAttentionMask` that returns no mask for a single
+  token, so whenever a Gemma 2 request decoded beside a longer one, each of
+  its steps also attended to the pad columns: wrong tokens, no error. Gemma 2
+  had been on the batching allowlist since continuous batching shipped in
+  v0.6.0. It is off it now, and Gemma 2 requests are served one at a time on
+  the single-stream path, as any unlisted architecture is; a request with no
+  concurrent company was never batched and was not affected. The other six
+  allowlisted architectures (Gemma, Gemma 3, Gemma 4, Qwen 2, Qwen 3, Llama)
+  take every mask from the cache, at mlx-swift-lm 3.32.3. A new test builds
+  tiny random-weight instances of all seven and decodes a two-prompt ragged
+  cohort batched and each prompt alone: with TF32 off the six agree to 3.4e-6
+  and Gemma 2's padded row is off by 1.58, its unpadded row by 2.4e-6; the
+  production batch core refuses Gemma 2. This was not reproduced on a real
+  Gemma 2 checkpoint, since none is available here.
 - **Searching Hugging Face in the Model Library could freeze the app
   (#143).** After a search, the library fills in download sizes, up to four
   at a time. When only one to three results still needed a size, the loop
