@@ -12,7 +12,10 @@ import Foundation
 /// Detected in Debug builds only, the configuration both `swift test` and
 /// `xcodebuild test` build. A Release build always answers false, so a
 /// shipped app or CLI can never mistake itself for a test runner and stop
-/// persisting the user's data.
+/// persisting the user's data. The flip side: tests run in Release
+/// (`swift test -c release`, `xcodebuild -configuration Release test`) get
+/// no isolation and would use the real `~/.mac-mlx` again, so don't run the
+/// suite that way.
 enum TestHost {
     #if DEBUG
     static let isActive: Bool = {
