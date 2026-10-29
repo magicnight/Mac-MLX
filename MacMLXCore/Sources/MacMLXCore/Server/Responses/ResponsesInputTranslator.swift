@@ -183,7 +183,8 @@ enum ResponsesInputTranslator {
         default: return nil
         }
         guard let name = string(fields["name"]), !name.isEmpty else {
-            throw TranslationError(message: "A `\(kind == .function ? "function" : "custom")` tool is missing its `name`.")
+            let type = kind == .function ? "function" : "custom"
+            throw TranslationError(message: "A `\(type)` tool is missing its `name`.")
         }
         let description = string(fields["description"]) ?? ""
         switch kind {
@@ -273,7 +274,9 @@ enum ResponsesInputTranslator {
     }
 
     /// A `message` item: roles `user`, `assistant`, and `system`/`developer`
-    /// (both become `.system`, placed by `MidConversationSystemFolding`).
+    /// (both become `.system`, placed by `MidConversationSystemFolding`). An
+    /// image on a system turn is never decoded: the system prompt is text, so
+    /// each one becomes the placeholder in place, whatever its URL holds.
     private static func message(_ fields: [String: JSONValue]) throws -> ChatMessage {
         let role: MessageRole
         switch string(fields["role"]) {
@@ -302,6 +305,8 @@ enum ResponsesInputTranslator {
                     texts.append(string(partFields["text"]) ?? "")
                 case "refusal":
                     texts.append(string(partFields["refusal"]) ?? "")
+                case "input_image" where role == .system:
+                    texts.append(MidConversationSystemFolding.omittedImage)
                 case "input_image":
                     images.append(try image(partFields))
                 case .some(let other):
@@ -377,7 +382,10 @@ enum ResponsesInputTranslator {
         return ToolCallRequest(id: callID, name: exposed, arguments: ["input": .string(input)])
     }
 
-    private static func callIdentity(_ fields: [String: JSONValue], type: String) throws -> (callID: String, name: String) {
+    private static func callIdentity(
+        _ fields: [String: JSONValue],
+        type: String
+    ) throws -> (callID: String, name: String) {
         guard let name = string(fields["name"]), !name.isEmpty else {
             throw TranslationError(message: "A `\(type)` input item is missing its `name`.")
         }

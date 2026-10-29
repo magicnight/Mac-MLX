@@ -225,8 +225,9 @@ extension HummingbirdServer {
     /// chunks arrive — reasoning as both its summary part and its
     /// `reasoning_text` content (see `ResponsesOutputBuilder.reasoningItem`).
     /// Tool calls, which the engine reports on the terminal chunk, follow as
-    /// whole items, and exactly one terminal event ends the stream. An unknown model is a 404 before any byte is sent; a failure
-    /// once the stream is open is `response.failed`.
+    /// whole items, and exactly one terminal event ends the stream. An
+    /// unknown model is a 404 before any byte is sent; a failure once the
+    /// stream is open is `response.failed`.
     private func streamingResponsesResponse(
         genRequest: GenerateRequest,
         envelope: ResponsesOutputBuilder.Envelope,

@@ -35,6 +35,7 @@ import Testing
 //   reasoningEffortNoneTurnsThinkingOff             : 21_760
 //   originHeaderHidesCachedTokens                   : 21_820
 //   bodyOverTwoMegabytesIsAccepted                  : 21_850
+//   badImageOnADeveloperMessageIsAPlaceholder       : 21_880
 
 @Suite("ResponsesEndpoint")
 struct ResponsesEndpointTests {
@@ -723,5 +724,26 @@ struct ResponsesEndpointTests {
 
         #expect(response.statusCode == 200)
         #expect(try json(data)["status"] as? String == "completed")
+    }
+
+    @Test
+    func badImageOnADeveloperMessageIsAPlaceholder() async throws {
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 21_880)
+        let (_, response) = try await post(port: port, body: [
+            "model": Self.model,
+            "input": [
+                ["type": "message", "role": "developer", "content": [
+                    ["type": "input_text", "text": "dev"],
+                    ["type": "input_image", "image_url": "data:application/pdf;base64,AAAA"],
+                ]],
+                ["type": "message", "role": "user", "content": "hi"],
+            ],
+        ])
+        let systemPrompt = await engine.capturedRequest?.systemPrompt
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(systemPrompt == "dev\n[image omitted from a system message]")
     }
 }

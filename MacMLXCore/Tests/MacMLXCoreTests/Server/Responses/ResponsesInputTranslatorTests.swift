@@ -309,6 +309,25 @@ struct ResponsesInputTranslatorTests {
     }
 
     @Test
+    func undecodableImageOnASystemMessageIsNotRejected() throws {
+        // The image is never decoded for a system turn, so a URL the user turn
+        // would reject only adds the placeholder.
+        let translation = try translate([
+            "model": "m",
+            "input": [
+                ["role": "system", "content": [
+                    ["type": "input_image", "image_url": "data:application/pdf;base64,AAAA"],
+                    ["type": "input_text", "text": "after"],
+                    ["type": "input_image", "image_url": "https://example.com/x.png"],
+                ]],
+                user("ok"),
+            ],
+        ])
+        #expect(translation.systemPrompt
+            == "[image omitted from a system message]\nafter\n[image omitted from a system message]")
+    }
+
+    @Test
     func hostedToolsAreDroppedNotRejected() throws {
         let hosted = ["web_search", "web_search_preview", "file_search", "code_interpreter",
                       "computer_use_preview", "image_generation", "mcp", "local_shell", "tool_search", "brand_new"]
