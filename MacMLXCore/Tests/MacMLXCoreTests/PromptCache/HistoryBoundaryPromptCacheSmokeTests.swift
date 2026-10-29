@@ -44,6 +44,10 @@ import enum MacMLXCore.JSONValue
 /// greedily from the same caches, so the stock path's warm and cold texts
 /// must equal the hand-built pipeline's.
 ///
+/// Both models' caches cannot be trimmed, so turn 1 ends with the snapshot as
+/// its only hot-tier entry: its own entry (prompt + generated tokens) is not
+/// stored beside it.
+///
 /// Mellum2 (sliding-window, also drops reasoning from history) passes the same
 /// checks. Gemma 4 would not pass the equality on `cachedPromptTokens`: its
 /// template keeps turn 1's record a prefix of turn 2, so the longer record is
@@ -232,11 +236,15 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
 
             let first = try await collect(engine, turn1)
             let turn1Bytes = await engine.promptCacheResidentBytes
+            let turn1Entries = await engine.promptCacheResidentCount
             XCTAssertEqual(first.promptTokens, turn1Render.prompt, "\(path): the test renders generation's prompt")
             XCTAssertEqual(first.cachedPromptTokens, 0, "\(path): turn 1 starts cold")
             let recordOrNil = await engine.lastPromptCacheRecord
             let record = try XCTUnwrap(recordOrNil, "\(path): turn 1 went through the prompt cache")
-            XCTAssertTrue(record.recorded, "\(path): turn 1's own record is still stored")
+            // Both models' caches cannot be trimmed, so the snapshot is the
+            // turn's only entry (`recordsTurnEntry`).
+            XCTAssertFalse(record.recorded, "\(path): turn 1's own entry is not stored beside the snapshot")
+            XCTAssertEqual(turn1Entries, 1, "\(path): one hot-tier entry per turn")
 
             let warm = try await collect(engine, turn2)
             // The reference: the same turn, cold and prefilled in one piece.
@@ -265,18 +273,18 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
             XCTAssertFalse(warm.text.isEmpty, "\(path): turn 2 generated text")
             if !logprobs {
                 stockTexts = (warm.text, cold.text)
-                // What the snapshot costs: turn 1 again, cold and without it,
-                // leaves only its record; the difference is the boundary entry.
+                // What the snapshot costs against the entry it replaces: turn
+                // 1 again, cold and without it, leaves only its own entry.
                 await engine.clearPromptCache()
                 await engine.setHistoryBoundarySnapshotsEnabled(false)
                 _ = try await collect(engine, turn1)
                 await engine.setHistoryBoundarySnapshotsEnabled(true)
                 let recordBytes = await engine.promptCacheResidentBytes
                 print(
-                    "[history-boundary] \(modelID): turn 1 hot tier \(turn1Bytes) bytes with the snapshot, "
-                        + "\(recordBytes) without; snapshot \(turn1Bytes - recordBytes) bytes "
-                        + "for \(turn1Render.history) tokens")
-                XCTAssertGreaterThan(turn1Bytes, recordBytes, "\(path): the snapshot is a second hot-tier entry")
+                    "[history-boundary] \(modelID): turn 1 hot tier \(turn1Bytes) bytes with the snapshot "
+                        + "(\(turn1Render.history) tokens), \(recordBytes) without (the turn's own entry, "
+                        + "\(record.tokenCount) tokens)")
+                XCTAssertLessThan(turn1Bytes, recordBytes, "\(path): the snapshot is shorter than the entry it replaces")
             }
             if logprobs {
                 XCTAssertEqual(warm.text, stockTexts?.warm, "the warm run decodes alike on both paths")

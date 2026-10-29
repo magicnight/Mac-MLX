@@ -96,6 +96,24 @@ extension MLXSwiftEngine {
         return Date.timeIntervalSinceReferenceDate - start
     }
 
+    /// Whether a finished turn records its own entry (the prompt, the
+    /// generated tokens and the stop token) besides the history-boundary
+    /// snapshot.
+    ///
+    /// Not when this turn stored a snapshot and `caches` cannot be trimmed.
+    /// Such an entry serves only a prompt that extends it exactly, and the
+    /// templates the snapshot is for (Qwen3.5/3.6, Mellum2) never re-render a
+    /// turn that way; even an exact retry needs a one-token trim these caches
+    /// refuse. It would cost as much as the snapshot (about 1.2 GB on
+    /// Qwen3.6-27B at 17k tokens), push the snapshot out of the in-memory tier
+    /// and double the SSD writes of every turn. A template that does re-render
+    /// the turn verbatim (Gemma 4) loses only the reuse of the generated
+    /// tokens; the snapshot still serves its history. A trimmable cache keeps
+    /// recording the entry, which replaces the snapshot on insert as before.
+    static func recordsTurnEntry(historySnapshotStored: Bool, caches: [any KVCache]) -> Bool {
+        !historySnapshotStored || MLXLMCommon.canTrimPromptCache(caches)
+    }
+
     /// `info` with the boundary prefill counted as prompt work: the iterator
     /// that reported it prefilled only the tokens after the boundary, so the
     /// tokens and time spent before it are added back. `cachedPromptTokens` is

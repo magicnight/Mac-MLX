@@ -1,5 +1,6 @@
 // Copyright © 2026 macMLX. English comments only.
 
+import MLXLMCommon
 import Testing
 
 @testable import MacMLXCore
@@ -103,6 +104,17 @@ struct HistoryBoundaryTests {
                 historyTokens: longer, renderedPromptTokens: whole,
                 promptTokens: whole, reusedTokenCount: 0)
                 != .snapshot(boundary: 601))
+    }
+
+    @Test("A turn's own entry is skipped only after a snapshot of an untrimmable cache")
+    func recordsTheTurnEntryUnlessTheSnapshotCannotBeTrimmedPast() {
+        // Empty caches: trimmability is a property of the cache type here.
+        let hybrid: [any KVCache] = [MambaCache(), KVCacheSimple()]
+        let plain: [any KVCache] = [KVCacheSimple(), KVCacheSimple()]
+        #expect(!MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: true, caches: hybrid))
+        #expect(MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: false, caches: hybrid))
+        #expect(MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: true, caches: plain))
+        #expect(MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: false, caches: plain))
     }
 
     @Test("A cold file promotes with the class it was demoted with, old files as assistant")

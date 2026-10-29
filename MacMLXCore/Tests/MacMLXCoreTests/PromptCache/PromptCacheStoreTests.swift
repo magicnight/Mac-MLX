@@ -252,6 +252,32 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(hit?.reusedTokenCount, history.count)
     }
 
+    /// The engine's rule for a turn's own entry (`recordsTurnEntry`) on real
+    /// caches: after a history-boundary snapshot, a non-trimmable turn ends
+    /// with the snapshot alone, and a trimmable one still records its entry,
+    /// which collapses the snapshot as before.
+    func testATurnAfterAHistorySnapshotKeepsOneEntry() async throws {
+        try requireMLXRuntimeOrSkip()
+        let history = [1, 2, 3, 4]
+        let record = history + [50, 51]
+        for hybrid in [true, false] {
+            let make = hybrid ? makeHybridSnapshot : makeSnapshot
+            let store = PromptCacheStore(root: tmpRoot(), coldEnabled: false)
+            await store.insert(
+                modelID: model, tokens: history, snapshot: make(history.count), cacheType: .user)
+            let turnCache = make(record.count)
+            if MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: true, caches: turnCache.caches) {
+                await store.insert(modelID: model, tokens: record, snapshot: turnCache)
+            }
+            let resident = await store.residentCount
+            let historyType = await store.hotCacheType(modelID: model, tokens: history)
+            let recordType = await store.hotCacheType(modelID: model, tokens: record)
+            XCTAssertEqual(resident, 1, "hybrid=\(hybrid): one entry per turn")
+            XCTAssertEqual(historyType, hybrid ? .user : nil, "hybrid=\(hybrid): the snapshot")
+            XCTAssertEqual(recordType, hybrid ? nil : .assistant, "hybrid=\(hybrid): the turn's entry")
+        }
+    }
+
     /// A `.user` entry demoted to the cold tier comes back as `.user`, so a
     /// promoted history-boundary snapshot keeps its eviction priority.
     func testColdPromotionKeepsTheCacheType() async throws {

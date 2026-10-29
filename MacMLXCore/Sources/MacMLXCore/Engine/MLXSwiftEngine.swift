@@ -2066,17 +2066,26 @@ public actor MLXSwiftEngine: InferenceEngine {
         // before the loop saw it, so its position is in the cache and belongs
         // in the key (#142; see `promptCacheKey`). Skipped when quantizing the
         // KV cache (see `bypassPromptCache`) so a `QuantizedKVCache` snapshot
-        // is never persisted for later plain reuse.
+        // is never persisted for later plain reuse, and when this turn stored
+        // a history-boundary snapshot of a cache that cannot be trimmed (see
+        // `recordsTurnEntry`).
         if !bypassPromptCache {
             let key = Self.promptCacheKey(
                 inputTokens: inputTokens, generatedTokenIDs: generatedTokenIDs,
                 terminalStopToken: stopTokens.terminal, tokenAfterStopToken: stopTokens.tokenAfterTerminal,
                 stopReason: completionInfo?.stopReason)
+            let records = Self.recordsTurnEntry(
+                historySnapshotStored: setup.history != nil, caches: workingCache)
             lastPromptCacheRecord = PromptCacheRecord(
                 tokenCount: key?.count ?? inputTokens.count + generatedTokenIDs.count,
                 heldPositions: workingCache.map(\.offset).max() ?? 0,
-                endedOnStopToken: stopTokens.terminal != nil, recorded: key != nil)
-            if let key {
+                endedOnStopToken: stopTokens.terminal != nil, recorded: key != nil && records)
+            if let key, !records {
+                await LogManager.shared.debug(
+                    "Prompt cache: the cache cannot be trimmed and the history boundary was "
+                        + "stored, so the turn's own entry (\(key.count) tokens) is not (model=\(modelID))",
+                    category: .inference)
+            } else if let key {
                 await promptCacheStore.insert(
                     modelID: modelID,
                     tokens: key,
