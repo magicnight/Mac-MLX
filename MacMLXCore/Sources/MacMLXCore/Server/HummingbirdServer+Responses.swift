@@ -18,11 +18,36 @@ import NIOCore
 
 extension HummingbirdServer {
 
+    /// Ceiling on a `/v1/responses` body. A Responses client is stateless
+    /// toward macMLX and replays the whole conversation every turn — tool
+    /// outputs, base64 screenshots and all — so the route-wide 2 MB
+    /// `context.maxUploadSize` would turn a long agent session into a
+    /// permanent 413 a few turns in.
+    static let responsesBodyLimitBytes = 64 * 1024 * 1024
+
+    /// The output budget when a request names none. Codex never sends
+    /// `max_output_tokens`, and the chat path's 2048 is spent by a thinking
+    /// model's reasoning before it reaches the tool call, which would end
+    /// every such turn `incomplete` with no call in it.
+    static let responsesDefaultMaxOutputTokens = 32_768
+
     func handleResponses(
         request: Request,
         context: BasicRequestContext
     ) async throws -> Response {
-        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        let buffer: ByteBuffer
+        do {
+            buffer = try await request.body.collect(upTo: Self.responsesBodyLimitBytes)
+        } catch {
+            // Only the ceiling is a 413 (see `isUploadTooLarge`); anything else
+            // takes Hummingbird's own error path, as on the other routes.
+            guard Self.isUploadTooLarge(error) else { throw error }
+            return errorResponse(
+                status: .contentTooLarge,
+                message: "Request body exceeds the \(Self.responsesBodyLimitBytes)-byte limit.",
+                code: "request_too_large"
+            )
+        }
         guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
             return errorResponse(status: .badRequest, message: "Empty request body", code: "invalid_request_error")
         }
@@ -55,7 +80,7 @@ extension HummingbirdServer {
         let parameters = GenerationParameters(
             temperature: responsesRequest.temperature ?? 0.7,
             topP: responsesRequest.top_p ?? 0.95,
-            maxTokens: responsesRequest.max_output_tokens ?? 2048,
+            maxTokens: responsesRequest.max_output_tokens ?? Self.responsesDefaultMaxOutputTokens,
             stream: responsesRequest.stream ?? false
         )
         // `reasoning.effort` "none"/"minimal" switches a thinking template
@@ -166,8 +191,12 @@ extension HummingbirdServer {
         if !reasoning.isEmpty {
             output.append(ResponsesOutputBuilder.reasoningItem(id: ResponsesOutputBuilder.newID("rs"), text: reasoning))
         }
+        let outcome: ResponsesOutputBuilder.Outcome = failure.map { .failed($0, code: "server_error") }
+            ?? .finished(finishReason)
         if !answer.isEmpty || (toolCalls.isEmpty && failure == nil) {
-            output.append(ResponsesOutputBuilder.messageItem(id: ResponsesOutputBuilder.newID("msg"), text: answer))
+            output.append(ResponsesOutputBuilder.messageItem(
+                id: ResponsesOutputBuilder.newID("msg"), text: answer,
+                status: ResponsesOutputBuilder.itemStatus(outcome)))
         }
         for call in toolCalls {
             let prefix = ResponsesOutputBuilder.isCustomToolCall(call, toolNames: toolNames) ? "ctc" : "fc"
@@ -175,7 +204,6 @@ extension HummingbirdServer {
                 id: ResponsesOutputBuilder.newID(prefix), call: call, toolNames: toolNames, done: true))
         }
 
-        let outcome: ResponsesOutputBuilder.Outcome = failure.map { .failed($0) } ?? .finished(finishReason)
         let (status, incompleteDetails, error) = ResponsesOutputBuilder.statusFields(outcome)
         var body = ResponsesOutputBuilder.responseObject(
             envelope,
@@ -195,9 +223,9 @@ extension HummingbirdServer {
     /// a client waiting behind another generation (or a cold swap) sees the
     /// response start. Reasoning and text stream as their own items while
     /// chunks arrive — reasoning as both its summary part and its
-    /// `reasoning_text` content (see `ResponsesOutputBuilder.reasoningItem`); tool calls, which the engine reports on the terminal
-    /// chunk, follow as whole items; exactly one terminal event ends the
-    /// stream. An unknown model is a 404 before any byte is sent; a failure
+    /// `reasoning_text` content (see `ResponsesOutputBuilder.reasoningItem`).
+    /// Tool calls, which the engine reports on the terminal chunk, follow as
+    /// whole items, and exactly one terminal event ends the stream. An unknown model is a 404 before any byte is sent; a failure
     /// once the stream is open is `response.failed`.
     private func streamingResponsesResponse(
         genRequest: GenerateRequest,
@@ -237,7 +265,7 @@ extension HummingbirdServer {
                     "output_index": index,
                     "item": reasoning
                         ? ResponsesOutputBuilder.reasoningItem(id: openID, text: nil)
-                        : ResponsesOutputBuilder.messageItem(id: openID, text: nil),
+                        : ResponsesOutputBuilder.messageItem(id: openID, text: nil, status: "in_progress"),
                 ])
                 if reasoning {
                     try emit("response.reasoning_summary_part.added", [
@@ -252,7 +280,7 @@ extension HummingbirdServer {
                         : ResponsesOutputBuilder.outputTextPart(""),
                 ])
             }
-            func closeItem() throws {
+            func closeItem(status: String = "completed") throws {
                 guard let reasoning = openIsReasoning else { return }
                 let index = output.count
                 let item: [String: Any]
@@ -281,7 +309,7 @@ extension HummingbirdServer {
                         "item_id": openID, "output_index": index, "content_index": 0,
                         "part": ResponsesOutputBuilder.outputTextPart(openText),
                     ])
-                    item = ResponsesOutputBuilder.messageItem(id: openID, text: openText)
+                    item = ResponsesOutputBuilder.messageItem(id: openID, text: openText, status: status)
                     messageEmitted = true
                 }
                 try emit("response.output_item.done", ["output_index": index, "item": item])
@@ -363,6 +391,7 @@ extension HummingbirdServer {
             var finishReason: FinishReason?
             var toolCalls: [ToolCallRequest] = []
             var failure: String?
+            var failureCode = "server_error"
 
             // Lock-scope invariant (SRV-2/SRV-3): acquire, cold-swap and
             // generate all happen inside this closure, released by `defer`.
@@ -370,9 +399,13 @@ extension HummingbirdServer {
             do {
                 engine = try await server.beginGeneration(genRequest.model)
             } catch ModelSwapError.modelNotFound(let id) {
+                // The codes `openAIStyleSwapErrorResponse` gives these on a
+                // response that has not started.
                 failure = "Model not found: \(id)."
+                failureCode = "model_not_found"
             } catch ModelSwapError.loadFailed(let id, let reason) {
                 failure = "Failed to load \(id): \(reason)"
+                failureCode = "load_failed"
             } catch {
                 failure = error.localizedDescription
             }
@@ -419,7 +452,9 @@ extension HummingbirdServer {
                 await server.incrementTokens(usage?.completionTokens ?? 0)
             }
 
-            try closeItem()
+            let outcome: ResponsesOutputBuilder.Outcome = failure.map { .failed($0, code: failureCode) }
+                ?? .finished(finishReason)
+            try closeItem(status: ResponsesOutputBuilder.itemStatus(outcome))
             for call in toolCalls {
                 try emitToolCall(call)
             }
@@ -427,9 +462,8 @@ extension HummingbirdServer {
             // unless the model only called tools.
             if failure == nil, !messageEmitted, toolCalls.isEmpty {
                 try openItem(reasoning: false)
-                try closeItem()
+                try closeItem(status: ResponsesOutputBuilder.itemStatus(outcome))
             }
-            let outcome: ResponsesOutputBuilder.Outcome = failure.map { .failed($0) } ?? .finished(finishReason)
             let (status, incompleteDetails, error) = ResponsesOutputBuilder.statusFields(outcome)
             let terminalEvent: String
             switch status {

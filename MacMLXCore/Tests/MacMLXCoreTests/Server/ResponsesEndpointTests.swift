@@ -28,6 +28,13 @@ import Testing
 //   engineErrorIsResponseFailed                     : 21_520
 //   stallIsResponseFailed                           : 21_550
 //   whitespaceBeforeAToolCallMakesNoMessageItem     : 21_580
+//   (21_600 is ResponsesAgentLoopE2ETests)
+//   maxOutputTokensDefaultsTo32768                  : 21_640
+//   lockIsFreedAfterAClientDisconnect               : 21_670
+//   coldSwapFailureAfterHeadersIsResponseFailed     : 21_730
+//   reasoningEffortNoneTurnsThinkingOff             : 21_760
+//   originHeaderHidesCachedTokens                   : 21_820
+//   bodyOverTwoMegabytesIsAccepted                  : 21_850
 
 @Suite("ResponsesEndpoint")
 struct ResponsesEndpointTests {
@@ -38,9 +45,10 @@ struct ResponsesEndpointTests {
         var errorDescription: String? { "stub engine failed" }
     }
 
-    /// Plays back a fixed chunk script (optionally failing after it, or never
-    /// finishing), reports whether the prompt opens a think block, and records
-    /// the request it was asked to generate.
+    /// Plays back a fixed chunk script (optionally failing after it, never
+    /// finishing, or streaming "x" forever until the consumer goes away),
+    /// refuses to load `brokenModel`, reports whether the prompt opens a think
+    /// block, and records the request it was asked to generate.
     private actor ScriptedEngine: InferenceEngine {
         nonisolated let engineID: EngineID = .mlxSwift
         private(set) var status: EngineStatus = .idle
@@ -52,20 +60,24 @@ struct ResponsesEndpointTests {
         private let opensThink: Bool
         private let failsAfterScript: Bool
         private let hangsAfterScript: Bool
+        private let dripsForever: Bool
 
         init(
             chunks: [GenerateChunk],
             opensThink: Bool = false,
             failsAfterScript: Bool = false,
-            hangsAfterScript: Bool = false
+            hangsAfterScript: Bool = false,
+            dripsForever: Bool = false
         ) {
             self.chunks = chunks
             self.opensThink = opensThink
             self.failsAfterScript = failsAfterScript
             self.hangsAfterScript = hangsAfterScript
+            self.dripsForever = dripsForever
         }
 
         func load(_ model: LocalModel) async throws {
+            if model.id == ResponsesEndpointTests.brokenModel { throw StubFailure() }
             loadedModel = model
             status = .ready(model: model.id)
         }
@@ -79,11 +91,16 @@ struct ResponsesEndpointTests {
             let chunks = self.chunks
             let failsAfterScript = self.failsAfterScript
             let hangsAfterScript = self.hangsAfterScript
+            let dripsForever = self.dripsForever
             return AsyncThrowingStream { continuation in
                 Task {
                     await self.capture(request)
                     for chunk in chunks {
                         continuation.yield(chunk)
+                    }
+                    while dripsForever {
+                        if case .terminated = continuation.yield(GenerateChunk(text: "x")) { return }
+                        try? await Task.sleep(nanoseconds: 20_000_000)
                     }
                     if failsAfterScript {
                         continuation.finish(throwing: StubFailure())
@@ -119,6 +136,24 @@ struct ResponsesEndpointTests {
     // MARK: Helpers
 
     private static let model = "stub-model"
+    fileprivate static let brokenModel = "broken-model"
+
+    private func localModel(_ id: String) -> LocalModel {
+        LocalModel(
+            id: id, displayName: id, directory: URL(filePath: "/tmp"), sizeBytes: 0,
+            format: .mlx, quantization: nil, parameterCount: nil, architecture: nil)
+    }
+
+    /// Polls until the server's generation lock is free (the release runs in
+    /// a detached task, so it lands shortly after the response ends), for at
+    /// most 60 s. True when it was released.
+    private func lockIsReleased(_ server: HummingbirdServer) async throws -> Bool {
+        for _ in 0..<1_200 {
+            if await !server.generationLockIsHeld { return true }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return false
+    }
 
     private func loadedEngine(_ engine: ScriptedEngine) async throws -> ScriptedEngine {
         try await engine.load(LocalModel(
@@ -132,15 +167,21 @@ struct ResponsesEndpointTests {
         return (server, try await server.start(preferredPort: port))
     }
 
-    private func post(port: Int, body: Any) async throws -> (Data, HTTPURLResponse) {
-        try await postRaw(port: port, data: JSONSerialization.data(withJSONObject: body))
+    private func post(port: Int, body: Any, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+        try await postRaw(port: port, data: JSONSerialization.data(withJSONObject: body), headers: headers)
     }
 
-    private func postRaw(port: Int, data: Data) async throws -> (Data, HTTPURLResponse) {
+    private func urlRequest(port: Int, data: Data, headers: [String: String] = [:]) throws -> URLRequest {
         var request = URLRequest(url: try #require(URL(string: "http://127.0.0.1:\(port)/v1/responses")))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         request.httpBody = data
+        return request
+    }
+
+    private func postRaw(port: Int, data: Data, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+        let request = try urlRequest(port: port, data: data, headers: headers)
         let (body, response) = try await URLSession.shared.data(for: request)
         return (body, try #require(response as? HTTPURLResponse))
     }
@@ -466,7 +507,8 @@ struct ResponsesEndpointTests {
         #expect(captured.messages[2].toolCallID == "call_1")
         #expect(captured.messages[2].content == "22C")
         #expect(captured.tools?.count == 1)
-        #expect(captured.parameters.maxTokens == 2048)
+        // No `max_output_tokens`, as Codex sends: the Responses default.
+        #expect(captured.parameters.maxTokens == 32_768)
     }
 
     // MARK: Statuses and errors
@@ -485,9 +527,14 @@ struct ResponsesEndpointTests {
         #expect(terminal["status"] as? String == "incomplete")
         #expect((terminal["incomplete_details"] as? [String: Any])?["reason"] as? String == "max_output_tokens")
         #expect(terminal["max_output_tokens"] as? Int == 1)
+        // The cut-off message is itself incomplete, streamed and not.
+        #expect((terminal["output"] as? [[String: Any]])?.first?["status"] as? String == "incomplete")
+        let streamedDone = try #require(events.first { $0.type == "response.output_item.done" })
+        #expect((streamedDone.payload["item"] as? [String: Any])?["status"] as? String == "incomplete")
         let body = try json(bodyData)
         #expect(body["status"] as? String == "incomplete")
         #expect((body["incomplete_details"] as? [String: Any])?["reason"] as? String == "max_output_tokens")
+        #expect((body["output"] as? [[String: Any]])?.first?["status"] as? String == "incomplete")
     }
 
     @Test
@@ -554,7 +601,10 @@ struct ResponsesEndpointTests {
         let error = try #require(terminal["error"] as? [String: Any])
         #expect(error["code"] as? String == "server_error")
         #expect(error["message"] as? String == "stub engine failed")
-        #expect(try json(bodyData)["status"] as? String == "failed")
+        #expect((terminal["output"] as? [[String: Any]])?.first?["status"] as? String == "incomplete")
+        let body = try json(bodyData)
+        #expect(body["status"] as? String == "failed")
+        #expect((body["output"] as? [[String: Any]])?.first?["status"] as? String == "incomplete")
     }
 
     @Test
@@ -563,13 +613,115 @@ struct ResponsesEndpointTests {
         let server = HummingbirdServer(engineProvider: { engine }, stallTimeoutSeconds: 0.5)
         let port = try await server.start(preferredPort: 21_550)
         let (data, _) = try await post(port: port, body: streamRequest())
+        let released = try await lockIsReleased(server)
         await server.stop()
 
+        #expect(released)
         let events = try events(data)
         #expect(events.last?.type == "response.failed")
         let error = try #require(try terminalResponse(events)["error"] as? [String: Any])
         #expect((error["message"] as? String)?.contains("Generation stalled") == true)
+        #expect(error["code"] as? String == "server_error")
         // A stall with no output still leaves no empty message item behind.
         #expect(outputTypes(try terminalResponse(events)).isEmpty)
+    }
+
+    // MARK: Budget, lock and request limits
+
+    @Test
+    func maxOutputTokensDefaultsTo32768() async throws {
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 21_640)
+        _ = try await post(port: port, body: ["model": Self.model, "input": "hi", "stream": true])
+        let defaulted = await engine.capturedRequest?.parameters.maxTokens
+        _ = try await post(port: port, body: ["model": Self.model, "input": "hi", "max_output_tokens": 100])
+        let explicit = await engine.capturedRequest?.parameters.maxTokens
+        await server.stop()
+
+        #expect(defaulted == 32_768)
+        #expect(explicit == 100)
+    }
+
+    @Test
+    func lockIsFreedAfterAClientDisconnect() async throws {
+        let (server, port) = try await start(ScriptedEngine(chunks: [], dripsForever: true), port: 21_670)
+        let request = try urlRequest(port: port, data: JSONSerialization.data(withJSONObject: streamRequest()))
+        let (bytes, _) = try await URLSession.shared.bytes(for: request)
+        var sawDelta = false
+        for try await line in bytes.lines where line.contains("response.output_text.delta") {
+            sawDelta = true
+            break
+        }
+        bytes.task.cancel()
+        let released = try await lockIsReleased(server)
+        await server.stop()
+
+        #expect(sawDelta)
+        #expect(released)
+    }
+
+    @Test
+    func coldSwapFailureAfterHeadersIsResponseFailed() async throws {
+        let engine = try await loadedEngine(ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)]))
+        let broken = localModel(Self.brokenModel)
+        let server = HummingbirdServer(engine: engine, modelResolver: { $0 == Self.brokenModel ? broken : nil })
+        let port = try await server.start(preferredPort: 21_730)
+        let (data, response) = try await post(port: port, body: [
+            "model": Self.brokenModel, "input": "hi", "stream": true,
+        ])
+        let released = try await lockIsReleased(server)
+        await server.stop()
+
+        // The model resolves, so headers go out; the load then fails in-band.
+        #expect(response.statusCode == 200)
+        let events = try events(data)
+        #expect(events.map(\.type) == ["response.created", "response.in_progress", "response.failed"])
+        let error = try #require(try terminalResponse(events)["error"] as? [String: Any])
+        #expect(error["code"] as? String == "load_failed")
+        #expect((error["message"] as? String)?.hasPrefix("Failed to load \(Self.brokenModel)") == true)
+        #expect(released)
+    }
+
+    @Test
+    func reasoningEffortNoneTurnsThinkingOff() async throws {
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)])
+        let (server, port) = try await start(engine, port: 21_760)
+        _ = try await post(port: port, body: ["model": Self.model, "input": "hi", "reasoning": ["effort": "none"]])
+        let off = await engine.capturedRequest?.templateKwargs?["enable_thinking"]
+        _ = try await post(port: port, body: ["model": Self.model, "input": "hi", "reasoning": ["effort": "high"]])
+        let untouched = await engine.capturedRequest?.templateKwargs?["enable_thinking"]
+        await server.stop()
+
+        #expect(off == .bool(false))
+        #expect(untouched == nil)
+    }
+
+    @Test
+    func originHeaderHidesCachedTokens() async throws {
+        let (server, port) = try await start(ScriptedEngine(chunks: [
+            GenerateChunk(text: "ok", finishReason: .stop,
+                          usage: TokenUsage(promptTokens: 5, completionTokens: 1, cachedPromptTokens: 4)),
+        ]), port: 21_820)
+        let body = ["model": Self.model, "input": "hi"]
+        let (native, _) = try await post(port: port, body: body)
+        let (browser, _) = try await post(port: port, body: body, headers: ["Origin": "https://example.com"])
+        await server.stop()
+
+        func cached(_ data: Data) throws -> Int? {
+            ((try json(data)["usage"] as? [String: Any])?["input_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int
+        }
+        #expect(try cached(native) == 4)
+        #expect(try cached(browser) == 0)
+    }
+
+    @Test
+    func bodyOverTwoMegabytesIsAccepted() async throws {
+        let (server, port) = try await start(ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)]), port: 21_850)
+        let big = String(repeating: "a", count: 2 * 1024 * 1024 + 4096)
+        let (data, response) = try await post(port: port, body: ["model": Self.model, "input": big])
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(try json(data)["status"] as? String == "completed")
     }
 }

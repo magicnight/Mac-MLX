@@ -27,7 +27,9 @@ import XCTest
 ///     -only-testing:MacMLXCoreTests/ResponsesAgentLoopE2ETests
 ///
 /// The model thinks before it answers; the reasoning arrives as its own
-/// output item, so the anchor check reads the answer and the reasoning.
+/// output item, so the anchor check reads the answer and the reasoning. No
+/// `max_output_tokens` is sent, as Codex sends none, so the endpoint's default
+/// budget has to cover the thinking and the call.
 final class ResponsesAgentLoopE2ETests: XCTestCase {
 
     private func gateAndResolveModel() throws -> (id: String, directory: URL) {
@@ -87,7 +89,7 @@ final class ResponsesAgentLoopE2ETests: XCTestCase {
         // Round 1 — expect a get_weather function_call item.
         let round1Data = try await post(port: port, body: [
             "model": modelID, "input": [userItem], "tools": [weatherTool],
-            "temperature": 0, "max_output_tokens": 4096,
+            "temperature": 0,
         ])
         let round1 = try XCTUnwrap(try JSONSerialization.jsonObject(with: round1Data) as? [String: Any])
         XCTAssertEqual(round1["status"] as? String, "completed", "round 1: \(round1)")
@@ -111,7 +113,7 @@ final class ResponsesAgentLoopE2ETests: XCTestCase {
         }
         let round2Data = try await post(port: port, body: [
             "model": modelID, "input": input, "tools": [weatherTool], "stream": true,
-            "temperature": 0, "max_output_tokens": 4096,
+            "temperature": 0,
         ])
         let streamed = String(decoding: round2Data, as: UTF8.self)
         let payloads = try streamed.components(separatedBy: "\n\n").filter { !$0.isEmpty }.map { frame in

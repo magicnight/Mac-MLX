@@ -87,14 +87,16 @@ struct ResponsesOutputBuilderTests {
 
     @Test
     func messageAndReasoningItems() throws {
-        let message = ResponsesOutputBuilder.messageItem(id: "msg_1", text: "hi")
+        let message = ResponsesOutputBuilder.messageItem(id: "msg_1", text: "hi", status: "completed")
         #expect(message["role"] as? String == "assistant")
         #expect(message["status"] as? String == "completed")
         let content = try #require(message["content"] as? [[String: Any]])
         #expect(content.first?["type"] as? String == "output_text")
         #expect(content.first?["text"] as? String == "hi")
         #expect((content.first?["annotations"] as? [Any])?.isEmpty == true)
-        #expect((ResponsesOutputBuilder.messageItem(id: "msg_1", text: nil)["content"] as? [Any])?.isEmpty == true)
+        let added = ResponsesOutputBuilder.messageItem(id: "msg_1", text: nil, status: "in_progress")
+        #expect((added["content"] as? [Any])?.isEmpty == true)
+        #expect(added["status"] as? String == "in_progress")
 
         let reasoning = ResponsesOutputBuilder.reasoningItem(id: "rs_1", text: "think")
         #expect(reasoning["type"] as? String == "reasoning")
@@ -106,9 +108,9 @@ struct ResponsesOutputBuilderTests {
         #expect(summary.count == 1)
         #expect(summary.first?["type"] as? String == "summary_text")
         #expect(summary.first?["text"] as? String == "think")
-        let added = ResponsesOutputBuilder.reasoningItem(id: "rs_1", text: nil)
-        #expect((added["summary"] as? [Any])?.isEmpty == true)
-        #expect((added["content"] as? [Any])?.isEmpty == true)
+        let addedReasoning = ResponsesOutputBuilder.reasoningItem(id: "rs_1", text: nil)
+        #expect((addedReasoning["summary"] as? [Any])?.isEmpty == true)
+        #expect((addedReasoning["content"] as? [Any])?.isEmpty == true)
     }
 
     @Test
@@ -126,10 +128,23 @@ struct ResponsesOutputBuilderTests {
         #expect(engineError.status == "failed")
         #expect((engineError.error as? [String: Any])?["code"] as? String == "server_error")
 
-        let failed = ResponsesOutputBuilder.statusFields(.failed("stalled"))
+        let failed = ResponsesOutputBuilder.statusFields(.failed("stalled", code: "server_error"))
         #expect(failed.status == "failed")
         #expect((failed.error as? [String: Any])?["message"] as? String == "stalled")
+        #expect((failed.error as? [String: Any])?["code"] as? String == "server_error")
         #expect(failed.incompleteDetails is NSNull)
+
+        let swap = ResponsesOutputBuilder.statusFields(.failed("Failed to load m: x", code: "load_failed"))
+        #expect((swap.error as? [String: Any])?["code"] as? String == "load_failed")
+    }
+
+    @Test
+    func messageItemIsIncompleteUnlessTheResponseCompleted() {
+        #expect(ResponsesOutputBuilder.itemStatus(.finished(.stop)) == "completed")
+        #expect(ResponsesOutputBuilder.itemStatus(.finished(.toolCalls)) == "completed")
+        #expect(ResponsesOutputBuilder.itemStatus(.finished(.length)) == "incomplete")
+        #expect(ResponsesOutputBuilder.itemStatus(.finished(.error)) == "incomplete")
+        #expect(ResponsesOutputBuilder.itemStatus(.failed("x", code: "server_error")) == "incomplete")
     }
 
     @Test

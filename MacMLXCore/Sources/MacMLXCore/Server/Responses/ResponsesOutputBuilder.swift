@@ -43,12 +43,14 @@ enum ResponsesOutputBuilder {
     }
 
     /// The assistant's visible text as a `message` item. A nil `text` gives
-    /// empty `content` and `in_progress` (the shape `output_item.added` carries).
-    static func messageItem(id: String, text: String?) -> [String: Any] {
+    /// empty `content` (the shape `output_item.added` carries, with
+    /// `in_progress`); a finished item is `completed`, or `incomplete` when
+    /// the response it ends did not complete (see `itemStatus(_:)`).
+    static func messageItem(id: String, text: String?, status: String) -> [String: Any] {
         [
             "type": "message",
             "id": id,
-            "status": text == nil ? "in_progress" : "completed",
+            "status": status,
             "role": "assistant",
             "content": text.map { [outputTextPart($0)] } ?? [],
         ]
@@ -124,29 +126,39 @@ enum ResponsesOutputBuilder {
         /// The engine finished with this reason (nil: the stream ended
         /// without a terminal chunk, which reads as a normal stop).
         case finished(FinishReason?)
-        /// The generation failed: a thrown error or a stall.
-        case failed(String)
+        /// The generation failed: a thrown error, a stall or a failed model
+        /// load. `code` is the error code (`server_error`, or the
+        /// `model_not_found` / `load_failed` a cold swap reports).
+        case failed(String, code: String)
+    }
+
+    /// The status of the message item a response ends with: `completed` when
+    /// the response completed, `incomplete` when it was cut off or failed.
+    static func itemStatus(_ outcome: Outcome) -> String {
+        statusFields(outcome).status == "completed" ? "completed" : "incomplete"
     }
 
     /// `status`, `incomplete_details` and `error` for an outcome: a stop or a
     /// tool call completes, the length cap is `incomplete` with reason
-    /// `max_output_tokens`, an engine error or failure is `failed` with a
-    /// `server_error`.
+    /// `max_output_tokens`, an engine error is `failed` with a `server_error`
+    /// and a failure `failed` with its own code. macMLX's engine reports no
+    /// distinct context-overflow error, so there is no
+    /// `context_length_exceeded`.
     static func statusFields(_ outcome: Outcome) -> (status: String, incompleteDetails: Any, error: Any) {
         switch outcome {
         case .finished(.length):
             return ("incomplete", ["reason": "max_output_tokens"] as [String: Any], NSNull())
         case .finished(.error):
-            return ("failed", NSNull(), errorObject("The model failed to generate a response."))
+            return ("failed", NSNull(), errorObject("The model failed to generate a response.", code: "server_error"))
         case .finished(.stop), .finished(.toolCalls), .finished(.none):
             return ("completed", NSNull(), NSNull())
-        case .failed(let message):
-            return ("failed", NSNull(), errorObject(message))
+        case .failed(let message, let code):
+            return ("failed", NSNull(), errorObject(message, code: code))
         }
     }
 
-    private static func errorObject(_ message: String) -> [String: Any] {
-        ["code": "server_error", "message": message]
+    private static func errorObject(_ message: String, code: String) -> [String: Any] {
+        ["code": code, "message": message]
     }
 
     /// The Responses `usage` object. `input_tokens` includes the cached
