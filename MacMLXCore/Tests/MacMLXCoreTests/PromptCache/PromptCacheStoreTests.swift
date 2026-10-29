@@ -386,6 +386,40 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(again?.reusedTokenCount, largeTokens.count)
     }
 
+    /// A cold hit served without promotion moves its file's modification
+    /// time to now, so the mtime-ordered byte-cap prune keeps a snapshot a
+    /// live session hits every turn. Both cold paths: the cold trie, and the
+    /// exact key after a restart without `index.json`.
+    func testAColdHitLargerThanTheHotTierMarksItsFileUsed() async throws {
+        try requireMLXRuntimeOrSkip()
+        let large = makeSnapshot(tokenCount: 30)
+        let budget = PromptCacheStore.cacheBytes(large.caches) - 1
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxBytes: budget)
+        let largeTokens = Array(100..<130)
+        await store.insert(
+            modelID: model, tokens: largeTokens, snapshot: large, cacheType: .user, modelFingerprint: fpA)
+        await store.drainInFlight()
+        let file = PromptCacheKey(modelID: model, tokens: largeTokens).shardedFileURL(under: root)
+        let past = Date(timeIntervalSinceNow: -3_600)
+
+        func modified() throws -> Date {
+            try XCTUnwrap(file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+        }
+
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: file.path)
+        let trieHit = await store.fetchNearest(modelID: model, tokens: largeTokens + [7], modelFingerprint: fpA)
+        XCTAssertEqual(trieHit?.reusedTokenCount, largeTokens.count)
+        XCTAssertGreaterThan(try modified(), past.addingTimeInterval(60), "the cold-trie hit marks the file used")
+
+        try FileManager.default.removeItem(at: root.appending(path: "index.json"))
+        let restarted = PromptCacheStore(root: root, maxBytes: budget)
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: file.path)
+        let exactHit = await restarted.fetchNearest(modelID: model, tokens: largeTokens, modelFingerprint: fpA)
+        XCTAssertEqual(exactHit?.reusedTokenCount, largeTokens.count - 1)
+        XCTAssertGreaterThan(try modified(), past.addingTimeInterval(60), "the exact-key hit marks the file used")
+    }
+
     // MARK: - copy-on-fetch isolation
 
     func testFetchedSnapshotIsIndependentCopy() async throws {

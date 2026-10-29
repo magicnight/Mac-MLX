@@ -815,6 +815,16 @@ public actor PromptCacheStore {
             .appending(path: "\(hash).safetensors", directoryHint: .notDirectory)
     }
 
+    /// Move `url`'s modification time to now. The cold tier's byte-cap prune
+    /// drops the files modified longest ago, and a promoted entry is
+    /// rewritten when it is next evicted; an entry served from disk without
+    /// promotion (larger than the hot tier) is not, so without this a
+    /// snapshot a live session hits every turn would age out first.
+    /// Best-effort, like the tier's other file bookkeeping.
+    static func markUsed(_ url: URL) {
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
     /// Whether an entry of `caches` may live in the hot tier: no larger than
     /// the tier's whole byte budget (see ``store``).
     private func fitsHotTier(_ caches: [any KVCache]) -> Bool {
@@ -898,7 +908,10 @@ public actor PromptCacheStore {
         else { return nil }
         // An entry the hot tier cannot hold is served from disk as it is: its
         // cold record stays and nothing is rewritten.
-        guard fitsHotTier(restored) else { return hit }
+        guard fitsHotTier(restored) else {
+            Self.markUsed(url)
+            return hit
+        }
         // Promote back into the hot tier under the SAME (validated) fingerprint,
         // so a later re-eviction demotes it with the correct stamp.
         store(
@@ -1012,7 +1025,10 @@ public actor PromptCacheStore {
             else { continue }
             // An entry the hot tier cannot hold is served from disk as it is:
             // its cold record stays and nothing is rewritten.
-            guard fitsHotTier(restored) else { return hit }
+            guard fitsHotTier(restored) else {
+                Self.markUsed(url)
+                return hit
+            }
             // Promote into the hot tier under the validated fingerprint, then
             // drop the cold record + node so the tiers stay disjoint.
             store(
