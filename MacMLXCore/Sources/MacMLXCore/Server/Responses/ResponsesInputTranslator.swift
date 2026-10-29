@@ -10,9 +10,10 @@
 /// `file_id`) is a 400. Every rejection is a `TranslationError` carrying the
 /// message the handler returns with HTTP 400 — nothing is silently dropped
 /// except what the Responses wire format makes optional to honor: hosted
-/// tools (Codex always declares `web_search`), `reasoning` input items (the
-/// conversation model has no reasoning field yet), and non-text parts of a
-/// tool output.
+/// tools (Codex always declares `web_search`) and `reasoning` input items
+/// (the conversation model has no reasoning field yet). An image in a tool
+/// output or a system message, which the template cannot render, is replaced
+/// by a placeholder saying so.
 ///
 /// Pure apart from decoding an inline image into its temporary file, which the
 /// chat path does the same way.
@@ -194,13 +195,32 @@ enum ResponsesInputTranslator {
         case .custom:
             // A freeform tool takes one raw string. Offered as a function with a
             // single required `input` argument; the call is turned back into a
-            // `custom_tool_call` whose `input` is that argument.
+            // `custom_tool_call` whose `input` is that argument. The template
+            // has no slot for the tool's input grammar, so its definition is
+            // given to the model in the description instead.
             return DeclaredTool(
                 entry: .init(namespace: namespace, name: name, kind: .custom),
-                description: description,
+                description: customToolDescription(description, format: fields["format"]),
                 parameters: customToolParameters)
         }
     }
+
+    /// A custom tool's description, followed after a blank line by its input
+    /// format when `format` carries a `definition` (a grammar, such as the
+    /// Lark grammar of Codex's `apply_patch`).
+    static func customToolDescription(_ description: String, format: JSONValue?) -> String {
+        guard case .object(let fields)? = format, let definition = string(fields["definition"]) else {
+            return description
+        }
+        let heading = string(fields["syntax"]).map { "Input format (\($0)):" } ?? "Input format:"
+        let block = "\(heading)\n\(definition)"
+        return description.isEmpty ? block : "\(description)\n\n\(block)"
+    }
+
+    /// What a tool result's image part becomes: the template renders tool
+    /// results as text, so the model is told an image was there rather than
+    /// seeing an empty result it might retry forever.
+    static let omittedToolImage = "[image omitted: macMLX does not pass images in tool results]"
 
     /// The parameters a custom tool is offered with.
     static let customToolParameters: JSONValue = .object([
@@ -387,7 +407,8 @@ enum ResponsesInputTranslator {
     }
 
     /// A `function_call_output` / `custom_tool_call_output` item → a `.tool`
-    /// message. `output` is a string, or parts whose text parts are joined.
+    /// message. `output` is a string, or parts joined line by line: a text part
+    /// as its text, any other part as a placeholder naming what was left out.
     private static func toolOutput(_ fields: [String: JSONValue], type: String) throws -> ChatMessage {
         guard let callID = string(fields["call_id"]), !callID.isEmpty else {
             throw TranslationError(message: "A `\(type)` input item is missing its `call_id`.")
@@ -399,11 +420,13 @@ enum ResponsesInputTranslator {
         case .some(.string(let text)):
             content = text
         case .some(.array(let parts)):
-            content = parts.compactMap { part -> String? in
-                guard case .object(let partFields) = part else { return nil }
+            content = parts.map { part -> String in
+                guard case .object(let partFields) = part else { return "[part omitted]" }
                 switch string(partFields["type"]) {
-                case "input_text", "output_text", "text": return string(partFields["text"])
-                default: return nil
+                case "input_text", "output_text", "text": return string(partFields["text"]) ?? ""
+                case "input_image": return omittedToolImage
+                case .some(let other): return "[\(other) omitted]"
+                case .none: return "[part omitted]"
                 }
             }.joined(separator: "\n")
         case .some:

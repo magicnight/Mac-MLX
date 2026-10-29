@@ -16,12 +16,19 @@
 ///    instead, and with no user turn at all, to the system prompt — the only
 ///    place left that every template renders.
 ///
+/// A system turn's images cannot go where its text goes — the system prompt
+/// and a folded user turn's text are text — so each becomes the placeholder
+/// ``omittedImage`` at the end of the turn's text.
+///
 /// Pure: the caller decides which wire roles count as system and builds
 /// `.system` messages for them.
 enum MidConversationSystemFolding {
 
     /// The separator between joined instruction texts.
     static let separator = "\n\n"
+
+    /// What an image on a system turn becomes.
+    static let omittedImage = "[image omitted from a system message]"
 
     /// Splits `messages` into a system prompt and system-free messages.
     ///
@@ -37,10 +44,11 @@ enum MidConversationSystemFolding {
 
         for message in messages {
             if message.role == .system {
+                let text = systemText(message)
                 if seenNonSystem {
-                    pending.append(message.content)
+                    pending.append(text)
                 } else {
-                    systemParts.append(message.content)
+                    systemParts.append(text)
                 }
                 continue
             }
@@ -63,6 +71,13 @@ enum MidConversationSystemFolding {
 
         let prompt = join(systemParts)
         return (prompt.isEmpty ? nil : prompt, out)
+    }
+
+    /// A system turn's text, one placeholder line per image after it.
+    private static func systemText(_ message: ChatMessage) -> String {
+        ([message.content] + message.images.map { _ in omittedImage })
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 
     /// Joins texts with the separator, skipping empty ones so an empty turn

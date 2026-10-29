@@ -131,8 +131,9 @@ struct ResponsesInputTranslatorTests {
         #expect(translation.messages.map(\.role) == [.user, .assistant, .tool, .tool])
         #expect(translation.messages[1].content == "Checking.")
         #expect(translation.messages[1].toolCalls?.map(\.id) == ["a", "b"])
-        // Only the text parts of an array output are kept.
-        #expect(translation.messages[3].content == "two\nlines")
+        // Text parts are kept; an image is replaced by a placeholder, not dropped.
+        #expect(translation.messages[3].content
+            == "two\n[image omitted: macMLX does not pass images in tool results]\nlines")
     }
 
     @Test
@@ -241,13 +242,70 @@ struct ResponsesInputTranslatorTests {
             "type": .string("function"),
             "function": .object([
                 "name": .string("apply_patch"),
-                "description": .string("Apply a patch."),
+                "description": .string("Apply a patch.\n\nInput format (lark):\nstart: /.+/"),
                 "parameters": ResponsesInputTranslator.customToolParameters,
             ]),
         ]))
         #expect(translation.toolNames.entry(forExposedName: "apply_patch")?.kind == .custom)
         #expect(translation.messages[1].toolCalls?.first?.arguments == ["input": .string("*** Begin Patch")])
         #expect(translation.messages[2].toolCallID == "p1")
+    }
+
+    @Test
+    func customToolFormatDefinitionIsAppendedToTheDescription() throws {
+        let grammar = "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF"
+        let translation = try translate([
+            "model": "m", "input": "hi",
+            "tools": [
+                ["type": "custom", "name": "apply_patch", "description": "Use the `apply_patch` tool to edit files.",
+                 "format": ["type": "grammar", "syntax": "lark", "definition": grammar]],
+                ["type": "custom", "name": "free", "description": "No grammar.", "format": ["type": "text"]],
+                ["type": "custom", "name": "bare", "format": ["type": "grammar", "definition": "x"]],
+            ],
+        ])
+        let descriptions = (translation.tools ?? []).compactMap { spec -> String? in
+            guard case .object(let fields) = spec, case .object(let function)? = fields["function"],
+                  case .string(let description)? = function["description"] else { return nil }
+            return description
+        }
+        #expect(descriptions == [
+            "Use the `apply_patch` tool to edit files.\n\nInput format (lark):\n\(grammar)",
+            "No grammar.",
+            "Input format:\nx",
+        ])
+    }
+
+    @Test
+    func toolOutputPartsOtherThanTextBecomePlaceholders() throws {
+        let translation = try translate([
+            "model": "m",
+            "input": [
+                user("look"),
+                ["type": "function_call", "name": "view_image", "arguments": "{}", "call_id": "v1"],
+                ["type": "function_call_output", "call_id": "v1",
+                 "output": [["type": "input_image", "image_url": "data:image/png;base64,AAAA"],
+                            ["type": "input_file", "file_id": "f"]]],
+            ],
+        ])
+        #expect(translation.messages[2].content
+            == "[image omitted: macMLX does not pass images in tool results]\n[input_file omitted]")
+    }
+
+    @Test
+    func imageOnADeveloperMessageBecomesAPlaceholder() throws {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        let translation = try translate([
+            "model": "m",
+            "input": [
+                ["role": "developer", "content": [
+                    ["type": "input_text", "text": "look at this"],
+                    ["type": "input_image", "image_url": "data:image/png;base64,\(png)"],
+                ]],
+                user("ok"),
+            ],
+        ])
+        #expect(translation.systemPrompt == "look at this\n[image omitted from a system message]")
+        #expect(translation.messages.allSatisfy { $0.images.isEmpty })
     }
 
     @Test

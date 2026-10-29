@@ -68,6 +68,21 @@ struct MidConversationSystemFoldingTests {
     }
 
     @Test
+    func imagesOnSystemTurnsBecomePlaceholders() {
+        let image = ImageAttachment(fileURL: URL(filePath: "/tmp/x.png"), mimeType: "image/png")
+        let (prompt, messages) = MidConversationSystemFolding.fold([
+            ChatMessage(role: .system, content: "lead", images: [image]),
+            user("a"),
+            ChatMessage(role: .system, content: "", images: [image, image]),
+            user("b"),
+        ])
+        #expect(prompt == "lead\n[image omitted from a system message]")
+        #expect(messages[1].content == "[image omitted from a system message]\n"
+            + "[image omitted from a system message]\n\nb")
+        #expect(messages.allSatisfy { $0.images.isEmpty })
+    }
+
+    @Test
     func emptyTextsAddNoStrayBlankLines() {
         let (prompt, messages) = MidConversationSystemFolding.fold([
             system(""), user("a"), system("note"), user(""),
