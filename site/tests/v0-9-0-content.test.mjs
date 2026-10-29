@@ -7,6 +7,9 @@ import { project } from "../content/project.mjs";
 import { releases } from "../content/releases.mjs";
 
 const factsById = new Map(facts.map((fact) => [fact.id, fact]));
+// v0.9.0 is now a historical record; its own entry, not releases[0], carries what it shipped.
+const v090 = releases.find((item) => item.id === "v0-9-0");
+const currentTag = `v${project.currentVersion}`;
 const releasedV090FactIds = [
   "audio-endpoints",
   "audio-in-app",
@@ -35,24 +38,19 @@ function assertImmutableSource(factId, version) {
   assert.equal(item.status, "released", `${factId} must be released`);
   assert.equal(item.sinceVersion, version, `${factId} must ship in v${version}`);
   assert.ok(
-    item.sourceUrls.some((url) => url.includes("/releases/tag/v0.9.0") || url.includes("/blob/v0.9.0/")),
+    // Evidence cites the current tag, or v0.9.0 for a fact the current tag superseded.
+    item.sourceUrls.some((url) => [currentTag, "v0.9.0"].some((tag) => url.includes(`/releases/tag/${tag}`) || url.includes(`/blob/${tag}/`))),
     `${factId} must cite immutable tagged evidence`,
   );
 }
 
-test("project and release registries identify v0.9.0 as current", () => {
-  assert.deepEqual(
-    {
-      currentVersion: project.currentVersion,
-      releaseDate: project.releaseDate,
-      lastVerified: project.lastVerified,
-    },
-    { currentVersion: "0.9.0", releaseDate: "2026-08-28", lastVerified: "2026-10-13" },
-  );
-  assert.equal(releases[0].id, "v0-9-0");
-  assert.equal(releases[0].version, project.currentVersion);
-  assert.equal(releases[0].releaseDate, project.releaseDate);
-  assert.equal(releases[0].lastVerified, project.lastVerified);
+test("v0.9.0 stays in the release registry as a historical record", () => {
+  assert.ok(v090, "v0.9.0 must remain a release record");
+  assert.notEqual(project.currentVersion, "0.9.0");
+  assert.equal(v090.version, "0.9.0");
+  assert.equal(v090.releaseDate, "2026-08-28");
+  assert.match(v090.en.summary, /^Historically,/);
+  assert.match(v090["zh-Hans"].summary, /^作为历史记录，/);
   for (const id of ["v0-8-0", "v0-7-0", "v0-6-2", "v0-5-3"]) {
     assert.ok(releases.some((item) => item.id === id), `${id} must remain a historical record`);
   }
@@ -60,16 +58,16 @@ test("project and release registries identify v0.9.0 as current", () => {
 
 test("v0.9.0 audio, rerank, MTP, and engine-linkage facts are governed by immutable tagged evidence", () => {
   for (const factId of releasedV090FactIds) assertImmutableSource(factId, "0.9.0");
-  const shipped = releases[0].shippedFactIds;
+  const shipped = v090.shippedFactIds;
   for (const factId of releasedV090FactIds) assert.ok(shipped.includes(factId), `v0.9.0 must ship ${factId}`);
-  assert.deepEqual(releases[0].developmentFactIds, [], "v0.9.0 has no development facts on main");
+  assert.deepEqual(v090.developmentFactIds, [], "v0.9.0 has no development facts on main");
 });
 
 test("unvalidated v0.9.0 surfaces are labelled as limitations, not silent claims", () => {
   // The audio and reranker paths are code-complete and unit-tested but have never
   // run against a real checkpoint; the release record must say so on its face.
   for (const factId of ["audio-endpoints", "audio-in-app", "rerank-cross-encoder", "mtp-drafter-detection"]) {
-    assert.ok(releases[0].limitationFactIds.includes(factId), `${factId} must be a visible v0.9.0 limitation`);
+    assert.ok(v090.limitationFactIds.includes(factId), `${factId} must be a visible v0.9.0 limitation`);
   }
   for (const factId of ["audio-endpoints", "audio-in-app", "rerank-cross-encoder"]) {
     assert.match(factsById.get(factId).en.detail, /not been validated against real|has not been validated/);
@@ -109,7 +107,7 @@ test("the bi-encoder rerank MVP stays scoped to the releases that shipped only i
   const biEncoder = factsById.get("rerank-bi-encoder");
   assert.equal(biEncoder.sinceVersion, "0.5.3");
   assert.deepEqual([...biEncoder.pageIds], [], "the superseded MVP no longer fronts a current page");
-  assert.ok(!releases[0].shippedFactIds.includes("rerank-bi-encoder"), "v0.9.0 ships the cross-encoder instead");
+  assert.ok(!v090.shippedFactIds.includes("rerank-bi-encoder"), "v0.9.0 ships the cross-encoder instead");
   const v080 = releases.find((item) => item.id === "v0-8-0");
   assert.ok(v080.shippedFactIds.includes("rerank-bi-encoder"), "v0.8.0 really did ship only the MVP");
   assert.ok(!v080.shippedFactIds.includes("rerank-cross-encoder"), "the cross-encoder must not be backdated");
@@ -117,7 +115,7 @@ test("the bi-encoder rerank MVP stays scoped to the releases that shipped only i
 
 test("v0.8.0 cold-cache facts stay shipped, scoped to v0.8.0, on immutable tagged evidence", () => {
   for (const factId of coldCacheFactIds) assertImmutableSource(factId, "0.8.0");
-  const shipped = releases[0].shippedFactIds;
+  const shipped = v090.shippedFactIds;
   for (const factId of coldCacheFactIds) assert.ok(shipped.includes(factId), `v0.9.0 still ships ${factId}`);
 });
 
@@ -147,7 +145,7 @@ test("released cold-cache facts keep exact-prefix and no-virtualization boundari
 });
 
 test("v0.7.0 silicon and OCR facts stay shipped with their immutable provenance", () => {
-  const shipped = releases[0].shippedFactIds;
+  const shipped = v090.shippedFactIds;
   for (const factId of siliconOcrFactIds) {
     const item = factsById.get(factId);
     assert.ok(item, `missing ${factId}`);

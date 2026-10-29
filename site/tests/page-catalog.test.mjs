@@ -12,13 +12,15 @@ import { routes } from "../routes.mjs";
 const expectedIds = [
   "home", "architecture", "api-compatibility", "models", "choosing-a-model",
   "vision-language-models", "faq", "compare", "compare-ollama",
-  "compare-lm-studio", "compare-omlx", "releases", "release-v0-9-0", "release-v0-8-0", "release-v0-7-0", "release-v0-6-2", "release-v0-5-3",
+  "compare-lm-studio", "compare-omlx", "releases", "release-v0-10-0", "release-v0-9-0", "release-v0-8-0", "release-v0-7-0", "release-v0-6-2", "release-v0-5-3",
 ];
 
 test("page and route catalogs contain the exact bilingual hub", () => {
   assert.deepEqual(routes.map((route) => route.id), expectedIds);
   assert.deepEqual(pages.map((page) => page.id), expectedIds.slice(1));
-  assert.equal(new Set(routes.flatMap((route) => Object.values(route.paths))).size, 34);
+  assert.equal(new Set(routes.flatMap((route) => Object.values(route.paths))).size, 36);
+  assert.equal(routes.find((route) => route.id === "release-v0-10-0").paths.en, "/releases/v0-10-0/");
+  assert.equal(routes.find((route) => route.id === "release-v0-10-0").paths["zh-Hans"], "/zh/releases/v0-10-0/");
   assert.equal(routes.find((route) => route.id === "release-v0-9-0").paths.en, "/releases/v0-9-0/");
   assert.equal(routes.find((route) => route.id === "release-v0-9-0").paths["zh-Hans"], "/zh/releases/v0-9-0/");
   assert.equal(routes.find((route) => route.id === "release-v0-8-0").paths.en, "/releases/v0-8-0/");
@@ -32,7 +34,7 @@ test("page and route catalogs contain the exact bilingual hub", () => {
 });
 
 test("every page validates cross-references and has related coverage", () => {
-  assert.doesNotThrow(() => validateContentHub({ facts, competitors, faqs, releases, pages, macmlxComparisonProfile }, { today: "2026-10-13", maxAgeDays: 45 }));
+  assert.doesNotThrow(() => validateContentHub({ facts, competitors, faqs, releases, pages, macmlxComparisonProfile }, { today: "2026-10-29", maxAgeDays: 45 }));
   assert.equal(pages.every((page) => page.relatedIds.length >= 2), true);
   assert.deepEqual(new Set(pages.flatMap((page) => page.relatedIds)), new Set(pages.map((page) => page.id)));
 });
@@ -44,6 +46,7 @@ test("page catalog includes audited API, model, FAQ, comparison, and release blo
   assert.ok(byId["vision-language-models"].blocks.some((block) => block.type === "table"));
   assert.deepEqual(byId.faq.blocks.find((block) => block.type === "faq").faqIds, faqs.map((item) => item.id));
   assert.deepEqual(byId.compare.blocks.find((block) => block.type === "comparison").competitorIds, competitors.map((item) => item.id));
+  assert.deepEqual(byId["release-v0-10-0"].blocks.find((block) => block.type === "release").releaseIds, ["v0-10-0"]);
   assert.deepEqual(byId["release-v0-9-0"].blocks.find((block) => block.type === "release").releaseIds, ["v0-9-0"]);
   assert.deepEqual(byId["release-v0-8-0"].blocks.find((block) => block.type === "release").releaseIds, ["v0-8-0"]);
   assert.deepEqual(byId["release-v0-7-0"].blocks.find((block) => block.type === "release").releaseIds, ["v0-7-0"]);
@@ -94,12 +97,12 @@ test("release pages keep current fact closure and historical evidence version-sc
     ...release.developmentFactIds,
     ...release.plannedFactIds,
   ]);
-  const currentRelease = releases.find((release) => release.id === "v0-9-0");
-  const currentSources = pages.find((page) => page.id === "release-v0-9-0").blocks.find((block) => block.type === "sources");
-  assert.deepEqual(new Set(currentSources.factIds), releaseFacts(currentRelease), "release-v0-9-0 fact source closure");
-  assert.deepEqual(currentSources.releaseIds, ["v0-9-0"], "release-v0-9-0 official release source closure");
+  const currentRelease = releases.find((release) => release.id === "v0-10-0");
+  const currentSources = pages.find((page) => page.id === "release-v0-10-0").blocks.find((block) => block.type === "sources");
+  assert.deepEqual(new Set(currentSources.factIds), releaseFacts(currentRelease), "release-v0-10-0 fact source closure");
+  assert.deepEqual(currentSources.releaseIds, ["v0-10-0"], "release-v0-10-0 official release source closure");
 
-  for (const version of ["0.8.0", "0.7.0", "0.6.2", "0.5.3"]) {
+  for (const version of ["0.9.0", "0.8.0", "0.7.0", "0.6.2", "0.5.3"]) {
     const id = `release-v${version.replaceAll(".", "-")}`;
     const historicalRelease = releases.find((release) => release.version === version);
     const historicalSources = pages.find((page) => page.id === id).blocks.find((block) => block.type === "sources");

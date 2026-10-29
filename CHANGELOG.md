@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-29
+
+Structured output learns the schemas Apple's Foundation Models client sends,
+unloading a model finally gives its memory back, and the DMG ships the
+dependency graph its tests ran on.
+
 ### Added
 - **Nested JSON schemas in `response_format`.** Structured output now
   accepts nested objects, arrays with `minItems`/`maxItems` (including arrays
@@ -78,6 +84,72 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   prompt, so it is withheld from requests that carry an `Origin` header
   (cross-origin browser callers, which the server otherwise answers without
   credentials); native clients see it.
+
+### Fixed
+- **A vision model's patch embedding could be padded with a stray value
+  instead of zero.** When a convolution's channel count is not a multiple of 16, MLX
+  pads the channels from a zero scalar that it freed as soon as the work was
+  queued, before the GPU read it; a scalar created in that window got the
+  same buffer and became the padding (`ml-explore/mlx#4660`). The vision
+  encoders of Qwen2-VL, Qwen2.5-VL, Qwen3-VL and GLM-OCR open with a
+  3-channel `Conv3d`, which takes that path, and the generation loop
+  evaluates asynchronously. Reproduced here: a 3-channel conv3d of ones
+  under `asyncEval`, followed by a few scalar allocations, returned 128
+  instead of 24 in 297 of 300 runs, and the 2D sibling 144 instead of 72 in
+  300 of 300. It was not reproduced through a real VLM checkpoint, and how
+  often the window opens during an image prefill was not measured. Carried
+  on the fork with a regression test.
+- **Batched long-context decode attention read the first request's keys for
+  every request** in one kernel: `sdpa_vector_2pass_1_gqa`, chosen for a
+  single query with no mask, a GQA factor of exactly 8, head dim 64 or 128
+  and at least 8192 keys, offset its keys and values by head but not by
+  batch (`ml-explore/mlx#4431`). Reproduced here at batch 2: row 0 matched a
+  plain attention reference and row 1 was off by 0.61. No macMLX path
+  reaches it today: single-stream decode has batch 1, and batched decode
+  always passes the array mask the batch cache builds, which selects a
+  different kernel. Carried on the fork with a regression test so a later
+  batching change cannot walk into it.
+- **A quantized KV cache stored all-negative groups with the wrong scale.**
+  GPU affine quantization started its running maximum at 0, so a group
+  whose values were all negative was quantized over `[min, 0]` rather than
+  its real range, with a coarser scale and a larger reconstruction error
+  than the CPU path gives (`ml-explore/mlx#4775`, on mlx main and in no
+  release yet). macMLX quantizes on the GPU whenever a request sets
+  `kv_bits`, one group per `kv_group_size` slice of a head. Reproduced here:
+  unit-spaced negative grids came back off by 1.0 at every group size and
+  bit width, where the CPU path restores them exactly. The effect on a real
+  model's output was not measured. Carried on the fork with a regression
+  test.
+- **Gemma 2 ran without a causal mask, and in a batch without its padding
+  mask.** mlx-swift-lm 3.32.3's Gemma 2 builds its mask with the overload of
+  `createAttentionMask` that never asks the cache, and adds that boolean mask
+  to the attention scores instead of applying it: +1 where a key is visible,
+  +0 where it lies in the future, so nothing was masked. Every prompt longer
+  than one token was prefilled with each position also attending to the
+  positions after it; one-token decode steps, which get no mask, were right.
+  And because the mask never came from the cache, a Gemma 2 request decoded
+  beside a longer one in continuous batching also attended to the
+  zero-filled left-pad columns the cache's mask exists to hide. macMLX now
+  loads `gemma2` checkpoints through its own copy of the model
+  (`Gemma2OverlayModel`, same parameter names and weights), which takes the
+  mask from the cache and applies a boolean mask by selection, as mlx-lm
+  does; that type is on the batching allowlist and upstream's `Gemma2Model`
+  is refused. Upstream fixed the same defect on its main branch after 3.32.3
+  (ml-explore/mlx-swift-lm#728), so the copy goes when a release carrying it
+  is adopted, which a test expecting 3.32.3's model to disagree with itself
+  will flag. The other six allowlisted architectures (Gemma, Gemma 3, Gemma
+  4, Qwen 2, Qwen 3, Llama) take every mask from the cache at 3.32.3. On
+  tiny random-weight models with TF32 off, a whole-prompt prefill now matches
+  token-by-token decode to 3e-6, where upstream's was off by up to 11, and a
+  two-prompt ragged cohort matches each prompt decoded alone to 3e-6, where
+  upstream's padded row was off by 1.58. Verified on random weights only; no
+  real Gemma 2 checkpoint was run here. Gemma 2 had been on the batching
+  allowlist since continuous batching shipped in v0.6.0. The copy also no
+  longer aborts the process when `kv_bits` is set: the quantized cache that
+  setting swaps in has no plain update, which upstream's Gemma 2 called, so
+  the copy reads the quantized keys and values back dense for its
+  soft-capped attention (checked against the unquantized cache on random
+  weights).
 - **Structured output no longer runs away on whitespace.** JSON permits any
   amount of whitespace between tokens, so a constrained decode could spin:
   after `{` the automaton accepted spaces, tabs and newlines forever, and a
@@ -126,8 +198,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   earlier triage had excluded by title). Fixed by the new base.
 - Kernels now compile under the Metal 4.1 language version that core
   v0.32.2 requests on macOS 27 (`mlx#3963`, in the base).
-
-### Fixed
 - **Searching Hugging Face in the Model Library could freeze the app
   (#143).** After a search, the library fills in download sizes, up to four
   at a time. When only one to three results still needed a size, the loop
@@ -141,6 +211,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   repository with one to three files of undeclared size. Both date from
   v0.3.6. Clearing the search field while a search was running also left
   "Searching Hugging Face…" up until the next search.
+- **Model Library sizes were kept for one launch only, and a failed size
+  lookup could report a model at a few KB.** The size cache
+  (`~/.mac-mlx/hf-cache/sizes.json`) was written with ISO 8601 dates and read
+  back expecting numeric ones, so every read failed silently, each launch
+  started empty, and the first new size overwrote the file. Sizes now survive
+  a restart for the seven days the cache promises. A file whose size had to
+  be asked for with a HEAD dropped out of the sum when that HEAD failed, and
+  one answered with an error status counted the error body, a few bytes, so
+  a model whose weights met a 404 or 503 came out at a few KB. A result now
+  shows no size unless every file got one, a HEAD counts only on a 2xx, and
+  it asks for the uncompressed length, since the Hub otherwise sends text
+  files compressed with no `content-length`.
 - **A cached audio snapshot is certified against the whole repository
   listing.** The fork's completeness check read `listFiles`, which returns
   only the first page of a Hub tree listing, so a repository past one page
@@ -549,8 +631,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   model is not supported (see `docs/model-support.md`).
 - **The controlled MLX fork now sits on mlx-swift 0.32.3** (core v0.32.2)
   instead of 0.31.6 (core v0.31.1). Twelve of the thirteen correctness fixes
-  the fork used to carry are in that base, so it now carries two:
-  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3. The
+  the fork used to carry are in that base, so it carries two of those,
+  `ml-explore/mlx#3922` and `mlx#4009`, both only in core v0.32.3, plus
+  three fixes the release scan found (`mlx#4660`, `mlx#4431`, `mlx#4775`,
+  under Fixed): five in all, at the fork's 420dd05. The
   cross-thread evaluation abort that kept the fork on the old core is gone —
   0.32.3 registers every stream globally — and `CrossThreadEvalTripwireTests`
   now guards against regressing it rather than predicting it.
@@ -587,7 +671,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   smokes (moonshine-tiny, VyvoTTS with SNAC, and SenseVoiceSmall, whose
   `am.mvn` and `*.bpe.model` reach the app cache only through the listing)
   ran at that version. mlx-swift-lm stays at 3.32.3 and mlx-swift at the
-  controlled fork's 1026d23.
+  controlled fork's 420dd05.
 
 ### Removed
 - `BatchPositionedCacheWrapper`, the shim over the batched single-token RoPE

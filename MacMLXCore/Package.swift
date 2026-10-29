@@ -9,10 +9,12 @@ let package = Package(
     ],
     dependencies: [
         // CONTROLLED MINIMAL FORK (master plan §1.1, rebased 2026-10-02):
-        // upstream mlx-swift 0.32.3, which vendors core v0.32.2, plus TWO
-        // cherry-picks that landed in core v0.32.3 and are not yet in any
-        // mlx-swift release. Both produce silently wrong numbers on NAX
-        // hardware and both are pinned by QuantizedMatmulParityTests:
+        // upstream mlx-swift 0.32.3, which vendors core v0.32.2, plus FIVE
+        // upstream cherry-picks that no mlx-swift release carries. Each
+        // produces silently wrong numbers and each was reproduced here
+        // against the base before it was carried. The first two landed in
+        // core v0.32.3, are NAX-only, and are pinned by
+        // QuantizedMatmulParityTests:
         //
         //   - ml-explore/mlx#3922 — the sorted-RHS affine NAX kernel narrowed
         //     its remaining-row count to short before clamping it to the tile,
@@ -28,6 +30,28 @@ let package = Package(
         //     K, so the window is a `--q-group-size 32` checkpoint whose hidden
         //     or MoE-intermediate size is 32 mod 64; the result reads like a
         //     bad model rather than a bug.
+        //
+        // Three more were added on 2026-10-29, none of them hardware-gated:
+        //
+        //   - ml-explore/mlx#4660 (core v0.32.4) — the pad-for-conv paths in
+        //     conv.cpp freed the zero scalar they pad channels with before the
+        //     GPU read it, so a scalar allocated in that window became the
+        //     padding. Reachable through the Conv3d(3 → hidden) patch embeds of
+        //     Qwen2/2.5/3-VL and GLM-OCR. Reproduced here: a 3-channel conv3d
+        //     of ones under asyncEval returned 128 instead of 24 in 297 of 300
+        //     runs. ConvChannelPaddingRaceTests.
+        //   - ml-explore/mlx#4431 (core v0.32.3) — sdpa_vector_2pass_1_gqa read
+        //     batch 0's keys and values for every batch element (one query, no
+        //     mask, GQA factor 8, head dim 64 or 128, >= 8192 keys, B > 1).
+        //     Reproduced here: row 1 off by 0.61. No production path reaches
+        //     it today, because batched decode always passes an array mask.
+        //     SDPAVectorGQABatchParityTests.
+        //   - ml-explore/mlx#4775 (mlx main, in no release yet) — GPU affine
+        //     quantize started its maximum at 0, so an all-negative group was
+        //     quantized over [min, 0]. Reachable through the quantized KV cache
+        //     (kv_bits). Reproduced here: every group size and bit width
+        //     restored a unit-spaced negative grid with max |diff| 1.0, the
+        //     CPU stream with 0. AffineQuantizeSignedGroupTests.
         //
         // The twelve fixes the previous base (0.31.6, core v0.31.1) carried —
         // #3498 #3810 #3497 #3631 #3560 #3632 #3960 #4043 #3361 #4251 #3167
@@ -62,12 +86,13 @@ let package = Package(
         // The fork carries no API changes; its .gitmodules points the mlx
         // submodule at the magicnight mirror so the carried commits resolve.
         // Drop this override and return to the upstream package as soon as an
-        // mlx-swift release vendors core >= v0.32.3. Pinned by revision so it
+        // mlx-swift release vendors a core that contains all five; #4775 is
+        // after core v0.32.4, so v0.32.4 is not enough. Pinned by revision so it
         // can never drift; CLIForkPinTests, AppForkPinTests and the CI step
         // that reads the app's resolved graph keep the three roots in step.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "1026d239d831ac7ddd154c970bb6c1bff08c0e0c"),
+            revision: "420dd0552f7abf383a60977c9be040c6a0216163"),
         // Minor-pinned: a minor bump of mlx-swift-lm raises its mlx-swift floor,
         // which the fork's revision pin can satisfy at resolution but not at the
         // source level. Move both together, never one.

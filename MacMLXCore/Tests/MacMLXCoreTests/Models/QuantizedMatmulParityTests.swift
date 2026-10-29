@@ -19,7 +19,7 @@ import MLX
 /// - `ml-explore/mlx#4251` — `qvm_split_k` floored its grid and left the tail
 ///   columns undispatched at group size 32.
 ///
-/// Guards for the two fixes the fork still carries ahead of its base — both in
+/// Guards for two of the five fixes the fork carries ahead of its base — both in
 /// core v0.32.3 only, both on the sorted-RHS NAX MoE path: `mlx#3922` and
 /// `mlx#4009`. Each was run against the fork's unpatched base first and failed
 /// with its mechanism's fingerprint.

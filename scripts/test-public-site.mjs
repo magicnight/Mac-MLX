@@ -275,24 +275,24 @@ assert.doesNotMatch(englishRelease.classes, /\bbuilding\b/);
 assert.doesNotMatch(chineseRelease.classes, /\bbuilding\b/);
 assert.equal(englishRelease.content.match(/<li\b/g)?.length, 4);
 assert.equal(chineseRelease.content.match(/<li\b/g)?.length, 4);
-assert.match(englishRelease.content, /<strong>v0\.9\.0 · Aug 28, 2026<\/strong>/);
-assert.match(chineseRelease.content, /<strong>v0\.9\.0 · 2026年8月28日<\/strong>/);
-assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.9\.0"[^>]*>View v0\.9\.0 release ↗<\/a>/);
-assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.9\.0"[^>]*>查看 v0\.9\.0 版本 ↗<\/a>/);
+assert.match(englishRelease.content, /<strong>v0\.10\.0 · Oct 29, 2026<\/strong>/);
+assert.match(chineseRelease.content, /<strong>v0\.10\.0 · 2026年10月29日<\/strong>/);
+assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.10\.0"[^>]*>View v0\.10\.0 release ↗<\/a>/);
+assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.10\.0"[^>]*>查看 v0\.10\.0 版本 ↗<\/a>/);
 for (const capability of [
-  /Speech to text and text to speech run in-process on MLX, with no Python and no Core ML detour/,
-  /A true cross-encoder scores each query-document pair jointly, with bi-encoder cosine kept as the fallback/,
-  /Transcription is a cancellable chat attachment, and assistant messages gained a speech button/,
-  /The app finally links the patched MLX engine, so this DMG carries its correctness fixes/,
+  /Structured output accepts the nested, referenced, and range-bounded schemas Foundation Models sends for @Generable types/,
+  /Unloading a model now gives its memory back, and in the app rerankers and embedders count against the pool budget/,
+  /\/v1\/rerank moves to MLXRerankers, with BERT and Qwen3 rerankers checked on real checkpoints/,
+  /The DMG is built from committed lockfiles, so it ships the dependency graph its tests ran on/,
 ]) assert.match(englishRelease.content, capability);
 for (const capability of [
-  /语音转文字与文字转语音在进程内基于 MLX 运行，不需要 Python，也不绕道 Core ML/,
-  /真正的交叉编码器对每个查询-文档对联合打分，双编码器余弦保留为回退路径/,
-  /转写以可取消的聊天附件形式提供，助手消息新增朗读按钮/,
-  /应用终于链接了补丁版 MLX 引擎，这个 DMG 才真正携带其正确性修复/,
+  /结构化输出接受 Foundation Models 为 @Generable 类型发送的嵌套、引用与数值范围 Schema/,
+  /卸载模型现会真正归还内存，应用中的重排器与嵌入模型也计入模型池预算/,
+  /\/v1\/rerank 改用 MLXRerankers，BERT 与 Qwen3 重排器已在真实检查点上核验/,
+  /DMG 依据已提交的 lockfile 构建，交付的依赖图与测试所用一致/,
 ]) assert.match(chineseRelease.content, capability);
-assert.match(llms, /Latest release: v0\.9\.0/);
-assert.match(ogImage, /v0\.9\.0/);
+assert.match(llms, /Latest release: v0\.10\.0/);
+assert.match(ogImage, /v0\.10\.0/);
 
 const combined = `${html}\n${zhHTML}\n${llms}\n${ogImage}`;
 for (const staleClaim of [
