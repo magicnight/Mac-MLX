@@ -751,7 +751,9 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// The `hashValue` of the prompt tokens the last text generation
     /// prefilled, so a gated test can check they are the tokens it rendered
     /// (hashes compare within one process). A test seam, reset at the start
-    /// of every text generation; nil on the VLM path.
+    /// of every LLM generation and left nil when it takes the speculative
+    /// path. VLM generations don't touch it, so after one it still holds the
+    /// previous LLM generation's value.
     private(set) var lastPromptTokensHash: Int?
 
     /// Whether a text generation may split its prefill at the history
@@ -1113,7 +1115,8 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// thinking off, `<think>\n\n</think>\n\n` closes it there too), so
     /// a tail this long holds the last tag, without decoding a long agent
     /// prompt whole on every request. A block opened earlier and left open
-    /// for longer than this would be missed; no chat template renders one.
+    /// for longer than this would be missed; no chat template we know of
+    /// renders one.
     static let thinkProbeTailTokens = 64
 
     /// How many tokens `request`'s prompt renders to: the `UserInput`
