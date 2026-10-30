@@ -84,6 +84,14 @@ struct ChatCompletionsOutputBudgetTests {
         #expect(await engine.maxTokens == [32_768, 32_768])
     }
 
+    /// The batched path's per-row ceiling must not cut the default budget
+    /// short, or a batched request that names no limit would stop earlier
+    /// than a single-stream one.
+    @Test
+    func batchedCeilingCoversTheDefaultBudget() {
+        #expect(MLXSwiftEngine.batchServingGlobalMaxTokens >= HummingbirdServer.defaultMaxOutputTokens)
+    }
+
     @Test
     func explicitLimitsAreHonored() async throws {
         let engine = CapturingStubEngine()

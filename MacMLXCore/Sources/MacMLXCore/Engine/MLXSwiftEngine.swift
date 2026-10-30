@@ -317,8 +317,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     var batchServingContainer: ModelContainer?
 
     /// Hard per-row token ceiling for the batched path (safety net above each row's
-    /// own `maxTokens`), matching ``BatchScheduler``'s default.
-    static let batchServingGlobalMaxTokens = 4096
+    /// own `maxTokens`). No lower than the server's default output budget
+    /// (`HummingbirdServer.defaultMaxOutputTokens`), or a batched request that
+    /// names no limit would stop short of the budget a single-stream one gets.
+    static let batchServingGlobalMaxTokens = 32_768
 
     /// Max decode steps the drive loop runs in ONE `container.perform` before it
     /// returns to release the model mutex, then re-acquires it to continue the same
