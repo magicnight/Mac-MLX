@@ -173,10 +173,11 @@ final class ReasoningHistorySmokeTests: XCTestCase {
         return (modelID, directory)
     }
 
-    private func loadedEngine(_ model: (id: String, url: URL)) async throws -> MLXSwiftEngine {
+    private func loadedEngine(_ model: (id: String, url: URL), coldEnabled: Bool = false) async throws -> MLXSwiftEngine {
         let coldRoot = FileManager.default.temporaryDirectory
             .appending(path: "reasoning-history-\(UUID().uuidString)", directoryHint: .isDirectory)
-        let engine = MLXSwiftEngine(promptCache: PromptCacheConfig(coldEnabled: false), promptCacheRoot: coldRoot)
+        let engine = MLXSwiftEngine(
+            promptCache: PromptCacheConfig(coldEnabled: coldEnabled), promptCacheRoot: coldRoot)
         try await engine.load(
             LocalModel(
                 id: model.id, displayName: model.id, directory: model.url, sizeBytes: 0,
@@ -213,6 +214,43 @@ final class ReasoningHistorySmokeTests: XCTestCase {
             additionalContext: request.templateKwargs?.mapValues { $0.toSendable() })
     }
 
+    /// The loop's four turns on `engine`, from an empty cache: each turn's
+    /// reuse and history boundary.
+    private func runLoop(
+        _ engine: MLXSwiftEngine, _ modelID: String, tokenizer: TokenizerBridge, preserveThinking: Bool,
+        label: String
+    ) async throws -> (reused: [Int], boundaries: [Int]) {
+        await engine.clearPromptCache()
+        var boundaries: [Int] = []
+        var reused: [Int] = []
+        for turn in 1...4 {
+            let turnRequest = request(modelID, turn: turn, preserveThinking: preserveThinking)
+            let history = try render(engineInput(turnRequest), tokenizer: tokenizer, generationPrompt: false)
+            let run = try await collect(engine, turnRequest)
+            await engine.drainPromptCacheWrites()
+            if turn == 2 {
+                let expected = try await engine.countPromptTokens(turnRequest)
+                XCTAssertEqual(run.promptTokens, expected, "generation prefills the counted prompt")
+            }
+            boundaries.append(history.count)
+            reused.append(run.cachedPromptTokens ?? -1)
+            print("\(label) turn \(turn): prompt=\(run.promptTokens ?? -1) "
+                + "reused=\(run.cachedPromptTokens ?? -1) history boundary=\(history.count)")
+        }
+        XCTAssertEqual(reused[0], 0, "\(label) turn 1 starts cold")
+        XCTAssertGreaterThanOrEqual(reused[1], boundaries[0], "\(label) turn 2 reuses turn 1's history boundary")
+        XCTAssertGreaterThanOrEqual(reused[2], boundaries[1], "\(label) turn 3 reuses turn 2's history boundary")
+        print("\(label) at the new query turn 4 reused \(reused[3]) (turn 3's boundary \(boundaries[2]), "
+            + "turn 1's \(boundaries[0]))")
+        return (reused, boundaries)
+    }
+
+    /// Whether the model's template has Qwen3.6's `preserve_thinking` switch.
+    private func templateHasPreserveThinking(_ model: (id: String, url: URL)) -> Bool {
+        let template = try? String(contentsOf: model.url.appending(path: "chat_template.jinja"), encoding: .utf8)
+        return template?.contains("preserve_thinking") == true
+    }
+
     // MARK: - Tests
 
     func testReplayedReasoningIsRenderedAndTheLoopStaysAppendOnly() async throws {
@@ -246,31 +284,32 @@ final class ReasoningHistorySmokeTests: XCTestCase {
         XCTAssertEqual(withoutTokens, chatTokens, "without reasoning the prompt is the .chat render, token for token")
 
         // Prompt-cache reuse across the loop, then at a new query, with
-        // `preserve_thinking` off and on.
-        for preserve in [false, true] {
-            await engine.clearPromptCache()
-            var boundaries: [Int] = []
-            var reused: [Int] = []
-            for turn in 1...4 {
-                let turnRequest = request(model.id, turn: turn, preserveThinking: preserve)
-                let history = try render(engineInput(turnRequest), tokenizer: tokenizer, generationPrompt: false)
-                let run = try await collect(engine, turnRequest)
-                if turn == 2 {
-                    let expected = try await engine.countPromptTokens(turnRequest)
-                    XCTAssertEqual(run.promptTokens, expected, "generation prefills the counted prompt")
-                }
-                boundaries.append(history.count)
-                reused.append(run.cachedPromptTokens ?? -1)
-                print("\(label) preserve_thinking=\(preserve) turn \(turn): prompt=\(run.promptTokens ?? -1) "
-                    + "reused=\(run.cachedPromptTokens ?? -1) history boundary=\(history.count)")
-            }
-            XCTAssertEqual(reused[0], 0, "preserve_thinking=\(preserve): turn 1 starts cold")
+        // `preserve_thinking` off and on. The cold tier is off: only the
+        // in-memory tier serves.
+        _ = try await runLoop(
+            engine, model.id, tokenizer: tokenizer, preserveThinking: false,
+            label: "\(label) in-memory tier, preserve_thinking=false")
+        let preserved = try await runLoop(
+            engine, model.id, tokenizer: tokenizer, preserveThinking: true,
+            label: "\(label) in-memory tier, preserve_thinking=true")
+        if templateHasPreserveThinking(model) {
             XCTAssertGreaterThanOrEqual(
-                reused[1], boundaries[0], "preserve_thinking=\(preserve): turn 2 reuses turn 1's history boundary")
-            XCTAssertGreaterThanOrEqual(
-                reused[2], boundaries[1], "preserve_thinking=\(preserve): turn 3 reuses turn 2's history boundary")
-            print("\(label) preserve_thinking=\(preserve): at the new query turn 4 reused \(reused[3]) of "
-                + "turn 3's boundary \(boundaries[2]) (turn 1's: \(boundaries[0]))")
+                preserved.reused[3], preserved.boundaries[2],
+                "with preserve_thinking the new query reuses the loop's last history boundary")
         }
+    }
+
+    /// The new query with the SSD tier on (the default), under a temporary
+    /// root: the earlier boundary snapshots the in-memory tier evicted are
+    /// still on disk.
+    func testANewQueryWithTheSSDTier() async throws {
+        let model = try modelDirectory()
+        let engine = try await loadedEngine(model, coldEnabled: true)
+        let loaded = try await HuggingFaceTokenizerLoader().load(from: model.url)
+        let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
+        let label = "[reasoning-history] \(model.id):"
+        _ = try await runLoop(
+            engine, model.id, tokenizer: tokenizer, preserveThinking: false,
+            label: "\(label) SSD tier, preserve_thinking=false")
     }
 }
