@@ -164,7 +164,7 @@ struct ResponsesInputTranslatorTests {
     }
 
     @Test
-    func midConversationDeveloperMessageIsFoldedIntoTheNextUserTurn() throws {
+    func developerMessageAfterAnAssistantTurnOpensAUserTurnTheNextUserJoins() throws {
         let translation = try translate([
             "model": "m",
             "input": [user("one"), ["role": "assistant", "content": "ok"], developer("reminder"), user("two")],
@@ -172,6 +172,25 @@ struct ResponsesInputTranslatorTests {
         #expect(translation.systemPrompt == nil)
         #expect(translation.messages.map(\.role) == [.user, .assistant, .user])
         #expect(translation.messages[2].content == "reminder\n\ntwo")
+    }
+
+    @Test
+    func developerMessageStaysAtItsPosition() throws {
+        // After a user turn it is appended to that turn; after a tool output
+        // it opens a user turn there, never reaching back to an earlier turn.
+        let translation = try translate([
+            "model": "m",
+            "input": [
+                user("one"), developer("after user"),
+                ["type": "function_call", "name": "exec_command", "arguments": "{}", "call_id": "c1"],
+                ["type": "function_call_output", "call_id": "c1", "output": "done"],
+                developer("after tool"),
+            ],
+        ])
+        #expect(translation.systemPrompt == nil)
+        try #require(translation.messages.map(\.role) == [.user, .assistant, .tool, .user])
+        #expect(translation.messages[0].content == "one\n\nafter user")
+        #expect(translation.messages[3].content == "after tool")
     }
 
     @Test

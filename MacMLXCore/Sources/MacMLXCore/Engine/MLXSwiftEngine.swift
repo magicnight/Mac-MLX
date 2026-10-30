@@ -999,6 +999,77 @@ public actor MLXSwiftEngine: InferenceEngine {
         }
     }
 
+    /// How many tokens `request`'s prompt renders to: the `UserInput`
+    /// generation builds (`userInput(for:isVLM:)` — tools, template kwargs
+    /// and, on a VLM, images, whose image tokens count) through the same
+    /// `container.prepare`, so it equals the `promptTokens` a cold-cache
+    /// generation of the request reports. Throws `modelNotLoaded` with no
+    /// model, and whatever applying the template throws.
+    public func countPromptTokens(_ request: GenerateRequest) async throws -> Int {
+        let support = loadedSupport
+        guard let container = support.container else { throw EngineError.modelNotLoaded }
+        // Borrows the container across an await: counted like a generation,
+        // see `promptOpensThinkBlock`.
+        beginGenerationRun()
+        defer { endGenerationRun() }
+        let lmInput = try await container.prepare(input: Self.userInput(for: request, isVLM: support.isVLM))
+        return lmInput.text.tokens.size
+    }
+
+    /// The `UserInput` `request` renders from — the one place generation
+    /// (`runGeneration`) and `countPromptTokens` build it, so a count renders
+    /// the very prompt generation would.
+    private static func userInput(for request: GenerateRequest, isVLM: Bool) -> UserInput {
+        // Map our ChatMessage array to MLXLMCommon Chat.Message array.
+        // For VLM models, fold each message's `images` into the `Chat.Message`
+        // image bag — the VLM's `UserInputProcessor` injects image tokens at
+        // the right position when it builds the prompt. For LLM models we
+        // drop attachments with a debug-level warning so `[image attached]`
+        // stub strings don't sneak into the chat template.
+        let chatMessages: [Chat.Message] = request.allMessages.map { msg in
+            let images: [UserInput.Image]
+            if isVLM {
+                images = msg.images.map { .url($0.fileURL) }
+            } else {
+                images = []
+                if !msg.images.isEmpty {
+                    Task.detached { [count = msg.images.count] in
+                        await LogManager.shared.debug(
+                            "Dropping \(count) image attachment(s) on text-only model — load a VLM (Qwen-VL, Gemma-3, SmolVLM, …) to use images.",
+                            category: .inference
+                        )
+                    }
+                }
+            }
+            return Self.upstreamChatMessage(from: msg, images: images)
+        }
+
+        // Convert any OpenAI tool specs (v0.5) to the tokenizer's `[ToolSpec]`
+        // shape. Non-object elements are dropped (never force-cast) with a
+        // debug note so a malformed spec degrades instead of crashing.
+        let toolSpecs = request.tools.map { Self.toolSpecs(from: $0) }
+        if let requested = request.tools, let converted = toolSpecs,
+           converted.count < requested.count {
+            Task.detached { [dropped = requested.count - converted.count] in
+                await LogManager.shared.debug(
+                    "Dropping \(dropped) non-object tool spec(s) from GenerateRequest.tools",
+                    category: .inference
+                )
+            }
+        }
+
+        // Forward per-model chat-template kwargs (v0.5.1) as
+        // `additionalContext` — the tokenizer hands them to the Jinja
+        // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
+        // to the plain Sendable shape the upstream API expects. Tools (when
+        // present) reach the template via `UserInput.tools`.
+        return UserInput(
+            chat: chatMessages,
+            tools: toolSpecs,
+            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
+        )
+    }
+
     // MARK: Prompt cache management
 
     /// Drop both tiers of the prompt cache. Wired up to the Settings
@@ -1294,54 +1365,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             prefill: PrefillParameters(chunking: .remainder)
         )
 
-        // Map our ChatMessage array to MLXLMCommon Chat.Message array.
-        // For VLM models, fold each message's `images` into the `Chat.Message`
-        // image bag — the VLM's `UserInputProcessor` injects image tokens at
-        // the right position when it builds the prompt. For LLM models we
-        // drop attachments with a debug-level warning so `[image attached]`
-        // stub strings don't sneak into the chat template.
-        let chatMessages: [Chat.Message] = request.allMessages.map { msg in
-            let images: [UserInput.Image]
-            if isVLM {
-                images = msg.images.map { .url($0.fileURL) }
-            } else {
-                images = []
-                if !msg.images.isEmpty {
-                    Task.detached { [count = msg.images.count] in
-                        await LogManager.shared.debug(
-                            "Dropping \(count) image attachment(s) on text-only model — load a VLM (Qwen-VL, Gemma-3, SmolVLM, …) to use images.",
-                            category: .inference
-                        )
-                    }
-                }
-            }
-            return Self.upstreamChatMessage(from: msg, images: images)
-        }
-
-        // Convert any OpenAI tool specs (v0.5) to the tokenizer's `[ToolSpec]`
-        // shape. Non-object elements are dropped (never force-cast) with a
-        // debug note so a malformed spec degrades instead of crashing.
-        let toolSpecs = request.tools.map { Self.toolSpecs(from: $0) }
-        if let requested = request.tools, let converted = toolSpecs,
-           converted.count < requested.count {
-            Task.detached { [dropped = requested.count - converted.count] in
-                await LogManager.shared.debug(
-                    "Dropping \(dropped) non-object tool spec(s) from GenerateRequest.tools",
-                    category: .inference
-                )
-            }
-        }
-
-        // Forward per-model chat-template kwargs (v0.5.1) as
-        // `additionalContext` — the tokenizer hands them to the Jinja
-        // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
-        // to the plain Sendable shape the upstream API expects. Tools (when
-        // present) reach the template via `UserInput.tools`.
-        let userInput = UserInput(
-            chat: chatMessages,
-            tools: toolSpecs,
-            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
-        )
+        let userInput = Self.userInput(for: request, isVLM: isVLM)
 
         status = .generating
 

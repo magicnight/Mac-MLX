@@ -375,16 +375,26 @@ private struct OllamaGenerateRequest: Decodable, Sendable {
 
 // MARK: - Anthropic-compatible request/response types
 
-/// Anthropic Messages API request body (`POST /v1/messages`).
+/// Anthropic Messages API request body (`POST /v1/messages`, and
+/// `POST /v1/messages/count_tokens`, which takes the same body).
 ///
 /// Mirrors the subset of the Anthropic wire format macMLX supports:
 /// a top-level `system` prompt (string or `[{type:"text", text}]`),
 /// a `messages` array whose `content` is either a bare string or an
 /// array of typed blocks (`text` / `image`), and the usual sampling
-/// knobs. Unlike OpenAI, `max_tokens` is required by Anthropic's spec.
+/// knobs. Unlike OpenAI, `max_tokens` is required by Anthropic's spec —
+/// on `/v1/messages`; `count_tokens` takes no generation fields, so the
+/// handler, not the decoder, requires it.
+///
+/// Every other key is accepted and ignored (the synthesized decoder skips
+/// unknown keys): what Claude Code sends besides — `metadata`,
+/// `output_config` (its `effort` is not mapped), `context_management`,
+/// `safeguards`, `cache_control` on blocks — and the sampling fields macMLX
+/// does not honor here (`top_k`, `stop_sequences`, `service_tier`). A
+/// known-but-unhonored field never turns a request into a 400.
 private struct AnthropicMessagesRequest: Decodable, Sendable {
     let model: String
-    let max_tokens: Int
+    let max_tokens: Int?
     let messages: [AnthropicMessage]
     let system: AnthropicSystem?
     let temperature: Double?
@@ -396,10 +406,23 @@ private struct AnthropicMessagesRequest: Decodable, Sendable {
     /// feed the chat template identically. Optional + `decodeIfPresent` ⇒ every
     /// pre-tools client is unchanged.
     let tools: [AnthropicTool]?
-    /// Anthropic `tool_choice`. Only `{type:"auto"}` (or an absent field) is
-    /// honoured; `any`/`tool`/`none` are rejected with a 400 rather than
-    /// silently altered (project rule: no silent degradation).
+    /// Anthropic `tool_choice`. `none` offers no tools; `auto`, `any` and
+    /// `tool` offer them all, as `tool_choice` does on chat and Responses: a
+    /// forced call is not enforced. `disable_parallel_tool_use` is ignored.
     let tool_choice: AnthropicToolChoice?
+    /// Anthropic `thinking`. `disabled` switches a thinking template off;
+    /// `enabled` / `adaptive` keep the model's default and return the
+    /// reasoning as a `thinking` block unless `display` is `"omitted"`.
+    let thinking: AnthropicThinking?
+}
+
+/// Anthropic `thinking`: `{type:"enabled"|"adaptive"|"disabled",
+/// budget_tokens?, display?}`. `budget_tokens` is accepted and not enforced:
+/// the model thinks for as long as its template and `max_tokens` let it.
+private struct AnthropicThinking: Decodable, Sendable {
+    let type: String
+    let budget_tokens: Int?
+    let display: String?
 }
 
 /// One Anthropic `tools[]` entry: `{name, description?, input_schema}`.
@@ -412,7 +435,8 @@ private struct AnthropicTool: Decodable, Sendable {
 }
 
 /// Anthropic `tool_choice` object: `{type:"auto"|"any"|"tool"|"none", name?}`.
-/// Decoded so the handler can reject the unsupported modes explicitly.
+/// Decoded so the handler can drop the tools for `none` and reject a type
+/// Anthropic does not define.
 private struct AnthropicToolChoice: Decodable, Sendable {
     let type: String
     let name: String?
@@ -422,6 +446,13 @@ private struct AnthropicToolChoice: Decodable, Sendable {
 /// array of `{type:"text", text}` blocks (the SDK's structured form).
 /// `text` flattens both into the single system-prompt string macMLX's
 /// engine expects.
+///
+/// A block carrying Claude Code's billing header
+/// (`x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;`) is left
+/// out. It is Anthropic billing metadata, not an instruction, and it differs
+/// between sessions (the version suffix changes); as the first text of the
+/// system prompt it would keep a new session from reusing any cached prompt
+/// — system prompt and tools — from an earlier one.
 private enum AnthropicSystem: Decodable, Sendable {
     case string(String)
     case blocks([AnthropicBlock])
@@ -435,14 +466,23 @@ private enum AnthropicSystem: Decodable, Sendable {
         self = .blocks(try container.decode([AnthropicBlock].self))
     }
 
-    /// Concatenated text of the system blocks (or the bare string).
+    /// The prefix that marks a billing-header block, after any leading
+    /// whitespace.
+    static let billingHeaderPrefix = "x-anthropic-billing-header:"
+
+    /// Concatenated text of the system blocks (or the bare string), without
+    /// a billing-header block.
     var text: String {
         switch self {
         case .string(let s):
             return s
         case .blocks(let blocks):
-            return blocks.compactMap { $0.type == "text" ? $0.text : nil }
-                .joined(separator: "\n")
+            return blocks.compactMap { block -> String? in
+                guard block.type == "text", let text = block.text else { return nil }
+                let isBillingHeader = text.drop(while: \.isWhitespace).hasPrefix(Self.billingHeaderPrefix)
+                return isBillingHeader ? nil : text
+            }
+            .joined(separator: "\n")
         }
     }
 }
@@ -480,6 +520,26 @@ private enum AnthropicContent: Decodable, Sendable {
         case .blocks(let blocks):
             return blocks.compactMap { $0.type == "text" ? $0.text : nil }
                 .joined(separator: "\n")
+        }
+    }
+
+    /// A `role:"system"` turn's text: its text blocks in order, an image block
+    /// as `MidConversationSystemFolding.omittedImage` in place (a system turn
+    /// is text wherever it lands, so its images are never decoded), any other
+    /// block type skipped as `text` skips it.
+    var systemText: String {
+        switch self {
+        case .string(let s):
+            return s
+        case .blocks(let blocks):
+            return blocks.compactMap { block -> String? in
+                switch block.type {
+                case "text": return block.text
+                case "image": return MidConversationSystemFolding.omittedImage
+                default: return nil
+                }
+            }
+            .joined(separator: "\n")
         }
     }
 
@@ -847,14 +907,22 @@ private func userMessages(
 /// and validating tool blocks. Because one Anthropic turn can carry several
 /// blocks, a turn may expand to multiple internal messages (see
 /// `assistantMessage` / `userMessages`). Bare-string content is a plain text
-/// turn. Unknown roles are dropped; a malformed tool block throws (→ 400).
+/// turn. A `role:"system"` turn — Claude Code sends its reminders (CLAUDE.md,
+/// memory, skills) as one, after the user turn, and its context-usage notes
+/// as another at the end — becomes a `.system` message for
+/// `MidConversationSystemFolding` to place (see `AnthropicContent.systemText`).
+/// Other unknown roles are dropped; a malformed tool block throws (→ 400).
 /// After per-message decode, `validateToolCallPairing` rejects an
 /// orphaned/duplicate-answered tool result or a duplicate `tool_use` id
 /// anywhere in the history.
 private func decodeAnthropicMessages(_ messages: [AnthropicMessage]) throws -> [ChatMessage] {
     var out: [ChatMessage] = []
     for msg in messages {
-        guard let role = MessageRole(rawValue: msg.role), role != .system else {
+        guard let role = MessageRole(rawValue: msg.role) else {
+            continue
+        }
+        if role == .system {
+            out.append(ChatMessage(role: .system, content: msg.content.systemText))
             continue
         }
         guard let blocks = msg.content.blocks else {
@@ -883,6 +951,8 @@ private func decodeAnthropicMessages(_ messages: [AnthropicMessage]) throws -> [
 ///   GET  /x/status
 ///   POST /v1/chat/completions  (non-streaming + SSE streaming)
 ///   POST /v1/responses         (OpenAI Responses API, stateless)
+///   POST /v1/messages          (Anthropic Messages API)
+///   POST /v1/messages/count_tokens
 ///   POST /x/models/load
 ///   POST /x/models/unload
 ///
@@ -1133,10 +1203,11 @@ public actor HummingbirdServer {
         await inFlightHook?(modelID, active)
     }
 
-    /// Map a cold-swap failure onto an OpenAI/Anthropic-style error
-    /// `Response` (`model_not_found` / `load_failed`). Shared by every
-    /// OpenAI + Anthropic response path — each now calls `beginGeneration`
-    /// directly (SRV-2 moved the swap under the generation lock).
+    /// Map a cold-swap failure onto an OpenAI-style error `Response`
+    /// (`model_not_found` / `load_failed`). Shared by every OpenAI response
+    /// path — each now calls `beginGeneration` directly (SRV-2 moved the swap
+    /// under the generation lock). The Anthropic paths use
+    /// `anthropicSwapErrorResponse`.
     func openAIStyleSwapErrorResponse(_ err: ModelSwapError) -> Response {
         switch err {
         case .modelNotFound(let id):
@@ -1150,6 +1221,27 @@ public actor HummingbirdServer {
                 status: .internalServerError,
                 message: "Failed to load \(id): \(reason)",
                 code: "load_failed"
+            )
+        }
+    }
+
+    /// Anthropic-envelope variant for `/v1/messages` and
+    /// `/v1/messages/count_tokens` — the same messages as
+    /// `openAIStyleSwapErrorResponse`, as `not_found_error` (404) and
+    /// `api_error` (500), so an Anthropic client reads them as its own errors.
+    func anthropicSwapErrorResponse(_ err: ModelSwapError) -> Response {
+        switch err {
+        case .modelNotFound(let id):
+            return anthropicErrorResponse(
+                status: .notFound,
+                message: "Model not found: \(id). Download it via `macmlx pull \(id)` or check `macmlx list`.",
+                type: "not_found_error"
+            )
+        case .loadFailed(let id, let reason):
+            return anthropicErrorResponse(
+                status: .internalServerError,
+                message: "Failed to load \(id): \(reason)",
+                type: "api_error"
             )
         }
     }
@@ -1486,6 +1578,14 @@ public actor HummingbirdServer {
         router.post("/v1/messages") { request, context -> Response in
             await server.incrementRequest()
             return try await server.handleAnthropicMessages(request: request, context: context)
+        }
+
+        // POST /v1/messages/count_tokens — Anthropic token counting: the
+        // prompt `/v1/messages` would render for the same body, counted by
+        // the engine (see HummingbirdServer+CountTokens.swift).
+        router.post("/v1/messages/count_tokens") { request, context -> Response in
+            await server.incrementRequest()
+            return try await server.handleAnthropicCountTokens(request: request, context: context)
         }
 
         // POST /v1/responses — OpenAI Responses API (v0.11). Codex and other
@@ -3203,15 +3303,22 @@ public actor HummingbirdServer {
     // MARK: - Anthropic Messages API compatibility
 
     /// Anthropic `POST /v1/messages`. Decodes the Anthropic wire format,
-    /// maps it onto the same `GenerateRequest` the OpenAI path uses, runs
-    /// the shared cold-swap, and dispatches to the Anthropic streaming or
-    /// non-streaming responder. `system` is top-level (not a message turn)
-    /// and `max_tokens` is required by Anthropic's spec.
+    /// maps it onto the same `GenerateRequest` the OpenAI path uses (see
+    /// `anthropicGenerateRequest`), runs the shared cold-swap, and dispatches
+    /// to the Anthropic streaming or non-streaming responder.
     private func handleAnthropicMessages(
         request: Request,
         context: BasicRequestContext
     ) async throws -> Response {
-        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        let buffer: ByteBuffer
+        do {
+            buffer = try await request.body.collect(upTo: Self.anthropicBodyLimitBytes)
+        } catch {
+            // Only the ceiling is a 413 (see `isUploadTooLarge`); anything else
+            // takes Hummingbird's own error path, as on the other routes.
+            guard Self.isUploadTooLarge(error) else { throw error }
+            return anthropicBodyTooLargeResponse()
+        }
         guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else {
             return anthropicErrorResponse(
                 status: .badRequest,
@@ -3220,90 +3327,161 @@ public actor HummingbirdServer {
             )
         }
 
+        let genRequest: GenerateRequest
+        let showsThinking: Bool
+        do {
+            (genRequest, showsThinking) = try await anthropicGenerateRequest(from: data, requiresMaxTokens: true)
+        } catch let error as AnthropicRequestError {
+            return anthropicErrorResponse(status: .badRequest, message: error.message, type: "invalid_request_error")
+        }
+
+        // Cold-swap (SRV-2): resolved inside each responder, atomically with
+        // the generation lock — see `beginGeneration`. Missing model → 404,
+        // load failure → 500, both mapped by the responder itself.
+        let exposeCacheFigures = Self.exposeCacheFigures(request)
+        if genRequest.parameters.stream {
+            return try await anthropicStreamingResponse(
+                genRequest: genRequest, showsThinking: showsThinking, exposeCacheFigures: exposeCacheFigures)
+        } else {
+            return try await anthropicNonStreamingResponse(
+                genRequest: genRequest, showsThinking: showsThinking, exposeCacheFigures: exposeCacheFigures)
+        }
+    }
+
+    /// Ceiling on a `/v1/messages` or `/v1/messages/count_tokens` body.
+    /// Claude Code is stateless toward macMLX and replays the whole session
+    /// every turn — tool results, file contents, screenshots — so the
+    /// route-wide 2 MB `context.maxUploadSize` would turn a long session into
+    /// a permanent 413. The same ceiling as `/v1/responses`.
+    static let anthropicBodyLimitBytes = 64 * 1024 * 1024
+
+    /// The 413 for a body over `anthropicBodyLimitBytes`, in Anthropic's
+    /// envelope with its own error type for it, `request_too_large`.
+    func anthropicBodyTooLargeResponse() -> Response {
+        anthropicErrorResponse(
+            status: .contentTooLarge,
+            message: "Request body exceeds the \(Self.anthropicBodyLimitBytes)-byte limit.",
+            type: "request_too_large"
+        )
+    }
+
+    /// The `GenerateRequest` an Anthropic Messages body asks for. Shared by
+    /// `/v1/messages` and `/v1/messages/count_tokens`, so a count renders the
+    /// very prompt generation would: same turns, system placement, tools,
+    /// template kwargs and images.
+    ///
+    /// - The top-level `system` loses Claude Code's billing-header block (see
+    ///   `AnthropicSystem`), so it is the same from one session to the next.
+    /// - The top-level `system` and any `role:"system"` turns go through
+    ///   `MidConversationSystemFolding`: `system` first, then the leading
+    ///   system turns, form the system prompt; a later system turn stays at
+    ///   its position in the conversation.
+    /// - Turns: text blocks → `content`, image blocks → `images`, assistant
+    ///   `tool_use` → `ChatMessage.toolCalls`, each user `tool_result` → a
+    ///   `.tool` message carrying `tool_use_id` (emitted before any residual
+    ///   user text so the chat template's call ↔ result pairing holds).
+    ///   Replayed `thinking` / `redacted_thinking` blocks are ignored.
+    /// - `tool_choice` `none` drops the tools; `auto`, `any` and `tool` offer
+    ///   them all.
+    /// - `thinking.type` `disabled` sets the template kwarg
+    ///   `enable_thinking=false` over the per-model kwargs (as `/v1/responses`
+    ///   does for `reasoning.effort:"none"`); `enabled` / `adaptive` leave the
+    ///   model's default.
+    ///
+    /// - Parameter requiresMaxTokens: `/v1/messages` requires `max_tokens`,
+    ///   `count_tokens` ignores it.
+    /// - Returns: the request, and whether the response returns the reasoning
+    ///   as a `thinking` block — only when `thinking` is `enabled` or
+    ///   `adaptive` and its `display` is not `"omitted"` (Claude Code sends
+    ///   `"omitted"`). Without `thinking` the reasoning is dropped, as it
+    ///   always was on this path.
+    /// - Throws: `AnthropicRequestError` with the 400's message.
+    func anthropicGenerateRequest(
+        from data: Data,
+        requiresMaxTokens: Bool
+    ) async throws -> (request: GenerateRequest, showsThinking: Bool) {
         let req: AnthropicMessagesRequest
         do {
             req = try JSONDecoder().decode(AnthropicMessagesRequest.self, from: data)
         } catch {
-            return anthropicErrorResponse(
-                status: .badRequest,
-                message: "Invalid JSON: \(error.localizedDescription)",
-                type: "invalid_request_error"
-            )
+            throw AnthropicRequestError(message: "Invalid JSON: \(error.localizedDescription)")
+        }
+        if requiresMaxTokens, req.max_tokens == nil {
+            throw AnthropicRequestError(message: "`max_tokens` is required.")
         }
 
-        // Reject unsupported `tool_choice` modes explicitly — `any`/`tool` force
-        // a call (which we can't guarantee) and `none` suppresses tools; rather
-        // than silently ignore the directive we 400 (no silent degradation).
-        if let choice = req.tool_choice, choice.type != "auto" {
-            return anthropicErrorResponse(
-                status: .badRequest,
-                message: "Unsupported `tool_choice.type` '\(choice.type)': only 'auto' "
-                    + "(or omitting `tool_choice`) is supported.",
-                type: "invalid_request_error"
-            )
+        let offersTools: Bool
+        switch req.tool_choice?.type {
+        case nil, "auto", "any":
+            offersTools = true
+        case "tool":
+            guard let name = req.tool_choice?.name, !name.isEmpty else {
+                throw AnthropicRequestError(message: "`tool_choice` of type 'tool' requires a `name`.")
+            }
+            offersTools = true
+        case "none":
+            offersTools = false
+        case .some(let other):
+            throw AnthropicRequestError(
+                message: "Unsupported `tool_choice.type` '\(other)': expected 'auto', 'any', 'tool' or 'none'.")
         }
 
-        // Anthropic carries the system prompt at the top level (not as a
-        // message turn), so there's nothing to strip out of `messages` —
-        // GenerateRequest.allMessages re-prepends this systemPrompt.
-        let systemPrompt = req.system?.text
-
-        // Map turns. Anthropic roles are only user / assistant; unknown roles are
-        // dropped. Text blocks → `content`, image blocks → `images`. Tool blocks
-        // are fully wired (agent-tools wave): assistant `tool_use` →
-        // `ChatMessage.toolCalls`; each user `tool_result` → a `.tool` message
-        // carrying `tool_use_id` (emitted before any residual user text so the
-        // chat template's call ↔ result pairing holds). A malformed tool block is
-        // a 400 (never a silent drop).
-        let messages: [ChatMessage]
+        var conversation: [ChatMessage] = []
+        if let system = req.system?.text, !system.isEmpty {
+            conversation.append(ChatMessage(role: .system, content: system))
+        }
         do {
-            messages = try decodeAnthropicMessages(req.messages)
+            conversation.append(contentsOf: try decodeAnthropicMessages(req.messages))
         } catch let error as ToolHistoryDecodeError {
-            return anthropicErrorResponse(
-                status: .badRequest,
-                message: error.message,
-                type: "invalid_request_error"
-            )
+            throw AnthropicRequestError(message: error.message)
         }
+        let (systemPrompt, messages) = MidConversationSystemFolding.fold(conversation)
 
         // Convert Anthropic tools to the same internal OpenAI-function-spec shape
         // the OpenAI path forwards, so both protocols feed the chat template
         // identically. Absent ⇒ nil (byte-for-byte unchanged for no-tools calls).
-        let tools: [JSONValue]? = req.tools.map { $0.map { openAIToolSpec(fromAnthropic: $0) } }
+        let tools: [JSONValue]? = offersTools
+            ? req.tools.map { $0.map { openAIToolSpec(fromAnthropic: $0) } }
+            : nil
+
+        var kwargs = await templateKwargs(for: req.model)
+        let thinkingType = req.thinking?.type
+        if thinkingType == "disabled" {
+            var disabled = kwargs ?? [:]
+            disabled["enable_thinking"] = .bool(false)
+            kwargs = disabled
+        }
+        let showsThinking = (thinkingType == "enabled" || thinkingType == "adaptive")
+            && req.thinking?.display != "omitted"
 
         let params = GenerationParameters(
             temperature: req.temperature ?? 0.7,
             topP: req.top_p ?? 0.95,
-            maxTokens: req.max_tokens,
+            // `count_tokens` generates nothing; the budget is never read there.
+            maxTokens: req.max_tokens ?? 1,
             stream: req.stream ?? false
         )
-
         let genRequest = GenerateRequest(
             model: req.model,
             messages: messages,
             systemPrompt: systemPrompt,
             parameters: params,
-            templateKwargs: await templateKwargs(for: req.model),
+            templateKwargs: kwargs,
             tools: tools
         )
-
-        // Cold-swap (SRV-2): resolved inside each responder, atomically with
-        // the generation lock — see `beginGeneration`. Missing model → 404,
-        // load failure → 500, both mapped by the responder itself.
-        let wantsStream = req.stream ?? false
-        let exposeCacheFigures = Self.exposeCacheFigures(request)
-        if wantsStream {
-            return try await anthropicStreamingResponse(genRequest: genRequest, exposeCacheFigures: exposeCacheFigures)
-        } else {
-            return try await anthropicNonStreamingResponse(genRequest: genRequest, exposeCacheFigures: exposeCacheFigures)
-        }
+        return (genRequest, showsThinking)
     }
 
     /// Non-streaming Anthropic `/v1/messages` response. Accumulates the
-    /// full generation, splits off reasoning (dropped in this MVP — only
-    /// the answer is surfaced in `content[0]`), and emits Anthropic's
-    /// message envelope.
-    private func anthropicNonStreamingResponse(genRequest: GenerateRequest, exposeCacheFigures: Bool) async throws -> Response {
+    /// full generation, splits off the reasoning (seeded, as the stream is,
+    /// by `promptOpensThinkBlock`), and emits Anthropic's message envelope:
+    /// a `thinking` block first when `showsThinking` and the model reasoned,
+    /// then the text block, then one `tool_use` block per call.
+    private func anthropicNonStreamingResponse(
+        genRequest: GenerateRequest,
+        showsThinking: Bool,
+        exposeCacheFigures: Bool
+    ) async throws -> Response {
         // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
         // under it, and re-resolve the active engine (SRV-1). Release on
         // ALL exit paths (success, catch, throw).
@@ -3311,7 +3489,7 @@ public actor HummingbirdServer {
         do {
             engine = try await beginGeneration(genRequest.model)
         } catch let err as ModelSwapError {
-            return openAIStyleSwapErrorResponse(err)
+            return anthropicSwapErrorResponse(err)
         } catch {
             return anthropicErrorResponse(
                 status: .internalServerError, message: error.localizedDescription, type: "api_error")
@@ -3322,9 +3500,14 @@ public actor HummingbirdServer {
         await markInFlight(modelID, true)
         defer { Task { [weak self] in await self?.markInFlight(modelID, false) } }
 
+        // `/v1/messages` carries no `response_format`, so unlike the OpenAI
+        // path there is no constrained case to bypass the splitter for.
+        let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
+        var splitter = ReasoningStreamSplitter(startInReasoning: startInReasoning)
         let stream = await engine.generate(genRequest)
         let box = ChunkIteratorBox(stream)
-        var fullText = ""
+        var reasoning = ""
+        var answer = ""
         var finishReason: FinishReason?
         var promptTokens = 0
         var completionTokens = 0
@@ -3345,7 +3528,9 @@ public actor HummingbirdServer {
                         type: "api_error"
                     )
                 case .chunk(let chunk):
-                    fullText += chunk.text
+                    let (r, a) = splitter.push(chunk.text)
+                    reasoning += r
+                    answer += a
                     if let usage = chunk.usage {
                         promptTokens = usage.promptTokens
                         completionTokens = usage.completionTokens
@@ -3366,23 +3551,30 @@ public actor HummingbirdServer {
                 type: "api_error"
             )
         }
+        let (reasoningTail, answerTail) = splitter.finish()
+        reasoning += reasoningTail
+        answer += answerTail
 
         incrementTokens(completionTokens)
 
-        // Reasoning is not surfaced as a separate block in this MVP — only
-        // the answer text goes into content[0]. `splitReasoning` strips any
-        // `<think>…</think>`; non-reasoning models keep their full text.
-        let (_, answer) = MessageSegmenter.splitReasoning(fullText)
+        // As in the stream, the answer starts at its first non-whitespace
+        // text: a thinking model emits blank lines after `</think>`, which
+        // are not an answer, and must not make a tool-only reply carry a
+        // whitespace text block.
+        answer = String(answer.drop(while: \.isWhitespace))
 
-        // Content: the text block first — UNLESS the assistant only called
-        // tools and produced no text, in which case real Anthropic omits the
-        // empty text block entirely (a tool-only reply is the common case in
-        // an agent loop) — then one `tool_use` block per detected call
-        // (`input` is a decoded JSON object, not a string). With no tool calls
-        // the single text block is always present, byte-for-byte unchanged
-        // from the pre-tools response, and `stop_reason` stays `end_turn`;
-        // `.toolCalls` maps to `tool_use` via `anthropicStopReason`.
+        // Content: the thinking block when it is wanted and the model reasoned;
+        // then the text block — UNLESS the assistant only called tools and
+        // produced no text, in which case real Anthropic omits the empty text
+        // block entirely (a tool-only reply is the common case in an agent
+        // loop) — then one `tool_use` block per detected call (`input` is a
+        // decoded JSON object, not a string). With no tool calls the text block
+        // is always present, and `stop_reason` stays `end_turn`; `.toolCalls`
+        // maps to `tool_use` via `anthropicStopReason`.
         var content: [[String: Any]] = []
+        if showsThinking, !reasoning.isEmpty {
+            content.append(["type": "thinking", "thinking": reasoning, "signature": anthropicThinkingSignature])
+        }
         if !answer.isEmpty || capturedToolCalls.isEmpty {
             content.append(["type": "text", "text": answer])
         }
@@ -3407,24 +3599,36 @@ public actor HummingbirdServer {
 
     /// Streaming Anthropic `/v1/messages` — SSE with *named* events
     /// (`event: <name>\ndata: <json>\n\n`) in Anthropic's fixed order:
-    /// message_start → content_block_start → content_block_delta* →
-    /// content_block_stop → [tool_use content_block_start/delta/stop]* →
-    /// message_delta → message_stop. Only the answer portion is streamed as
-    /// `text_delta`; reasoning is dropped for this MVP (matching the
-    /// non-streaming path). The index-0 text block opens LAZILY on the first
-    /// non-empty answer delta and is entirely omitted for a tool-only reply
-    /// (no free text at all) — matching real Anthropic, which never emits an
-    /// empty text block — in which case the `tool_use` block(s) open at index
-    /// 0 instead of 1; see `textBlockOpened` below. The generation lock is
-    /// held for the whole body and released in `defer`.
-    private func anthropicStreamingResponse(genRequest: GenerateRequest, exposeCacheFigures: Bool) async throws -> Response {
+    /// message_start → [thinking block] → [text block] → [tool_use block]* →
+    /// message_delta → message_stop, each block a content_block_start, its
+    /// deltas and a content_block_stop, indexed in emission order.
+    ///
+    /// - The thinking block (only when `showsThinking`) opens on the first
+    ///   reasoning text: `content_block_start` with
+    ///   `{"type":"thinking","thinking":"","signature":""}`, a `thinking_delta`
+    ///   per reasoning delta, then one `signature_delta` before its stop.
+    ///   Otherwise the reasoning is dropped, never streamed as text.
+    /// - The text block opens LAZILY on the first non-whitespace answer text
+    ///   (the blank lines a thinking model emits after `</think>` are not an
+    ///   answer) and is omitted for a tool-only reply — matching real
+    ///   Anthropic, which never emits an empty text block before a tool call.
+    ///   A reply with neither text nor tool calls still gets an empty one.
+    /// - Tool calls, which the engine reports on the terminal chunk, follow
+    ///   whole.
+    ///
+    /// The generation lock is held for the whole body and released in `defer`.
+    private func anthropicStreamingResponse(
+        genRequest: GenerateRequest,
+        showsThinking: Bool,
+        exposeCacheFigures: Bool
+    ) async throws -> Response {
         // A1: cheap pre-flight resolve check (no load, no lock) — reject
         // an unknown model with a real 404 before any streaming headers
         // are sent. The real (locked) resolve+load still happens inside
         // the ResponseBody closure below; SRV-2 atomicity is unchanged.
         let modelIsResolvable = await canResolveModel(genRequest.model)
         if !modelIsResolvable {
-            return openAIStyleSwapErrorResponse(.modelNotFound(id: genRequest.model))
+            return anthropicSwapErrorResponse(.modelNotFound(id: genRequest.model))
         }
 
         // Lock-scope invariant (SRV-2/SRV-3): acquire, cold-swap, and
@@ -3439,15 +3643,60 @@ public actor HummingbirdServer {
             var cachedPromptTokens: Int?
             var finishReason: FinishReason?
             // Tool calls the model requested this turn — emitted as `tool_use`
-            // content blocks after the text block closes. Empty unless the
+            // content blocks after the other blocks close. Empty unless the
             // terminal chunk ends in `.toolCalls`.
             var capturedToolCalls: [ToolCallRequest] = []
-            // Whether the index-0 text content_block has been opened yet. Opening
-            // is LAZY (on the first non-empty answer delta) rather than eager, so
-            // a tool-only reply (no free text at all) never opens one — real
-            // Anthropic omits the empty text block in that case. See the
-            // pre-loop-exit handling below for the "opened at all?" resolution.
-            var textBlockOpened = false
+            // Events built since the last write, in order.
+            var pending: [(event: String, payload: [String: Any])] = []
+            // The block text is streaming into — its index, and whether it is
+            // the thinking block; nil when none is open.
+            var openBlock: (index: Int, isThinking: Bool)?
+            var nextIndex = 0
+            var textBlockEmitted = false
+
+            func closeOpenBlock() {
+                guard let block = openBlock else { return }
+                if block.isThinking {
+                    // Nothing verifies it; Claude Code only replays it.
+                    pending.append(("content_block_delta", [
+                        "type": "content_block_delta",
+                        "index": block.index,
+                        "delta": ["type": "signature_delta", "signature": anthropicThinkingSignature] as [String: Any],
+                    ]))
+                }
+                pending.append(("content_block_stop", ["type": "content_block_stop", "index": block.index]))
+                openBlock = nil
+            }
+            // Text of one kind continues the open block, or closes it and
+            // opens the next one — normally the thinking block, then the text
+            // block. A text block opens on its first non-whitespace text.
+            func streamBlockText(_ text: String, thinking: Bool) {
+                var text = text
+                if !thinking, openBlock?.isThinking != false {
+                    text = String(text.drop(while: \.isWhitespace))
+                }
+                guard !text.isEmpty else { return }
+                if openBlock?.isThinking != thinking {
+                    closeOpenBlock()
+                    openBlock = (nextIndex, thinking)
+                    if !thinking { textBlockEmitted = true }
+                    pending.append(("content_block_start", [
+                        "type": "content_block_start",
+                        "index": nextIndex,
+                        "content_block": thinking
+                            ? ["type": "thinking", "thinking": "", "signature": ""] as [String: Any]
+                            : ["type": "text", "text": ""] as [String: Any],
+                    ]))
+                    nextIndex += 1
+                }
+                pending.append(("content_block_delta", [
+                    "type": "content_block_delta",
+                    "index": nextIndex - 1,
+                    "delta": thinking
+                        ? ["type": "thinking_delta", "thinking": text] as [String: Any]
+                        : ["type": "text_delta", "text": text] as [String: Any],
+                ]))
+            }
 
             let engine: any InferenceEngine
             do {
@@ -3467,9 +3716,7 @@ public actor HummingbirdServer {
             defer { Task { await server.markInFlight(modelID, false) } }
 
             // Seed the reasoning splitter — does the rendered prompt open a
-            // <think> block the model continues (qwen3)? Reasoning is dropped
-            // for the Anthropic MVP, so this only affects which text counts as
-            // the answer, never a separate surfaced block. (`/v1/messages`
+            // <think> block the model continues (qwen3)? (`/v1/messages`
             // carries no `response_format`, so unlike the OpenAI path there is
             // no constrained case to bypass the splitter for.)
             let startInReasoning = await engine.promptOpensThinkBlock(genRequest)
@@ -3507,10 +3754,8 @@ public actor HummingbirdServer {
                     ] as [String: Any],
                 ])
 
-                // 2/3. content_block_start for the text block (index 0), opened
-                // LAZILY on the first non-empty answer delta — see
-                // `textBlockOpened`'s doc comment — then a content_block_delta per
-                // subsequent delta.
+                // 2/3. The thinking and text blocks, opened as their text
+                // arrives (see `streamBlockText`).
                 stallLoop: while true {
                     switch try await nextGenerationStep(box, stallTimeout: stallTimeout) {
                     case .finished:
@@ -3528,40 +3773,27 @@ public actor HummingbirdServer {
                             promptTokens = usage.promptTokens
                             cachedPromptTokens = exposeCacheFigures ? usage.cachedPromptTokens : nil
                         }
-                        let (_, answer) = splitter.push(chunk.text)
-                        var text = answer
+                        var (reasoning, answer) = splitter.push(chunk.text)
                         if let reason = chunk.finishReason {
                             finishReason = reason
                             // Flush any buffered tail into this terminal chunk.
-                            let (_, aTail) = splitter.finish()
-                            text += aTail
+                            let (rTail, aTail) = splitter.finish()
+                            reasoning += rTail
+                            answer += aTail
                         }
-                        // Capture tool calls BEFORE the empty-text guard below: a
-                        // tool-only terminal chunk carries no answer text but must
-                        // still surface its `tool_use` blocks.
+                        // A tool-only terminal chunk carries no answer text but
+                        // must still surface its `tool_use` blocks.
                         if let calls = chunk.toolCalls, !calls.isEmpty {
                             capturedToolCalls = calls
                         }
-                        guard !text.isEmpty else { continue }
-                        if !textBlockOpened {
-                            try await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
-                                "type": "content_block_start",
-                                "index": 0,
-                                "content_block": [
-                                    "type": "text",
-                                    "text": "",
-                                ] as [String: Any],
-                            ])
-                            textBlockOpened = true
+                        if showsThinking {
+                            streamBlockText(reasoning, thinking: true)
                         }
-                        try await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": [
-                                "type": "text_delta",
-                                "text": text,
-                            ] as [String: Any],
-                        ])
+                        streamBlockText(answer, thinking: false)
+                        for frame in pending {
+                            try await writeAnthropicSSE(&writer, event: frame.event, payload: frame.payload)
+                        }
+                        pending.removeAll()
                     }
                 }
             } catch {
@@ -3572,63 +3804,52 @@ public actor HummingbirdServer {
                 try? await writer.write(buf)
             }
 
-            // 4. content_block_stop for the text block. If it was never opened
-            // (no non-empty delta arrived) AND there are no tool calls, still
-            // open+close an empty one here — matching the pre-tools byte-for-byte
-            // invariant for a content-less response. A tool-only reply (no text,
-            // ≥1 tool call) skips the text block entirely; its tool_use block(s)
-            // below open at index 0 instead of 1.
-            if !textBlockOpened && capturedToolCalls.isEmpty {
-                try? await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
+            // 4. Close the open block. A reply with no text block AND no tool
+            // calls still gets an empty text block — the content-less response
+            // has always carried one. A tool-only reply skips it.
+            closeOpenBlock()
+            if !textBlockEmitted && capturedToolCalls.isEmpty {
+                pending.append(("content_block_start", [
                     "type": "content_block_start",
-                    "index": 0,
+                    "index": nextIndex,
                     "content_block": ["type": "text", "text": ""] as [String: Any],
-                ])
-                textBlockOpened = true
-            }
-            if textBlockOpened {
-                try? await writeAnthropicSSE(&writer, event: "content_block_stop", payload: [
-                    "type": "content_block_stop",
-                    "index": 0,
-                ])
+                ]))
+                pending.append(("content_block_stop", ["type": "content_block_stop", "index": nextIndex]))
+                nextIndex += 1
             }
 
-            // 4b. Tool-use blocks follow the text block (index 1…N) when one was
-            // opened, or start at index 0 when the reply was tool-only (see
-            // above). Detection is terminal, so each call is emitted whole: a
-            // content_block_start (empty `input`), ONE `input_json_delta` frame
-            // carrying the full arguments JSON, then a content_block_stop. No
-            // tool calls ⇒ this loop is skipped and the event stream is
-            // byte-for-byte unchanged.
-            let toolBlockBaseIndex = textBlockOpened ? 1 : 0
-            for (offset, call) in capturedToolCalls.enumerated() {
-                let index = toolBlockBaseIndex + offset
-                try? await writeAnthropicSSE(&writer, event: "content_block_start", payload: [
+            // 4b. Tool-use blocks follow, at the next indexes. Detection is
+            // terminal, so each call is emitted whole: a content_block_start
+            // (empty `input`), ONE `input_json_delta` frame carrying the full
+            // arguments JSON, then a content_block_stop.
+            for call in capturedToolCalls {
+                pending.append(("content_block_start", [
                     "type": "content_block_start",
-                    "index": index,
+                    "index": nextIndex,
                     "content_block": [
                         "type": "tool_use",
                         "id": call.id,
                         "name": call.name,
                         "input": [String: Any](),
                     ] as [String: Any],
-                ])
-                try? await writeAnthropicSSE(&writer, event: "content_block_delta", payload: [
+                ]))
+                pending.append(("content_block_delta", [
                     "type": "content_block_delta",
-                    "index": index,
+                    "index": nextIndex,
                     "delta": [
                         "type": "input_json_delta",
                         "partial_json": openAIToolArgumentsJSON(call.arguments),
                     ] as [String: Any],
-                ])
-                try? await writeAnthropicSSE(&writer, event: "content_block_stop", payload: [
-                    "type": "content_block_stop",
-                    "index": index,
-                ])
+                ]))
+                pending.append(("content_block_stop", ["type": "content_block_stop", "index": nextIndex]))
+                nextIndex += 1
             }
 
-            // 5. message_delta — final stop reason + output token count.
-            try? await writeAnthropicSSE(&writer, event: "message_delta", payload: [
+            // 5. message_delta — final stop reason and the real usage: the
+            // prompt's uncached tokens and the cache figure, as the
+            // non-streaming body reports them (Claude Code's context meter
+            // reads them here).
+            pending.append(("message_delta", [
                 "type": "message_delta",
                 "delta": [
                     "stop_reason": anthropicStopReason(finishReason),
@@ -3637,12 +3858,13 @@ public actor HummingbirdServer {
                 "usage": anthropicUsageObject(
                     inputTokens: promptTokens, outputTokens: completionTokens,
                     cacheReadInputTokens: cachedPromptTokens),
-            ])
+            ]))
 
             // 6. message_stop
-            try? await writeAnthropicSSE(&writer, event: "message_stop", payload: [
-                "type": "message_stop",
-            ])
+            pending.append(("message_stop", ["type": "message_stop"]))
+            for frame in pending {
+                try? await writeAnthropicSSE(&writer, event: frame.event, payload: frame.payload)
+            }
             try await writer.finish(nil)
 
             await server.incrementTokens(completionTokens)
@@ -5165,7 +5387,7 @@ public actor HummingbirdServer {
     /// 400s. `type` is one of Anthropic's error-type strings
     /// (`invalid_request_error`, `api_error`, …); callers choose the one
     /// matching `status`.
-    private func anthropicErrorResponse(
+    func anthropicErrorResponse(
         status: HTTPResponse.Status,
         message: String,
         type: String
@@ -5463,6 +5685,12 @@ private func writeAnthropicSSE(
     buf.writeString("event: \(event)\ndata: \(jsonStr)\n\n")
     try await writer.write(buf)
 }
+
+/// The `signature` of a `thinking` block macMLX returns. Anthropic signs its
+/// thinking so it can verify a replayed block; nothing verifies this one —
+/// Claude Code only replays it, and macMLX ignores replayed thinking — but
+/// clients expect a non-empty string.
+private let anthropicThinkingSignature = "macmlx"
 
 /// Map macMLX's `FinishReason` onto Anthropic's `stop_reason` vocabulary.
 /// Only an explicit length cap maps to `max_tokens`; everything else

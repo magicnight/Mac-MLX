@@ -13,11 +13,22 @@ public actor StubInferenceEngine: InferenceEngine {
     /// that reported none.
     private let promptTokens: Int
     private let cachedPromptTokens: Int?
+    /// What `countPromptTokens` returns; nil (the default) models an engine
+    /// that cannot count, as the protocol default does.
+    private let countedPromptTokens: Int?
+    /// The last request `countPromptTokens` was asked to count.
+    public private(set) var countedRequest: GenerateRequest?
 
-    public init(engineID: EngineID, promptTokens: Int = 1, cachedPromptTokens: Int? = nil) {
+    public init(
+        engineID: EngineID,
+        promptTokens: Int = 1,
+        cachedPromptTokens: Int? = nil,
+        countedPromptTokens: Int? = nil
+    ) {
         self.engineID = engineID
         self.promptTokens = promptTokens
         self.cachedPromptTokens = cachedPromptTokens
+        self.countedPromptTokens = countedPromptTokens
     }
 
     public func load(_ model: LocalModel) async throws {
@@ -50,4 +61,10 @@ public actor StubInferenceEngine: InferenceEngine {
     }
 
     public func healthCheck() async -> Bool { true }
+
+    public func countPromptTokens(_ request: GenerateRequest) async throws -> Int {
+        guard let countedPromptTokens else { throw EngineError.tokenCountingUnsupported }
+        countedRequest = request
+        return countedPromptTokens
+    }
 }

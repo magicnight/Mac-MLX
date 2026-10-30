@@ -108,8 +108,16 @@ Request (the fields acted on; anything else is accepted and ignored):
 
 - `input`: a string (one user turn) or items. `system`/`developer` messages
   before the first other item, after `instructions`, become the system
-  prompt (joined with a blank line); a later one is folded into the next user
-  turn (`MidConversationSystemFolding`). Consecutive `function_call` /
+  prompt (joined with a blank line); a later one is folded in place
+  (`MidConversationSystemFolding`): appended to the user turn just before
+  it, or, after an assistant or tool turn, opening a user turn there that a
+  user message right after it joins. Earlier turns never change, so folding
+  does not force them to be prefilled again; whether the prompt cache hits
+  across agent turns depends on the engine (today it often does not on
+  hybrid or sliding-window models, whose cache cannot be trimmed back to
+  the shared prefix). When the user turn merged into an opened one carries
+  images, a VLM may render them before the text, so that last message's
+  tokens can shift; earlier messages still do not. Consecutive `function_call` /
   `custom_tool_call` items, with an assistant message directly before them,
   form one assistant turn; `*_call_output` items become tool turns.
   `reasoning` items are dropped. Content parts: `input_text`, `output_text`,
@@ -194,6 +202,108 @@ then one of completed | incomplete | failed
 `created` and `in_progress` are sent before the generation lock is taken;
 tool calls follow the text because the engine reports them on the terminal
 chunk.
+
+### POST /v1/messages
+
+Anthropic Messages API (`handleAnthropicMessages` in
+`Server/HummingbirdServer.swift`), translated onto the same `GenerateRequest`
+chat completions builds and generated on the single-stream path. A query
+string (Claude Code posts to `/v1/messages?beta=true`) and the
+`anthropic-version` / `anthropic-beta` headers are ignored.
+
+Request (the fields acted on):
+```json
+{
+  "model": "Qwen3.6-27B-4bit",
+  "max_tokens": 32000,
+  "system": [{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}],
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "Run echo hi"}]},
+    {"role": "system", "content": [{"type": "text", "text": "<system-reminder>…</system-reminder>"}]},
+    {"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "…", "signature": "macmlx"},
+      {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "echo hi"}}]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "toolu_1", "content": "hi", "is_error": false}]}
+  ],
+  "tools": [{"name": "Bash", "description": "...", "input_schema": {"type": "object"}}],
+  "tool_choice": {"type": "auto"},
+  "thinking": {"type": "adaptive", "display": "omitted"},
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "stream": true
+}
+```
+
+- `max_tokens` is required (400 without it).
+- A top-level `system` text block (blocks form only; a plain-string
+  `system` is left alone) whose text starts (after leading
+  whitespace) with `x-anthropic-billing-header:` is dropped: Claude Code's
+  billing metadata, which differs between sessions and would keep a new
+  session from reusing a cached system prompt.
+- `system` (string or text blocks, joined with a newline) and the
+  `role:"system"` turns in `messages` are placed by
+  `MidConversationSystemFolding`, `system` first: system turns before the
+  first other turn join the system prompt; a later one is folded in place
+  as on `/v1/responses`. A system turn's image block becomes
+  `[image omitted from a system message]`.
+- User turns: `text` and base64 `image` blocks; each `tool_result` becomes a
+  tool turn ahead of the turn's text. Assistant turns: `text` and `tool_use`.
+  Replayed `thinking` / `redacted_thinking` blocks are ignored.
+- `tool_choice`: `none` offers no tools; `auto`, `any` and `tool` (which
+  needs a `name`) offer them all, not enforced; any other type is a 400.
+  `disable_parallel_tool_use` is ignored.
+- `thinking.type`: `disabled` sets `enable_thinking=false` over the per-model
+  template kwargs; `enabled` / `adaptive` keep the model's default and return
+  the reasoning as a `thinking` block unless `display` is `"omitted"`.
+  `budget_tokens` is not enforced. Without `thinking`, reasoning is dropped.
+- Accepted and ignored: `metadata`, `output_config` (`effort` is not mapped),
+  `context_management`, `safeguards`, `cache_control`, `top_k`,
+  `stop_sequences`, `service_tier`.
+- Body limit 64 MB (`anthropicBodyLimitBytes`), not the 2 MB route default
+  chat uses: Claude Code replays the whole session every turn.
+- Errors use Anthropic's envelope, `{"type": "error", "error": {"type",
+  "message"}}`: 400 `invalid_request_error` (bad JSON, missing `max_tokens`,
+  bad `tool_choice`, a broken tool history), 413 `request_too_large` (a body
+  over the limit), 404 `not_found_error` (unknown
+  model, before the stream opens when streaming), 500 `api_error` (a failed
+  load or generation), 504 on a stall. The bearer-auth 401 keeps the OpenAI
+  shape.
+
+Response content, in order: a `thinking` block (`{"type": "thinking",
+"thinking": "…", "signature": "macmlx"}`, only as above), a `text` block
+(starting at the first non-whitespace answer text; left out when the model
+only called tools), then one `tool_use` block per call. `usage` is
+`{"input_tokens", "output_tokens", "cache_read_input_tokens"}`, with
+`input_tokens` the uncached part of the prompt; `cache_read_input_tokens` is
+left out (and `input_tokens` is the whole prompt) for a request carrying an
+`Origin` header, as on chat.
+
+Streaming events: `message_start` (usage `input_tokens: 0` — the count is
+known only at the end), then each block as `content_block_start` → deltas →
+`content_block_stop`, indexed in emission order — thinking
+(`thinking_delta`*, then one `signature_delta`), text (`text_delta`*),
+each tool call (one `input_json_delta`) — then `message_delta` carrying
+`stop_reason` and the real `usage`, then `message_stop`. No `ping`. A
+failure once the stream is open is an in-band `event: error`.
+
+### POST /v1/messages/count_tokens
+
+Anthropic token counting (`Server/HummingbirdServer+CountTokens.swift`). The
+body is a `/v1/messages` body; `max_tokens` is optional and `stream` is
+ignored. It is built into the same `GenerateRequest` (turns, system
+placement, tools, `thinking`, images) and counted by
+`InferenceEngine.countPromptTokens`, which renders the prompt exactly as
+generation tokenizes it.
+
+```json
+{"input_tokens": 1234}
+```
+
+The model is resolved and loaded as for a generation, under the generation
+lock, so a count waits behind an in-flight generation. The body limit and
+errors are `/v1/messages`'s: 400, 413, 404 for an unknown model, and 501 `api_error` ("token
+counting is not supported by this engine") for an engine without counting.
 
 ### GET /v1/models
 

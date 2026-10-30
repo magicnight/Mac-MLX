@@ -26,9 +26,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   template's `enable_thinking` off. Without `max_output_tokens` (Codex sends
   none, and has no setting to send one) a response may run to 32,768 tokens,
   not the chat path's 2,048, so a long think still reaches its tool call. A
-  `system` or `developer` item after the first turn is folded into the next
-  user turn, since many chat templates accept a system turn only first. A
-  custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
+  `system` or `developer` item after the first turn is folded into a user
+  turn, since many chat templates accept a system turn only first, at the
+  place it was sent: it is appended to the user turn just before it, or,
+  after an assistant turn or a tool output, starts a user turn of its own
+  that a user message right after it joins. Earlier turns are never
+  rewritten, so folding no longer forces them to be prefilled again; whether
+  the prompt cache actually serves them on the next turn depends on the
+  engine, and today it often does not on hybrid (linear-attention) or
+  sliding-window models. A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
   is appended to the description the model sees. Bodies up to 64 MB are
   accepted, since the whole conversation is sent every turn.
 
@@ -60,8 +66,74 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   # env_key = "MACMLX_API_KEY"
   ```
 
+- **Claude Code on `/v1/messages`: `thinking`, and
+  `POST /v1/messages/count_tokens`.** `thinking: {"type": "disabled"}` turns
+  a thinking template's `enable_thinking` off; `"enabled"` and `"adaptive"`
+  keep the model's default and return its reasoning as a `thinking` block
+  before the text (streamed as `thinking_delta`s and one `signature_delta`;
+  the signature is an opaque `"macmlx"` that nothing verifies), unless
+  `display` is `"omitted"`, which is what Claude Code sends. `budget_tokens`
+  is accepted and not enforced. Without `thinking` the reasoning is dropped,
+  as before, and replayed `thinking` blocks are ignored. `count_tokens` takes
+  a `/v1/messages` body (without `max_tokens`) and returns
+  `{"input_tokens": N}`, the length of the prompt `/v1/messages` would
+  generate from — tools, system turns and images included. It loads the
+  model like a generation and waits behind one that is running. Fields
+  Claude Code sends that macMLX does not act on (`output_config`,
+  `context_management`, `safeguards`, `metadata`, `cache_control`) and
+  `top_k`, `stop_sequences` and `service_tier` are accepted and ignored.
+
+  To use it from Claude Code:
+
+  ```bash
+  export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
+  export ANTHROPIC_API_KEY=sk-local   # any value
+  # With bearer auth on, set ANTHROPIC_AUTH_TOKEN to the key instead.
+  export ANTHROPIC_MODEL=Qwen3.6-27B-4bit
+  export ANTHROPIC_DEFAULT_OPUS_MODEL=Qwen3.6-27B-4bit
+  export ANTHROPIC_DEFAULT_SONNET_MODEL=Qwen3.6-27B-4bit
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL=Qwen3.6-27B-4bit
+  # Older name of the Haiku setting, for older Claude Code versions.
+  export ANTHROPIC_SMALL_FAST_MODEL=Qwen3.6-27B-4bit
+  claude
+  ```
+
+  Map every alias: one left unmapped makes Claude Code request a `claude-*`
+  model id, which macMLX answers with a 404.
+
 ### Fixed
 
+- `/v1/messages` dropped `role:"system"` turns inside `messages`. Claude Code
+  sends its reminders that way (your CLAUDE.md, memory and skills, after the
+  first user turn, and a context-usage note at the end of later requests),
+  so the model never saw them. They now reach it, placed by the same rule as
+  the Responses API's mid-conversation `developer` items (see above), with
+  the top-level `system` ahead of any leading ones.
+- `/v1/messages` answered any `tool_choice` but `auto` with a 400. `none` now
+  offers no tools, and `any` and `tool` offer them all without forcing a
+  call, as `tool_choice` already works on chat completions and Responses.
+- `/v1/messages` reported an unknown model (404) or a failed load (500) in
+  OpenAI's error shape; both now use Anthropic's (`not_found_error`,
+  `api_error`). And a thinking model's reply that went straight to a tool
+  call opened a text block holding only the blank lines after `</think>`;
+  the text block now starts at the first non-whitespace text. More
+  generally, a `/v1/messages` reply's leading whitespace is now dropped, as
+  on `/v1/responses`.
+- Claude Code's first `system` block is billing metadata
+  (`x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;`) whose
+  version suffix differs between sessions. At the very start of the system
+  prompt it kept a new session from reusing the cached system prompt and
+  tools of an earlier one. `/v1/messages` and `count_tokens` now leave that
+  block out when `system` is sent as blocks, as Claude Code sends it (a
+  plain-string `system` is left alone); no other block is touched. Whether
+  a later session then hits the cache still depends on the model: hybrid
+  and sliding-window caches can't be trimmed back to the shared prefix.
+- `/v1/messages` rejected a body over 2 MB with a 413. Claude Code sends the
+  whole session every turn, tool results and file contents included, so a
+  long session would hit that limit for good. `/v1/messages` and
+  `/v1/messages/count_tokens` now accept bodies up to 64 MB, as
+  `/v1/responses` does, and answer a larger one with a 413 in Anthropic's
+  envelope (`request_too_large`).
 - A tool-calling request that arrived while another request was being served on a model the continuous batcher covers (the dense Qwen 2/3, Llama and Gemma families) could be batched, and the batched path never parsed tool calls, so the call came back as plain text in `content` instead of `tool_calls`. A request that offers tools now always takes the single-stream path; `tool_choice: "none"` and `tools: []` still batch, since there is nothing to parse. A lone request on an idle server was never affected (the batcher hands it to the single-stream path), which is why this survived since v0.6: it takes concurrency, such as an agent running subagents. The cost is that concurrent tool-using agents now queue on the single-stream path instead of batching, until the batched path learns to parse tool calls. Covered by stub tests; I have no batch-covered checkpoint locally to reproduce it on real weights.
 
 ## [0.10.0] - 2026-10-29

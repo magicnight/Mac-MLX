@@ -1737,30 +1737,6 @@ struct HummingbirdServerTests {
         #expect(toolStart.json["index"] as? Int == 1)
     }
 
-    /// An unsupported `tool_choice` mode (anything but `auto`) is a 400 — we
-    /// don't silently ignore a force/suppress directive we can't honor.
-    @Test
-    func anthropicMessagesToolChoiceNonAutoReturns400() async throws {
-        let engine = CapturingStubEngine()
-        try await engine.load(fixtureModel(id: "stub-model"))
-        let server = HummingbirdServer(engine: engine)
-        let port = try await server.start(preferredPort: 20_060)
-
-        let url = URL(string: "http://127.0.0.1:\(port)/v1/messages")!
-        let body: [String: Any] = [
-            "model": "stub-model",
-            "max_tokens": 64,
-            "messages": [["role": "user", "content": "Weather in Paris?"]],
-            "tools": [anthropicWeatherTool],
-            "tool_choice": ["type": "any"],
-        ]
-        let (_, response) = try await postRaw(url, jsonObject: body)
-        await server.stop()
-
-        #expect(response.statusCode == 400)
-        #expect(await engine.capturedRequest == nil)
-    }
-
     /// A malformed `tool_use` block (`input` not a JSON object) is a 400 — never
     /// silently dropped.
     @Test
