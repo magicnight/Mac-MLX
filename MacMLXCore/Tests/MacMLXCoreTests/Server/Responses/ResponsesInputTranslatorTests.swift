@@ -88,8 +88,10 @@ struct ResponsesInputTranslatorTests {
         #expect(!translation.disablesThinking)
     }
 
+    /// Codex replays a reasoning item with `summary` and an `encrypted_content`
+    /// another provider wrote: neither is reasoning macMLX can read.
     @Test
-    func codexSecondTurnReplaysToolHistoryAndDropsReasoning() throws {
+    func codexSecondTurnReplaysToolHistoryAndDropsForeignReasoning() throws {
         let translation = try translate([
             "model": "m",
             "input": [
@@ -108,6 +110,7 @@ struct ResponsesInputTranslatorTests {
         let calls = try #require(translation.messages[1].toolCalls)
         #expect(calls == [ToolCallRequest(id: "call_1", name: "exec_command", arguments: ["cmd": .string("echo hi")])])
         #expect(translation.messages[1].content == "")
+        #expect(translation.messages[1].reasoning == nil)
         #expect(translation.messages[2].toolCallID == "call_1")
         #expect(translation.messages[2].content == "Output:\nhi\n")
     }
@@ -502,5 +505,82 @@ struct ResponsesInputTranslatorTests {
             user("hi"), ["type": "function_call", "name": "f", "arguments": "[1]", "call_id": "c"],
         ]])
         #expect(badArguments == "Malformed `arguments` for tool 'f': expected a JSON object string.")
+    }
+
+    // MARK: Reasoning history
+
+    private func reasoning(
+        content: [String]? = nil, summary: String? = nil, encrypted: String? = nil
+    ) -> [String: Any] {
+        var item: [String: Any] = ["type": "reasoning", "id": "rs_1"]
+        item["content"] = content.map { $0.map { ["type": "reasoning_text", "text": $0] } } ?? NSNull()
+        item["summary"] = summary.map { [["type": "summary_text", "text": $0]] } ?? []
+        if let encrypted { item["encrypted_content"] = encrypted }
+        return item
+    }
+
+    private func call(_ id: String) -> [String: Any] {
+        ["type": "function_call", "name": "exec_command", "arguments": "{}", "call_id": id]
+    }
+
+    private func output(_ id: String) -> [String: Any] {
+        ["type": "function_call_output", "call_id": id, "output": "ok"]
+    }
+
+    private func reasoningPerMessage(_ input: [[String: Any]]) throws -> [String?] {
+        try translate(["model": "m", "input": input]).messages.map(\.reasoning)
+    }
+
+    @Test
+    func reasoningContentAttachesToTheFollowingCall() throws {
+        // Codex replays the item verbatim: summary, content and encrypted_content.
+        let item = reasoning(
+            content: ["Run it."], summary: "a summary", encrypted: ReasoningCarrier.encode("not used: content wins"))
+        #expect(try reasoningPerMessage([user("go"), item, call("a"), output("a")]) == [nil, "Run it.", nil])
+    }
+
+    @Test
+    func encryptedContentIsReadWhenThereIsNoContent() throws {
+        let item = reasoning(encrypted: ReasoningCarrier.encode("From the blob."))
+        #expect(try reasoningPerMessage([user("go"), item, call("a"), output("a")]) == [nil, "From the blob.", nil])
+    }
+
+    /// A provider's summary is not the model's reasoning, and another
+    /// provider's encrypted content is opaque: neither is read.
+    @Test
+    func summaryAndForeignEncryptedContentAreNotReasoning() throws {
+        let item = reasoning(summary: "a summary", encrypted: "gAAAAABo-opaque")
+        #expect(try reasoningPerMessage([user("go"), item, call("a"), output("a")]) == [nil, nil, nil])
+    }
+
+    @Test
+    func reasoningAttachesToAnAssistantMessageAndSurvivesTheMerge() throws {
+        let messages = try translate(["model": "m", "input": [
+            user("go"), reasoning(content: ["one"]),
+            ["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "Checking."]]],
+            reasoning(content: ["two"]), call("a"), call("b"), output("a"), output("b"),
+        ]]).messages
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .tool])
+        #expect(messages[1].content == "Checking.")
+        #expect(messages[1].toolCalls?.map(\.id) == ["a", "b"])
+        #expect(messages[1].reasoning == "one\n\ntwo")
+    }
+
+    @Test
+    func severalItemsBeforeOneTurnJoin() throws {
+        let input = [user("go"), reasoning(content: ["one", "two"]), reasoning(content: ["three"]), call("a"), output("a")]
+        #expect(try reasoningPerMessage(input) == [nil, "one\n\ntwo\n\nthree", nil])
+    }
+
+    /// Reasoning belongs to the assistant turn it precedes: a user, system or
+    /// tool item first drops it.
+    @Test
+    func reasoningBeforeANonAssistantItemIsDropped() throws {
+        #expect(try reasoningPerMessage([reasoning(content: ["lost"]), user("go"), call("a"), output("a")])
+            == [nil, nil, nil])
+        #expect(try reasoningPerMessage([user("go"), call("a"), reasoning(content: ["lost"]), output("a"), user("more")])
+            == [nil, nil, nil, nil])
+        #expect(try reasoningPerMessage([user("go"), reasoning(content: ["lost"]), developer("note"), call("a"), output("a")])
+            == [nil, nil, nil])
     }
 }

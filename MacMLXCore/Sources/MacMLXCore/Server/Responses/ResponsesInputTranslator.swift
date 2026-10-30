@@ -10,10 +10,10 @@
 /// `file_id`) is a 400. Every rejection is a `TranslationError` carrying the
 /// message the handler returns with HTTP 400 — nothing is silently dropped
 /// except what the Responses wire format makes optional to honor: hosted
-/// tools (Codex always declares `web_search`) and `reasoning` input items
-/// (the conversation model has no reasoning field yet). An image in a tool
-/// output or a system message, which the template cannot render, is replaced
-/// by a placeholder saying so.
+/// tools (Codex always declares `web_search`) and a `reasoning` item macMLX
+/// cannot read (a real provider's summary or encrypted content). An image in a
+/// tool output or a system message, which the template cannot render, is
+/// replaced by a placeholder saying so.
 ///
 /// Pure apart from decoding an inline image into its temporary file, which the
 /// chat path does the same way.
@@ -242,6 +242,11 @@ enum ResponsesInputTranslator {
         toolNames: ResponsesToolNameMap
     ) throws -> [ChatMessage] {
         var out: [ChatMessage] = []
+        // The text of the `reasoning` items since the last other item, waiting
+        // for the assistant turn the next message or call builds. A user,
+        // system or tool item before that drops it: reasoning belongs to the
+        // assistant turn it preceded.
+        var pendingReasoning: [String] = []
         for (index, item) in items.enumerated() {
             guard case .object(let fields) = item else {
                 throw TranslationError(message: "`input[\(index)]` must be an object.")
@@ -249,17 +254,20 @@ enum ResponsesInputTranslator {
             let type = string(fields["type"]) ?? (fields["role"] != nil ? "message" : nil)
             switch type {
             case "message":
-                out.append(try message(fields))
+                let message = try message(fields)
+                out.append(message.role == .assistant ? adding(pendingReasoning, to: message) : message)
+                pendingReasoning.removeAll()
             case "function_call":
-                appendToolCall(try functionCall(fields, toolNames: toolNames), to: &out)
+                appendToolCall(try functionCall(fields, toolNames: toolNames), reasoning: pendingReasoning, to: &out)
+                pendingReasoning.removeAll()
             case "custom_tool_call":
-                appendToolCall(try customToolCall(fields, toolNames: toolNames), to: &out)
+                appendToolCall(try customToolCall(fields, toolNames: toolNames), reasoning: pendingReasoning, to: &out)
+                pendingReasoning.removeAll()
             case "function_call_output", "custom_tool_call_output":
                 out.append(try toolOutput(fields, type: type ?? ""))
+                pendingReasoning.removeAll()
             case "reasoning":
-                // Not carried across turns yet: `ChatMessage` has no reasoning
-                // field, and the template re-renders history without it.
-                continue
+                if let text = reasoningText(fields) { pendingReasoning.append(text) }
             case "item_reference":
                 throw TranslationError(
                     message: "`item_reference` input items are not supported: macMLX keeps no "
@@ -399,10 +407,15 @@ enum ResponsesInputTranslator {
 
     /// Consecutive calls, and an assistant text message directly before them,
     /// form one assistant turn — the shape `validateToolCallPairing` and the
-    /// chat templates expect.
-    private static func appendToolCall(_ call: ToolCallRequest, to out: inout [ChatMessage]) {
+    /// chat templates expect. `reasoning` (the items just before the call)
+    /// joins the turn's own.
+    private static func appendToolCall(
+        _ call: ToolCallRequest,
+        reasoning: [String],
+        to out: inout [ChatMessage]
+    ) {
         guard let last = out.last, last.role == .assistant else {
-            out.append(ChatMessage(role: .assistant, content: "", toolCalls: [call]))
+            out.append(adding(reasoning, to: ChatMessage(role: .assistant, content: "", toolCalls: [call])))
             return
         }
         out[out.count - 1] = ChatMessage(
@@ -410,8 +423,48 @@ enum ResponsesInputTranslator {
             role: .assistant,
             content: last.content,
             images: last.images,
-            toolCalls: (last.toolCalls ?? []) + [call]
+            toolCalls: (last.toolCalls ?? []) + [call],
+            reasoning: joinedReasoning([last.reasoning].compactMap { $0 } + reasoning)
         )
+    }
+
+    // MARK: - Reasoning
+
+    /// The reasoning a `reasoning` item carries: its `reasoning_text` content
+    /// parts, or, when it has none, the text its `encrypted_content` carries
+    /// if macMLX wrote it (`ReasoningCarrier`). Nil when it carries neither:
+    /// `summary` is never read, because a provider's summary is not the
+    /// reasoning the model produced (macMLX's own summary repeats `content`).
+    private static func reasoningText(_ fields: [String: JSONValue]) -> String? {
+        var parts: [String] = []
+        if case .array(let content)? = fields["content"] {
+            for part in content {
+                guard case .object(let partFields) = part, string(partFields["type"]) == "reasoning_text",
+                      let text = string(partFields["text"]), !text.isEmpty
+                else { continue }
+                parts.append(text)
+            }
+        }
+        return joinedReasoning(parts) ?? ReasoningCarrier.decode(string(fields["encrypted_content"]))
+    }
+
+    /// `message` with `reasoning` joined after any it already carries.
+    private static func adding(_ reasoning: [String], to message: ChatMessage) -> ChatMessage {
+        guard !reasoning.isEmpty else { return message }
+        return ChatMessage(
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            images: message.images,
+            toolCallID: message.toolCallID,
+            toolCalls: message.toolCalls,
+            reasoning: joinedReasoning([message.reasoning].compactMap { $0 } + reasoning)
+        )
+    }
+
+    /// Reasoning texts joined with a blank line; nil when there are none.
+    private static func joinedReasoning(_ parts: [String]) -> String? {
+        parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
 
     /// A `function_call_output` / `custom_tool_call_output` item → a `.tool`

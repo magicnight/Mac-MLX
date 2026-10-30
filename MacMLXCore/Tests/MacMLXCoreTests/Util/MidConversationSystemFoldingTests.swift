@@ -233,4 +233,22 @@ struct MidConversationSystemFoldingTests {
             expectPrefixStable(Array(conversation.prefix(split)), extendedBy: Array(conversation.dropFirst(split)))
         }
     }
+
+    /// Folding touches system and user turns only: an assistant turn's
+    /// reasoning stays on that turn, wherever system turns fall around it.
+    @Test
+    func assistantReasoningStaysOnItsTurn() throws {
+        let call = ChatMessage(
+            role: .assistant, content: "", toolCalls: [ToolCallRequest(id: "c1", name: "Bash", arguments: [:])],
+            reasoning: "run it")
+        let answer = ChatMessage(role: .assistant, content: "done", reasoning: "it worked")
+        let (_, messages) = MidConversationSystemFolding.fold([
+            system("lead"), user("a"), system("s1"), call, system("s2"), toolResult("c1", "r"),
+            system("s3"), answer, system("s4"),
+        ])
+        try #require(messages.map(\.role) == [.user, .assistant, .user, .tool, .user, .assistant, .user])
+        #expect(messages.map(\.reasoning) == [nil, "run it", nil, nil, nil, "it worked", nil])
+        #expect(messages[1].id == call.id)
+        #expect(messages[5].id == answer.id)
+    }
 }

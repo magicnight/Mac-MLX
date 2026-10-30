@@ -31,6 +31,21 @@ private struct ChatCompletionRequest: Decodable, Sendable {
         /// answers (OpenAI `tool_call_id`). Carried onto the `.tool`
         /// `ChatMessage` so the chat template pairs result ↔ call.
         let tool_call_id: String?
+        /// An assistant turn's replayed reasoning: `reasoning_content` (what
+        /// macMLX, DeepSeek and vLLM return), else `reasoning` (OpenRouter's
+        /// spelling). Decoded as `JSONValue` so a non-string value is ignored
+        /// rather than failing the request; see `replayedReasoning`.
+        let reasoning_content: JSONValue?
+        let reasoning: JSONValue?
+
+        /// The reasoning this turn replays, nil when it carries none as a
+        /// non-empty string.
+        var replayedReasoning: String? {
+            for value in [reasoning_content, reasoning] {
+                if case .string(let text)? = value, !text.isEmpty { return text }
+            }
+            return nil
+        }
     }
 
     let model: String
@@ -412,7 +427,8 @@ private struct AnthropicMessagesRequest: Decodable, Sendable {
     let tool_choice: AnthropicToolChoice?
     /// Anthropic `thinking`. `disabled` switches a thinking template off;
     /// `enabled` / `adaptive` keep the model's default and return the
-    /// reasoning as a `thinking` block unless `display` is `"omitted"`.
+    /// reasoning as a `thinking` block, its text left empty when `display`
+    /// is `"omitted"` (see `AnthropicThinkingReply`).
     let thinking: AnthropicThinking?
 }
 
@@ -609,10 +625,11 @@ private enum AnthropicContent: Decodable, Sendable {
 /// One Anthropic content block. `text` is set for `type:"text"`; `source` for
 /// `type:"image"`; the `tool_use` fields (`id`/`name`/`input`) for an assistant
 /// `type:"tool_use"` block; the `tool_result` fields (`tool_use_id`/`content`/
-/// `is_error`) for a user `type:"tool_result"` block. Every tool field is
-/// optional so the existing text/image decode paths are unaffected.
+/// `is_error`) for a user `type:"tool_result"` block; `thinking`/`signature`
+/// for an assistant `type:"thinking"` block. Every such field is optional so
+/// the existing text/image decode paths are unaffected.
 private struct AnthropicBlock: Decodable, Sendable {
-    let type: String            // "text" | "image" | "tool_use" | "tool_result"
+    let type: String            // "text" | "image" | "tool_use" | "tool_result" | "thinking"
     let text: String?
     let source: AnthropicImageSource?
     // tool_use (assistant turn): the call the model issued.
@@ -623,6 +640,10 @@ private struct AnthropicBlock: Decodable, Sendable {
     let tool_use_id: String?
     let content: AnthropicToolResultContent?
     let is_error: Bool?
+    // thinking (assistant turn): the replayed reasoning, and the signature
+    // macMLX returned with it (see `ReasoningCarrier`).
+    let thinking: String?
+    let signature: String?
 }
 
 /// Anthropic `tool_result.content`: either a bare string or an array of content
@@ -807,7 +828,9 @@ private func decodeOpenAIMessages(_ messages: [ChatCompletionRequest.Message]) t
             role: role,
             content: msg.content?.text ?? "",
             images: msg.content?.extractImages() ?? [],
-            toolCalls: (toolCalls?.isEmpty == false) ? toolCalls : nil
+            toolCalls: (toolCalls?.isEmpty == false) ? toolCalls : nil,
+            // Reasoning belongs to the assistant's own turns only.
+            reasoning: role == .assistant ? msg.replayedReasoning : nil
         )
     }
     try validateToolCallPairing(decoded)
@@ -854,7 +877,12 @@ private func toolCallRequest(fromAnthropicUse block: AnthropicBlock) throws -> T
 }
 
 /// Assistant turn (block form) → one `.assistant` message whose text is the
-/// joined text blocks and whose `toolCalls` are the decoded `tool_use` blocks.
+/// joined text blocks, whose `toolCalls` are the decoded `tool_use` blocks,
+/// and whose reasoning is its `thinking` blocks': each block's `thinking`
+/// text, or, when that is empty (macMLX's reply to `display: "omitted"`), the
+/// text its signature carries (`ReasoningCarrier`); several blocks join with
+/// a blank line. `redacted_thinking` and a foreign signature carry nothing
+/// macMLX can read.
 private func assistantMessage(
     fromAnthropic blocks: [AnthropicBlock],
     images: [ImageAttachment]
@@ -864,11 +892,17 @@ private func assistantMessage(
         guard block.type == "tool_use" else { return nil }
         return try toolCallRequest(fromAnthropicUse: block)
     }
+    let reasoning = blocks.compactMap { block -> String? in
+        guard block.type == "thinking" else { return nil }
+        if let thinking = block.thinking, !thinking.isEmpty { return thinking }
+        return ReasoningCarrier.decode(block.signature)
+    }.joined(separator: "\n\n")
     return ChatMessage(
         role: .assistant,
         content: text,
         images: images,
-        toolCalls: toolCalls.isEmpty ? nil : toolCalls
+        toolCalls: toolCalls.isEmpty ? nil : toolCalls,
+        reasoning: reasoning.isEmpty ? nil : reasoning
     )
 }
 
@@ -1816,7 +1850,9 @@ public actor HummingbirdServer {
                     role: "user",
                     content: .string(legacy.prompt),
                     tool_calls: nil,
-                    tool_call_id: nil
+                    tool_call_id: nil,
+                    reasoning_content: nil,
+                    reasoning: nil
                 )],
                 stream: legacy.stream,
                 temperature: legacy.temperature,
@@ -3328,9 +3364,9 @@ public actor HummingbirdServer {
         }
 
         let genRequest: GenerateRequest
-        let showsThinking: Bool
+        let thinkingReply: AnthropicThinkingReply
         do {
-            (genRequest, showsThinking) = try await anthropicGenerateRequest(from: data, requiresMaxTokens: true)
+            (genRequest, thinkingReply) = try await anthropicGenerateRequest(from: data, requiresMaxTokens: true)
         } catch let error as AnthropicRequestError {
             return anthropicErrorResponse(status: .badRequest, message: error.message, type: "invalid_request_error")
         }
@@ -3341,10 +3377,10 @@ public actor HummingbirdServer {
         let exposeCacheFigures = Self.exposeCacheFigures(request)
         if genRequest.parameters.stream {
             return try await anthropicStreamingResponse(
-                genRequest: genRequest, showsThinking: showsThinking, exposeCacheFigures: exposeCacheFigures)
+                genRequest: genRequest, thinkingReply: thinkingReply, exposeCacheFigures: exposeCacheFigures)
         } else {
             return try await anthropicNonStreamingResponse(
-                genRequest: genRequest, showsThinking: showsThinking, exposeCacheFigures: exposeCacheFigures)
+                genRequest: genRequest, thinkingReply: thinkingReply, exposeCacheFigures: exposeCacheFigures)
         }
     }
 
@@ -3380,7 +3416,10 @@ public actor HummingbirdServer {
     ///   `tool_use` → `ChatMessage.toolCalls`, each user `tool_result` → a
     ///   `.tool` message carrying `tool_use_id` (emitted before any residual
     ///   user text so the chat template's call ↔ result pairing holds).
-    ///   Replayed `thinking` / `redacted_thinking` blocks are ignored.
+    ///   An assistant turn's `thinking` blocks become its
+    ///   `ChatMessage.reasoning`: the block's text, else the text its
+    ///   signature carries (`ReasoningCarrier`); `redacted_thinking` is
+    ///   ignored.
     /// - `tool_choice` `none` drops the tools; `auto`, `any` and `tool` offer
     ///   them all.
     /// - `thinking.type` `disabled` sets the template kwarg
@@ -3390,16 +3429,16 @@ public actor HummingbirdServer {
     ///
     /// - Parameter requiresMaxTokens: `/v1/messages` requires `max_tokens`,
     ///   `count_tokens` ignores it.
-    /// - Returns: the request, and whether the response returns the reasoning
-    ///   as a `thinking` block — only when `thinking` is `enabled` or
-    ///   `adaptive` and its `display` is not `"omitted"` (Claude Code sends
-    ///   `"omitted"`). Without `thinking` the reasoning is dropped, as it
-    ///   always was on this path.
+    /// - Returns: the request, and how the response returns the reasoning
+    ///   (`AnthropicThinkingReply`): a `thinking` block when `thinking` is
+    ///   `enabled` or `adaptive`, its text left empty when `display` is
+    ///   `"omitted"` (Claude Code sends `"omitted"`). Without `thinking` the
+    ///   reasoning is dropped, as it always was on this path.
     /// - Throws: `AnthropicRequestError` with the 400's message.
     func anthropicGenerateRequest(
         from data: Data,
         requiresMaxTokens: Bool
-    ) async throws -> (request: GenerateRequest, showsThinking: Bool) {
+    ) async throws -> (request: GenerateRequest, thinkingReply: AnthropicThinkingReply) {
         let req: AnthropicMessagesRequest
         do {
             req = try JSONDecoder().decode(AnthropicMessagesRequest.self, from: data)
@@ -3451,8 +3490,7 @@ public actor HummingbirdServer {
             disabled["enable_thinking"] = .bool(false)
             kwargs = disabled
         }
-        let showsThinking = (thinkingType == "enabled" || thinkingType == "adaptive")
-            && req.thinking?.display != "omitted"
+        let thinkingReply = AnthropicThinkingReply(type: thinkingType, display: req.thinking?.display)
 
         let params = GenerationParameters(
             temperature: req.temperature ?? 0.7,
@@ -3469,17 +3507,18 @@ public actor HummingbirdServer {
             templateKwargs: kwargs,
             tools: tools
         )
-        return (genRequest, showsThinking)
+        return (genRequest, thinkingReply)
     }
 
     /// Non-streaming Anthropic `/v1/messages` response. Accumulates the
     /// full generation, splits off the reasoning (seeded, as the stream is,
     /// by `promptOpensThinkBlock`), and emits Anthropic's message envelope:
-    /// a `thinking` block first when `showsThinking` and the model reasoned,
-    /// then the text block, then one `tool_use` block per call.
+    /// a `thinking` block first when `thinkingReply` asks for one and the
+    /// model reasoned (see `anthropicThinkingBlock`), then the text block,
+    /// then one `tool_use` block per call.
     private func anthropicNonStreamingResponse(
         genRequest: GenerateRequest,
-        showsThinking: Bool,
+        thinkingReply: AnthropicThinkingReply,
         exposeCacheFigures: Bool
     ) async throws -> Response {
         // Serialise + cold-swap atomically (SRV-2): acquire the lock, swap
@@ -3572,8 +3611,8 @@ public actor HummingbirdServer {
         // is always present, and `stop_reason` stays `end_turn`; `.toolCalls`
         // maps to `tool_use` via `anthropicStopReason`.
         var content: [[String: Any]] = []
-        if showsThinking, !reasoning.isEmpty {
-            content.append(["type": "thinking", "thinking": reasoning, "signature": anthropicThinkingSignature])
+        if let thinking = anthropicThinkingBlock(reasoning, reply: thinkingReply) {
+            content.append(thinking)
         }
         if !answer.isEmpty || capturedToolCalls.isEmpty {
             content.append(["type": "text", "text": answer])
@@ -3603,11 +3642,14 @@ public actor HummingbirdServer {
     /// message_delta → message_stop, each block a content_block_start, its
     /// deltas and a content_block_stop, indexed in emission order.
     ///
-    /// - The thinking block (only when `showsThinking`) opens on the first
-    ///   reasoning text: `content_block_start` with
+    /// - A `.shown` thinking block opens on the first reasoning text:
+    ///   `content_block_start` with
     ///   `{"type":"thinking","thinking":"","signature":""}`, a `thinking_delta`
-    ///   per reasoning delta, then one `signature_delta` before its stop.
-    ///   Otherwise the reasoning is dropped, never streamed as text.
+    ///   per reasoning delta, then one `signature_delta` carrying the block's
+    ///   reasoning (`ReasoningCarrier`) before its stop. An `.omitted` one
+    ///   streams no text: once the reasoning ends (the next block opens, or
+    ///   the reply ends), the same start, the one `signature_delta` and the
+    ///   stop. With `.none` the reasoning is dropped, never streamed as text.
     /// - The text block opens LAZILY on the first non-whitespace answer text
     ///   (the blank lines a thinking model emits after `</think>` are not an
     ///   answer) and is omitted for a tool-only reply — matching real
@@ -3619,7 +3661,7 @@ public actor HummingbirdServer {
     /// The generation lock is held for the whole body and released in `defer`.
     private func anthropicStreamingResponse(
         genRequest: GenerateRequest,
-        showsThinking: Bool,
+        thinkingReply: AnthropicThinkingReply,
         exposeCacheFigures: Bool
     ) async throws -> Response {
         // A1: cheap pre-flight resolve check (no load, no lock) — reject
@@ -3653,19 +3695,45 @@ public actor HummingbirdServer {
             var openBlock: (index: Int, isThinking: Bool)?
             var nextIndex = 0
             var textBlockEmitted = false
+            // The reasoning of the open `.shown` thinking block, which its
+            // signature carries.
+            var thinkingText = ""
+            // `.omitted`: the reasoning not yet returned as a block.
+            var omittedReasoning = ""
 
+            func thinkingStart(_ index: Int) -> (event: String, payload: [String: Any]) {
+                ("content_block_start", [
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": ["type": "thinking", "thinking": "", "signature": ""] as [String: Any],
+                ])
+            }
+            func signatureDelta(_ index: Int, _ reasoning: String) -> (event: String, payload: [String: Any]) {
+                ("content_block_delta", [
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": ["type": "signature_delta", "signature": ReasoningCarrier.encode(reasoning)]
+                        as [String: Any],
+                ])
+            }
             func closeOpenBlock() {
                 guard let block = openBlock else { return }
                 if block.isThinking {
-                    // Nothing verifies it; Claude Code only replays it.
-                    pending.append(("content_block_delta", [
-                        "type": "content_block_delta",
-                        "index": block.index,
-                        "delta": ["type": "signature_delta", "signature": anthropicThinkingSignature] as [String: Any],
-                    ]))
+                    pending.append(signatureDelta(block.index, thinkingText))
                 }
                 pending.append(("content_block_stop", ["type": "content_block_stop", "index": block.index]))
                 openBlock = nil
+            }
+            // `.omitted`: the reasoning so far as one text-less thinking
+            // block, at the next index — before the block that follows it.
+            func emitOmittedThinking() {
+                guard !omittedReasoning.isEmpty else { return }
+                closeOpenBlock()
+                pending.append(thinkingStart(nextIndex))
+                pending.append(signatureDelta(nextIndex, omittedReasoning))
+                pending.append(("content_block_stop", ["type": "content_block_stop", "index": nextIndex]))
+                nextIndex += 1
+                omittedReasoning = ""
             }
             // Text of one kind continues the open block, or closes it and
             // opens the next one — normally the thinking block, then the text
@@ -3678,17 +3746,21 @@ public actor HummingbirdServer {
                 guard !text.isEmpty else { return }
                 if openBlock?.isThinking != thinking {
                     closeOpenBlock()
+                    if thinking {
+                        thinkingText = ""
+                    } else {
+                        emitOmittedThinking()
+                    }
                     openBlock = (nextIndex, thinking)
                     if !thinking { textBlockEmitted = true }
-                    pending.append(("content_block_start", [
+                    pending.append(thinking ? thinkingStart(nextIndex) : ("content_block_start", [
                         "type": "content_block_start",
                         "index": nextIndex,
-                        "content_block": thinking
-                            ? ["type": "thinking", "thinking": "", "signature": ""] as [String: Any]
-                            : ["type": "text", "text": ""] as [String: Any],
+                        "content_block": ["type": "text", "text": ""] as [String: Any],
                     ]))
                     nextIndex += 1
                 }
+                if thinking { thinkingText += text }
                 pending.append(("content_block_delta", [
                     "type": "content_block_delta",
                     "index": nextIndex - 1,
@@ -3786,8 +3858,10 @@ public actor HummingbirdServer {
                         if let calls = chunk.toolCalls, !calls.isEmpty {
                             capturedToolCalls = calls
                         }
-                        if showsThinking {
-                            streamBlockText(reasoning, thinking: true)
+                        switch thinkingReply {
+                        case .shown: streamBlockText(reasoning, thinking: true)
+                        case .omitted: omittedReasoning += reasoning
+                        case .none: break
                         }
                         streamBlockText(answer, thinking: false)
                         for frame in pending {
@@ -3804,10 +3878,13 @@ public actor HummingbirdServer {
                 try? await writer.write(buf)
             }
 
-            // 4. Close the open block. A reply with no text block AND no tool
-            // calls still gets an empty text block — the content-less response
-            // has always carried one. A tool-only reply skips it.
+            // 4. Close the open block, and return any `.omitted` reasoning
+            // still held, ahead of what follows. A reply with no text block
+            // AND no tool calls still gets an empty text block — the
+            // content-less response has always carried one. A tool-only reply
+            // skips it.
             closeOpenBlock()
+            emitOmittedThinking()
             if !textBlockEmitted && capturedToolCalls.isEmpty {
                 pending.append(("content_block_start", [
                     "type": "content_block_start",
@@ -5686,11 +5763,23 @@ private func writeAnthropicSSE(
     try await writer.write(buf)
 }
 
-/// The `signature` of a `thinking` block macMLX returns. Anthropic signs its
-/// thinking so it can verify a replayed block; nothing verifies this one —
-/// Claude Code only replays it, and macMLX ignores replayed thinking — but
-/// clients expect a non-empty string.
-private let anthropicThinkingSignature = "macmlx"
+/// The `thinking` block a non-streaming reply starts with, or nil when
+/// `reply` is `.none` or the model did not reason. Anthropic signs its
+/// thinking so it can verify a replayed block; macMLX's signature instead
+/// carries the reasoning (`ReasoningCarrier`), so a replayed block gives it
+/// back even when its text was omitted (`.omitted`: empty `thinking`, as
+/// Anthropic returns for `display: "omitted"`).
+private func anthropicThinkingBlock(_ reasoning: String, reply: AnthropicThinkingReply) -> [String: Any]? {
+    guard !reasoning.isEmpty else { return nil }
+    switch reply {
+    case .none:
+        return nil
+    case .shown:
+        return ["type": "thinking", "thinking": reasoning, "signature": ReasoningCarrier.encode(reasoning)]
+    case .omitted:
+        return ["type": "thinking", "thinking": "", "signature": ReasoningCarrier.encode(reasoning)]
+    }
+}
 
 /// Map macMLX's `FinishReason` onto Anthropic's `stop_reason` vocabulary.
 /// Only an explicit length cap maps to `max_tokens`; everything else

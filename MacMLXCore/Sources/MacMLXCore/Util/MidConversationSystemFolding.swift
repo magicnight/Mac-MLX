@@ -54,7 +54,8 @@ enum MidConversationSystemFolding {
     /// - Returns: `systemPrompt` is nil when no text ends up there; `messages`
     ///   holds every non-system message in order, plus the user turns opened
     ///   by system turns. A user turn that gains folded text keeps its id,
-    ///   images and tool fields.
+    ///   images and tool fields; every other message, an assistant turn's
+    ///   reasoning included, passes through unchanged.
     static func fold(_ messages: [ChatMessage]) -> (systemPrompt: String?, messages: [ChatMessage]) {
         var systemParts: [String] = []
         var out: [ChatMessage] = []
@@ -108,7 +109,8 @@ enum MidConversationSystemFolding {
             content: content,
             images: message.images,
             toolCallID: message.toolCallID,
-            toolCalls: message.toolCalls
+            toolCalls: message.toolCalls,
+            reasoning: message.reasoning
         )
     }
 }

@@ -25,13 +25,20 @@ enum ResponsesOutputBuilder {
     /// the summary (Codex 0.162 prints `summary` and ignores raw
     /// `reasoning_text` unless told to). A nil `text` gives an empty `summary`
     /// and `content` (the shape `response.output_item.added` carries).
-    static func reasoningItem(id: String, text: String?) -> [String: Any] {
-        [
+    /// `encryptedContent` (the request's `include` asked for
+    /// `reasoning.encrypted_content`) adds the text as `encrypted_content`,
+    /// carried by `ReasoningCarrier`, for a client that replays only that.
+    static func reasoningItem(id: String, text: String?, encryptedContent: Bool = false) -> [String: Any] {
+        var item: [String: Any] = [
             "type": "reasoning",
             "id": id,
             "summary": text.map { [summaryTextPart($0)] } ?? [],
             "content": text.map { [reasoningTextPart($0)] } ?? [],
         ]
+        if encryptedContent, let text {
+            item["encrypted_content"] = ReasoningCarrier.encode(text)
+        }
+        return item
     }
 
     static func reasoningTextPart(_ text: String) -> [String: Any] {

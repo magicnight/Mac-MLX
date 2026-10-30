@@ -109,24 +109,29 @@ extension HummingbirdServer {
             parameters: parameters
         )
         let exposeCacheFigures = Self.exposeCacheFigures(request)
+        let encryptedReasoning = responsesRequest.includesEncryptedReasoning
         if parameters.stream {
             return await streamingResponsesResponse(
                 genRequest: genRequest, envelope: envelope,
-                toolNames: translation.toolNames, exposeCacheFigures: exposeCacheFigures)
+                toolNames: translation.toolNames, exposeCacheFigures: exposeCacheFigures,
+                encryptedReasoning: encryptedReasoning)
         }
         return try await nonStreamingResponsesResponse(
             genRequest: genRequest, envelope: envelope,
-            toolNames: translation.toolNames, exposeCacheFigures: exposeCacheFigures)
+            toolNames: translation.toolNames, exposeCacheFigures: exposeCacheFigures,
+            encryptedReasoning: encryptedReasoning)
     }
 
     /// The whole response as one JSON body. A generation that fails after it
     /// started (an engine error or a stall) is a `failed` response object, not
     /// an HTTP error: it is the same outcome the stream reports in-band.
+    /// `encryptedReasoning`: the reasoning item carries `encrypted_content`.
     private func nonStreamingResponsesResponse(
         genRequest: GenerateRequest,
         envelope: ResponsesOutputBuilder.Envelope,
         toolNames: ResponsesToolNameMap,
-        exposeCacheFigures: Bool
+        exposeCacheFigures: Bool,
+        encryptedReasoning: Bool
     ) async throws -> Response {
         let engine: any InferenceEngine
         do {
@@ -189,7 +194,8 @@ extension HummingbirdServer {
 
         var output: [[String: Any]] = []
         if !reasoning.isEmpty {
-            output.append(ResponsesOutputBuilder.reasoningItem(id: ResponsesOutputBuilder.newID("rs"), text: reasoning))
+            output.append(ResponsesOutputBuilder.reasoningItem(
+                id: ResponsesOutputBuilder.newID("rs"), text: reasoning, encryptedContent: encryptedReasoning))
         }
         let outcome: ResponsesOutputBuilder.Outcome = failure.map { .failed($0, code: "server_error") }
             ?? .finished(finishReason)
@@ -227,12 +233,15 @@ extension HummingbirdServer {
     /// Tool calls, which the engine reports on the terminal chunk, follow as
     /// whole items, and exactly one terminal event ends the stream. An
     /// unknown model is a 404 before any byte is sent; a failure once the
-    /// stream is open is `response.failed`.
+    /// stream is open is `response.failed`. `encryptedReasoning`: the finished
+    /// reasoning item (`output_item.done`, the terminal response) carries
+    /// `encrypted_content`.
     private func streamingResponsesResponse(
         genRequest: GenerateRequest,
         envelope: ResponsesOutputBuilder.Envelope,
         toolNames: ResponsesToolNameMap,
-        exposeCacheFigures: Bool
+        exposeCacheFigures: Bool,
+        encryptedReasoning: Bool
     ) async -> Response {
         // A1: reject an unknown model with a real 404 before headers are sent;
         // the locked resolve and load still happen inside the body (SRV-2).
@@ -300,7 +309,8 @@ extension HummingbirdServer {
                         "item_id": openID, "output_index": index, "content_index": 0,
                         "part": ResponsesOutputBuilder.reasoningTextPart(openText),
                     ])
-                    item = ResponsesOutputBuilder.reasoningItem(id: openID, text: openText)
+                    item = ResponsesOutputBuilder.reasoningItem(
+                        id: openID, text: openText, encryptedContent: encryptedReasoning)
                 } else {
                     try emit("response.output_text.done", [
                         "item_id": openID, "output_index": index, "content_index": 0,
