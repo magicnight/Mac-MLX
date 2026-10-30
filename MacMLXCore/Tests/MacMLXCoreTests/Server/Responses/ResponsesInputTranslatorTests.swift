@@ -179,8 +179,8 @@ struct ResponsesInputTranslatorTests {
 
     @Test
     func developerMessageStaysAtItsPosition() throws {
-        // After a user turn it is appended to that turn; after a tool output
-        // it opens a user turn there, never reaching back to an earlier turn.
+        // After a user turn or a tool output it is appended to that turn,
+        // never reaching back to an earlier one.
         let translation = try translate([
             "model": "m",
             "input": [
@@ -191,9 +191,10 @@ struct ResponsesInputTranslatorTests {
             ],
         ])
         #expect(translation.systemPrompt == nil)
-        try #require(translation.messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(translation.messages.map(\.role) == [.user, .assistant, .tool])
         #expect(translation.messages[0].content == "one\n\nafter user")
-        #expect(translation.messages[3].content == "after tool")
+        #expect(translation.messages[2].content == "done\n\nafter tool")
+        #expect(translation.messages[2].toolCallID == "c1")
     }
 
     @Test

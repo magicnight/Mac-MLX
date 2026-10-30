@@ -266,7 +266,7 @@ struct AnthropicMessagesCompatTests {
 
         #expect(response.statusCode == 200)
         let request = try #require(captured)
-        try #require(request.messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(request.messages.map(\.role) == [.user, .assistant, .tool])
         // The first turn renders as it did on turn one: the reminder stays put.
         #expect(request.messages[0].content == "Run echo hi\n\n<system-reminder>memory</system-reminder>")
         // Replayed thinking becomes the turn's reasoning; the call and its
@@ -275,8 +275,9 @@ struct AnthropicMessagesCompatTests {
         #expect(request.messages[1].reasoning == "I should run it.")
         #expect(request.messages[1].toolCalls?.map(\.id) == ["toolu_01"])
         #expect(request.messages[2].toolCallID == "toolu_01")
-        #expect(request.messages[2].content == "hi")
-        #expect(request.messages[3].content == "<total_tokens>9000 tokens left</total_tokens>")
+        // The trailing system turn joins the tool result: a user turn there
+        // would read as a new query to a thinking template.
+        #expect(request.messages[2].content == "hi\n\n<total_tokens>9000 tokens left</total_tokens>")
     }
 
     @Test

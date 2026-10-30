@@ -69,14 +69,33 @@ struct MidConversationSystemFoldingTests {
         #expect(messages.map(\.content) == ["a", "b", "late"])
     }
 
+    /// Claude Code's shape: a system turn right after the tool result. It
+    /// joins the result rather than opening a user turn, which a thinking
+    /// template would take for a new query.
     @Test
-    func systemTurnAfterAToolTurnOpensAUserTurn() throws {
+    func systemTurnAfterAToolTurnIsAppendedToIt() throws {
         let (_, messages) = MidConversationSystemFolding.fold([
             user("a"), toolCall("c1"), toolResult("c1", "out"), system("<total_tokens>1</total_tokens>"),
+            system("<total_tokens>2</total_tokens>"),
         ])
-        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
-        #expect(messages[2].content == "out")
-        #expect(messages[3].content == "<total_tokens>1</total_tokens>")
+        try #require(messages.map(\.role) == [.user, .assistant, .tool])
+        #expect(messages[2].content == "out\n\n<total_tokens>1</total_tokens>\n\n<total_tokens>2</total_tokens>")
+        #expect(messages[2].toolCallID == "c1")
+    }
+
+    /// After several tool results, the last one takes the system text; a user
+    /// turn after it stays a turn of its own.
+    @Test
+    func systemTurnAfterSeveralToolTurnsJoinsTheLast() throws {
+        let calls = ChatMessage(role: .assistant, content: "", toolCalls: [
+            ToolCallRequest(id: "c1", name: "Bash", arguments: [:]),
+            ToolCallRequest(id: "c2", name: "Bash", arguments: [:]),
+        ])
+        let (_, messages) = MidConversationSystemFolding.fold([
+            user("a"), calls, toolResult("c1", "one"), toolResult("c2", "two"), system("note"), user("next"),
+        ])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .tool, .user])
+        #expect(messages.map(\.content) == ["a", "", "one", "two\n\nnote", "next"])
     }
 
     @Test
@@ -179,11 +198,12 @@ struct MidConversationSystemFoldingTests {
         expectPrefixStable(turn1, extendedBy: turn2Additions)
         expectPrefixStable(turn1 + turn2Additions, extendedBy: turn3Additions)
 
-        // The reminder stays in the first user turn on every turn.
+        // The reminder stays in the first user turn on every turn, and the
+        // trailing system turn joins the tool result.
         let (_, messages) = MidConversationSystemFolding.fold(turn1 + turn2Additions)
-        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool])
         #expect(messages[0].content.hasSuffix("CLAUDE.md…</system-reminder>"))
-        #expect(messages[3].content == "<total_tokens>9</total_tokens>")
+        #expect(messages[2].content == "hi\n\n<total_tokens>9</total_tokens>")
     }
 
     /// Codex: developer items lead (the system prompt), and a later one arrives
@@ -200,7 +220,8 @@ struct MidConversationSystemFoldingTests {
         let (prompt, messages) = MidConversationSystemFolding.fold(turn1 + turn2Additions + turn3Additions)
         #expect(prompt == "dev one\n\ndev two")
         try #require(messages.map(\.role) == [.user, .assistant, .tool, .user, .assistant, .tool])
-        #expect(messages[3].content == "permissions changed\n\nnow list files")
+        #expect(messages[2].content == "hi\n\n\npermissions changed")
+        #expect(messages[3].content == "now list files")
     }
 
     /// A user turn merged into the turn a system turn opened brings its
@@ -210,14 +231,14 @@ struct MidConversationSystemFoldingTests {
     /// unchanged, which `expectPrefixStable` still checks.
     @Test
     func mergedUserTurnWithImagesOnlyChangesTheLastMessage() throws {
-        let history = [user("a"), toolCall("c1"), toolResult("c1", "r"), system("note")]
+        let history = [user("a"), assistant("b"), system("note")]
         let next = ChatMessage(role: .user, content: "look", images: [image])
         expectPrefixStable(history, extendedBy: [next])
 
         let (_, messages) = MidConversationSystemFolding.fold(history + [next])
-        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
-        #expect(messages[3].content == "note\n\nlook")
-        #expect(messages[3].images == [image])
+        try #require(messages.map(\.role) == [.user, .assistant, .user])
+        #expect(messages[2].content == "note\n\nlook")
+        #expect(messages[2].images == [image])
     }
 
     /// Every split point of one mixed conversation keeps the property.
@@ -226,7 +247,8 @@ struct MidConversationSystemFoldingTests {
         let conversation = [
             system("lead"), user("a"), system("s1"), toolCall("c1"), toolResult("c1", "r1"),
             system("s2"), system("s3"), user("b"), user("c"), assistant("d"), system("s4"),
-            toolCall("c2"), toolResult("c2", "r2"), user("e"), system("s5"),
+            toolCall("c2"), toolResult("c2", "r2"), system("s6"), user("e"), system("s5"),
+            toolCall("c3"), toolResult("c3", "r3"), system("<total_tokens>1</total_tokens>"),
         ]
         // From the first item on: an empty history has no system prompt yet.
         for split in 1...conversation.count {
@@ -246,9 +268,9 @@ struct MidConversationSystemFoldingTests {
             system("lead"), user("a"), system("s1"), call, system("s2"), toolResult("c1", "r"),
             system("s3"), answer, system("s4"),
         ])
-        try #require(messages.map(\.role) == [.user, .assistant, .user, .tool, .user, .assistant, .user])
-        #expect(messages.map(\.reasoning) == [nil, "run it", nil, nil, nil, "it worked", nil])
+        try #require(messages.map(\.role) == [.user, .assistant, .user, .tool, .assistant, .user])
+        #expect(messages.map(\.reasoning) == [nil, "run it", nil, nil, "it worked", nil])
         #expect(messages[1].id == call.id)
-        #expect(messages[5].id == answer.id)
+        #expect(messages[4].id == answer.id)
     }
 }

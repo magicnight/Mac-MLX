@@ -11,13 +11,20 @@
 ///
 ///  - the system turns before the first other turn are joined, in order, with
 ///    a blank line into the system prompt;
-///  - a later system turn whose previous message is a user turn is appended to
-///    that turn's text, after a blank line;
-///  - any other later system turn (after an assistant or tool turn) opens a
-///    new user turn at its own position carrying its text. Further system
+///  - a later system turn whose previous message is a user or tool turn is
+///    appended to that turn's text, after a blank line (after several tool
+///    turns, to the last one);
+///  - any other later system turn (after an assistant turn) opens a new user
+///    turn at its own position carrying its text. Further system
 ///    turns append to it like any user turn, and a user turn directly after it
 ///    is merged into it: its text follows the system text, and the merged
 ///    turn keeps that user turn's id and images.
+///
+/// Appending to a tool turn rather than opening a user turn after it matters
+/// to thinking templates (Qwen3.x, Mellum2): they take any user turn that is
+/// not a tool response for a new query and stop rendering the reasoning of
+/// the assistant turns before it, and Claude Code ends every request in a
+/// tool loop with a system turn after the tool result.
 ///
 /// The rule is position-stable, because the prompt cache depends on it:
 /// clients replay the whole conversation every turn, and macMLX reuses the
@@ -69,7 +76,7 @@ enum MidConversationSystemFolding {
                 guard !text.isEmpty else { continue }
                 if out.isEmpty {
                     systemParts.append(text)
-                } else if let last = out.last, last.role == .user {
+                } else if let last = out.last, last.role == .user || last.role == .tool {
                     out[out.count - 1] = replacingContent(of: last, with: join([last.content, text]))
                 } else {
                     out.append(ChatMessage(role: .user, content: text))
