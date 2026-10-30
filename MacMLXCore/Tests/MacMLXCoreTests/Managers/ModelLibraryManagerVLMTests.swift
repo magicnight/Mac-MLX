@@ -141,14 +141,43 @@ struct ModelLibraryManagerVLMTests {
     func vlmRegistryMirrorMatchesTheResolvedSource() throws {
         let source = try #require(Self.resolvedVLMFactorySource(),
                                   "MACMLX_REQUIRE_RESOLVED_SOURCE is set but no checkout was found")
-        let start = try #require(source.range(of: "public enum VLMTypeRegistry"))
-        let end = source.range(of: "public enum VLMProcessorTypeRegistry", range: start.upperBound..<source.endIndex)
-        let block = source[start.upperBound..<(end?.lowerBound ?? source.endIndex)]
-        let entry = /^\s*"([^"]+)"\s*:/.anchorsMatchLineEndings()
-        let keys = Set(block.matches(of: entry).map { String($0.1) })
+        let keys = try #require(Self.vlmRegistryKeys(in: source), "no VLMTypeRegistry in VLMModelFactory.swift")
         #expect(!keys.isEmpty, "found no registry entries; has VLMModelFactory.swift changed shape?")
         #expect(keys == Self.upstreamVLMRegistryKeys,
                 "mirror out of date: added \(keys.subtracting(Self.upstreamVLMRegistryKeys).sorted()), removed \(Self.upstreamVLMRegistryKeys.subtracting(keys).sorted())")
+    }
+
+    /// The keys of the `VLMTypeRegistry` dictionary in `source`: every line
+    /// between it and `VLMProcessorTypeRegistry` that opens with a quoted key
+    /// and a colon, whatever value follows. Nil without the registry.
+    static func vlmRegistryKeys(in source: String) -> Set<String>? {
+        guard let start = source.range(of: "public enum VLMTypeRegistry") else { return nil }
+        let end = source.range(of: "public enum VLMProcessorTypeRegistry", range: start.upperBound..<source.endIndex)
+        let block = source[start.upperBound..<(end?.lowerBound ?? source.endIndex)]
+        let entry = /^\s*"([^"]+)"\s*:/.anchorsMatchLineEndings()
+        return Set(block.matches(of: entry).map { String($0.1) })
+    }
+
+    /// A key is read whatever creates its model, as `LLMModelFactory` already
+    /// registers one with a plain function; the processor registry after it
+    /// and comments are not read.
+    @Test
+    func registryKeysAreReadWhateverCreatesTheModel() {
+        let source = """
+            /// Registry of model type, e.g "llama": not an entry.
+            public enum VLMTypeRegistry {
+                public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
+                    "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
+                    "qwen3": createQwen3CompatibleModel,
+                    "closure_vl" : { data in try make(data) },
+                ])
+            }
+            public enum VLMProcessorTypeRegistry {
+                    "PaliGemmaProcessor": create(PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
+            }
+            """
+        #expect(Self.vlmRegistryKeys(in: source) == ["paligemma", "qwen3", "closure_vl"])
+        #expect(Self.vlmRegistryKeys(in: "no registry here") == nil)
     }
 
     static var requiresResolvedSource: Bool {
