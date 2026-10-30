@@ -126,37 +126,49 @@ struct ModelLibraryManagerVLMTests {
 
     /// The mirror above against the registry the package actually resolved:
     /// its keys read from the checked-out `VLMModelFactory.swift`, since
-    /// `ModelTypeRegistry` can only answer `contains`, not list. Runs where a
-    /// SwiftPM checkout sits next to the build (`swift test`, and so
-    /// ci-local's spm job); elsewhere, as under xcodebuild, it is skipped,
-    /// not passed.
-    @Test(.enabled(if: Self.resolvedVLMFactorySource() != nil, "no SwiftPM checkout of mlx-swift-lm next to the build"))
+    /// `ModelTypeRegistry` can only answer `contains`, not list. Every line
+    /// of the registry's dictionary that opens with a quoted key counts,
+    /// whatever creates the model; a type registered elsewhere through
+    /// `registerModelType` would not be seen (there is none at 3.32.3).
+    ///
+    /// Runs under `swift test`, where the checkout sits in the scratch
+    /// directory next to the test bundle; under xcodebuild there is none and
+    /// it is skipped. ci-local's spm job sets
+    /// `MACMLX_REQUIRE_RESOLVED_SOURCE=1`, which turns a missing checkout
+    /// into a failure there, so the gate cannot pass by skipping.
+    @Test(.enabled(if: Self.resolvedVLMFactorySource() != nil || Self.requiresResolvedSource,
+                   "no SwiftPM checkout of mlx-swift-lm next to the test bundle"))
     func vlmRegistryMirrorMatchesTheResolvedSource() throws {
-        let source = try #require(Self.resolvedVLMFactorySource())
+        let source = try #require(Self.resolvedVLMFactorySource(),
+                                  "MACMLX_REQUIRE_RESOLVED_SOURCE is set but no checkout was found")
         let start = try #require(source.range(of: "public enum VLMTypeRegistry"))
         let end = source.range(of: "public enum VLMProcessorTypeRegistry", range: start.upperBound..<source.endIndex)
         let block = source[start.upperBound..<(end?.lowerBound ?? source.endIndex)]
-        let keys = Set(block.matches(of: /"([^"]+)":\s*create\(/).map { String($0.1) })
+        let entry = /^\s*"([^"]+)"\s*:/.anchorsMatchLineEndings()
+        let keys = Set(block.matches(of: entry).map { String($0.1) })
         #expect(!keys.isEmpty, "found no registry entries; has VLMModelFactory.swift changed shape?")
         #expect(keys == Self.upstreamVLMRegistryKeys,
                 "mirror out of date: added \(keys.subtracting(Self.upstreamVLMRegistryKeys).sorted()), removed \(Self.upstreamVLMRegistryKeys.subtracting(keys).sorted())")
     }
 
+    static var requiresResolvedSource: Bool {
+        ProcessInfo.processInfo.environment["MACMLX_REQUIRE_RESOLVED_SOURCE"] == "1"
+    }
+
     /// `VLMModelFactory.swift` in the mlx-swift-lm checkout SwiftPM resolved
     /// for this build: under `checkouts/` in the scratch directory, found by
-    /// walking up from the test bundle (any `--scratch-path`) or from this
-    /// file (the default `.build`).
+    /// walking up from the test target's resource bundle, which sits in that
+    /// directory under any `--scratch-path`. Not from this source file: a
+    /// tree's own `.build` may hold an older checkout than the one this
+    /// build resolved (xcodebuild resolves into DerivedData instead).
     static func resolvedVLMFactorySource() -> String? {
         let relative = "checkouts/mlx-swift-lm/Libraries/MLXVLM/VLMModelFactory.swift"
-        let starts = Bundle.allBundles.map(\.bundleURL) + [URL(filePath: #filePath)]
-        for start in starts {
-            var directory = start.deletingLastPathComponent()
-            for _ in 0..<8 {
-                for candidate in [directory.appending(path: relative), directory.appending(path: ".build/" + relative)] {
-                    if let text = try? String(contentsOf: candidate, encoding: .utf8) { return text }
-                }
-                directory.deleteLastPathComponent()
+        var directory = Bundle.module.bundleURL.deletingLastPathComponent()
+        for _ in 0..<8 {
+            if let text = try? String(contentsOf: directory.appending(path: relative), encoding: .utf8) {
+                return text
             }
+            directory.deleteLastPathComponent()
         }
         return nil
     }

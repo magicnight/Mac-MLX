@@ -419,8 +419,8 @@ public actor ModelLibraryManager {
     /// registry's keys, checks the copy against the checked-out
     /// `VLMModelFactory.swift` (under `swift test`) and both sets against the
     /// copy and the registries, so a bump that adds, drops or renames a key
-    /// fails there until the copy and these sets are refreshed. Stored lowercased — comparisons are case-insensitive
-    /// against `config.json`.
+    /// fails there until the copy and these sets are refreshed. Stored
+    /// lowercased — comparisons are case-insensitive against `config.json`.
     static let knownVLMTypes: Set<String> = [
         "paligemma",
         "qwen2_vl",

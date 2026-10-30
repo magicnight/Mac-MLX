@@ -298,8 +298,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   types upstream never registered: `fast_vlm`, `qwen3_5_vl` and `smolvlm2`
   (SmolVLM2 checkpoints say `smolvlm`). Every key of mlx-swift-lm 3.32.3's
   VLM registry is now classified, and a test compares that classification
-  with the registry the build resolved, so an mlx-swift-lm bump that adds a
-  key fails until it is placed. Gemma 4 and Qwen3.5/3.6, which that registry
+  with the registry the build resolved (under `swift test`, as CI and
+  ci-local's spm job run it, where a missing source fails the test rather
+  than skips it), so an mlx-swift-lm bump that adds a key fails until it is
+  placed. Gemma 4 and Qwen3.5/3.6, which that registry
   also lists, stay on the text path on purpose: a VLM load has no prompt
   cache, batching, replayed reasoning or history snapshots, which are what
   macMLX serves agents with, so their images are still dropped, as before.
