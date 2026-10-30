@@ -27,6 +27,8 @@ import Testing
 //   emptyToolsArrayStillBatches                     : 19_895
 //   concurrentSameModelDifferentPromptsNoCrossTalk  : 19_900
 //   streamingBatchRequestHonorsIncludeUsage         : 20_800
+//   batchedAnswerStartsAtItsFirstText               : 19_905
+//   batchedStreamedAnswerStartsAtItsFirstText       : 19_915
 
 @Suite("HummingbirdServerBatch")
 struct HummingbirdServerBatchTests {
@@ -51,6 +53,9 @@ struct HummingbirdServerBatchTests {
         /// which proves (or disproves) that the drain ran before the swap/load/
         /// unload it is meant to precede.
         private let currentlyLoadedModelIDProbe: (@Sendable () async -> String?)?
+        /// Chunks streamed before the echo, such as the blank lines a thinking
+        /// template puts after `</think>`. Default none.
+        private let leadingChunks: [String]
         private(set) var submitted: [String] = []
         private(set) var drainCalls = 0
         private(set) var loadedModelIDsAtDrain: [String?] = []
@@ -58,8 +63,10 @@ struct HummingbirdServerBatchTests {
         init(
             refuse: Set<String> = [],
             includePromptInEcho: Bool = false,
-            currentlyLoadedModelIDProbe: (@Sendable () async -> String?)? = nil
+            currentlyLoadedModelIDProbe: (@Sendable () async -> String?)? = nil,
+            leadingChunks: [String] = []
         ) {
+            self.leadingChunks = leadingChunks
             self.refuse = refuse
             self.includePromptInEcho = includePromptInEcho
             self.currentlyLoadedModelIDProbe = currentlyLoadedModelIDProbe
@@ -76,7 +83,11 @@ struct HummingbirdServerBatchTests {
             } else {
                 echoText = "batch:\(model)"
             }
+            let leadingChunks = leadingChunks
             return AsyncThrowingStream { continuation in
+                for text in leadingChunks {
+                    continuation.yield(GenerateChunk(text: text))
+                }
                 continuation.yield(GenerateChunk(text: echoText))
                 continuation.yield(GenerateChunk(
                     text: "",
@@ -388,6 +399,43 @@ struct HummingbirdServerBatchTests {
 
     /// A streaming batched request streams the seam's output as OpenAI SSE frames
     /// (through the same watchdog/splitter/`[DONE]` machinery as the single path).
+    /// A batched answer starts at its first non-whitespace text, as a
+    /// single-stream one does: a thinking model's blank lines after
+    /// `</think>` are not part of it.
+    @Test
+    func batchedAnswerStartsAtItsFirstText() async throws {
+        let seam = StubBatchServing(leadingChunks: ["<think>plan</think>", "\n\n"])
+        let server = HummingbirdServer(
+            engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
+            batchServing: seam)
+        let port = try await server.start(preferredPort: 19_905)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: chatBody("m"))
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(try chatContent(data) == "batch:m")
+        #expect(await seam.submittedModels() == ["m"], "the request must have been batched")
+    }
+
+    @Test
+    func batchedStreamedAnswerStartsAtItsFirstText() async throws {
+        let seam = StubBatchServing(leadingChunks: ["<think>plan</think>", "\n", " \n"])
+        let server = HummingbirdServer(
+            engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
+            batchServing: seam)
+        let port = try await server.start(preferredPort: 19_915)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        let (data, response) = try await postRaw(url, jsonObject: chatBody("m", stream: true))
+        await server.stop()
+
+        #expect(response.statusCode == 200)
+        #expect(streamedContent(data) == "batch:m")
+        #expect(await seam.submittedModels() == ["m"], "the request must have been batched")
+    }
+
     @Test
     func streamingBatchRequestStreamsViaSeam() async throws {
         let seam = StubBatchServing()

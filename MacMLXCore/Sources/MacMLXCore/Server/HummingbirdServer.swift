@@ -2943,19 +2943,7 @@ public actor HummingbirdServer {
             // chunk fully buffered as a partial reasoning tag carries its logprobs
             // forward until the next frame flushes).
             var pendingStreamLogprobs: [TokenLogprob] = []
-            // The answer starts at its first non-whitespace text, as on
-            // `/v1/messages` and `/v1/responses`: a thinking model emits blank
-            // lines after `</think>`, which are not an answer, and on a
-            // tool-only turn they made Apple's Foundation Models client store a
-            // blank response and replay the reasoning on it, apart from the
-            // tool calls.
-            var answerStarted = false
-            func answerText(_ text: String) -> String {
-                guard !answerStarted else { return text }
-                let trimmed = String(text.drop(while: \.isWhitespace))
-                answerStarted = !trimmed.isEmpty
-                return trimmed
-            }
+            var answerStart = AnswerStartTrimmer()
 
             let engine: any InferenceEngine
             do {
@@ -3035,7 +3023,7 @@ public actor HummingbirdServer {
                             pendingStreamLogprobs.append(contentsOf: logprobs)
                         }
                         let (reasoning, rawAnswer) = splitsReasoning ? splitter.push(chunk.text) : ("", chunk.text)
-                        let answer = answerText(rawAnswer)
+                        let answer = answerStart.push(rawAnswer)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
                         if !answer.isEmpty { delta["content"] = answer }
@@ -3043,7 +3031,7 @@ public actor HummingbirdServer {
                             // Flush any buffered tail into this terminal chunk.
                             let (rTail, aTail) = splitsReasoning ? splitter.finish() : ("", "")
                             let r = (delta["reasoning_content"] as? String ?? "") + rTail
-                            let a = (delta["content"] as? String ?? "") + answerText(aTail)
+                            let a = (delta["content"] as? String ?? "") + answerStart.push(aTail)
                             if !r.isEmpty { delta["reasoning_content"] = r }
                             if !a.isEmpty { delta["content"] = a }
                         } else if delta.isEmpty {
@@ -3229,7 +3217,10 @@ public actor HummingbirdServer {
 
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
-        let (reasoning, answer) = MessageSegmenter.splitReasoning(fullText)
+        let (reasoning, rawAnswer) = MessageSegmenter.splitReasoning(fullText)
+        // As on the single-stream path, the answer starts at its first
+        // non-whitespace text.
+        let answer = String(rawAnswer.drop(while: \.isWhitespace))
         var message: [String: Any] = ["role": "assistant", "content": answer]
         if let reasoning {
             message["reasoning_content"] = reasoning
@@ -3286,6 +3277,7 @@ public actor HummingbirdServer {
             // concern). In-stream <think> tags are still split correctly.
             let stallTimeout = await server.stallTimeoutSeconds
             var splitter = ReasoningStreamSplitter(startInReasoning: false)
+            var answerStart = AnswerStartTrimmer()
             let box = ChunkIteratorBox(stream)
             do {
                 loop: while true {
@@ -3306,7 +3298,8 @@ public actor HummingbirdServer {
                             completionTokens = usage.completionTokens
                             terminalUsage = usage.exposingCacheFigure(exposeCacheFigures)
                         }
-                        let (reasoning, answer) = splitter.push(chunk.text)
+                        let (reasoning, rawAnswer) = splitter.push(chunk.text)
+                        let answer = answerStart.push(rawAnswer)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
                         if !answer.isEmpty { delta["content"] = answer }
@@ -3314,7 +3307,7 @@ public actor HummingbirdServer {
                             // Flush any buffered tail into this terminal chunk.
                             let (rTail, aTail) = splitter.finish()
                             let r = (delta["reasoning_content"] as? String ?? "") + rTail
-                            let a = (delta["content"] as? String ?? "") + aTail
+                            let a = (delta["content"] as? String ?? "") + answerStart.push(aTail)
                             if !r.isEmpty { delta["reasoning_content"] = r }
                             if !a.isEmpty { delta["content"] = a }
                         } else if delta.isEmpty {
