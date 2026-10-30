@@ -77,7 +77,8 @@ reasoning. `top_p` of 0 or below samples greedily
 `topP` of 0 as no filter; Apple's Foundation Models client sends `.greedy` as
 `top_p: 0`. The answer starts at its first non-whitespace text, as on
 `/v1/messages` and `/v1/responses` (thinking templates put blank lines after
-`</think>`).
+`</think>`), on the batched path too. The legacy `/v1/completions`, `POST /`
+and `POST /v1` routes are this path and behave the same.
 
 An assistant message's `reasoning_content` (else `reasoning`, OpenRouter's
 spelling; a non-string value is ignored) is that turn's reasoning: it reaches
@@ -376,11 +377,13 @@ Response:
 ```
 
 The loaded model first, then every other chat model (text and vision) in the
-model directory, each under its alias when one is set. A request naming any of
-them loads it on demand. Embedders, rerankers and audio models are not listed.
-Ollama's `/api/tags` lists the same models. Xcode 27's locally hosted provider
-reads an empty list as a failed connection, which is why the list no longer
-waits for a model to be loaded.
+model directory in id order, each under its alias when one is set. A request
+naming any of them loads it on demand. Embedders, rerankers and audio models are
+not listed. Ollama's `/api/tags` lists the same models. Xcode 27's locally
+hosted provider reads an empty list as a failed connection, which is why the
+list no longer waits for a model to be loaded. A request with an `Origin` header
+gets only the loaded model (`listsModelLibrary`), as cache figures are withheld
+from it: a web page should not learn which models are downloaded.
 
 ---
 

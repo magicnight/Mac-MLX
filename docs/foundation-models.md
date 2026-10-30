@@ -7,17 +7,19 @@ an app that uses Apple's Foundation Models framework through
 Either one talks to a running macMLX server over HTTP, on
 `/v1/chat/completions`; nothing from macMLX is linked into the app. So:
 
-- macMLX must be running with its server on (it is on by default), or run
-  `macmlx serve`.
+- macMLX's server must be running: start it from the menu bar or in
+  Settings (turn on "Auto-start server on launch" to have it start with the
+  app), or run `macmlx serve`.
 - An app using the Foundation Models API needs macOS 27, which is where a
   third-party `LanguageModel` can drive a `LanguageModelSession`.
-- Any MLX checkpoint macMLX can load works, and nothing has to be loaded
-  first: `GET /v1/models` lists every downloaded chat model, and the first
-  request naming one loads it.
+- Nothing has to be loaded first: `GET /v1/models` lists every chat model in
+  macMLX's model directory, and the first request naming one loads it. Models
+  the app finds only in the Hugging Face cache are not listed.
 
-What follows was checked against a real `macmlx serve` on Qwen3.6-27B-4bit and
-Gemma 4 E4B (8-bit), with Xcode 27.1 and foundation-models-utilities at
-`cc3820d`.
+What follows was checked against a real `macmlx serve`: the Foundation Models
+API on Qwen3.6-27B-4bit and Gemma 4 E4B (8-bit) with foundation-models-utilities
+at `cc3820d`, and Xcode 27.1 on Qwen3.6-27B-4bit. Other MLX checkpoints go
+through the same server path and should behave the same, but were not run.
 
 ## Xcode 27
 
@@ -47,9 +49,9 @@ let answer = try await session.respond(to: "Why is the sky blue?")
 ```
 
 The client appends `/v1/chat/completions` to the URL, or only
-`/chat/completions` when the URL already has a `/v1` segment, so pass the
-server's address, never the full endpoint. With bearer auth on, pass
-`additionalHeaders: ["Authorization": "Bearer <key>"]`. The default URL session
+`/chat/completions` when the URL already has a version segment (`/v1`, `/v2`,
+…), so pass the server's address, never the full endpoint. With bearer auth on,
+pass `additionalHeaders: ["Authorization": "Bearer <key>"]`. The default URL session
 gives up after 60 seconds without a byte; loading a large model and prefilling a
 long prompt can take longer than that, so pass a `urlSessionConfiguration` with
 a larger `timeoutIntervalForRequest` if the model may not be loaded yet.
@@ -79,7 +81,10 @@ tokens, and with 60 lines of instructions 2,342 of 2,572.
   model's: Gemma 4 E4B often wrote Lyon's population as 5180000000000000000, as
   though it wanted a thousands separator after 518 and, refused one, carried on
   with zeros. An unbounded `Int` is held to the range of a 64-bit integer, so
-  it always parses; a `.range(…)` guide bounds it where that matters.
+  it always parses; a `.range(…)` guide bounds it where that matters. An
+  unbounded `Double` has no such limit: the constraint lets its digits run on,
+  so a model could write one until the token limit, or past what a `Double`
+  holds. It did not happen in these runs; a `.range(…)` guide closes it.
 - **Thinking models.** `maximumResponseTokens` counts the reasoning too. A
   small limit can be spent before the answer starts, and the client then
   throws "The model produced an empty response". With `.greedy`, Qwen3.6
@@ -89,8 +94,12 @@ tokens, and with 60 lines of instructions 2,342 of 2,572.
 - **Sampling.** The client itself refuses top-k sampling and a fixed seed, and
   sends `.greedy` as `top_p: 0`, which macMLX samples greedily.
 - **Capabilities.** `ChatCompletionsLanguageModel` declares vision, tool
-  calling, reasoning and guided generation for every model. macMLX does not
-  yet tell the app which of these the loaded checkpoint really has.
+  calling and reasoning for every model, and guided generation too unless it
+  is created with `supportsGuidedGeneration: false`. macMLX does not yet tell
+  the app which of these the loaded checkpoint really has.
+- **Browsers.** A request that carries an `Origin` header, as a web page's
+  does, sees only the loaded model in the list, so a page cannot learn which
+  models are downloaded.
 
 Not checked yet: images, a model other than these two, what the app sees when
 no server is running, and the Ollama endpoints.

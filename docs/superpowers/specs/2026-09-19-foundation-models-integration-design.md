@@ -471,21 +471,25 @@ What running it found, each fixed on the way:
 
 - **The empty model list was fatal, as suspected above.** With nothing loaded,
   Xcode showed a network error and could not add the provider. `GET /v1/models`
-  (and Ollama's `/api/tags`) now list every downloaded chat model, the loaded
-  one first, and the first request naming one loads it.
+  (and Ollama's `/api/tags`) now list every chat model in the model directory,
+  the loaded one first, and the first request naming one loads it. A request
+  with an `Origin` header still sees only the loaded model.
 - **Xcode sends no `max_tokens`**, and at the chat path's 2048 default
   Qwen3.6 spent the whole budget reasoning, so Xcode showed no answer. The
-  default is now the 32768 `/v1/responses` already used.
+  default is now the 32768 `/v1/responses` already used, and the batched
+  path's per-row ceiling (4096) was raised to match it.
 - **`.greedy` arrives as `top_p: 0` with no temperature**, which mlx-swift-lm
   reads as "no nucleus filter", so greedy sessions sampled. `top_p <= 0` now
   samples greedily.
 - **Answers began with the `\n\n` Qwen3.6's template puts after `</think>`.**
-  Chat completions now drops leading whitespace, as the other two shapes did.
+  Chat completions now drops leading whitespace on the single-stream and the
+  batched path, as the other two shapes did.
 - **An unbounded `integer` had no length limit**; Gemma wrote 300-odd digits,
   which Apple's parser read as a `Double` and refused as an `Int`. It is now
   held to `Int.min...Int.max`. The value can still be poor (Gemma pads
   518 with zeros, apparently wanting a thousands separator), which is the
-  model's, not the constraint's.
+  model's, not the constraint's. An unbounded `number` still has no digit
+  limit; it did not run away here, and is documented as a limit.
 
 The guided-generation table above is superseded: since v0.10.0's nested-schema
 work, flat, nested, array, `.count`, enum, `.range`, optional and `Double`
@@ -494,11 +498,11 @@ unions) is still a 400.
 
 B1 shipped in v0.10.0. B2 and B3 are not built, and the run changes their case
 rather than removing it: Apple's type drives macMLX unchanged, so the wrapper is
-no longer needed to make anything work. What it would still add is what the run
-also showed missing: `ChatCompletionsLanguageModel` declares vision, tool
-calling, reasoning and guided generation for every model, and a dead server
-surfaces as a connection error. Whether that earns a macOS 27-only SPM product
-is a separate decision.
+no longer needed to make anything work. What it would still add: per-checkpoint
+capabilities (`ChatCompletionsLanguageModel` declares vision, tool calling and
+reasoning for every model, and guided generation unless told otherwise), and a
+clear error when no server is running, which the run did not check. Whether
+that earns a macOS 27-only SPM product is a separate decision.
 
 The verification plan's "cannot be verified here" no longer holds for the
 models on this machine; images, other checkpoints, the dead-server error and
