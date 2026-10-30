@@ -61,18 +61,26 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// it so generation can choose the right code path (LLM gets the
     /// prompt cache; VLM bypasses it for now — multimodal cache keys
     /// would need to fold image bytes into the hash, deferred to a
-    /// follow-up).
+    /// follow-up). An LLM keeps the message generator its input processor
+    /// renders with, so `userInput(for:isVLM:messageGenerator:)` can build
+    /// the message dictionaries itself when history carries reasoning.
     private enum LoadedSupport {
         case none
-        case llm(ModelContainer)
+        case llm(ModelContainer, messageGenerator: any MessageGenerator)
         case vlm(ModelContainer)
 
         var container: ModelContainer? {
             switch self {
             case .none: return nil
-            case .llm(let c): return c
+            case .llm(let c, _): return c
             case .vlm(let c): return c
             }
+        }
+
+        /// The LLM's message generator; nil for a VLM or nothing loaded.
+        var messageGenerator: (any MessageGenerator)? {
+            if case .llm(_, let generator) = self { return generator }
+            return nil
         }
 
         var isVLM: Bool {
@@ -82,6 +90,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     }
 
     private var loadedSupport: LoadedSupport = .none
+
+    /// The resident LLM's message generator (nil for a VLM or no model), for
+    /// the batched path's prompt build, which lives in another file.
+    var loadedLLMMessageGenerator: (any MessageGenerator)? { loadedSupport.messageGenerator }
 
     /// The drain the engine runs after releasing a resident model, from
     /// `unload()`, from the catches in `load()` and `ensureDraftContainer`,
@@ -192,7 +204,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         container: ModelContainer?, draft: ModelContainer? = nil, batch: ModelContainer? = nil,
         model: LocalModel
     ) {
-        loadedSupport = container.map { .llm($0) } ?? .none
+        loadedSupport = container.map { .llm($0, messageGenerator: DefaultMessageGenerator()) } ?? .none
         draftContainer = draft
         loadedDraftModelID = draft == nil ? nil : "\(model.id)-draft"
         batchServingContainer = batch
@@ -502,7 +514,15 @@ public actor MLXSwiftEngine: InferenceEngine {
                         }
                     }
                 }
-                support = .llm(container)
+                // The generator the factory gave the input processor, chosen
+                // the same way (the configuration's, else the model's, else
+                // the default): Gemma's drops system messages.
+                let messageGenerator = await container.perform { context -> any MessageGenerator in
+                    context.configuration.messageGenerator
+                        ?? (context.model as? LLMModel)?.messageGenerator(tokenizer: context.tokenizer)
+                        ?? DefaultMessageGenerator()
+                }
+                support = .llm(container, messageGenerator: messageGenerator)
 
             case .mlxVLM:
                 let container = try await VLMModelFactory.shared.loadContainer(
@@ -543,7 +563,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             // the container's serial mutex is free (the drive loop later holds it for
             // whole cohorts). A VLM never batches, so clear the state for it.
             switch support {
-            case .llm(let container):
+            case .llm(let container, _):
                 await refreshBatchServingCoverage(container: container)
             case .vlm, .none:
                 clearBatchServingState()
@@ -1056,26 +1076,23 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     /// Whether the rendered prompt for `request` ends inside an open
     /// `<think>` block. Applies the chat template exactly as `generate`
-    /// does (same `Chat.Message` mapping + `container.prepare`), decodes
+    /// does (the same `userInput(for:isVLM:messageGenerator:)` — tools,
+    /// reasoning and template kwargs — and `container.prepare`), decodes
     /// the resulting tokens, and inspects the tail via
     /// `MessageSegmenter.promptOpensThink`. Returns false if no model is
     /// loaded or the template can't be applied.
     public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
-        guard let container = loadedSupport.container else { return false }
+        let support = loadedSupport
+        guard let container = support.container else { return false }
         // Borrows the container across an await: counted like a generation,
         // so an unload that lands meanwhile drains once this lets go (#136).
         beginGenerationRun()
         defer { endGenerationRun() }
-        // Same tool-aware mapping as generation, without image attachments —
-        // this heuristic only inspects the rendered token tail.
-        let chatMessages: [Chat.Message] = request.allMessages.map {
-            Self.upstreamChatMessage(from: $0, images: [])
-        }
+        // Without image attachments (`isVLM: false`): this heuristic only
+        // inspects the rendered token tail.
         do {
-            let lmInput = try await container.prepare(input: UserInput(
-                chat: chatMessages,
-                additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
-            ))
+            let lmInput = try await container.prepare(input: Self.userInput(
+                for: request, isVLM: false, messageGenerator: support.messageGenerator, logsDroppedInputs: false))
             let ids = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             let text = await container.decode(tokenIds: ids)
             return MessageSegmenter.promptOpensThink(text)
@@ -1085,8 +1102,9 @@ public actor MLXSwiftEngine: InferenceEngine {
     }
 
     /// How many tokens `request`'s prompt renders to: the `UserInput`
-    /// generation builds (`userInput(for:isVLM:)` — tools, template kwargs
-    /// and, on a VLM, images, whose image tokens count) through the same
+    /// generation builds (`userInput(for:isVLM:messageGenerator:)` — tools,
+    /// reasoning, template kwargs and, on a VLM, images, whose image tokens
+    /// count) through the same
     /// `container.prepare`, so it equals the `promptTokens` a cold-cache
     /// generation of the request reports. Throws `modelNotLoaded` with no
     /// model, and whatever applying the template throws.
@@ -1097,16 +1115,30 @@ public actor MLXSwiftEngine: InferenceEngine {
         // see `promptOpensThinkBlock`.
         beginGenerationRun()
         defer { endGenerationRun() }
-        let lmInput = try await container.prepare(input: Self.userInput(for: request, isVLM: support.isVLM))
+        let lmInput = try await container.prepare(input: Self.userInput(
+            for: request, isVLM: support.isVLM, messageGenerator: support.messageGenerator))
         return lmInput.text.tokens.size
     }
 
     /// The `UserInput` `request` renders from — the one place generation
-    /// (`runGeneration`) and `countPromptTokens` build it, so a count renders
-    /// the very prompt generation would. `logsDroppedInputs` is false for a
-    /// second build of the same request, so its notes (dropped images, dropped tool specs) are logged once.
-    private static func userInput(
-        for request: GenerateRequest, isVLM: Bool, logsDroppedInputs: Bool = true
+    /// (`runGeneration`), `countPromptTokens`, `promptOpensThinkBlock` and the
+    /// batched path build it, so all of them render one prompt.
+    /// `logsDroppedInputs` is false for a second build of the same request,
+    /// so its notes (dropped images, dropped tool specs) are logged once.
+    ///
+    /// `messageGenerator` is the loaded LLM's (nil for a VLM). When an
+    /// assistant message carries reasoning, the input is built as the
+    /// generator's message dictionaries with that reasoning added as
+    /// `reasoning_content` (see `injectingReasoning`), which the input
+    /// processor passes to the template unchanged: `Chat.Message` has no
+    /// reasoning slot. Otherwise it is the `.chat` input it always was, so a
+    /// request without reasoning renders exactly as before. A VLM's processor
+    /// handles images on `.chat`, so a VLM never gets the reasoning.
+    static func userInput(
+        for request: GenerateRequest,
+        isVLM: Bool,
+        messageGenerator: (any MessageGenerator)?,
+        logsDroppedInputs: Bool = true
     ) -> UserInput {
         // Map our ChatMessage array to MLXLMCommon Chat.Message array.
         // For VLM models, fold each message's `images` into the `Chat.Message`
@@ -1151,11 +1183,51 @@ public actor MLXSwiftEngine: InferenceEngine {
         // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
         // to the plain Sendable shape the upstream API expects. Tools (when
         // present) reach the template via `UserInput.tools`.
-        return UserInput(
-            chat: chatMessages,
-            tools: toolSpecs,
-            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() }
-        )
+        let additionalContext = request.templateKwargs?.mapValues { $0.toSendable() }
+
+        let assistantReasoning = request.allMessages.filter { $0.role == .assistant }.map(\.reasoning)
+        if let messageGenerator, assistantReasoning.contains(where: { $0?.isEmpty == false }) {
+            if let messages = injectingReasoning(
+                messageGenerator.generate(messages: chatMessages), assistantReasoning: assistantReasoning) {
+                return UserInput(messages: messages, tools: toolSpecs, additionalContext: additionalContext)
+            }
+            if logsDroppedInputs {
+                Task.detached {
+                    await LogManager.shared.debug(
+                        "Not rendering replayed reasoning: the message generator's assistant turns "
+                            + "do not match the request's",
+                        category: .inference
+                    )
+                }
+            }
+        }
+        return UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
+    }
+
+    /// `messages` — a message generator's dictionaries for a conversation —
+    /// with the k-th assistant dictionary's `reasoning_content` set to the
+    /// k-th entry of `assistantReasoning` (the conversation's assistant
+    /// messages' reasoning, in order) when that is non-empty. The thinking
+    /// templates read that key (Qwen3.x, Mellum2, GLM; Gemma 4 also reads
+    /// `reasoning`) and render it only where they choose, typically for the
+    /// assistant turns after the last user query.
+    ///
+    /// A generator may drop messages (Gemma's drops system ones) but never an
+    /// assistant one, so the k-th assistant dictionary is the k-th assistant
+    /// message. Nil when the counts differ anyway, rather than guess.
+    static func injectingReasoning(
+        _ messages: [[String: any Sendable]],
+        assistantReasoning: [String?]
+    ) -> [[String: any Sendable]]? {
+        let assistantIndices = messages.indices.filter { messages[$0]["role"] as? String == "assistant" }
+        guard assistantIndices.count == assistantReasoning.count else { return nil }
+        var out = messages
+        for (index, reasoning) in zip(assistantIndices, assistantReasoning) {
+            if let reasoning, !reasoning.isEmpty {
+                out[index]["reasoning_content"] = reasoning
+            }
+        }
+        return out
     }
 
     // MARK: Prompt cache management
@@ -1453,7 +1525,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             prefill: PrefillParameters(chunking: .remainder)
         )
 
-        let userInput = Self.userInput(for: request, isVLM: isVLM)
+        let userInput = Self.userInput(for: request, isVLM: isVLM, messageGenerator: support.messageGenerator)
 
         status = .generating
 
@@ -1526,7 +1598,9 @@ public actor MLXSwiftEngine: InferenceEngine {
                 // A second copy of the same `UserInput`: `prepare` consumed the
                 // first, and the history-boundary snapshot renders it again.
                 // The first build already logged anything it dropped.
-                historyInput: Self.userInput(for: request, isVLM: false, logsDroppedInputs: false),
+                historyInput: Self.userInput(
+                    for: request, isVLM: false, messageGenerator: support.messageGenerator,
+                    logsDroppedInputs: false),
                 container: container,
                 generateParams: generateParams,
                 sampling: params,

@@ -8,7 +8,9 @@
 /// after a turn — the prompt, the generated tokens and the stop token — is not
 /// a prefix of the next turn's prompt on templates that render a previous
 /// assistant turn differently from how the model produced it (Qwen3.6 and
-/// Mellum2 drop reasoning from history), and the full prompt is not one either
+/// Mellum2 render a turn's reasoning only for the turns after the last user
+/// query, and only as the client replays it, so a new query drops it from
+/// history), and the full prompt is not one either
 /// when the generation prompt itself is re-rendered (Qwen3.6 opens `<think>`
 /// `\n` and closes the same turn as `<think>` `\n\n` `</think>`). Serving the
 /// shared prefix out of either then needs a trim, which hybrid

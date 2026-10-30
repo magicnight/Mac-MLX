@@ -148,7 +148,7 @@ extension MLXSwiftEngine: BatchGenerationServing {
         // real error cleanly.
         let promptTokens: [Int]
         do {
-            let userInput = batchServingUserInput(from: request)
+            let userInput = batchServingUserInput(from: request, messageGenerator: loadedLLMMessageGenerator)
             promptTokens = try await admissionProcessor.prepare(userInput)
         } catch {
             return nil
@@ -334,22 +334,20 @@ extension MLXSwiftEngine: BatchGenerationServing {
 
     // MARK: - Prompt assembly
 
-    /// Build the `UserInput` for a batched request, mirroring `runGeneration`'s
-    /// text-only mapping (chat messages, tool specs, template kwargs). The batched
-    /// path is dense-LLM-only by the coverage gate, so image attachments are dropped
-    /// exactly as the single-stream LLM path drops them.
+    /// Build the `UserInput` for a batched request with `runGeneration`'s own
+    /// builder (`userInput(for:isVLM:messageGenerator:)` — chat messages, tool
+    /// specs, reasoning, template kwargs), text-only. The batched path is
+    /// dense-LLM-only by the coverage gate, so image attachments are dropped
+    /// exactly as the single-stream LLM path drops them; the single-stream
+    /// build of a declined request logs them.
     ///
-    /// `nonisolated`: it reads only the `Sendable` `request` and static helpers, so
+    /// `nonisolated`: it reads only `Sendable` arguments and static helpers, so
     /// its result is a disconnected value — safe to hand to the off-actor
     /// `processor.prepare(input:)` without a data-race diagnostic.
-    private nonisolated func batchServingUserInput(from request: GenerateRequest) -> UserInput {
-        let chatMessages: [Chat.Message] = request.allMessages.map { message in
-            Self.upstreamChatMessage(from: message, images: [])
-        }
-        let toolSpecs = request.tools.map { Self.toolSpecs(from: $0) }
-        return UserInput(
-            chat: chatMessages,
-            tools: toolSpecs,
-            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() })
+    private nonisolated func batchServingUserInput(
+        from request: GenerateRequest,
+        messageGenerator: (any MessageGenerator)?
+    ) -> UserInput {
+        Self.userInput(for: request, isVLM: false, messageGenerator: messageGenerator, logsDroppedInputs: false)
     }
 }
