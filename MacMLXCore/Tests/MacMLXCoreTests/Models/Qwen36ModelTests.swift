@@ -12,7 +12,7 @@ import XCTest
 /// `model_type` strings Qwen3.5 already uses. mlx-swift-lm 3.32.3's
 /// `Qwen35Model` / `Qwen35MoEModel` (registered in `LLMModelFactory` under
 /// those two keys) and macMLX's own format classifier
-/// (`ModelLibraryManager.knownVLMTypes`, which does NOT list bare `qwen3_5`)
+/// (`ModelLibraryManager.vlmTypesServedAsText`, which keeps `qwen3_5` text)
 /// therefore already resolve Qwen3.6 checkpoints with zero code changes —
 /// this test exists to PROVE that against real downloaded weights, not to
 /// add support.

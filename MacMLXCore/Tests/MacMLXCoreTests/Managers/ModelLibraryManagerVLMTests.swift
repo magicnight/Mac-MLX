@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import MLXLLM
+import MLXVLM
 @testable import MacMLXCore
 
 /// Filesystem-backed tests run serialised — swift-testing's default
@@ -94,6 +96,56 @@ struct ModelLibraryManagerVLMTests {
         let byID = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0.format) })
         #expect(byID["qwen3-text"] == .mlx)
         #expect(byID["qwen-vl"] == .mlxVLM)
+    }
+
+    /// The keys of mlx-swift-lm's `VLMTypeRegistry.shared` at the pinned
+    /// revision (3.32.3), as `VLMModelFactory.swift` lists them. Refresh on
+    /// every mlx-swift-lm bump; the tests below then say which side each new
+    /// key belongs on.
+    private static let upstreamVLMRegistryKeys: Set<String> = [
+        "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
+        "qwen3_5", "qwen3_5_moe", "idefics3", "gemma3", "gemma4", "gemma4_unified",
+        "smolvlm", "fastvlm", "llava_qwen2", "pixtral", "mistral3", "lfm2_vl",
+        "lfm2-vl", "glm_ocr", "muse_glimmer",
+    ]
+
+    /// Every registry key is classified exactly once: loaded as a VLM, or on
+    /// purpose as text. A stale list (it once held `fast_vlm` and
+    /// `qwen3_5_vl`, which upstream never registered) fails here.
+    @Test
+    func everyVLMRegistryKeyIsClassifiedOnce() async {
+        let vlm = ModelLibraryManager.knownVLMTypes
+        let text = ModelLibraryManager.vlmTypesServedAsText
+        #expect(vlm.isDisjoint(with: text))
+        #expect(vlm.union(text) == Self.upstreamVLMRegistryKeys)
+        for key in Self.upstreamVLMRegistryKeys {
+            #expect(await VLMTypeRegistry.shared.contains(key), "\(key) is not in the VLM registry")
+        }
+    }
+
+    /// A type kept on the text path must be one the LLM factory loads, or
+    /// its checkpoints would not load at all.
+    @Test
+    func typesServedAsTextLoadThroughTheLLMFactory() async {
+        for key in ModelLibraryManager.vlmTypesServedAsText {
+            #expect(await LLMTypeRegistry.shared.contains(key), "\(key) is not in the LLM registry")
+        }
+    }
+
+    @Test(arguments: ["fastvlm", "llava_qwen2", "qwen3_vl_moe", "muse_glimmer", "lfm2-vl"])
+    func detectsTheVLMTypesTheListUsedToMiss(modelType: String) async throws {
+        let temp = try TemporaryDirectory()
+        try writeModel(in: temp.url, name: "vlm-\(modelType)", modelType: modelType)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models.first?.format == .mlxVLM)
+    }
+
+    @Test(arguments: ["gemma4", "gemma4_unified", "qwen3_5", "qwen3_5_moe"])
+    func multimodalAgentModelsStayOnTheTextPath(modelType: String) async throws {
+        let temp = try TemporaryDirectory()
+        try writeModel(in: temp.url, name: "text-\(modelType)", modelType: modelType)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models.first?.format == .mlx)
     }
 
     // MARK: - Helpers
