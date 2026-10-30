@@ -49,12 +49,20 @@ struct NumberRange: Hashable, Sendable {
         self.integersOnly = integersOnly
     }
 
+    /// An integer's bounds, a missing side being the limit of `Int`: a value a
+    /// typed client cannot hold is never a usable answer, and without a limit
+    /// the digits of an unbounded integer could run on to `max_tokens`.
     @usableFromInline
     init(_ bounds: SchemaIntegerBounds) {
         self.init(
-            lower: bounds.minimum.map(SchemaDecimal.init), lowerOpen: false,
-            upper: bounds.maximum.map(SchemaDecimal.init), upperOpen: false, integersOnly: true)
+            lower: SchemaDecimal(bounds.minimum ?? Int.min), lowerOpen: false,
+            upper: SchemaDecimal(bounds.maximum ?? Int.max), upperOpen: false, integersOnly: true)
     }
+
+    /// Any integer an `Int` holds: what `"type": "integer"` reads as when the
+    /// schema gives no bounds.
+    @usableFromInline
+    static let anyInt = NumberRange(SchemaIntegerBounds.anyInt)
 
     @usableFromInline
     init(_ bounds: SchemaNumberBounds) {

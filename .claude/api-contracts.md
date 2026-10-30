@@ -70,6 +70,15 @@ figure is a prefix oracle against every cached prompt.
 
 `max_completion_tokens` is accepted as the newer spelling of `max_tokens` and
 wins when both are present (the precedence mlx-lm's and vLLM's servers use).
+With neither, the budget is 32768 (`defaultMaxOutputTokens`, as on
+`/v1/responses`): Xcode 27 sends neither, and a thinking model can spend 2048
+reasoning. `top_p` of 0 or below samples greedily
+(`GenerationParameters.samplingTemperature`), since mlx-swift-lm reads a
+`topP` of 0 as no filter; Apple's Foundation Models client sends `.greedy` as
+`top_p: 0`. The answer starts at its first non-whitespace text, as on
+`/v1/messages` and `/v1/responses` (thinking templates put blank lines after
+`</think>`), on the batched path too. The legacy `/v1/completions`, `POST /`
+and `POST /v1` routes are this path and behave the same.
 
 An assistant message's `reasoning_content` (else `reasoning`, OpenRouter's
 spelling; a non-string value is ignored) is that turn's reasoning: it reaches
@@ -151,9 +160,9 @@ Request (the fields acted on; anything else is accepted and ignored):
 - `text.format` is rebuilt as the chat `response_format` and decoded by
   `ResponseFormatDecoder`; with tools or images it is a 400, as on chat.
 - `reasoning.effort` `"none"`/`"minimal"` sets `enable_thinking=false`.
-- `max_output_tokens` absent → 32768 (`responsesDefaultMaxOutputTokens`), not
-  the chat path's 2048: Codex never sends it, and a thinking model spends
-  2048 before its tool call. An explicit value is honored.
+- `max_output_tokens` absent → 32768 (`defaultMaxOutputTokens`, shared with
+  chat completions): Codex never sends it, and a thinking model spends 2048
+  before its tool call. An explicit value is honored.
 - Body limit 64 MB (`responsesBodyLimitBytes`, 413 `request_too_large`
   above it), not the 2 MB route default chat uses: the whole conversation
   is replayed every turn.
@@ -366,6 +375,15 @@ Response:
   ]
 }
 ```
+
+The loaded model first, then every other chat model (text and vision) in the
+model directory in id order, each under its alias when one is set. A request
+naming any of them loads it on demand. Embedders, rerankers and audio models are
+not listed. Ollama's `/api/tags` lists the same models. Xcode 27's locally
+hosted provider reads an empty list as a failed connection, which is why the
+list no longer waits for a model to be loaded. A request with an `Origin` header
+gets only the loaded model (`listsModelLibrary`), as cache figures are withheld
+from it: a web page should not learn which models are downloaded.
 
 ---
 

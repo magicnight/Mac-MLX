@@ -25,11 +25,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   text. `reasoning.effort` `"none"` or `"minimal"` turns a thinking
   template's `enable_thinking` off. Without `max_output_tokens` (Codex sends
   none, and has no setting to send one) a response may run to 32,768 tokens,
-  not the chat path's 2,048, so a long think still reaches its tool call. A
-  `system` or `developer` item after the first turn is folded into a user
-  turn, since many chat templates accept a system turn only first, at the
-  place it was sent: it is appended to the user turn just before it, or,
-  after an assistant turn or a tool output, starts a user turn of its own
+  as a chat completion now may (see below), so a long think still reaches
+  its tool call. A `system` or `developer` item after the first turn is
+  folded into a user turn, since many chat templates accept a system turn
+  only first, at the place it was sent: it is appended to the user turn
+  just before it, or, after an assistant turn or a tool output, starts a
+  user turn of its own
   that a user message right after it joins. Earlier turns are never
   rewritten, so folding no longer forces them to be prefilled again, and the
   prompt cache serves them on the next turn on hybrid (linear-attention) and
@@ -145,6 +146,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `tool_result`s still becomes a user turn of its own, so from that request
   on those templates stop rendering the loop's earlier reasoning.
 
+- **Xcode 27 and Apple's Foundation Models client, checked end to end.** I
+  ran a real `macmlx serve` behind Xcode 27's locally hosted model provider
+  on Qwen3.6-27B-4bit, and behind `ChatCompletionsLanguageModel` from
+  apple/foundation-models-utilities on Qwen3.6-27B-4bit and Gemma 4 E4B.
+  Xcode lists the downloaded models, loads the one picked when the first
+  message is sent, and answers follow-ups in the same conversation. Through
+  the Foundation Models API, `respond` and `streamResponse`, sessions over
+  several turns (the reasoning a session records reaches the template),
+  tools and tool loops (served from the prompt cache: on Qwen3.6 the turn
+  after the tool output reused 402 of 429 prompt tokens), `.greedy`, and
+  guided generation for flat, nested, array, enum, `.range` and optional
+  `@Generable` types (and `Double`, run on Gemma only), streamed or not, all
+  work. `@Guide(.pattern)` is a 400, and on a thinking model `.greedy` can
+  reason in a loop until the limit. An unbounded `Double` has no digit limit
+  in the constraint, so a model could run one on; it did not in these runs.
+  It took the two changes below and the last three fixes under Fixed.
+  Setup, what was checked on which model, and the limits are on
+  [Xcode 27 and Foundation Models](docs/foundation-models.md). Not checked
+  yet: images, other models, what an app sees with no server running, and
+  the Ollama endpoints.
+- **`GET /v1/models` lists every chat model in the model directory**, the
+  loaded one first and the rest in id order, each under its alias when one
+  is set, not only the loaded one. A request naming any of them loads it, as
+  before. Embedders, rerankers and audio models are not listed, nor are
+  models the app finds only in the Hugging Face cache. Ollama's `/api/tags`
+  lists the same models. With nothing loaded the list was empty, and Xcode
+  27 reads an empty list as a failed connection, so it could not be set up
+  until a model had been loaded by hand. A request that carries an `Origin`
+  header, as a web page's does, still sees only the loaded model, so that a
+  page cannot learn which models are downloaded.
+- **A chat completion with no `max_tokens` or `max_completion_tokens` may
+  run to 32,768 tokens**, as on `/v1/responses`, not 2,048. Xcode 27 sends
+  neither, and a thinking model can spend 2,048 tokens reasoning: in one
+  Xcode conversation Qwen3.6-27B-4bit did, and Xcode showed no answer. The
+  legacy `/v1/completions`, `POST /` and `POST /v1` routes, which take the
+  chat path, get the same budget. The continuous batcher's per-row ceiling
+  rose from 4,096 to 32,768 with it, so a batched request is not cut short
+  of that budget (and an explicit `max_tokens` above 4,096 is no longer cut
+  to 4,096 when the request is batched; above 32,768 it still is, while the
+  single-stream path honors it). The cost is that the batcher's rows, up to
+  32 of them, may each run eight times longer than before, with no memory
+  guard over the batch, and a model swap waits for that cohort to finish.
+  An explicit limit is otherwise honored as before, and the Ollama
+  endpoints keep their 2,048 default for `num_predict`.
+
 ### Fixed
 
 - Agent turns now reuse the previous turn's history on hybrid
@@ -222,6 +268,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `/v1/responses` does, and answer a larger one with a 413 in Anthropic's
   envelope (`request_too_large`).
 - A tool-calling request that arrived while another request was being served on a model the continuous batcher covers (the dense Qwen 2/3, Llama and Gemma families) could be batched, and the batched path never parsed tool calls, so the call came back as plain text in `content` instead of `tool_calls`. A request that offers tools now always takes the single-stream path; `tool_choice: "none"` and `tools: []` still batch, since there is nothing to parse. A lone request on an idle server was never affected (the batcher hands it to the single-stream path), which is why this survived since v0.6: it takes concurrency, such as an agent running subagents. The cost is that concurrent tool-using agents now queue on the single-stream path instead of batching, until the batched path learns to parse tool calls. Covered by stub tests; I have no batch-covered checkpoint locally to reproduce it on real weights.
+- A chat completion's answer started with the blank lines a thinking
+  template puts after `</think>` (Qwen3.6's `\n\n`), so Apple's Foundation
+  Models client showed every answer after two empty lines, and on a turn
+  that only called tools it stored those lines as a response of its own and
+  replayed the reasoning on that blank assistant message, apart from the
+  tool calls. The answer now starts at its first non-whitespace text,
+  streamed or not and batched or not (the legacy completion routes too), as
+  `/v1/messages` and `/v1/responses` already did. The Ollama endpoints are
+  unchanged.
+- `top_p: 0` sampled the whole vocabulary at the requested or default
+  temperature, since mlx-swift-lm reads a `topP` of 0 as no nucleus filter.
+  Apple's Foundation Models client sends `.greedy` as exactly that, with no
+  temperature, so a greedy session sampled at random. A
+  `top_p` of 0 or below now samples greedily; three greedy runs of one
+  prompt on Gemma 4 E4B gave the same answer.
+- An `integer` with no bounds in a `response_format` schema took any number
+  of digits. Gemma 4 E4B wrote over 300 digits for a city's population,
+  which Apple's client read as a `Double` (`5.18e+307`) and failed to parse
+  as the `Int` it asked for. Such an integer is now held to the range of a 64-bit
+  integer, `Int.min` to `Int.max`, so it always parses. The value is still
+  the model's to choose within it, and Gemma often filled it with zeros
+  (5180000000000000000); a `.range` guide bounds it where that matters.
 
 ## [0.10.0] - 2026-10-29
 

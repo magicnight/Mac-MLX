@@ -32,10 +32,6 @@ enum SchemaScalarState: Hashable, Sendable {
     case numberAfterExp
     case numberAfterExpSign
     case numberExpDigits
-    // Integer only
-    case intAfterMinus
-    case intAfterZero
-    case intDigits
     // Number or integer within a range (scalar node `node`): judged digit by
     // digit against the range, see ``NumberRange``.
     /// Read `-`; a digit must follow.
@@ -64,8 +60,7 @@ enum SchemaScalarState: Hashable, Sendable {
     @usableFromInline
     func isCompleteNumber(program: SchemaProgram) -> Bool {
         switch self {
-        case .numberAfterLeadingZero, .numberIntDigits, .numberFracDigits, .numberExpDigits,
-            .intAfterZero, .intDigits:
+        case .numberAfterLeadingZero, .numberIntDigits, .numberFracDigits, .numberExpDigits:
             return true
         case .bounded(let node, let negative, let mantissa, let scale, let phase):
             guard phase != .afterDot, case .boundedNumber(let range) = program.scalars[Int(node)] else { return false }
@@ -114,11 +109,6 @@ enum SchemaScalarState: Hashable, Sendable {
             if byte == SchemaBytes.minus { return .numberAfterMinus }
             if byte == SchemaBytes.zero { return .numberAfterLeadingZero }
             if SchemaBytes.isDigit1to9(byte) { return .numberIntDigits }
-            return nil
-        case .integer:
-            if byte == SchemaBytes.minus { return .intAfterMinus }
-            if byte == SchemaBytes.zero { return .intAfterZero }
-            if SchemaBytes.isDigit1to9(byte) { return .intDigits }
             return nil
         case .boundedNumber(let range):
             if byte == SchemaBytes.minus { return range.admitsNegativeSign ? .boundedMinus(node: node) : nil }
@@ -196,17 +186,6 @@ enum SchemaScalarState: Hashable, Sendable {
 
         case .numberExpDigits:
             return SchemaBytes.isDigit(byte) ? .consumed(.numberExpDigits) : .endedBefore
-
-        case .intAfterMinus:
-            if byte == SchemaBytes.zero { return .consumed(.intAfterZero) }
-            if SchemaBytes.isDigit1to9(byte) { return .consumed(.intDigits) }
-            return .rejected
-
-        case .intAfterZero:
-            return .endedBefore
-
-        case .intDigits:
-            return SchemaBytes.isDigit(byte) ? .consumed(.intDigits) : .endedBefore
 
         case .boundedMinus(let node):
             guard case .boundedNumber(let range) = program.scalars[Int(node)],

@@ -317,8 +317,14 @@ public actor MLXSwiftEngine: InferenceEngine {
     var batchServingContainer: ModelContainer?
 
     /// Hard per-row token ceiling for the batched path (safety net above each row's
-    /// own `maxTokens`), matching ``BatchScheduler``'s default.
-    static let batchServingGlobalMaxTokens = 4096
+    /// own `maxTokens`). No lower than the server's default output budget
+    /// (`HummingbirdServer.defaultMaxOutputTokens`), or a batched request that
+    /// names no limit would stop short of the budget a single-stream one gets.
+    /// The cost: every row of a cohort (32 by default) may now run eight times
+    /// as long as at the old 4096, with no memory guard over the batch, and a
+    /// model swap waits for the cohort to drain. Routing requests without a
+    /// limit away from the batcher instead would mean they never batch.
+    static let batchServingGlobalMaxTokens = 32_768
 
     /// Max decode steps the drive loop runs in ONE `container.perform` before it
     /// returns to release the model mutex, then re-acquires it to continue the same
@@ -1522,32 +1528,7 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         let params = request.parameters
 
-        // Map GenerationParameters to mlx-swift-lm's GenerateParameters.
-        // temperature/topP: our values are Double, MLXLLM uses Float.
-        // KV-cache quantization (Track E): nil defers to the upstream defaults
-        // (no quantization; group size 64; start 0). These are honored on the
-        // stock LLM path, the speculative path, and the VLM path — all of which
-        // build their `TokenIterator` from these parameters. They are NOT honored
-        // on the custom-processor path (logit_bias / XTC / logprobs / constrained),
-        // whose `TokenIterator(input:model:cache:processor:sampler:…)` initializer
-        // carries no quantization parameters; that combination is logged and the
-        // KV-quant request silently deferred (see `runLLMGeneration`).
-        // `chunking: .remainder` restores the legacy prefill stride and reserved
-        // tail that mlx-swift-lm 3.32.3 replaced with `.balanced` by default.
-        // Checked by reading against 3.31.4 for the generic `LLMModel` path and
-        // every VLM path; it does not cover Gemma3Text, whose prefill 3.32.3
-        // reworked on its own (it now chunks at 128 regardless), and no
-        // output-level comparison was possible here. Moving to `.balanced` is a
-        // measured change of its own, not something a dependency bump decides.
-        let generateParams = GenerateParameters(
-            maxTokens: params.maxTokens,
-            kvBits: params.kvBits,
-            kvGroupSize: params.kvGroupSize ?? 64,
-            quantizedKVStart: params.quantizedKVStart ?? 0,
-            temperature: Float(params.temperature),
-            topP: Float(params.topP),
-            prefill: PrefillParameters(chunking: .remainder)
-        )
+        let generateParams = params.mlxGenerateParameters
 
         let userInput = Self.userInput(for: request, isVLM: isVLM, messageGenerator: support.messageGenerator)
 
@@ -1784,7 +1765,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         let xtcThreshold = sampling.xtcThreshold
         let wantsLogprobs = sampling.logprobs
         let topLogprobs = sampling.topLogprobs ?? 0
-        let usesXTC = (xtcProbability ?? 0) > 0 && sampling.temperature > 0
+        let usesXTC = (xtcProbability ?? 0) > 0 && sampling.samplingTemperature > 0
         let usesCustomPipeline = responseFormat != nil || logitBias != nil || usesXTC || wantsLogprobs
         // This flag also keeps our logit processors out of speculative decoding,
         // where mlx-swift-lm 3.32.3's `LogitProcessor.copy()` would hand the

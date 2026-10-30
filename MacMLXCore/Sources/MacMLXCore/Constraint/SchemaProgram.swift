@@ -48,7 +48,6 @@ final class SchemaProgram: Sendable {
     enum ScalarKind: Equatable, Sendable {
         case string
         case number
-        case integer
         case boolean
         /// The enum values.
         case stringEnum([SchemaLiteral])
@@ -92,7 +91,7 @@ final class SchemaProgram: Sendable {
             case .number:
                 return addScalar(.number)
             case .integer:
-                return addScalar(.integer)
+                return addScalar(.boundedNumber(NumberRange.anyInt))
             case .boundedInteger(let bounds):
                 return addScalar(.boundedNumber(NumberRange(bounds)))
             case .boundedNumber(let bounds):

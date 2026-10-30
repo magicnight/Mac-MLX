@@ -57,7 +57,7 @@ private struct ChatCompletionRequest: Decodable, Sendable {
     /// OpenAI's newer spelling of `max_tokens` (which OpenAI now marks
     /// deprecated). Apple's Foundation Models client sends only this one (its
     /// `maximumResponseTokens`), so without it that setting silently fell back
-    /// to the 2048 default. When a client sends both, this one wins — the same
+    /// to the default. When a client sends both, this one wins — the same
     /// precedence as mlx-lm's and vLLM's servers.
     let max_completion_tokens: Int?
     /// OpenAI `tools` — an array of `{"type":"function","function":{name,
@@ -1018,6 +1018,12 @@ public actor HummingbirdServer {
     /// with OpenAI's `model_not_found` code.
     public typealias ModelResolver = @Sendable (String) async -> LocalModel?
 
+    /// Async listing of the models on disk, for `GET /v1/models` and Ollama's
+    /// `/api/tags`. Every chat model in it can be named by a request and is
+    /// loaded on demand through the resolver, so the lists show them all, not
+    /// only the loaded one.
+    public typealias ModelLister = @Sendable () async -> [LocalModel]
+
     /// Optional hook the caller can install to perform the actual
     /// load through a layer above the raw engine (e.g. GUI's
     /// `EngineCoordinator`, which also maintains observable state
@@ -1040,6 +1046,10 @@ public actor HummingbirdServer {
     /// the explicitly-loaded model can answer). The CLI's
     /// `ServeCommand` wires this up against `ModelLibraryManager.scan`.
     private let modelResolver: ModelResolver
+
+    /// Caller-supplied library listing (see ``ModelLister``). `nil` lists
+    /// only the loaded model, as before it existed.
+    private let modelLister: ModelLister?
 
     /// Optional hook used by cold-swap instead of raw engine calls.
     /// GUI sets this to route through `EngineCoordinator.load(_:)` so
@@ -1336,6 +1346,7 @@ public actor HummingbirdServer {
     public init(engine: any InferenceEngine, apiKey: String? = nil) {
         self.engineProvider = { engine }
         self.modelResolver = { _ in nil }
+        self.modelLister = nil
         self.loadHook = nil
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
@@ -1355,6 +1366,7 @@ public actor HummingbirdServer {
     ) {
         self.engineProvider = { engine }
         self.modelResolver = modelResolver
+        self.modelLister = nil
         self.loadHook = nil
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
@@ -1376,6 +1388,7 @@ public actor HummingbirdServer {
     ) {
         self.engineProvider = { engine }
         self.modelResolver = modelResolver
+        self.modelLister = nil
         self.loadHook = loadHook
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
@@ -1396,6 +1409,7 @@ public actor HummingbirdServer {
     public init(
         engineProvider: @escaping @Sendable () async -> (any InferenceEngine)?,
         modelResolver: @escaping ModelResolver = { _ in nil },
+        modelLister: ModelLister? = nil,
         loadHook: LoadHook? = nil,
         inFlightHook: InFlightHook? = nil,
         auxiliaryResidency: (any AuxiliaryResidency)? = nil,
@@ -1405,6 +1419,7 @@ public actor HummingbirdServer {
     ) {
         self.engineProvider = engineProvider
         self.modelResolver = modelResolver
+        self.modelLister = modelLister
         self.loadHook = loadHook
         self.inFlightHook = inFlightHook
         self.auxiliaryResidency = auxiliaryResidency
@@ -1579,9 +1594,9 @@ public actor HummingbirdServer {
         }
 
         // GET /v1/models
-        router.get("/v1/models") { _, _ -> Response in
+        router.get("/v1/models") { request, _ -> Response in
             await server.incrementRequest()
-            return try await server.handleModels()
+            return try await server.handleModels(request)
         }
 
         // GET /x/status
@@ -1722,9 +1737,9 @@ public actor HummingbirdServer {
             await server.incrementRequest()
             return try await server.handleOllamaVersion()
         }
-        router.get("/api/tags") { _, _ -> Response in
+        router.get("/api/tags") { request, _ -> Response in
             await server.incrementRequest()
-            return try await server.handleOllamaTags()
+            return try await server.handleOllamaTags(request)
         }
         router.post("/api/chat") { request, context -> Response in
             await server.incrementRequest()
@@ -1775,32 +1790,41 @@ public actor HummingbirdServer {
         ])
     }
 
-    private func handleModels() async throws -> Response {
-        // Pre-v0.3.3 this only listed the currently loaded model, because
-        // that was the only one that could answer a chat completion. With
-        // cold-swap (v0.3.3), any model the resolver can find is a valid
-        // target, so we want `GET /v1/models` to reflect that. But we
-        // don't have a "list all" primitive on the resolver — it's a
-        // point-lookup. We keep listing the loaded model (compatibility)
-        // and document that external clients wanting a full list should
-        // use `macmlx list` or the GUI Models tab.
-        let loaded = await engineProvider()?.loadedModel
-        var data: [[String: String]] = []
-        if let model = loaded {
-            // Report the user-facing alias (v0.5.1) when one is set for
-            // this model; otherwise fall back to its directory id. Empty
-            // alias is treated as "no alias".
-            let params = await ModelParametersStore().load(for: model.id)
-            let reportedID: String
-            if let alias = params.alias, !alias.isEmpty {
-                reportedID = alias
-            } else {
-                reportedID = model.id
-            }
-            data = [["id": reportedID, "object": "model", "owned_by": "local"]]
-        }
+    private func handleModels(_ request: Request) async throws -> Response {
+        let data = await servableModelIDs(includeLibrary: Self.listsModelLibrary(request)).map { ["id": $0, "object": "model", "owned_by": "local"] }
         let body: [String: Any] = ["object": "list", "data": data]
         return try jsonResponseAny(body)
+    }
+
+    /// The models a request can name, as `GET /v1/models` and `/api/tags`
+    /// report them: the loaded one first, then, with `includeLibrary`, every
+    /// other chat model the lister finds in id order (text and vision;
+    /// embedders, rerankers and audio models are served elsewhere), each under
+    /// its user-facing alias when one is set (v0.5.1). Xcode 27's locally
+    /// hosted provider reads an empty list as a failed connection, so listing
+    /// only the loaded model left it unusable until a model was loaded by hand.
+    func servableModelIDs(includeLibrary: Bool = true) async -> [String] {
+        let loaded = await engineProvider()?.loadedModel
+        var models = loaded.map { [$0] } ?? []
+        if includeLibrary {
+            models += (await modelLister?() ?? [])
+                .filter { ($0.format == .mlx || $0.format == .mlxVLM) && $0.id != loaded?.id }
+                .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+        }
+        var ids: [String] = []
+        for model in models {
+            let id = await reportedModelID(model.id)
+            if !ids.contains(id) { ids.append(id) }
+        }
+        return ids
+    }
+
+    /// The id a model is reported under: its alias when one is set, else its
+    /// directory id. An empty alias counts as none.
+    private func reportedModelID(_ modelID: String) async -> String {
+        let params = await ModelParametersStore().load(for: modelID)
+        if let alias = params.alias, !alias.isEmpty { return alias }
+        return modelID
     }
 
     private func handleStatus() async throws -> Response {
@@ -1922,7 +1946,7 @@ public actor HummingbirdServer {
         let params = GenerationParameters(
             temperature: chatReq.temperature ?? 0.7,
             topP: chatReq.top_p ?? 0.95,
-            maxTokens: chatReq.max_completion_tokens ?? chatReq.max_tokens ?? 2048,
+            maxTokens: chatReq.max_completion_tokens ?? chatReq.max_tokens ?? Self.defaultMaxOutputTokens,
             stream: chatReq.stream ?? false,
             // Track E — the `GenerationParameters` initializer clamps every one of
             // these (see its clamp helpers), so a hostile/malformed value can't
@@ -2142,28 +2166,14 @@ public actor HummingbirdServer {
     /// Ollama `/api/tags` — list of locally-available models. We
     /// translate from our existing `/v1/models` shape into Ollama's
     /// `{"models":[{name, size, modified_at, digest, details}]}` shape.
-    private func handleOllamaTags() async throws -> Response {
-        // Reuse the same "what's loaded + what the resolver can see"
-        // logic as handleModels. For Ollama the list should be of
-        // locally-available models regardless of load state.
-        let currentID = await engineProvider()?.loadedModel?.id
-        var entries: [[String: Any]] = []
-        if let currentID {
-            // Report the user-facing alias (v0.5.1) when one is set for this
-            // model, mirroring `handleModels` / `GET /v1/models` (P3-2). Without
-            // this, Ollama-compat clients saw the raw directory id while the
-            // OpenAI list showed the alias (A3 inconsistency). Empty alias is
-            // treated as "no alias".
-            let params = await ModelParametersStore().load(for: currentID)
-            let reportedID: String
-            if let alias = params.alias, !alias.isEmpty {
-                reportedID = alias
-            } else {
-                reportedID = currentID
-            }
-            entries.append([
-                "name": reportedID,
-                "model": reportedID,
+    private func handleOllamaTags(_ request: Request) async throws -> Response {
+        // The same models as `GET /v1/models`, in Ollama's shape.
+        let entries: [[String: Any]] = await servableModelIDs(
+            includeLibrary: Self.listsModelLibrary(request)
+        ).map { id in
+            [
+                "name": id,
+                "model": id,
                 "modified_at": ISO8601DateFormatter().string(from: Date()),
                 "size": 0,
                 "digest": "",
@@ -2173,7 +2183,7 @@ public actor HummingbirdServer {
                     "parameter_size": "",
                     "quantization_level": ""
                 ] as [String: Any]
-            ])
+            ]
         }
         return try jsonResponseAny([
             "models": entries
@@ -2851,9 +2861,11 @@ public actor HummingbirdServer {
         // nil and `content` is the full text. A constrained generation is the
         // JSON answer entire, and a think tag inside a string value is data, so
         // it is not split (see `streamingChatResponse`).
-        let (reasoning, answer): (String?, String) = genRequest.responseFormat == nil
+        let (reasoning, rawAnswer): (String?, String) = genRequest.responseFormat == nil
             ? MessageSegmenter.splitReasoning(fullText)
             : (nil, fullText)
+        // As in the stream, the answer starts at its first non-whitespace text.
+        let answer = String(rawAnswer.drop(while: \.isWhitespace))
         var message: [String: Any] = ["role": "assistant", "content": answer]
         if let reasoning {
             message["reasoning_content"] = reasoning
@@ -2935,6 +2947,7 @@ public actor HummingbirdServer {
             // chunk fully buffered as a partial reasoning tag carries its logprobs
             // forward until the next frame flushes).
             var pendingStreamLogprobs: [TokenLogprob] = []
+            var answerStart = AnswerStartTrimmer()
 
             let engine: any InferenceEngine
             do {
@@ -3013,7 +3026,8 @@ public actor HummingbirdServer {
                         if wantsLogprobs, let logprobs = chunk.logprobs {
                             pendingStreamLogprobs.append(contentsOf: logprobs)
                         }
-                        let (reasoning, answer) = splitsReasoning ? splitter.push(chunk.text) : ("", chunk.text)
+                        let (reasoning, rawAnswer) = splitsReasoning ? splitter.push(chunk.text) : ("", chunk.text)
+                        let answer = answerStart.push(rawAnswer)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
                         if !answer.isEmpty { delta["content"] = answer }
@@ -3021,7 +3035,7 @@ public actor HummingbirdServer {
                             // Flush any buffered tail into this terminal chunk.
                             let (rTail, aTail) = splitsReasoning ? splitter.finish() : ("", "")
                             let r = (delta["reasoning_content"] as? String ?? "") + rTail
-                            let a = (delta["content"] as? String ?? "") + aTail
+                            let a = (delta["content"] as? String ?? "") + answerStart.push(aTail)
                             if !r.isEmpty { delta["reasoning_content"] = r }
                             if !a.isEmpty { delta["content"] = a }
                         } else if delta.isEmpty {
@@ -3207,7 +3221,10 @@ public actor HummingbirdServer {
 
         let completionID = "chatcmpl-\(UUID().uuidString)"
         let timestamp = Int(Date().timeIntervalSince1970)
-        let (reasoning, answer) = MessageSegmenter.splitReasoning(fullText)
+        let (reasoning, rawAnswer) = MessageSegmenter.splitReasoning(fullText)
+        // As on the single-stream path, the answer starts at its first
+        // non-whitespace text.
+        let answer = String(rawAnswer.drop(while: \.isWhitespace))
         var message: [String: Any] = ["role": "assistant", "content": answer]
         if let reasoning {
             message["reasoning_content"] = reasoning
@@ -3264,6 +3281,7 @@ public actor HummingbirdServer {
             // concern). In-stream <think> tags are still split correctly.
             let stallTimeout = await server.stallTimeoutSeconds
             var splitter = ReasoningStreamSplitter(startInReasoning: false)
+            var answerStart = AnswerStartTrimmer()
             let box = ChunkIteratorBox(stream)
             do {
                 loop: while true {
@@ -3284,7 +3302,8 @@ public actor HummingbirdServer {
                             completionTokens = usage.completionTokens
                             terminalUsage = usage.exposingCacheFigure(exposeCacheFigures)
                         }
-                        let (reasoning, answer) = splitter.push(chunk.text)
+                        let (reasoning, rawAnswer) = splitter.push(chunk.text)
+                        let answer = answerStart.push(rawAnswer)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
                         if !answer.isEmpty { delta["content"] = answer }
@@ -3292,7 +3311,7 @@ public actor HummingbirdServer {
                             // Flush any buffered tail into this terminal chunk.
                             let (rTail, aTail) = splitter.finish()
                             let r = (delta["reasoning_content"] as? String ?? "") + rTail
-                            let a = (delta["content"] as? String ?? "") + aTail
+                            let a = (delta["content"] as? String ?? "") + answerStart.push(aTail)
                             if !r.isEmpty { delta["reasoning_content"] = r }
                             if !a.isEmpty { delta["content"] = a }
                         } else if delta.isEmpty {
@@ -5732,6 +5751,15 @@ extension HummingbirdServer {
     /// carries one; native clients (Apple's Foundation Models client, Xcode,
     /// Claude Code, curl) send none and are served in full.
     static func exposeCacheFigures(_ request: Request) -> Bool {
+        request.headers[.origin] == nil
+    }
+
+    /// Whether `GET /v1/models` and `/api/tags` list the whole model library
+    /// rather than only the loaded model. By the same reasoning as
+    /// `exposeCacheFigures`, a page in a browser, which always sends `Origin`
+    /// and gets an answer by default, does not learn which models are
+    /// downloaded; it sees the loaded model, as before the library was listed.
+    static func listsModelLibrary(_ request: Request) -> Bool {
         request.headers[.origin] == nil
     }
 }
