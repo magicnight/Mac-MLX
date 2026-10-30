@@ -133,7 +133,7 @@ struct ModelLibraryManagerVLMTests {
     ///
     /// Runs under `swift test`, where the checkout sits in the scratch
     /// directory next to the test bundle; under xcodebuild there is none and
-    /// it is skipped. ci-local's spm job sets
+    /// it is skipped. The spm job, in CI and ci-local, sets
     /// `MACMLX_REQUIRE_RESOLVED_SOURCE=1`, which turns a missing checkout
     /// into a failure there, so the gate cannot pass by skipping.
     @Test(.enabled(if: Self.resolvedVLMFactorySource() != nil || Self.requiresResolvedSource,

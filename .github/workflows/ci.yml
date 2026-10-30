@@ -105,7 +105,7 @@ jobs:
 
       - name: Resolve & test MacMLXCore
         # The VLM registry mirror test reads mlx-swift-lm's source from the
-        # scratch directory; here a missing checkout fails it rather than skip.
+        # scratch directory; here a missing checkout fails it rather than skips it.
         env:
           MACMLX_REQUIRE_RESOLVED_SOURCE: "1"
         run: |
