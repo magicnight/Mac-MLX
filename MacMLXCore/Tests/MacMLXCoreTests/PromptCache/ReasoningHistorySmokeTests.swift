@@ -278,8 +278,12 @@ final class ReasoningHistorySmokeTests: XCTestCase {
             "and is absent without it")
         XCTAssertEqual(counted, withTokens.count, "the engine counts the render with reasoning")
         XCTAssertEqual(countedPlain, withoutTokens.count)
-        XCTAssertLessThanOrEqual(
-            abs(counted - countedPlain - reasoningTokens), 4, "the prompt grows by about the reasoning's length")
+        // Plus the think tags around it on a template (Mellum2's) that
+        // renders none for a turn without reasoning; Qwen3.6 renders empty
+        // ones either way. A token either side for the merge at its edges.
+        let growth = counted - countedPlain
+        XCTAssertGreaterThanOrEqual(growth, reasoningTokens - 1, "the prompt grows by about the reasoning's length")
+        XCTAssertLessThanOrEqual(growth, reasoningTokens + 8, "the prompt grows by about the reasoning's length")
         let chatTokens = try render(chatInput(turn2Plain), tokenizer: tokenizer)
         XCTAssertEqual(withoutTokens, chatTokens, "without reasoning the prompt is the .chat render, token for token")
 
