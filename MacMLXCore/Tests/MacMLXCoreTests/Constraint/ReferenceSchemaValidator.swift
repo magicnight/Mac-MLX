@@ -55,12 +55,13 @@ enum ReferenceSchemaValidator {
             return values.contains { Array($0.unicodeScalars.map(\.value)) == scalars }
         case (.number, .number):
             return true
-        case (.integer, .number(let lexeme)):
-            return !lexeme.contains(0x2E) && !lexeme.contains(0x65) && !lexeme.contains(0x45)
+        case (.integer, .number):
+            return conforms(value, to: .boundedInteger(.anyInt))
         case (.boundedInteger(let bounds), .number(let lexeme)):
+            // A missing side is the limit of `Int`: the value must fit one.
             guard !lexeme.contains(0x2E), let value = plainDecimal(lexeme) else { return false }
-            if let minimum = bounds.minimum, value < Decimal(minimum) { return false }
-            if let maximum = bounds.maximum, value > Decimal(maximum) { return false }
+            if value < Decimal(bounds.minimum ?? Int.min) { return false }
+            if value > Decimal(bounds.maximum ?? Int.max) { return false }
             return true
         case (.boundedNumber(let bounds), .number(let lexeme)):
             guard let value = plainDecimal(lexeme) else { return false }
