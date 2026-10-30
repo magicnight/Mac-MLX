@@ -136,14 +136,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   metadata), and the Qwen3.6 and Mellum2 templates took the user turn for a
   new query and stopped rendering the loop's reasoning. `/v1/responses`
   still opens a user turn there, since a Codex developer item after a tool
-  output is an instruction the model should not read as tool output. A
-  Claude Code user turn that carries text blocks beside its `tool_result`s
-  still becomes a user turn of its own, so from that request on those
-  templates stop rendering the loop's earlier reasoning. Claude Code replays those system turns
-  unchanged in later requests, so the prefix stays stable: in a real
-  four-request Claude Code loop on Qwen3.6-27B-4bit the prompts carried 28,
-  50 and 72 more tokens of earlier reasoning and reused 16,827 of 16,947,
-  17,029 of 17,065 and 17,147 of 17,183 tokens.
+  output is an instruction the model should not read as tool output.
+  Claude Code replays those system turns unchanged in later requests, so the
+  prefix stays stable: in a real four-request Claude Code loop on
+  Qwen3.6-27B-4bit the prompts carried 28, 50 and 72 more tokens of earlier
+  reasoning and reused 16,827 of 16,947, 17,029 of 17,065 and 17,147 of
+  17,183 tokens. A Claude Code user turn that carries text blocks beside its
+  `tool_result`s still becomes a user turn of its own, so from that request
+  on those templates stop rendering the loop's earlier reasoning.
 
 ### Fixed
 
