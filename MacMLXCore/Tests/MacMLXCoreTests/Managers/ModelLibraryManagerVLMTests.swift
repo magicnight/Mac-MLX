@@ -99,9 +99,10 @@ struct ModelLibraryManagerVLMTests {
     }
 
     /// The keys of mlx-swift-lm's `VLMTypeRegistry.shared` at the pinned
-    /// revision (3.32.3), as `VLMModelFactory.swift` lists them. Refresh on
-    /// every mlx-swift-lm bump; the tests below then say which side each new
-    /// key belongs on.
+    /// revision (3.32.3), as `Libraries/MLXVLM/VLMModelFactory.swift` lists
+    /// them. `vlmRegistryMirrorMatchesTheResolvedSource` fails when the
+    /// resolved mlx-swift-lm lists other keys, so a bump that adds one is
+    /// caught there; the tests after it then say which side it belongs on.
     private static let upstreamVLMRegistryKeys: Set<String> = [
         "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
         "qwen3_5", "qwen3_5_moe", "idefics3", "gemma3", "gemma4", "gemma4_unified",
@@ -121,6 +122,43 @@ struct ModelLibraryManagerVLMTests {
         for key in Self.upstreamVLMRegistryKeys {
             #expect(await VLMTypeRegistry.shared.contains(key), "\(key) is not in the VLM registry")
         }
+    }
+
+    /// The mirror above against the registry the package actually resolved:
+    /// its keys read from the checked-out `VLMModelFactory.swift`, since
+    /// `ModelTypeRegistry` can only answer `contains`, not list. Runs where a
+    /// SwiftPM checkout sits next to the build (`swift test`, and so
+    /// ci-local's spm job); elsewhere, as under xcodebuild, it is skipped,
+    /// not passed.
+    @Test(.enabled(if: Self.resolvedVLMFactorySource() != nil, "no SwiftPM checkout of mlx-swift-lm next to the build"))
+    func vlmRegistryMirrorMatchesTheResolvedSource() throws {
+        let source = try #require(Self.resolvedVLMFactorySource())
+        let start = try #require(source.range(of: "public enum VLMTypeRegistry"))
+        let end = source.range(of: "public enum VLMProcessorTypeRegistry", range: start.upperBound..<source.endIndex)
+        let block = source[start.upperBound..<(end?.lowerBound ?? source.endIndex)]
+        let keys = Set(block.matches(of: /"([^"]+)":\s*create\(/).map { String($0.1) })
+        #expect(!keys.isEmpty, "found no registry entries; has VLMModelFactory.swift changed shape?")
+        #expect(keys == Self.upstreamVLMRegistryKeys,
+                "mirror out of date: added \(keys.subtracting(Self.upstreamVLMRegistryKeys).sorted()), removed \(Self.upstreamVLMRegistryKeys.subtracting(keys).sorted())")
+    }
+
+    /// `VLMModelFactory.swift` in the mlx-swift-lm checkout SwiftPM resolved
+    /// for this build: under `checkouts/` in the scratch directory, found by
+    /// walking up from the test bundle (any `--scratch-path`) or from this
+    /// file (the default `.build`).
+    static func resolvedVLMFactorySource() -> String? {
+        let relative = "checkouts/mlx-swift-lm/Libraries/MLXVLM/VLMModelFactory.swift"
+        let starts = Bundle.allBundles.map(\.bundleURL) + [URL(filePath: #filePath)]
+        for start in starts {
+            var directory = start.deletingLastPathComponent()
+            for _ in 0..<8 {
+                for candidate in [directory.appending(path: relative), directory.appending(path: ".build/" + relative)] {
+                    if let text = try? String(contentsOf: candidate, encoding: .utf8) { return text }
+                }
+                directory.deleteLastPathComponent()
+            }
+        }
+        return nil
     }
 
     /// A type kept on the text path must be one the LLM factory loads, or

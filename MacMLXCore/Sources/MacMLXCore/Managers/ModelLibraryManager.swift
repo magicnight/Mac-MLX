@@ -415,9 +415,11 @@ public actor ModelLibraryManager {
     /// Source of truth: `VLMTypeRegistry.shared` in `Libraries/MLXVLM/
     /// VLMModelFactory.swift` at the pinned revision, less
     /// `vlmTypesServedAsText`. Every key of that registry is in exactly one
-    /// of the two sets, and `ModelLibraryManagerVLMTests` checks both
-    /// against the registry, so refresh them together when bumping the SPM
-    /// dependency. Stored lowercased — comparisons are case-insensitive
+    /// of the two sets. `ModelLibraryManagerVLMTests` keeps a copy of the
+    /// registry's keys, checks the copy against the checked-out
+    /// `VLMModelFactory.swift` (under `swift test`) and both sets against the
+    /// copy and the registries, so a bump that adds, drops or renames a key
+    /// fails there until the copy and these sets are refreshed. Stored lowercased — comparisons are case-insensitive
     /// against `config.json`.
     static let knownVLMTypes: Set<String> = [
         "paligemma",

@@ -1,8 +1,11 @@
 # Model Support
 
-macMLX's in-process engine runs every architecture bundled with
+macMLX's in-process engine runs the architectures bundled with
 [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-examples) — the full
-text family plus 16 VLM architectures — with no work on our side. This page
+text family plus 14 VLM architectures (16 `model_type`s) — with no work on our
+side. Gemma 4 and Qwen3.5/3.6 are VLM architectures there too, but macMLX
+loads them as text, because the vision path has no prompt cache or batching;
+images sent to them are dropped. This page
 tracks the **architectures macMLX itself ports in pure Swift** and registers
 into the model factory as external overlays, together with their support
 tier.

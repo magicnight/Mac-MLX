@@ -294,14 +294,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   refreshed since v0.5, so FastVLM (`fastvlm`, `llava_qwen2`), Qwen3-VL MoE
   (`qwen3_vl_moe`), MuseGlimmer (`muse_glimmer`) and LFM2-VL checkpoints
   that say `lfm2-vl` were sent to the text factory, which has none of them,
-  so they failed to load with an unsupported model type; and it held two
-  types upstream never registered
-  (`fast_vlm`, `qwen3_5_vl`). It is now mlx-swift-lm 3.32.3's VLM registry
-  key for key, and a test checks it against the registry. Gemma 4 and
-  Qwen3.5/3.6, which that registry also lists, stay on the text path on
-  purpose: a VLM load has no prompt cache, batching, replayed reasoning or
-  history snapshots, which are what macMLX serves agents with, so their
-  images are still dropped, as before.
+  so they failed to load with an unsupported model type. It also held three
+  types upstream never registered: `fast_vlm`, `qwen3_5_vl` and `smolvlm2`
+  (SmolVLM2 checkpoints say `smolvlm`). Every key of mlx-swift-lm 3.32.3's
+  VLM registry is now classified, and a test compares that classification
+  with the registry the build resolved, so an mlx-swift-lm bump that adds a
+  key fails until it is placed. Gemma 4 and Qwen3.5/3.6, which that registry
+  also lists, stay on the text path on purpose: a VLM load has no prompt
+  cache, batching, replayed reasoning or history snapshots, which are what
+  macMLX serves agents with, so their images are still dropped, as before.
+  This is routing only, checked against the registries and the published
+  checkpoints' `processor_class`; I have no checkpoint of the newly routed
+  types, so none was run here.
 
 ## [0.10.0] - 2026-10-29
 
