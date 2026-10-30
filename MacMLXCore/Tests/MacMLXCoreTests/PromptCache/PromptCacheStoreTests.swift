@@ -210,6 +210,216 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(shorter?.reusedTokenCount, 2)
     }
 
+    /// The history-boundary snapshot on a cache that cannot be trimmed: turn 1
+    /// stores its history `B` as `.user` and its record `C` (prompt +
+    /// generated tokens) as `.assistant`. Turn 2 extends `B` but leaves `C`
+    /// inside the generation prompt, so `C` shares more tokens yet needs a
+    /// trim it cannot have; the `B` entry serves turn 2 whole through the
+    /// shorter branch, and `C` is still recorded.
+    func testHybridHistoryBoundaryServesTheNextTurnPastADivergingRecord() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot())
+        let history = [1, 2, 3, 4]
+        let turn1Record = history + [50, 51, 60, 61]  // generation prompt, generated
+        let turn2 = history + [50, 52, 70, 71, 50]  // re-rendered turn, new message
+        await store.insert(
+            modelID: model, tokens: history,
+            snapshot: makeHybridSnapshot(tokenCount: history.count), cacheType: .user)
+        await store.insert(
+            modelID: model, tokens: turn1Record,
+            snapshot: makeHybridSnapshot(tokenCount: turn1Record.count))
+        let resident = await store.residentCount
+        XCTAssertEqual(resident, 2, "a non-trimmable record does not collapse the boundary entry")
+
+        let hit = await store.fetchNearest(modelID: model, tokens: turn2)
+        XCTAssertEqual(hit?.reusedTokenCount, history.count)
+    }
+
+    /// The boundary entry is `.user`, so a count budget that has to drop one
+    /// of a turn's two entries drops the `.assistant` record, never the entry
+    /// the next turn reuses.
+    func testHistoryBoundaryEntryOutlivesTheTurnRecordUnderBudget() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot(), maxEntries: 1, coldEnabled: false)
+        let history = [1, 2, 3, 4]
+        await store.insert(
+            modelID: model, tokens: history,
+            snapshot: makeHybridSnapshot(tokenCount: history.count), cacheType: .user)
+        await store.insert(
+            modelID: model, tokens: history + [50, 51],
+            snapshot: makeHybridSnapshot(tokenCount: 6))
+        let hit = await store.fetchNearest(modelID: model, tokens: history + [50, 52])
+        XCTAssertEqual(hit?.reusedTokenCount, history.count)
+    }
+
+    /// The engine's rule for a turn's own entry (`recordsTurnEntry`) on real
+    /// caches: after a history-boundary snapshot, a non-trimmable turn ends
+    /// with the snapshot alone, and a trimmable one still records its entry,
+    /// which collapses the snapshot as before.
+    func testATurnAfterAHistorySnapshotKeepsOneEntry() async throws {
+        try requireMLXRuntimeOrSkip()
+        let history = [1, 2, 3, 4]
+        let record = history + [50, 51]
+        for hybrid in [true, false] {
+            let make = hybrid ? makeHybridSnapshot : makeSnapshot
+            let store = PromptCacheStore(root: tmpRoot(), coldEnabled: false)
+            await store.insert(
+                modelID: model, tokens: history, snapshot: make(history.count), cacheType: .user)
+            let turnCache = make(record.count)
+            if MLXSwiftEngine.recordsTurnEntry(historySnapshotStored: true, caches: turnCache.caches) {
+                await store.insert(modelID: model, tokens: record, snapshot: turnCache)
+            }
+            let resident = await store.residentCount
+            let historyType = await store.hotCacheType(modelID: model, tokens: history)
+            let recordType = await store.hotCacheType(modelID: model, tokens: record)
+            XCTAssertEqual(resident, 1, "hybrid=\(hybrid): one entry per turn")
+            XCTAssertEqual(historyType, hybrid ? .user : nil, "hybrid=\(hybrid): the snapshot")
+            XCTAssertEqual(recordType, hybrid ? nil : .assistant, "hybrid=\(hybrid): the turn's entry")
+        }
+    }
+
+    /// A `.user` entry demoted to the cold tier comes back as `.user`, so a
+    /// promoted history-boundary snapshot keeps its eviction priority.
+    func testColdPromotionKeepsTheCacheType() async throws {
+        try requireMLXRuntimeOrSkip()
+        let store = PromptCacheStore(root: tmpRoot(), maxEntries: 1)
+        await store.insert(
+            modelID: model, tokens: [1, 2], snapshot: makeSnapshot(tokenCount: 2),
+            cacheType: .user, modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: [3, 4], snapshot: makeSnapshot(tokenCount: 2),
+            cacheType: .user, modelFingerprint: fpA)
+        await store.drainInFlight()
+        let demoted = await store.hotCacheType(modelID: model, tokens: [1, 2])
+        XCTAssertNil(demoted, "[1,2] was demoted to the cold tier")
+
+        let hit = await store.fetchNearest(modelID: model, tokens: [1, 2, 9], modelFingerprint: fpA)
+        XCTAssertEqual(hit?.reusedTokenCount, 2)
+        let promoted = await store.hotCacheType(modelID: model, tokens: [1, 2])
+        XCTAssertEqual(promoted, .user)
+    }
+
+    /// The exact-key cold path (`fetchFromCold`, the fallback when the cold
+    /// trie has no record, as after a restart without `index.json`) restores
+    /// the class an entry was demoted with too.
+    func testExactKeyColdPromotionKeepsTheCacheType() async throws {
+        try requireMLXRuntimeOrSkip()
+        let root = tmpRoot()
+        let first = PromptCacheStore(root: root, maxEntries: 1)
+        await first.insert(
+            modelID: model, tokens: [1, 2, 3], snapshot: makeSnapshot(tokenCount: 3),
+            cacheType: .user, modelFingerprint: fpA)
+        await first.insert(
+            modelID: model, tokens: [900, 901], snapshot: makeSnapshot(tokenCount: 2),
+            cacheType: .user, modelFingerprint: fpA)
+        await first.drainInFlight()
+        try FileManager.default.removeItem(at: root.appending(path: "index.json"))
+
+        let restarted = PromptCacheStore(root: root)
+        let hit = await restarted.fetchNearest(modelID: model, tokens: [1, 2, 3], modelFingerprint: fpA)
+        XCTAssertEqual(hit?.reusedTokenCount, 2, "served by the exact-key path")
+        let promoted = await restarted.hotCacheType(modelID: model, tokens: [1, 2, 3])
+        XCTAssertEqual(promoted, .user)
+    }
+
+    /// An entry larger than the whole hot tier goes straight to the cold
+    /// tier: one write, and the entries already hot stay hot.
+    func testAnEntryLargerThanTheHotTierIsWrittenOnceAndEvictsNothing() async throws {
+        try requireMLXRuntimeOrSkip()
+        let small = makeSnapshot(tokenCount: 3)
+        let large = makeSnapshot(tokenCount: 30)
+        let budget = (PromptCacheStore.cacheBytes(small.caches) + PromptCacheStore.cacheBytes(large.caches)) / 2
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxBytes: budget)
+        let writes = WriteLog()
+        await store.installWriteBarrier { hash in await writes.add(hash) }
+        let largeTokens = Array(100..<130)
+
+        await store.insert(modelID: model, tokens: [1, 2, 3], snapshot: small, modelFingerprint: fpA)
+        await store.insert(
+            modelID: model, tokens: largeTokens, snapshot: large, cacheType: .user, modelFingerprint: fpA)
+        await store.drainInFlight()
+
+        let written = await writes.hashes
+        XCTAssertEqual(written, [PromptCacheKey(modelID: model, tokens: largeTokens).hashString])
+        let resident = await store.residentCount
+        let smallType = await store.hotCacheType(modelID: model, tokens: [1, 2, 3])
+        let largeType = await store.hotCacheType(modelID: model, tokens: largeTokens)
+        let largeRecord = await store.hasColdRecord(modelID: model, tokens: largeTokens)
+        XCTAssertEqual(resident, 1)
+        XCTAssertEqual(smallType, .assistant, "the hot entry was not evicted")
+        XCTAssertNil(largeType, "the large entry never entered the hot tier")
+        XCTAssertTrue(largeRecord)
+    }
+
+    /// A cold hit on an entry larger than the hot tier is served from what was
+    /// loaded: the cold record stays, the hot tier does not take it, and
+    /// nothing is written.
+    func testAColdHitLargerThanTheHotTierKeepsItsRecordAndWritesNothing() async throws {
+        try requireMLXRuntimeOrSkip()
+        let large = makeSnapshot(tokenCount: 30)
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxBytes: PromptCacheStore.cacheBytes(large.caches) - 1)
+        let largeTokens = Array(100..<130)
+        await store.insert(
+            modelID: model, tokens: largeTokens, snapshot: large, cacheType: .user, modelFingerprint: fpA)
+        await store.drainInFlight()
+        let writes = WriteLog()
+        await store.installWriteBarrier { hash in await writes.add(hash) }
+
+        let hit = await store.fetchNearest(modelID: model, tokens: largeTokens + [7, 8], modelFingerprint: fpA)
+        await store.drainInFlight()
+
+        XCTAssertEqual(hit?.reusedTokenCount, largeTokens.count)
+        let written = await writes.hashes
+        let inFlight = await store.inFlightHashes()
+        let record = await store.hasColdRecord(modelID: model, tokens: largeTokens)
+        let hot = await store.hotCacheType(modelID: model, tokens: largeTokens)
+        let resident = await store.residentCount
+        XCTAssertEqual(written, [], "a hit rewrites nothing")
+        XCTAssertTrue(inFlight.isEmpty)
+        XCTAssertTrue(record, "the cold record stays")
+        XCTAssertNil(hot)
+        XCTAssertEqual(resident, 0)
+        // A second hit is served the same way.
+        let again = await store.fetchNearest(modelID: model, tokens: largeTokens + [9], modelFingerprint: fpA)
+        XCTAssertEqual(again?.reusedTokenCount, largeTokens.count)
+    }
+
+    /// A cold hit served without promotion moves its file's modification
+    /// time to now, so the mtime-ordered byte-cap prune keeps a snapshot a
+    /// live session hits every turn. Both cold paths: the cold trie, and the
+    /// exact key after a restart without `index.json`.
+    func testAColdHitLargerThanTheHotTierMarksItsFileUsed() async throws {
+        try requireMLXRuntimeOrSkip()
+        let large = makeSnapshot(tokenCount: 30)
+        let budget = PromptCacheStore.cacheBytes(large.caches) - 1
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxBytes: budget)
+        let largeTokens = Array(100..<130)
+        await store.insert(
+            modelID: model, tokens: largeTokens, snapshot: large, cacheType: .user, modelFingerprint: fpA)
+        await store.drainInFlight()
+        let file = PromptCacheKey(modelID: model, tokens: largeTokens).shardedFileURL(under: root)
+        let past = Date(timeIntervalSinceNow: -3_600)
+
+        func modified() throws -> Date {
+            try XCTUnwrap(file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+        }
+
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: file.path)
+        let trieHit = await store.fetchNearest(modelID: model, tokens: largeTokens + [7], modelFingerprint: fpA)
+        XCTAssertEqual(trieHit?.reusedTokenCount, largeTokens.count)
+        XCTAssertGreaterThan(try modified(), past.addingTimeInterval(60), "the cold-trie hit marks the file used")
+
+        try FileManager.default.removeItem(at: root.appending(path: "index.json"))
+        let restarted = PromptCacheStore(root: root, maxBytes: budget)
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: file.path)
+        let exactHit = await restarted.fetchNearest(modelID: model, tokens: largeTokens, modelFingerprint: fpA)
+        XCTAssertEqual(exactHit?.reusedTokenCount, largeTokens.count - 1)
+        XCTAssertGreaterThan(try modified(), past.addingTimeInterval(60), "the exact-key hit marks the file used")
+    }
+
     // MARK: - copy-on-fetch isolation
 
     func testFetchedSnapshotIsIndependentCopy() async throws {
@@ -1513,6 +1723,13 @@ final class PromptCacheStoreTests: XCTestCase {
 /// with no `Task.sleep`/wall-clock. The store's write task awaits ``wait()`` (which
 /// parks until ``open()``); a test awaits ``awaitEntered()`` to observe that the
 /// write has reached the barrier — i.e. is held open with its file not yet written.
+/// The hashes of the cold-tier writes a store started, in order (through
+/// its write barrier).
+private actor WriteLog {
+    private(set) var hashes: [String] = []
+    func add(_ hash: String) { hashes.append(hash) }
+}
+
 private actor WriteGate {
     private var isOpen = false
     private var hasEntered = false

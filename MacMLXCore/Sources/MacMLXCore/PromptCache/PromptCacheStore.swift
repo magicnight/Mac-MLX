@@ -66,7 +66,8 @@ public actor PromptCacheStore {
         let isTrimmable: Bool
     }
 
-    private let root: URL
+    /// The cold tier's directory. Internal for the engine's test seam.
+    let root: URL
     private let maxEntries: Int
     private let maxBytes: Int
     private let coldCapBytes: Int
@@ -280,6 +281,13 @@ public actor PromptCacheStore {
         Set(inFlight.keys)
     }
 
+    /// The eviction class of the hot entry stored under exactly `tokens`, or
+    /// nil when the hot tier holds none. Test-only: lets a test see that a
+    /// promotion from the cold tier keeps the class the entry was demoted with.
+    func hotCacheType(modelID: String, tokens: [Int]) -> PromptCacheType? {
+        trie.get(model: modelID, tokens: tokens)?.cacheType
+    }
+
     /// Snapshot of the current cold-tier index records, keyed by hash.
     /// Test-only: lets a test verify a deduped re-demote (Bugbot #4) left the
     /// ORIGINAL record byte-identical (``ColdIndexEntry`` is `Equatable`,
@@ -312,6 +320,13 @@ public actor PromptCacheStore {
     /// enforce both budgets. The store takes ownership of `caches` — callers
     /// that also hand the same state out to a generator must pass an
     /// independent copy.
+    ///
+    /// An entry larger than the whole hot tier (`maxBytes`) never enters it:
+    /// admitted, it would evict every other entry and then itself, and each
+    /// later hit would promote it only to evict and rewrite it again. It goes
+    /// straight to the cold tier instead, one write, with the hot tier left
+    /// as it was. The cold fetches likewise serve such an entry from what
+    /// they loaded without promoting it (``fitsHotTier(_:)``).
     private func store(
         modelID: String, tokens: [Int], caches: [any KVCache], cacheType: PromptCacheType,
         fingerprint: String?
@@ -322,6 +337,12 @@ public actor PromptCacheStore {
             cacheType: cacheType,
             fingerprint: fingerprint
         )
+        guard entry.nbytes <= maxBytes else {
+            demoteToCold(
+                modelID: modelID, tokens: tokens, caches: caches, fingerprint: fingerprint,
+                cacheType: cacheType)
+            return
+        }
         let key = PromptCacheEntryKey(modelID: modelID, tokens: tokens)
 
         nBytes += entry.nbytes
@@ -573,7 +594,7 @@ public actor PromptCacheStore {
         nBytes -= entry.nbytes
         demoteToCold(
             modelID: key.modelID, tokens: key.tokens, caches: entry.caches,
-            fingerprint: entry.fingerprint)
+            fingerprint: entry.fingerprint, cacheType: entry.cacheType)
         return true
     }
 
@@ -597,7 +618,8 @@ public actor PromptCacheStore {
     /// so the `insert` → `store` → `evictOne` chain and `insert`'s public
     /// signature are untouched.
     func demoteToCold(
-        modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?
+        modelID: String, tokens: [Int], caches: [any KVCache], fingerprint: String?,
+        cacheType: PromptCacheType
     ) {
         // Master opt-in: a disabled cold tier makes this a pure hot cache.
         // Check first, before any filesystem or serialisation work, so the
@@ -621,6 +643,9 @@ public actor PromptCacheStore {
             "tokenCount": String(key.tokenCount),
             "modelFingerprint": fingerprint,
             "recordVersion": Self.coldRecordVersion,
+            // Restored on promotion (``promotedCacheType``), so an entry keeps
+            // its eviction class across a round trip through the cold tier.
+            "cacheType": cacheType.rawValue,
         ]
 
         // Dedup (Bugbot #4): a write for this exact content-addressed key is
@@ -790,6 +815,22 @@ public actor PromptCacheStore {
             .appending(path: "\(hash).safetensors", directoryHint: .notDirectory)
     }
 
+    /// Move `url`'s modification time to now. The cold tier's byte-cap prune
+    /// drops the files modified longest ago, and a promoted entry is
+    /// rewritten when it is next evicted; an entry served from disk without
+    /// promotion (larger than the hot tier) is not, so without this a
+    /// snapshot a live session hits every turn would age out first.
+    /// Best-effort, like the tier's other file bookkeeping.
+    static func markUsed(_ url: URL) {
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
+    /// Whether an entry of `caches` may live in the hot tier: no larger than
+    /// the tier's whole byte budget (see ``store``).
+    private func fitsHotTier(_ caches: [any KVCache]) -> Bool {
+        Self.cacheBytes(caches) <= maxBytes
+    }
+
     /// Exact-key cold lookup. Restores the on-disk snapshot for `tokens`,
     /// promotes it back into the hot tier, and — like an exact hot hit — hands
     /// the caller an independent copy trimmed back one token so a suffix
@@ -801,10 +842,11 @@ public actor PromptCacheStore {
     /// restored caches internally, so the pristine `restored` array is what gets
     /// promoted while the returned hit owns a separate, trimmed copy. Promotion
     /// is skipped when the entry can't be served (`makeHit == nil`, e.g. a
-    /// non-trimmable hybrid cache), since caching it hot would never help.
-    /// Provenance isn't persisted in the cold tier, so the promoted entry
-    /// re-enters as `.assistant` (the most-evictable, correct-by-default class
-    /// for a speculatively restored prefix).
+    /// non-trimmable hybrid cache), since caching it hot would never help, and
+    /// when the entry is larger than the hot tier (``fitsHotTier(_:)``): then
+    /// the hit is served from what was loaded and the cold record stays, so
+    /// nothing is rewritten. A promoted entry re-enters with the class it was
+    /// demoted with, read from the file (``promotedCacheType(_:)``).
     ///
     /// `loadPromptCache` still reads synchronously on this executor (~1.3 ms —
     /// cheap; moving the READ off-actor is Stage 3c, deferred). The Stage 3a
@@ -864,11 +906,17 @@ public actor PromptCacheStore {
                 caches: restored, heldCount: tokens.count,
                 targetReuse: tokens.count - 1, tokenCount: tokens.count)
         else { return nil }
+        // An entry the hot tier cannot hold is served from disk as it is: its
+        // cold record stays and nothing is rewritten.
+        guard fitsHotTier(restored) else {
+            Self.markUsed(url)
+            return hit
+        }
         // Promote back into the hot tier under the SAME (validated) fingerprint,
         // so a later re-eviction demotes it with the correct stamp.
         store(
-            modelID: modelID, tokens: tokens, caches: restored, cacheType: .assistant,
-            fingerprint: current)
+            modelID: modelID, tokens: tokens, caches: restored,
+            cacheType: Self.promotedCacheType(meta), fingerprint: current)
         // Hot ⊕ cold disjoint: the entry now lives in the hot tier, so drop its
         // cold index record + trie node. The safetensors file stays as the
         // content-addressed backing (a re-eviction rewrites the record).
@@ -975,15 +1023,30 @@ public actor PromptCacheStore {
                     caches: restored, heldCount: candidate.heldCount,
                     targetReuse: candidate.targetReuse, tokenCount: tokens.count)
             else { continue }
+            // An entry the hot tier cannot hold is served from disk as it is:
+            // its cold record stays and nothing is rewritten.
+            guard fitsHotTier(restored) else {
+                Self.markUsed(url)
+                return hit
+            }
             // Promote into the hot tier under the validated fingerprint, then
             // drop the cold record + node so the tiers stay disjoint.
             store(
                 modelID: modelID, tokens: candidate.key, caches: restored,
-                cacheType: .assistant, fingerprint: current)
+                cacheType: Self.promotedCacheType(meta), fingerprint: current)
             dropColdRecord(modelID: modelID, tokens: candidate.key)
             return hit
         }
         return nil
+    }
+
+    /// The eviction class a cold file was demoted with, read back from its
+    /// `cacheType` metadata. Files written before the key existed carry none
+    /// and promote as `.assistant`, the class every promotion used before.
+    /// An additive key: older readers ignore it, and the `recordVersion` and
+    /// format stamps are unchanged.
+    static func promotedCacheType(_ meta: [String: String]) -> PromptCacheType {
+        meta["cacheType"].flatMap(PromptCacheType.init(rawValue:)) ?? .assistant
     }
 
     /// Drop a cold entry's ``coldTrie`` node and ``coldEntries`` record together,
@@ -1190,7 +1253,7 @@ public actor PromptCacheStore {
 
     /// Byte footprint of a KV snapshot: sum of its serialised `state` arrays,
     /// matching how mlx-swift-lm's wired-memory accounting measures a cache.
-    private static func cacheBytes(_ caches: [any KVCache]) -> Int {
+    static func cacheBytes(_ caches: [any KVCache]) -> Int {
         caches.flatMap { $0.state }.reduce(0) { $0 + $1.nbytes }
     }
 }
