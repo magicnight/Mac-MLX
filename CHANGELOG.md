@@ -132,7 +132,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   request in a tool loop with a system turn after the tool result; it is now
   appended to that result rather than opening a user turn, which the
   Qwen3.6 and Mellum2 templates would take for a new query and stop
-  rendering the loop's reasoning.
+  rendering the loop's reasoning. Claude Code replays those system turns
+  unchanged in later requests, so the prefix stays stable: in a real
+  four-request Claude Code loop on Qwen3.6-27B-4bit the prompts carried 28,
+  50 and 72 more tokens of earlier reasoning and reused 16,827 of 16,947,
+  17,029 of 17,065 and 17,147 of 17,183 tokens.
 
 ### Fixed
 
