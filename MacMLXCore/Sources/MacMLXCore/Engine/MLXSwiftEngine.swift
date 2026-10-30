@@ -1184,11 +1184,16 @@ public actor MLXSwiftEngine: InferenceEngine {
         // to the plain Sendable shape the upstream API expects. Tools (when
         // present) reach the template via `UserInput.tools`.
         let additionalContext = request.templateKwargs?.mapValues { $0.toSendable() }
+        let chatInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
 
         let assistantReasoning = request.allMessages.filter { $0.role == .assistant }.map(\.reasoning)
         if let messageGenerator, assistantReasoning.contains(where: { $0?.isEmpty == false }) {
+            // The generator's own entry point over the input the processor
+            // would get, so one that reads `additionalContext` (TranslateGemma)
+            // builds what it always builds; its `.messages` output then passes
+            // through the processor's `generate(from:)` unchanged.
             if let messages = injectingReasoning(
-                messageGenerator.generate(messages: chatMessages), assistantReasoning: assistantReasoning) {
+                messageGenerator.generate(from: chatInput), assistantReasoning: assistantReasoning) {
                 return UserInput(messages: messages, tools: toolSpecs, additionalContext: additionalContext)
             }
             if logsDroppedInputs {
@@ -1201,16 +1206,17 @@ public actor MLXSwiftEngine: InferenceEngine {
                 }
             }
         }
-        return UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
+        return chatInput
     }
 
     /// `messages` — a message generator's dictionaries for a conversation —
     /// with the k-th assistant dictionary's `reasoning_content` set to the
     /// k-th entry of `assistantReasoning` (the conversation's assistant
     /// messages' reasoning, in order) when that is non-empty. The thinking
-    /// templates read that key (Qwen3.x, Mellum2, GLM; Gemma 4 also reads
+    /// templates read that key (Qwen3.x, Mellum2; Gemma 4 also reads
     /// `reasoning`) and render it only where they choose, typically for the
-    /// assistant turns after the last user query.
+    /// assistant turns after the last user query (Gemma 4: only those with
+    /// tool calls).
     ///
     /// A generator may drop messages (Gemma's drops system ones) but never an
     /// assistant one, so the k-th assistant dictionary is the k-th assistant

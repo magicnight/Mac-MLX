@@ -1,4 +1,5 @@
 import Foundation
+import MLXLLM
 import MLXLMCommon
 import Testing
 
@@ -107,6 +108,28 @@ struct ReasoningInjectionTests {
         #expect(reasoning(messages) == [nil, "Run ls.", nil, nil])
         #expect(input.tools?.count == 1)
         #expect(input.additionalContext?["enable_thinking"] as? Bool == true)
+    }
+
+    /// The reasoning path goes through the generator's own `generate(from:)`,
+    /// so one that reads the template kwargs (TranslateGemma's language
+    /// codes) builds the dictionaries it always builds.
+    @Test
+    func theGeneratorsOwnEntryPointIsUsed() throws {
+        let translate = GenerateRequest(
+            model: "m",
+            messages: [
+                ChatMessage(role: .user, content: "Hallo"),
+                ChatMessage(role: .assistant, content: "Hello", reasoning: "Translate it."),
+                ChatMessage(role: .user, content: "Danke"),
+            ],
+            templateKwargs: ["source_lang_code": .string("de"), "target_lang_code": .string("en")])
+        let input = MLXSwiftEngine.userInput(
+            for: translate, isVLM: false, messageGenerator: TranslateGemma3MessageGenerator(), logsDroppedInputs: false)
+        let messages = try dicts(input)
+        #expect(roles(messages) == ["user", "assistant", "user"])
+        let parts = try #require(messages[0]["content"] as? [[String: any Sendable]])
+        #expect(parts.first?["source_lang_code"] as? String == "de")
+        #expect(reasoning(messages) == [nil, "Translate it.", nil])
     }
 
     /// No reasoning: the `.chat` input of before, so the prompt is unchanged.
