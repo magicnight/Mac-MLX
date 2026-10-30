@@ -79,6 +79,15 @@ public struct GenerationParameters: Codable, Hashable, Sendable {
     public var maxTokens: Int
     public var stream: Bool
 
+    /// The temperature to sample at. A `topP` of 0 or less keeps only the
+    /// most probable token, which is greedy decoding (OpenAI's and
+    /// llama.cpp's reading, and what Apple's Foundation Models client sends
+    /// for `.greedy`), while mlx-swift-lm reads it as "no nucleus filter" and
+    /// would sample the whole vocabulary. So it maps to temperature 0.
+    public var samplingTemperature: Double {
+        topP <= 0 ? 0 : temperature
+    }
+
     // MARK: Track E — API-compatibility extensions
     //
     // All optional and decoded via `decodeIfPresent` (see `init(from:)`), so

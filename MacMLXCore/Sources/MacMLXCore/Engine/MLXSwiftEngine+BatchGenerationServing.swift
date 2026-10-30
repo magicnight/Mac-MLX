@@ -160,7 +160,7 @@ extension MLXSwiftEngine: BatchGenerationServing {
             promptTokens: promptTokens,
             parameters: GenerateParameters(
                 maxTokens: params.maxTokens,
-                temperature: Float(params.temperature),
+                temperature: Float(params.samplingTemperature),
                 topP: Float(params.topP),
                 // The batched path prefills by hand in `ModelBatchInferenceCore`
                 // and never reads this; set for parity with the single-stream

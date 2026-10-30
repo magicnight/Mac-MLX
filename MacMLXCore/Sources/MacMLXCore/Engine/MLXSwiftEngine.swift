@@ -1544,7 +1544,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             kvBits: params.kvBits,
             kvGroupSize: params.kvGroupSize ?? 64,
             quantizedKVStart: params.quantizedKVStart ?? 0,
-            temperature: Float(params.temperature),
+            temperature: Float(params.samplingTemperature),
             topP: Float(params.topP),
             prefill: PrefillParameters(chunking: .remainder)
         )
