@@ -1078,7 +1078,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// `<think>` block. Applies the chat template exactly as `generate`
     /// does (the same `userInput(for:isVLM:messageGenerator:)` — tools,
     /// reasoning and template kwargs — and `container.prepare`), decodes
-    /// the resulting tokens, and inspects the tail via
+    /// the last ``thinkProbeTailTokens`` tokens, and inspects them via
     /// `MessageSegmenter.promptOpensThink`. Returns false if no model is
     /// loaded or the template can't be applied.
     public func promptOpensThinkBlock(_ request: GenerateRequest) async -> Bool {
@@ -1093,13 +1093,22 @@ public actor MLXSwiftEngine: InferenceEngine {
         do {
             let lmInput = try await container.prepare(input: Self.userInput(
                 for: request, isVLM: false, messageGenerator: support.messageGenerator, logsDroppedInputs: false))
-            let ids = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+            let ids = lmInput.text.tokens.asArray(Int32.self).suffix(Self.thinkProbeTailTokens).map(Int.init)
             let text = await container.decode(tokenIds: ids)
             return MessageSegmenter.promptOpensThink(text)
         } catch {
             return false
         }
     }
+
+    /// How many trailing prompt tokens `promptOpensThinkBlock` decodes. The
+    /// `<think>` a model continues is opened by the generation prompt, its
+    /// last few tokens (Qwen3's `<|im_start|>assistant\n<think>\n`; with
+    /// thinking off, `<think>\n\n</think>\n\n` closes it there too), so
+    /// a tail this long holds the last tag, without decoding a long agent
+    /// prompt whole on every request. A block opened earlier and left open
+    /// for longer than this would be missed; no chat template renders one.
+    static let thinkProbeTailTokens = 64
 
     /// How many tokens `request`'s prompt renders to: the `UserInput`
     /// generation builds (`userInput(for:isVLM:messageGenerator:)` — tools,
