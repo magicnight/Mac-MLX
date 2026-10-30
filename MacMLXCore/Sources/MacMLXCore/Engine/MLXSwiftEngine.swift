@@ -748,6 +748,12 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     private(set) var lastPromptCacheRecord: PromptCacheRecord?
 
+    /// The `hashValue` of the prompt tokens the last text generation
+    /// prefilled, so a gated test can check they are the tokens it rendered
+    /// (hashes compare within one process). A test seam, reset at the start
+    /// of every text generation; nil on the VLM path.
+    private(set) var lastPromptTokensHash: Int?
+
     /// Whether a text generation may split its prefill at the history
     /// boundary and store the cache there (see ``HistoryBoundary``). Always on
     /// in production; a test seam, so a real-weights test can run its cold
@@ -1765,6 +1771,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
         lastPromptCacheRecord = nil
+        lastPromptTokensHash = nil
         // Track E — per-request sampling extensions. Any of these forces the
         // hand-assembled `customTokenStream` (constraint / logit_bias / XTC /
         // logprobs share it), which is mutually exclusive with the stock
@@ -1897,6 +1904,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         // `LMInput.text.tokens` is an `MLXArray`; `asArray(Int.self)`
         // materialises to Swift.
         let inputTokens = lmInput.text.tokens.asArray(Int.self)
+        lastPromptTokensHash = inputTokens.hashValue
 
         // Track B — nearest-prefix (LCP) lookup. On a hit the store returns a
         // cache already TRIMMED to the shared prefix, so we prefill only the

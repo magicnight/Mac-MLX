@@ -19,13 +19,16 @@ import enum MacMLXCore.JSONValue
 /// replays it.
 ///
 /// What it asserts:
-/// - the engine's prompt for the loop's second turn (`countPromptTokens`, and
-///   the `promptTokens` generation reports) is the template's render of the
-///   conversation with `reasoning_content` set, which contains the reasoning
-///   (decoded from the tokens), and is longer than the same turn without
-///   reasoning by about the reasoning's own length;
-/// - without reasoning the prompt is the `.chat` render the engine always
-///   built, token for token;
+/// - the prompt the engine prefills on every turn (`lastPromptTokensHash`,
+///   token for token; `countPromptTokens` too) is the template's render of
+///   the conversation with `reasoning_content` set, which contains the
+///   reasoning (decoded from the tokens), and on the loop's second turn is
+///   longer than the same turn without reasoning by about the reasoning's
+///   own length;
+/// - without reasoning the engine prefills what the `.chat` input it built
+///   before reasoning was rendered renders to, token for token;
+/// - the think-tail probe, which decodes only the prompt's last tokens,
+///   agrees with the whole render, thinking on and off;
 /// - inside the loop the prompt stays append-only: turns 2 and 3 reuse at
 ///   least the previous turn's history boundary.
 ///
@@ -226,8 +229,11 @@ final class ReasoningHistorySmokeTests: XCTestCase {
         for turn in 1...4 {
             let turnRequest = request(modelID, turn: turn, preserveThinking: preserveThinking)
             let history = try render(engineInput(turnRequest), tokenizer: tokenizer, generationPrompt: false)
+            let prompt = try render(engineInput(turnRequest), tokenizer: tokenizer)
             let run = try await collect(engine, turnRequest)
             await engine.drainPromptCacheWrites()
+            let prefilled = await engine.lastPromptTokensHash
+            XCTAssertEqual(prefilled, prompt.hashValue, "\(label) turn \(turn): the engine prefills the render")
             if turn == 2 {
                 let expected = try await engine.countPromptTokens(turnRequest)
                 XCTAssertEqual(run.promptTokens, expected, "generation prefills the counted prompt")
@@ -284,8 +290,34 @@ final class ReasoningHistorySmokeTests: XCTestCase {
         let growth = counted - countedPlain
         XCTAssertGreaterThanOrEqual(growth, reasoningTokens - 1, "the prompt grows by about the reasoning's length")
         XCTAssertLessThanOrEqual(growth, reasoningTokens + 8, "the prompt grows by about the reasoning's length")
+        // The prompts the engine actually prefilled, token for token: with
+        // reasoning the render above; without it the `.chat` input the
+        // engine built before reasoning was rendered.
+        _ = try await collect(engine, turn2)
+        let prefilledWith = await engine.lastPromptTokensHash
+        XCTAssertEqual(prefilledWith, withTokens.hashValue, "the engine prefills the render with reasoning")
+        _ = try await collect(engine, turn2Plain)
+        let prefilledPlain = await engine.lastPromptTokensHash
         let chatTokens = try render(chatInput(turn2Plain), tokenizer: tokenizer)
-        XCTAssertEqual(withoutTokens, chatTokens, "without reasoning the prompt is the .chat render, token for token")
+        XCTAssertEqual(
+            prefilledPlain, chatTokens.hashValue,
+            "without reasoning the engine prefills what the pre-reasoning .chat input rendered")
+
+        // The think-tail probe, which decodes only the prompt's last tokens,
+        // agrees with the whole render, thinking on and off.
+        for thinking in [true, false] {
+            var probe = turn2
+            probe.templateKwargs = ["enable_thinking": .bool(thinking)]
+            let whole = tokenizer.decode(
+                tokenIds: try render(engineInput(probe), tokenizer: tokenizer), skipSpecialTokens: false)
+            let opens = await engine.promptOpensThinkBlock(probe)
+            print("\(label) enable_thinking=\(thinking): promptOpensThinkBlock=\(opens)")
+            XCTAssertEqual(opens, MessageSegmenter.promptOpensThink(whole), "enable_thinking=\(thinking)")
+        }
+        if MessageSegmenter.promptOpensThink(renderedText) {
+            let opens = await engine.promptOpensThinkBlock(turn2)
+            XCTAssertTrue(opens, "the probe still sees the generation prompt's open <think>")
+        }
 
         // Prompt-cache reuse across the loop, then at a new query, with
         // `preserve_thinking` off and on. The cold tier is off: only the
@@ -335,6 +367,8 @@ final class ReasoningHistorySmokeTests: XCTestCase {
             let text = tokenizer.decode(tokenIds: prompt, skipSpecialTokens: false)
             let history = try render(engineInput(turnRequest), tokenizer: tokenizer, generationPrompt: false)
             let run = try await collect(engine, turnRequest)
+            let prefilled = await engine.lastPromptTokensHash
+            XCTAssertEqual(prefilled, prompt.hashValue, "turn \(turn): the engine prefills the render")
             boundaries.append(history.count)
             reused.append(run.cachedPromptTokens ?? -1)
             print("\(label) turn \(turn): roles=\(messages.map(\.role.rawValue)) prompt=\(run.promptTokens ?? -1) "
