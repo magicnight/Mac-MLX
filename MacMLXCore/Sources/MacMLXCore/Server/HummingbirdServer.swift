@@ -2851,9 +2851,11 @@ public actor HummingbirdServer {
         // nil and `content` is the full text. A constrained generation is the
         // JSON answer entire, and a think tag inside a string value is data, so
         // it is not split (see `streamingChatResponse`).
-        let (reasoning, answer): (String?, String) = genRequest.responseFormat == nil
+        let (reasoning, rawAnswer): (String?, String) = genRequest.responseFormat == nil
             ? MessageSegmenter.splitReasoning(fullText)
             : (nil, fullText)
+        // As in the stream, the answer starts at its first non-whitespace text.
+        let answer = String(rawAnswer.drop(while: \.isWhitespace))
         var message: [String: Any] = ["role": "assistant", "content": answer]
         if let reasoning {
             message["reasoning_content"] = reasoning
@@ -2935,6 +2937,19 @@ public actor HummingbirdServer {
             // chunk fully buffered as a partial reasoning tag carries its logprobs
             // forward until the next frame flushes).
             var pendingStreamLogprobs: [TokenLogprob] = []
+            // The answer starts at its first non-whitespace text, as on
+            // `/v1/messages` and `/v1/responses`: a thinking model emits blank
+            // lines after `</think>`, which are not an answer, and on a
+            // tool-only turn they made Apple's Foundation Models client store a
+            // blank response and replay the reasoning on it, apart from the
+            // tool calls.
+            var answerStarted = false
+            func answerText(_ text: String) -> String {
+                guard !answerStarted else { return text }
+                let trimmed = String(text.drop(while: \.isWhitespace))
+                answerStarted = !trimmed.isEmpty
+                return trimmed
+            }
 
             let engine: any InferenceEngine
             do {
@@ -3013,7 +3028,8 @@ public actor HummingbirdServer {
                         if wantsLogprobs, let logprobs = chunk.logprobs {
                             pendingStreamLogprobs.append(contentsOf: logprobs)
                         }
-                        let (reasoning, answer) = splitsReasoning ? splitter.push(chunk.text) : ("", chunk.text)
+                        let (reasoning, rawAnswer) = splitsReasoning ? splitter.push(chunk.text) : ("", chunk.text)
+                        let answer = answerText(rawAnswer)
                         var delta: [String: Any] = [:]
                         if !reasoning.isEmpty { delta["reasoning_content"] = reasoning }
                         if !answer.isEmpty { delta["content"] = answer }
@@ -3021,7 +3037,7 @@ public actor HummingbirdServer {
                             // Flush any buffered tail into this terminal chunk.
                             let (rTail, aTail) = splitsReasoning ? splitter.finish() : ("", "")
                             let r = (delta["reasoning_content"] as? String ?? "") + rTail
-                            let a = (delta["content"] as? String ?? "") + aTail
+                            let a = (delta["content"] as? String ?? "") + answerText(aTail)
                             if !r.isEmpty { delta["reasoning_content"] = r }
                             if !a.isEmpty { delta["content"] = a }
                         } else if delta.isEmpty {
