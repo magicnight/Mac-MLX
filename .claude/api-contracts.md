@@ -151,9 +151,9 @@ Request (the fields acted on; anything else is accepted and ignored):
 - `text.format` is rebuilt as the chat `response_format` and decoded by
   `ResponseFormatDecoder`; with tools or images it is a 400, as on chat.
 - `reasoning.effort` `"none"`/`"minimal"` sets `enable_thinking=false`.
-- `max_output_tokens` absent → 32768 (`responsesDefaultMaxOutputTokens`), not
-  the chat path's 2048: Codex never sends it, and a thinking model spends
-  2048 before its tool call. An explicit value is honored.
+- `max_output_tokens` absent → 32768 (`defaultMaxOutputTokens`, shared with
+  chat completions): Codex never sends it, and a thinking model spends 2048
+  before its tool call. An explicit value is honored.
 - Body limit 64 MB (`responsesBodyLimitBytes`, 413 `request_too_large`
   above it), not the 2 MB route default chat uses: the whole conversation
   is replayed every turn.

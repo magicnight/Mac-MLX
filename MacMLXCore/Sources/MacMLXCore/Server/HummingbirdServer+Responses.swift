@@ -26,10 +26,11 @@ extension HummingbirdServer {
     static let responsesBodyLimitBytes = 64 * 1024 * 1024
 
     /// The output budget when a request names none. Codex never sends
-    /// `max_output_tokens`, and the chat path's 2048 is spent by a thinking
-    /// model's reasoning before it reaches the tool call, which would end
-    /// every such turn `incomplete` with no call in it.
-    static let responsesDefaultMaxOutputTokens = 32_768
+    /// `max_output_tokens`, and Xcode 27's locally hosted provider sends no
+    /// `max_tokens`. At the 2048 the chat path used to default to, a thinking
+    /// model spent it all reasoning: a Codex turn ended `incomplete` with no
+    /// tool call, and Xcode got no answer at all.
+    static let defaultMaxOutputTokens = 32_768
 
     func handleResponses(
         request: Request,
@@ -80,7 +81,7 @@ extension HummingbirdServer {
         let parameters = GenerationParameters(
             temperature: responsesRequest.temperature ?? 0.7,
             topP: responsesRequest.top_p ?? 0.95,
-            maxTokens: responsesRequest.max_output_tokens ?? Self.responsesDefaultMaxOutputTokens,
+            maxTokens: responsesRequest.max_output_tokens ?? Self.defaultMaxOutputTokens,
             stream: responsesRequest.stream ?? false
         )
         // `reasoning.effort` "none"/"minimal" switches a thinking template
