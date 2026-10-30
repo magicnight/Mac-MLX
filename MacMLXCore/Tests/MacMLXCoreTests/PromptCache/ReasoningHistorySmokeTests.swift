@@ -303,6 +303,54 @@ final class ReasoningHistorySmokeTests: XCTestCase {
         }
     }
 
+    /// Claude Code's shape: the reminder as a system turn after the first
+    /// user turn, and each tool-loop request ending with a system turn after
+    /// the tool result (`<total_tokens>`), kept in later requests' history.
+    /// Folded as the server folds it, that turn joins the tool result, so the
+    /// template still sees the loop's turns after the last user query and
+    /// renders their reasoning.
+    func testClaudeCodeShapeRendersTheLoopsReasoning() async throws {
+        let model = try modelDirectory()
+        let engine = try await loadedEngine(model)
+        let loaded = try await HuggingFaceTokenizerLoader().load(from: model.url)
+        let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
+        let label = "[reasoning-history] \(model.id) Claude Code shape:"
+        let loop = Self.conversation(withReasoning: true)
+        let turns: [[ChatMessage]] = [
+            loop[0] + [ChatMessage(role: .system, content: "<system-reminder>CLAUDE.md and memory</system-reminder>")],
+            loop[1] + [ChatMessage(role: .system, content: "<total_tokens>190000 tokens left</total_tokens>")],
+            loop[2] + [ChatMessage(role: .system, content: "<total_tokens>189000 tokens left</total_tokens>")],
+        ]
+        var boundaries: [Int] = []
+        var reused: [Int] = []
+        for turn in 1...turns.count {
+            let (system, messages) = MidConversationSystemFolding.fold(
+                [ChatMessage(role: .system, content: Self.systemPrompt)] + turns.prefix(turn).flatMap { $0 })
+            let turnRequest = GenerateRequest(
+                model: model.id, messages: messages, systemPrompt: system,
+                parameters: GenerationParameters(temperature: 0, topP: 1.0, maxTokens: 4, stream: true),
+                tools: [Self.bashTool])
+            let prompt = try render(engineInput(turnRequest), tokenizer: tokenizer)
+            let text = tokenizer.decode(tokenIds: prompt, skipSpecialTokens: false)
+            let history = try render(engineInput(turnRequest), tokenizer: tokenizer, generationPrompt: false)
+            let run = try await collect(engine, turnRequest)
+            boundaries.append(history.count)
+            reused.append(run.cachedPromptTokens ?? -1)
+            print("\(label) turn \(turn): roles=\(messages.map(\.role.rawValue)) prompt=\(run.promptTokens ?? -1) "
+                + "reused=\(run.cachedPromptTokens ?? -1) history boundary=\(history.count)")
+            XCTAssertEqual(run.promptTokens, prompt.count, "turn \(turn): generation prefills the render")
+            XCTAssertEqual(messages.last?.role, turn == 1 ? .user : .tool, "turn \(turn): the system turn is folded in")
+            if turn >= 2 {
+                XCTAssertTrue(text.contains(Self.reasoning1), "turn \(turn): the first call's reasoning is rendered")
+            }
+            if turn >= 3 {
+                XCTAssertTrue(text.contains(Self.reasoning2), "turn 3: the second call's reasoning is rendered")
+            }
+        }
+        XCTAssertGreaterThanOrEqual(reused[1], boundaries[0], "turn 2 reuses turn 1's history boundary")
+        XCTAssertGreaterThanOrEqual(reused[2], boundaries[1], "turn 3 reuses turn 2's history boundary")
+    }
+
     /// The new query with the SSD tier on (the default), under a temporary
     /// root: the earlier boundary snapshots the in-memory tier evicted are
     /// still on disk.
