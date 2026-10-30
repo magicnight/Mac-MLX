@@ -1018,6 +1018,12 @@ public actor HummingbirdServer {
     /// with OpenAI's `model_not_found` code.
     public typealias ModelResolver = @Sendable (String) async -> LocalModel?
 
+    /// Async listing of the models on disk, for `GET /v1/models` and Ollama's
+    /// `/api/tags`. Every chat model in it can be named by a request and is
+    /// loaded on demand through the resolver, so the lists show them all, not
+    /// only the loaded one.
+    public typealias ModelLister = @Sendable () async -> [LocalModel]
+
     /// Optional hook the caller can install to perform the actual
     /// load through a layer above the raw engine (e.g. GUI's
     /// `EngineCoordinator`, which also maintains observable state
@@ -1040,6 +1046,10 @@ public actor HummingbirdServer {
     /// the explicitly-loaded model can answer). The CLI's
     /// `ServeCommand` wires this up against `ModelLibraryManager.scan`.
     private let modelResolver: ModelResolver
+
+    /// Caller-supplied library listing (see ``ModelLister``). `nil` lists
+    /// only the loaded model, as before it existed.
+    private let modelLister: ModelLister?
 
     /// Optional hook used by cold-swap instead of raw engine calls.
     /// GUI sets this to route through `EngineCoordinator.load(_:)` so
@@ -1336,6 +1346,7 @@ public actor HummingbirdServer {
     public init(engine: any InferenceEngine, apiKey: String? = nil) {
         self.engineProvider = { engine }
         self.modelResolver = { _ in nil }
+        self.modelLister = nil
         self.loadHook = nil
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
@@ -1355,6 +1366,7 @@ public actor HummingbirdServer {
     ) {
         self.engineProvider = { engine }
         self.modelResolver = modelResolver
+        self.modelLister = nil
         self.loadHook = nil
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
@@ -1376,6 +1388,7 @@ public actor HummingbirdServer {
     ) {
         self.engineProvider = { engine }
         self.modelResolver = modelResolver
+        self.modelLister = nil
         self.loadHook = loadHook
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
@@ -1396,6 +1409,7 @@ public actor HummingbirdServer {
     public init(
         engineProvider: @escaping @Sendable () async -> (any InferenceEngine)?,
         modelResolver: @escaping ModelResolver = { _ in nil },
+        modelLister: ModelLister? = nil,
         loadHook: LoadHook? = nil,
         inFlightHook: InFlightHook? = nil,
         auxiliaryResidency: (any AuxiliaryResidency)? = nil,
@@ -1405,6 +1419,7 @@ public actor HummingbirdServer {
     ) {
         self.engineProvider = engineProvider
         self.modelResolver = modelResolver
+        self.modelLister = modelLister
         self.loadHook = loadHook
         self.inFlightHook = inFlightHook
         self.auxiliaryResidency = auxiliaryResidency
@@ -1776,31 +1791,38 @@ public actor HummingbirdServer {
     }
 
     private func handleModels() async throws -> Response {
-        // Pre-v0.3.3 this only listed the currently loaded model, because
-        // that was the only one that could answer a chat completion. With
-        // cold-swap (v0.3.3), any model the resolver can find is a valid
-        // target, so we want `GET /v1/models` to reflect that. But we
-        // don't have a "list all" primitive on the resolver — it's a
-        // point-lookup. We keep listing the loaded model (compatibility)
-        // and document that external clients wanting a full list should
-        // use `macmlx list` or the GUI Models tab.
-        let loaded = await engineProvider()?.loadedModel
-        var data: [[String: String]] = []
-        if let model = loaded {
-            // Report the user-facing alias (v0.5.1) when one is set for
-            // this model; otherwise fall back to its directory id. Empty
-            // alias is treated as "no alias".
-            let params = await ModelParametersStore().load(for: model.id)
-            let reportedID: String
-            if let alias = params.alias, !alias.isEmpty {
-                reportedID = alias
-            } else {
-                reportedID = model.id
-            }
-            data = [["id": reportedID, "object": "model", "owned_by": "local"]]
-        }
+        let data = await servableModelIDs().map { ["id": $0, "object": "model", "owned_by": "local"] }
         let body: [String: Any] = ["object": "list", "data": data]
         return try jsonResponseAny(body)
+    }
+
+    /// The models a request can name, as `GET /v1/models` and `/api/tags`
+    /// report them: the loaded one first, then every other chat model the
+    /// lister finds (text and vision; embedders, rerankers and audio models
+    /// are served elsewhere), each under its user-facing alias when one is set
+    /// (v0.5.1). Xcode 27's locally hosted provider reads an empty list as a
+    /// failed connection, so listing only the loaded model left it unusable
+    /// until a model was loaded by hand.
+    func servableModelIDs() async -> [String] {
+        let loaded = await engineProvider()?.loadedModel
+        var models = loaded.map { [$0] } ?? []
+        models += (await modelLister?() ?? []).filter {
+            ($0.format == .mlx || $0.format == .mlxVLM) && $0.id != loaded?.id
+        }
+        var ids: [String] = []
+        for model in models {
+            let id = await reportedModelID(model.id)
+            if !ids.contains(id) { ids.append(id) }
+        }
+        return ids
+    }
+
+    /// The id a model is reported under: its alias when one is set, else its
+    /// directory id. An empty alias counts as none.
+    private func reportedModelID(_ modelID: String) async -> String {
+        let params = await ModelParametersStore().load(for: modelID)
+        if let alias = params.alias, !alias.isEmpty { return alias }
+        return modelID
     }
 
     private func handleStatus() async throws -> Response {
@@ -2143,27 +2165,11 @@ public actor HummingbirdServer {
     /// translate from our existing `/v1/models` shape into Ollama's
     /// `{"models":[{name, size, modified_at, digest, details}]}` shape.
     private func handleOllamaTags() async throws -> Response {
-        // Reuse the same "what's loaded + what the resolver can see"
-        // logic as handleModels. For Ollama the list should be of
-        // locally-available models regardless of load state.
-        let currentID = await engineProvider()?.loadedModel?.id
-        var entries: [[String: Any]] = []
-        if let currentID {
-            // Report the user-facing alias (v0.5.1) when one is set for this
-            // model, mirroring `handleModels` / `GET /v1/models` (P3-2). Without
-            // this, Ollama-compat clients saw the raw directory id while the
-            // OpenAI list showed the alias (A3 inconsistency). Empty alias is
-            // treated as "no alias".
-            let params = await ModelParametersStore().load(for: currentID)
-            let reportedID: String
-            if let alias = params.alias, !alias.isEmpty {
-                reportedID = alias
-            } else {
-                reportedID = currentID
-            }
-            entries.append([
-                "name": reportedID,
-                "model": reportedID,
+        // The same models as `GET /v1/models`, in Ollama's shape.
+        let entries: [[String: Any]] = await servableModelIDs().map { id in
+            [
+                "name": id,
+                "model": id,
                 "modified_at": ISO8601DateFormatter().string(from: Date()),
                 "size": 0,
                 "digest": "",
@@ -2173,7 +2179,7 @@ public actor HummingbirdServer {
                     "parameter_size": "",
                     "quantization_level": ""
                 ] as [String: Any]
-            ])
+            ]
         }
         return try jsonResponseAny([
             "models": entries

@@ -437,6 +437,11 @@ public final class AppState {
             let models = (try? await library.scan(modelDirectory)) ?? []
             return models.first { $0.id == modelID || $0.displayName == modelID }
         }
+        // `GET /v1/models` lists what the resolver can load, not only the
+        // loaded model.
+        let lister: HummingbirdServer.ModelLister = {
+            (try? await library.scan(modelDirectory)) ?? []
+        }
         // Route cold-swap through EngineCoordinator so the GUI and
         // menu bar reflect the newly-loaded model (currentModel,
         // status, onModelLoaded callback all fire correctly).
@@ -480,6 +485,7 @@ public final class AppState {
         let instance = HummingbirdServer(
             engineProvider: engineProvider,
             modelResolver: resolver,
+            modelLister: lister,
             loadHook: loadHook,
             inFlightHook: inFlightHook,
             auxiliaryResidency: auxiliaryResidency,

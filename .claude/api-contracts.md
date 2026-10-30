@@ -367,6 +367,13 @@ Response:
 }
 ```
 
+The loaded model first, then every other chat model (text and vision) in the
+model directory, each under its alias when one is set. A request naming any of
+them loads it on demand. Embedders, rerankers and audio models are not listed.
+Ollama's `/api/tags` lists the same models. Xcode 27's locally hosted provider
+reads an empty list as a failed connection, which is why the list no longer
+waits for a model to be loaded.
+
 ---
 
 ## Custom Extensions (prefixed with x-)

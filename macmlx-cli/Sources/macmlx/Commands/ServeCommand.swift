@@ -47,6 +47,11 @@ struct ServeCommand: AsyncParsableCommand {
             let models = (try? await library.scan(modelDirectory)) ?? []
             return models.first { $0.id == modelID || $0.displayName == modelID }
         }
+        // `GET /v1/models` lists what the resolver can load, not only the
+        // loaded model.
+        let lister: HummingbirdServer.ModelLister = {
+            (try? await library.scan(modelDirectory)) ?? []
+        }
         // Refuse to double-bind if another macMLX process (GUI or CLI)
         // is already serving. `kill(pid, 0)` is the POSIX "is this PID
         // alive?" probe — returns 0 when the process exists. A stale
@@ -75,6 +80,7 @@ struct ServeCommand: AsyncParsableCommand {
         let server = HummingbirdServer(
             engineProvider: { engine },
             modelResolver: resolver,
+            modelLister: lister,
             apiKey: apiKey ?? ctx.settings.serverAPIKey,
             stallTimeoutSeconds: TimeInterval(ctx.settings.generationStallTimeoutSeconds),
             batchServing: engine as? (any BatchGenerationServing)
