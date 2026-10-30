@@ -25,7 +25,8 @@ through the same server path and should behave the same, but were not run.
 
 In Xcode's Intelligence settings, add a locally hosted model provider on
 macMLX's port (8000 unless you changed it). If Xcode asks for a base URL, give
-`http://localhost:8000`, without `/v1`: Xcode appends `/v1/models` itself.
+`http://localhost:8000`, without `/v1`: Xcode appends `/v1/models` itself. (The
+base URL macMLX's Server settings show ends in `/v1`; leave that part off.)
 
 Xcode lists the downloaded models and loads the one you pick when you send the
 first message, so that first answer waits for the load. Follow-up messages in

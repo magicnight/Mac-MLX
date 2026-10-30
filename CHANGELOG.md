@@ -28,8 +28,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   as a chat completion now may (see below), so a long think still reaches
   its tool call. A `system` or `developer` item after the first turn is
   folded into a user turn, since many chat templates accept a system turn
-  only first, at the place it was sent: it is appended to the user turn just before it, or,
-  after an assistant turn or a tool output, starts a user turn of its own
+  only first, at the place it was sent: it is appended to the user turn
+  just before it, or, after an assistant turn or a tool output, starts a
+  user turn of its own
   that a user message right after it joins. Earlier turns are never
   rewritten, so folding no longer forces them to be prefilled again, and the
   prompt cache serves them on the next turn on hybrid (linear-attention) and
@@ -183,9 +184,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   chat path, get the same budget. The continuous batcher's per-row ceiling
   rose from 4,096 to 32,768 with it, so a batched request is not cut short
   of that budget (and an explicit `max_tokens` above 4,096 is no longer cut
-  to 4,096 when the request is batched). An explicit limit is honored as
-  before, and the Ollama endpoints keep their 2,048 default for
-  `num_predict`.
+  to 4,096 when the request is batched; above 32,768 it still is, while the
+  single-stream path honors it). The cost is that the batcher's rows, up to
+  32 of them, may each run eight times longer than before, with no memory
+  guard over the batch, and a model swap waits for that cohort to finish.
+  An explicit limit is otherwise honored as before, and the Ollama
+  endpoints keep their 2,048 default for `num_predict`.
 
 ### Fixed
 

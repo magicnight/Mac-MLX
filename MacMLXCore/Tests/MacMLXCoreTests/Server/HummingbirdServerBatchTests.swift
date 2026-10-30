@@ -27,8 +27,8 @@ import Testing
 //   emptyToolsArrayStillBatches                     : 19_895
 //   concurrentSameModelDifferentPromptsNoCrossTalk  : 19_900
 //   streamingBatchRequestHonorsIncludeUsage         : 20_800
-//   batchedAnswerStartsAtItsFirstText               : 19_905
-//   batchedStreamedAnswerStartsAtItsFirstText       : 19_915
+//   batchedAnswerStartsAtItsFirstText               : 23_600 (the 19_9xx
+//   batchedStreamedAnswerStartsAtItsFirstText       : 23_620  block is full)
 
 @Suite("HummingbirdServerBatch")
 struct HummingbirdServerBatchTests {
@@ -397,8 +397,6 @@ struct HummingbirdServerBatchTests {
         #expect(try chatContent(d3) == "batch:m:prompt-3", "each response must carry its OWN prompt's content")
     }
 
-    /// A streaming batched request streams the seam's output as OpenAI SSE frames
-    /// (through the same watchdog/splitter/`[DONE]` machinery as the single path).
     /// A batched answer starts at its first non-whitespace text, as a
     /// single-stream one does: a thinking model's blank lines after
     /// `</think>` are not part of it.
@@ -408,7 +406,7 @@ struct HummingbirdServerBatchTests {
         let server = HummingbirdServer(
             engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
             batchServing: seam)
-        let port = try await server.start(preferredPort: 19_905)
+        let port = try await server.start(preferredPort: 23_600)
 
         let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
         let (data, response) = try await postRaw(url, jsonObject: chatBody("m"))
@@ -425,7 +423,7 @@ struct HummingbirdServerBatchTests {
         let server = HummingbirdServer(
             engineProvider: { StubInferenceEngine(engineID: .mlxSwift) },
             batchServing: seam)
-        let port = try await server.start(preferredPort: 19_915)
+        let port = try await server.start(preferredPort: 23_620)
 
         let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
         let (data, response) = try await postRaw(url, jsonObject: chatBody("m", stream: true))
@@ -436,6 +434,8 @@ struct HummingbirdServerBatchTests {
         #expect(await seam.submittedModels() == ["m"], "the request must have been batched")
     }
 
+    /// A streaming batched request streams the seam's output as OpenAI SSE frames
+    /// (through the same watchdog/splitter/`[DONE]` machinery as the single path).
     @Test
     func streamingBatchRequestStreamsViaSeam() async throws {
         let seam = StubBatchServing()

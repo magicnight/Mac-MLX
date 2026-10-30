@@ -320,6 +320,10 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// own `maxTokens`). No lower than the server's default output budget
     /// (`HummingbirdServer.defaultMaxOutputTokens`), or a batched request that
     /// names no limit would stop short of the budget a single-stream one gets.
+    /// The cost: every row of a cohort (32 by default) may now run eight times
+    /// as long as at the old 4096, with no memory guard over the batch, and a
+    /// model swap waits for the cohort to drain. Routing requests without a
+    /// limit away from the batcher instead would mean they never batch.
     static let batchServingGlobalMaxTokens = 32_768
 
     /// Max decode steps the drive loop runs in ONE `container.perform` before it
