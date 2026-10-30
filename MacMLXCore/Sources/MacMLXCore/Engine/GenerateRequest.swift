@@ -18,6 +18,13 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
     /// made, so a re-render reproduces the assistant's tool-call block. Nil
     /// otherwise. Back-compatible for the same reason as `toolCallID`.
     public let toolCalls: [ToolCallRequest]?
+    /// For an `.assistant` message: the reasoning the model produced before
+    /// this turn's answer, as a client replays it (`reasoning_content`, a
+    /// `thinking` block, a Responses `reasoning` item). The engine hands it to
+    /// the chat template as the turn's `reasoning_content`; the template
+    /// decides whether to render it. Nil otherwise, and on every message
+    /// decoded from JSON written before it existed; encoded only when set.
+    public let reasoning: String?
 
     public init(
         id: UUID = UUID(),
@@ -25,7 +32,8 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
         content: String,
         images: [ImageAttachment] = [],
         toolCallID: String? = nil,
-        toolCalls: [ToolCallRequest]? = nil
+        toolCalls: [ToolCallRequest]? = nil,
+        reasoning: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -33,10 +41,11 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
         self.images = images
         self.toolCallID = toolCallID
         self.toolCalls = toolCalls
+        self.reasoning = reasoning
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, images, toolCallID, toolCalls
+        case id, role, content, images, toolCallID, toolCalls, reasoning
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,6 +57,7 @@ public struct ChatMessage: Codable, Hashable, Identifiable, Sendable {
         self.images = try c.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
         self.toolCallID = try c.decodeIfPresent(String.self, forKey: .toolCallID)
         self.toolCalls = try c.decodeIfPresent([ToolCallRequest].self, forKey: .toolCalls)
+        self.reasoning = try c.decodeIfPresent(String.self, forKey: .reasoning)
     }
 }
 
