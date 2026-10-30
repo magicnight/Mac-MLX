@@ -81,7 +81,7 @@ enum ResponsesInputTranslator {
         default:
             throw TranslationError(message: "`input` must be a string or an array of input items.")
         }
-        let (systemPrompt, messages) = MidConversationSystemFolding.fold(conversation)
+        let (systemPrompt, messages) = MidConversationSystemFolding.fold(conversation, appendsToToolTurns: false)
         do {
             try validateToolCallPairing(messages)
         } catch let error as ToolHistoryDecodeError {

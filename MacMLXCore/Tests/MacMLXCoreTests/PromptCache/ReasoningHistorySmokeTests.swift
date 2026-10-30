@@ -325,7 +325,8 @@ final class ReasoningHistorySmokeTests: XCTestCase {
         var reused: [Int] = []
         for turn in 1...turns.count {
             let (system, messages) = MidConversationSystemFolding.fold(
-                [ChatMessage(role: .system, content: Self.systemPrompt)] + turns.prefix(turn).flatMap { $0 })
+                [ChatMessage(role: .system, content: Self.systemPrompt)] + turns.prefix(turn).flatMap { $0 },
+                appendsToToolTurns: true)
             let turnRequest = GenerateRequest(
                 model: model.id, messages: messages, systemPrompt: system,
                 parameters: GenerationParameters(temperature: 0, topP: 1.0, maxTokens: 4, stream: true),

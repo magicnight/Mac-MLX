@@ -11,20 +11,26 @@
 ///
 ///  - the system turns before the first other turn are joined, in order, with
 ///    a blank line into the system prompt;
-///  - a later system turn whose previous message is a user or tool turn is
-///    appended to that turn's text, after a blank line (after several tool
+///  - a later system turn whose previous message is a user turn is appended to
+///    that turn's text, after a blank line; with `appendsToToolTurns`, one
+///    after a tool turn is appended to it the same way (after several tool
 ///    turns, to the last one);
-///  - any other later system turn (after an assistant turn) opens a new user
-///    turn at its own position carrying its text. Further system
+///  - any other later system turn (after an assistant turn, or a tool turn
+///    without `appendsToToolTurns`) opens a new user turn at its own position
+///    carrying its text. Further system
 ///    turns append to it like any user turn, and a user turn directly after it
 ///    is merged into it: its text follows the system text, and the merged
 ///    turn keeps that user turn's id and images.
 ///
-/// Appending to a tool turn rather than opening a user turn after it matters
-/// to thinking templates (Qwen3.x, Mellum2): they take any user turn that is
-/// not a tool response for a new query and stop rendering the reasoning of
-/// the assistant turns before it, and Claude Code ends every request in a
-/// tool loop with a system turn after the tool result.
+/// `appendsToToolTurns` is for `/v1/messages`. Claude Code ends every request
+/// in a tool loop with a system turn after the tool result, and it is
+/// metadata (`<total_tokens>…</total_tokens>`). Opened as a user turn, the
+/// thinking templates (Qwen3.x, Mellum2) take it for a new query, since they
+/// count any user turn that is not a tool response as one, and stop
+/// rendering the reasoning of the loop's assistant turns. `/v1/responses`
+/// keeps opening a user turn: a Codex developer item after a tool output is
+/// an instruction (a permissions change, say), and inside the tool response
+/// the model could take it for untrusted tool output.
 ///
 /// The rule is position-stable, because the prompt cache depends on it:
 /// clients replay the whole conversation every turn, and macMLX reuses the
@@ -58,12 +64,18 @@ enum MidConversationSystemFolding {
 
     /// Splits `messages` into a system prompt and system-free messages.
     ///
+    /// - Parameter appendsToToolTurns: a system turn right after a tool turn
+    ///   is appended to that turn instead of opening a user turn (see above).
+    ///
     /// - Returns: `systemPrompt` is nil when no text ends up there; `messages`
     ///   holds every non-system message in order, plus the user turns opened
     ///   by system turns. A user turn that gains folded text keeps its id,
     ///   images and tool fields; every other message, an assistant turn's
     ///   reasoning included, passes through unchanged.
-    static func fold(_ messages: [ChatMessage]) -> (systemPrompt: String?, messages: [ChatMessage]) {
+    static func fold(
+        _ messages: [ChatMessage],
+        appendsToToolTurns: Bool
+    ) -> (systemPrompt: String?, messages: [ChatMessage]) {
         var systemParts: [String] = []
         var out: [ChatMessage] = []
         // Whether `out.last` is a user turn a system turn opened, which a user
@@ -76,7 +88,8 @@ enum MidConversationSystemFolding {
                 guard !text.isEmpty else { continue }
                 if out.isEmpty {
                     systemParts.append(text)
-                } else if let last = out.last, last.role == .user || last.role == .tool {
+                } else if let last = out.last,
+                          last.role == .user || (appendsToToolTurns && last.role == .tool) {
                     out[out.count - 1] = replacingContent(of: last, with: join([last.content, text]))
                 } else {
                     out.append(ChatMessage(role: .user, content: text))

@@ -3411,7 +3411,10 @@ public actor HummingbirdServer {
     /// - The top-level `system` and any `role:"system"` turns go through
     ///   `MidConversationSystemFolding`: `system` first, then the leading
     ///   system turns, form the system prompt; a later system turn stays at
-    ///   its position in the conversation.
+    ///   its position in the conversation, appended to a tool result right
+    ///   before it (`appendsToToolTurns`: Claude Code's `<total_tokens>`
+    ///   turn, which as a user turn would end the loop for a thinking
+    ///   template).
     /// - Turns: text blocks → `content`, image blocks → `images`, assistant
     ///   `tool_use` → `ChatMessage.toolCalls`, each user `tool_result` → a
     ///   `.tool` message carrying `tool_use_id` (emitted before any residual
@@ -3474,7 +3477,7 @@ public actor HummingbirdServer {
         } catch let error as ToolHistoryDecodeError {
             throw AnthropicRequestError(message: error.message)
         }
-        let (systemPrompt, messages) = MidConversationSystemFolding.fold(conversation)
+        let (systemPrompt, messages) = MidConversationSystemFolding.fold(conversation, appendsToToolTurns: true)
 
         // Convert Anthropic tools to the same internal OpenAI-function-spec shape
         // the OpenAI path forwards, so both protocols feed the chat template

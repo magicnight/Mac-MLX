@@ -23,13 +23,20 @@ struct MidConversationSystemFoldingTests {
         ChatMessage(role: .tool, content: text, toolCallID: id)
     }
 
+    /// `/v1/responses`' placement unless `appendsToToolTurns` (`/v1/messages`).
+    private func fold(
+        _ messages: [ChatMessage], appendsToToolTurns: Bool = false
+    ) -> (systemPrompt: String?, messages: [ChatMessage]) {
+        MidConversationSystemFolding.fold(messages, appendsToToolTurns: appendsToToolTurns)
+    }
+
     private let image = ImageAttachment(fileURL: URL(filePath: "/tmp/x.png"), mimeType: "image/png")
 
     // MARK: Placement
 
     @Test
     func leadingSystemTurnsJoinIntoThePromptInOrder() {
-        let (prompt, messages) = MidConversationSystemFolding.fold([
+        let (prompt, messages) = fold([
             system("first"), system("second"), user("hi"),
         ])
         #expect(prompt == "first\n\nsecond")
@@ -40,7 +47,7 @@ struct MidConversationSystemFoldingTests {
     @Test
     func noSystemTurnsLeavesMessagesUntouched() {
         let input = [user("a"), assistant("b"), user("c")]
-        let (prompt, messages) = MidConversationSystemFolding.fold(input)
+        let (prompt, messages) = fold(input)
         #expect(prompt == nil)
         #expect(messages == input)
     }
@@ -48,7 +55,7 @@ struct MidConversationSystemFoldingTests {
     @Test
     func systemTurnAfterAUserTurnIsAppendedToIt() throws {
         let first = ChatMessage(role: .user, content: "question", images: [image])
-        let (prompt, messages) = MidConversationSystemFolding.fold([
+        let (prompt, messages) = fold([
             system("lead"), first, system("note 1"), system("note 2"), assistant("b"),
         ])
         #expect(prompt == "lead")
@@ -61,7 +68,7 @@ struct MidConversationSystemFoldingTests {
 
     @Test
     func systemTurnAfterAnAssistantTurnOpensAUserTurn() throws {
-        let (prompt, messages) = MidConversationSystemFolding.fold([
+        let (prompt, messages) = fold([
             user("a"), assistant("b"), system("late"),
         ])
         #expect(prompt == nil)
@@ -69,15 +76,27 @@ struct MidConversationSystemFoldingTests {
         #expect(messages.map(\.content) == ["a", "b", "late"])
     }
 
-    /// Claude Code's shape: a system turn right after the tool result. It
-    /// joins the result rather than opening a user turn, which a thinking
+    /// `/v1/responses`: a developer item after a tool output is an
+    /// instruction, kept out of the tool response in a user turn of its own.
+    @Test
+    func systemTurnAfterAToolTurnOpensAUserTurn() throws {
+        let (_, messages) = fold([
+            user("a"), toolCall("c1"), toolResult("c1", "out"), system("permissions changed"),
+        ])
+        try #require(messages.map(\.role) == [.user, .assistant, .tool, .user])
+        #expect(messages[2].content == "out")
+        #expect(messages[3].content == "permissions changed")
+    }
+
+    /// `/v1/messages`, Claude Code's shape: a system turn right after the tool
+    /// result joins it rather than opening a user turn, which a thinking
     /// template would take for a new query.
     @Test
-    func systemTurnAfterAToolTurnIsAppendedToIt() throws {
-        let (_, messages) = MidConversationSystemFolding.fold([
+    func anthropicSystemTurnAfterAToolTurnIsAppendedToIt() throws {
+        let (_, messages) = fold([
             user("a"), toolCall("c1"), toolResult("c1", "out"), system("<total_tokens>1</total_tokens>"),
             system("<total_tokens>2</total_tokens>"),
-        ])
+        ], appendsToToolTurns: true)
         try #require(messages.map(\.role) == [.user, .assistant, .tool])
         #expect(messages[2].content == "out\n\n<total_tokens>1</total_tokens>\n\n<total_tokens>2</total_tokens>")
         #expect(messages[2].toolCallID == "c1")
@@ -86,14 +105,14 @@ struct MidConversationSystemFoldingTests {
     /// After several tool results, the last one takes the system text; a user
     /// turn after it stays a turn of its own.
     @Test
-    func systemTurnAfterSeveralToolTurnsJoinsTheLast() throws {
+    func anthropicSystemTurnAfterSeveralToolTurnsJoinsTheLast() throws {
         let calls = ChatMessage(role: .assistant, content: "", toolCalls: [
             ToolCallRequest(id: "c1", name: "Bash", arguments: [:]),
             ToolCallRequest(id: "c2", name: "Bash", arguments: [:]),
         ])
-        let (_, messages) = MidConversationSystemFolding.fold([
+        let (_, messages) = fold([
             user("a"), calls, toolResult("c1", "one"), toolResult("c2", "two"), system("note"), user("next"),
-        ])
+        ], appendsToToolTurns: true)
         try #require(messages.map(\.role) == [.user, .assistant, .tool, .tool, .user])
         #expect(messages.map(\.content) == ["a", "", "one", "two\n\nnote", "next"])
     }
@@ -101,7 +120,7 @@ struct MidConversationSystemFoldingTests {
     @Test
     func userTurnDirectlyAfterAnOpenedTurnIsMergedIntoIt() throws {
         let next = ChatMessage(role: .user, content: "question", images: [image])
-        let (_, messages) = MidConversationSystemFolding.fold([
+        let (_, messages) = fold([
             user("a"), assistant("b"), system("note 1"), system("note 2"), next, user("separate"),
         ])
         try #require(messages.map(\.role) == [.user, .assistant, .user, .user])
@@ -115,7 +134,7 @@ struct MidConversationSystemFoldingTests {
 
     @Test
     func systemTurnAfterALeadingAssistantTurnNeverReachesThePrompt() throws {
-        let (prompt, messages) = MidConversationSystemFolding.fold([
+        let (prompt, messages) = fold([
             system("lead"), assistant("b"), system("late"),
         ])
         #expect(prompt == "lead")
@@ -125,14 +144,14 @@ struct MidConversationSystemFoldingTests {
 
     @Test
     func systemOnlyInputIsAllPrompt() {
-        let (prompt, messages) = MidConversationSystemFolding.fold([system("one"), system("two")])
+        let (prompt, messages) = fold([system("one"), system("two")])
         #expect(prompt == "one\n\ntwo")
         #expect(messages.isEmpty)
     }
 
     @Test
     func imagesOnSystemTurnsBecomePlaceholders() {
-        let (prompt, messages) = MidConversationSystemFolding.fold([
+        let (prompt, messages) = fold([
             ChatMessage(role: .system, content: "lead", images: [image]),
             user("a"),
             ChatMessage(role: .system, content: "", images: [image, image]),
@@ -146,7 +165,7 @@ struct MidConversationSystemFoldingTests {
 
     @Test
     func emptyTextsAddNoStrayBlankLines() {
-        let (prompt, messages) = MidConversationSystemFolding.fold([
+        let (prompt, messages) = fold([
             system(""), user("a"), assistant("b"), system(""), system("note"), user(""),
         ])
         #expect(prompt == nil)
@@ -163,10 +182,11 @@ struct MidConversationSystemFoldingTests {
     private func expectPrefixStable(
         _ history: [ChatMessage],
         extendedBy more: [ChatMessage],
+        appendsToToolTurns: Bool = false,
         sourceLocation: SourceLocation = #_sourceLocation
     ) {
-        let short = MidConversationSystemFolding.fold(history)
-        let long = MidConversationSystemFolding.fold(history + more)
+        let short = fold(history, appendsToToolTurns: appendsToToolTurns)
+        let long = fold(history + more, appendsToToolTurns: appendsToToolTurns)
         #expect(short.systemPrompt == long.systemPrompt, sourceLocation: sourceLocation)
         guard let lastShort = short.messages.last else { return }
         guard long.messages.count >= short.messages.count else {
@@ -195,12 +215,12 @@ struct MidConversationSystemFoldingTests {
         let turn1 = [user("block 1\nblock 2\nblock 3"), system("<system-reminder>CLAUDE.md…</system-reminder>")]
         let turn2Additions = [toolCall("toolu_1"), toolResult("toolu_1", "hi"), system("<total_tokens>9</total_tokens>")]
         let turn3Additions = [assistant("Done."), user("next task"), system("<system-reminder>…</system-reminder>")]
-        expectPrefixStable(turn1, extendedBy: turn2Additions)
-        expectPrefixStable(turn1 + turn2Additions, extendedBy: turn3Additions)
+        expectPrefixStable(turn1, extendedBy: turn2Additions, appendsToToolTurns: true)
+        expectPrefixStable(turn1 + turn2Additions, extendedBy: turn3Additions, appendsToToolTurns: true)
 
         // The reminder stays in the first user turn on every turn, and the
         // trailing system turn joins the tool result.
-        let (_, messages) = MidConversationSystemFolding.fold(turn1 + turn2Additions)
+        let (_, messages) = fold(turn1 + turn2Additions, appendsToToolTurns: true)
         try #require(messages.map(\.role) == [.user, .assistant, .tool])
         #expect(messages[0].content.hasSuffix("CLAUDE.md…</system-reminder>"))
         #expect(messages[2].content == "hi\n\n<total_tokens>9</total_tokens>")
@@ -217,11 +237,11 @@ struct MidConversationSystemFoldingTests {
         expectPrefixStable(turn1 + turn2Additions, extendedBy: turn3Additions)
         expectPrefixStable(turn1 + turn2Additions + turn3Additions, extendedBy: [system("note"), user("more")])
 
-        let (prompt, messages) = MidConversationSystemFolding.fold(turn1 + turn2Additions + turn3Additions)
+        let (prompt, messages) = fold(turn1 + turn2Additions + turn3Additions)
         #expect(prompt == "dev one\n\ndev two")
         try #require(messages.map(\.role) == [.user, .assistant, .tool, .user, .assistant, .tool])
-        #expect(messages[2].content == "hi\n\n\npermissions changed")
-        #expect(messages[3].content == "now list files")
+        #expect(messages[2].content == "hi\n")
+        #expect(messages[3].content == "permissions changed\n\nnow list files")
     }
 
     /// A user turn merged into the turn a system turn opened brings its
@@ -235,7 +255,7 @@ struct MidConversationSystemFoldingTests {
         let next = ChatMessage(role: .user, content: "look", images: [image])
         expectPrefixStable(history, extendedBy: [next])
 
-        let (_, messages) = MidConversationSystemFolding.fold(history + [next])
+        let (_, messages) = fold(history + [next])
         try #require(messages.map(\.role) == [.user, .assistant, .user])
         #expect(messages[2].content == "note\n\nlook")
         #expect(messages[2].images == [image])
@@ -251,8 +271,13 @@ struct MidConversationSystemFoldingTests {
             toolCall("c3"), toolResult("c3", "r3"), system("<total_tokens>1</total_tokens>"),
         ]
         // From the first item on: an empty history has no system prompt yet.
-        for split in 1...conversation.count {
-            expectPrefixStable(Array(conversation.prefix(split)), extendedBy: Array(conversation.dropFirst(split)))
+        // Both placements of a system turn after a tool turn.
+        for appendsToToolTurns in [false, true] {
+            for split in 1...conversation.count {
+                expectPrefixStable(
+                    Array(conversation.prefix(split)), extendedBy: Array(conversation.dropFirst(split)),
+                    appendsToToolTurns: appendsToToolTurns)
+            }
         }
     }
 
@@ -264,10 +289,10 @@ struct MidConversationSystemFoldingTests {
             role: .assistant, content: "", toolCalls: [ToolCallRequest(id: "c1", name: "Bash", arguments: [:])],
             reasoning: "run it")
         let answer = ChatMessage(role: .assistant, content: "done", reasoning: "it worked")
-        let (_, messages) = MidConversationSystemFolding.fold([
+        let (_, messages) = fold([
             system("lead"), user("a"), system("s1"), call, system("s2"), toolResult("c1", "r"),
             system("s3"), answer, system("s4"),
-        ])
+        ], appendsToToolTurns: true)
         try #require(messages.map(\.role) == [.user, .assistant, .user, .tool, .assistant, .user])
         #expect(messages.map(\.reasoning) == [nil, "run it", nil, nil, "it worked", nil])
         #expect(messages[1].id == call.id)
