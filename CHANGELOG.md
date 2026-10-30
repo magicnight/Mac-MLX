@@ -44,8 +44,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `DELETE /v1/responses/{id}`. Hosted tools (`web_search`, `file_search`,
   `code_interpreter`, `mcp`, …) are not offered to the model and are ignored
   rather than rejected, since Codex always declares `web_search`. Reasoning
-  items sent back in `input` are dropped, so the model does not see its
-  earlier reasoning yet, and no `encrypted_content` is returned.
+  items sent back in `input` reach the model (see the reasoning round trip
+  below).
   `tool_choice` other than `"none"` and `parallel_tool_calls` are echoed, not
   enforced. Images must be base64 data URLs; an image in a tool output or a
   system message reaches the model as a placeholder line saying it was left
@@ -69,11 +69,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `POST /v1/messages/count_tokens`.** `thinking: {"type": "disabled"}` turns
   a thinking template's `enable_thinking` off; `"enabled"` and `"adaptive"`
   keep the model's default and return its reasoning as a `thinking` block
-  before the text (streamed as `thinking_delta`s and one `signature_delta`;
-  the signature is an opaque `"macmlx"` that nothing verifies), unless
-  `display` is `"omitted"`, which is what Claude Code sends. `budget_tokens`
-  is accepted and not enforced. Without `thinking` the reasoning is dropped,
-  as before, and replayed `thinking` blocks are ignored. `count_tokens` takes
+  before the text (streamed as `thinking_delta`s and one `signature_delta`),
+  with empty text when `display` is `"omitted"`, which is what Claude Code
+  sends (see the reasoning round trip below). `budget_tokens` is accepted
+  and not enforced. Without `thinking` the reasoning is dropped, as before.
+  `count_tokens` takes
   a `/v1/messages` body (without `max_tokens`) and returns
   `{"input_tokens": N}`, the length of the prompt `/v1/messages` would
   generate from — tools, system turns and images included. It loads the
@@ -100,14 +100,49 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   Map every alias: one left unmapped makes Claude Code request a `claude-*`
   model id, which macMLX answers with a 404.
 
+- **Reasoning round trip.** When a client replays an earlier assistant
+  turn's reasoning, the chat template now gets it as that turn's
+  `reasoning_content`, so a thinking model sees its own reasoning inside a
+  tool loop, as the Qwen3.x, Mellum2, GLM and Gemma 4 templates are built
+  for (they render it for the turns after the last user query; Gemma 4 only
+  on turns with tool calls). Read from an assistant message's
+  `reasoning_content` (or `reasoning`) on chat completions, from `thinking`
+  blocks on `/v1/messages`, and from `reasoning` items on `/v1/responses`
+  (their `reasoning_text` content; a summary is never taken for the
+  reasoning). So that clients which replay only opaque fields give it back,
+  a Responses reasoning item carries `encrypted_content` when `include`
+  asks for `reasoning.encrypted_content` (Codex does), and a `thinking`
+  block's `signature` carries the reasoning; both are the text in base64
+  behind a `macmlx.r1.` prefix, not encryption. With `display: "omitted"`
+  the reply now has a `thinking` block with empty text, as Anthropic's API
+  returns, where it had none, so Claude Code has a block to replay. A
+  request without replayed reasoning renders exactly as before. The
+  think-tail probe (whether the prompt opens `<think>`) now renders tools
+  too, as generation does. Inside a tool loop the prompt stays append-only,
+  so the prompt cache keeps serving it: on Qwen3.6-27B-4bit a real Codex
+  loop's second turn carried 33 more prompt tokens of reasoning and reused
+  9,465 of 9,679. At a new user query the template stops rendering the
+  loop's reasoning, so reuse falls back to the end of the previous query
+  (1,664 of 3,204 tokens in a measured four-turn loop, with the SSD tier on;
+  with only the 512 MiB in-memory tier, whose larger later snapshots evict
+  that one, 0). The Parameters Inspector's template kwarg
+  `preserve_thinking: true` makes Qwen3.6 render every turn's reasoning,
+  keeping the render append-only across queries (3,239 reused of 3,298).
+  Not rendered on VLMs or over the Ollama endpoints. On Claude Code the
+  replayed reasoning reaches the template but Qwen3.6 does not render it
+  yet: Claude Code ends each request with a system turn, which becomes a
+  user turn after the tool result, and the template takes it for a new
+  query.
+
 ### Fixed
 
 - Agent turns now reuse the previous turn's history on hybrid
   (linear-attention, e.g. Qwen3.6) and sliding-window (e.g. Mellum2) models.
   Codex and Claude Code send the whole conversation every turn, and the
   cache entry a turn left behind (its prompt and what it generated) is not
-  a prefix of the next turn on Qwen3.6 and Mellum2, whose templates drop
-  reasoning from history; on Qwen3.6 the prompt itself is not one either,
+  a prefix of the next turn on Qwen3.6 and Mellum2, whose templates render
+  a previous turn differently from how the model produced it; on Qwen3.6
+  the prompt itself is not one either,
   since the next turn renders the `<think>` that opened the reply
   differently. Serving the shared part needed a trim those caches cannot
   do, so every agent turn prefilled the whole conversation again. On a
