@@ -278,7 +278,11 @@ Request (the fields acted on):
   and `thinking` blocks, whose `thinking` text — or, when it is empty, the
   text a macMLX `signature` carries — is the turn's reasoning (rendered as on
   chat completions; several blocks join with a blank line).
-  `redacted_thinking` and another provider's signature carry nothing.
+  `redacted_thinking` and another provider's signature carry nothing. A
+  `role:"system"` turn after a tool result opens a user turn (see above),
+  which Qwen3.6's and Mellum2's templates count as a new query, so they do
+  not render the reasoning of the turns before it; Claude Code ends every
+  request with such a turn.
 - `tool_choice`: `none` offers no tools; `auto`, `any` and `tool` (which
   needs a `name`) offer them all, not enforced; any other type is a 400.
   `disable_parallel_tool_use` is ignored.
