@@ -641,9 +641,21 @@ private struct AnthropicBlock: Decodable, Sendable {
     let content: AnthropicToolResultContent?
     let is_error: Bool?
     // thinking (assistant turn): the replayed reasoning, and the signature
-    // macMLX returned with it (see `ReasoningCarrier`).
-    let thinking: String?
-    let signature: String?
+    // macMLX returned with it (see `ReasoningCarrier`). `JSONValue`, so a
+    // non-string value is ignored, as before they were read, rather than
+    // failing the request; see `thinkingText` / `signatureText`.
+    let thinking: JSONValue?
+    let signature: JSONValue?
+
+    var thinkingText: String? {
+        if case .string(let text)? = thinking { return text }
+        return nil
+    }
+
+    var signatureText: String? {
+        if case .string(let text)? = signature { return text }
+        return nil
+    }
 }
 
 /// Anthropic `tool_result.content`: either a bare string or an array of content
@@ -894,8 +906,8 @@ private func assistantMessage(
     }
     let reasoning = blocks.compactMap { block -> String? in
         guard block.type == "thinking" else { return nil }
-        if let thinking = block.thinking, !thinking.isEmpty { return thinking }
-        return ReasoningCarrier.decode(block.signature)
+        if let thinking = block.thinkingText, !thinking.isEmpty { return thinking }
+        return ReasoningCarrier.decode(block.signatureText)
     }.joined(separator: "\n\n")
     return ChatMessage(
         role: .assistant,

@@ -21,6 +21,7 @@ import Testing
 //   responsesEncryptedContentNonStreaming           : 23_120
 //   responsesEncryptedContentStreaming              : 23_150
 //   responsesEncryptedOnlyReplayRoundTrips          : 23_180
+//   anthropicNonStringThinkingFieldsAreIgnored      : 23_210
 
 @Suite("ReasoningHistoryEndpoint")
 struct ReasoningHistoryEndpointTests {
@@ -201,6 +202,31 @@ struct ReasoningHistoryEndpointTests {
         #expect(messages[1].reasoning == "First block.\n\nSecond, from the signature.")
         // A foreign signature carries nothing macMLX can read.
         #expect(messages.map(\.reasoning) == [nil, "First block.\n\nSecond, from the signature.", nil, nil, nil])
+    }
+
+    /// A client that sends `thinking` or `signature` as something other than
+    /// a string is served as before these fields were read: they are ignored.
+    @Test
+    func anthropicNonStringThinkingFieldsAreIgnored() async throws {
+        let engine = ScriptedEngine(chunks: [GenerateChunk(text: "ok", finishReason: .stop)], opensThink: false)
+        let (server, port) = try await start(engine, port: 23_210)
+        let (data, response) = try await post(port: port, path: "/v1/messages", body: [
+            "model": Self.model, "max_tokens": 64,
+            "messages": [
+                ["role": "user", "content": "Weather?"],
+                ["role": "assistant", "content": [
+                    ["type": "thinking", "thinking": 42, "signature": ["opaque": true]],
+                    ["type": "thinking", "thinking": NSNull(), "signature": ReasoningCarrier.encode("Still read.")],
+                    toolUse,
+                ]],
+                toolResult,
+            ],
+        ])
+        let captured = await engine.capturedRequest
+        await server.stop()
+
+        #expect(response.statusCode == 200, "\(String(decoding: data, as: UTF8.self))")
+        #expect(captured?.messages.map(\.reasoning) == [nil, "Still read.", nil])
     }
 
     /// Claude Code's setting: the reply's text-less thinking block, replayed
