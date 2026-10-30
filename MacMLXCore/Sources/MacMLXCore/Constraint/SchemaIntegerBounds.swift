@@ -8,6 +8,14 @@ public struct SchemaIntegerBounds: Equatable, Hashable, Sendable, Codable {
     public let minimum: Int?
     public let maximum: Int?
 
+    /// No bounds: the reading side fills in the limits of `Int`.
+    static let anyInt = SchemaIntegerBounds(unchecked: nil, nil)
+
+    private init(unchecked minimum: Int?, _ maximum: Int?) {
+        self.minimum = minimum
+        self.maximum = maximum
+    }
+
     /// `nil` when no integer lies between the bounds.
     public init?(minimum: Int?, maximum: Int?) {
         if let minimum, let maximum, minimum > maximum { return nil }

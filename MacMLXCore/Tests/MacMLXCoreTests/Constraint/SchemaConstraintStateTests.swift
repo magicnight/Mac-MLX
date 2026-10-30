@@ -339,6 +339,28 @@ struct SchemaConstraintStateTests {
 
     // MARK: Numeric bounds
 
+    /// An integer with no bounds still has to fit an `Int`: past that a typed
+    /// client cannot read it, and an unbounded digit run is how a model ran a
+    /// `population` field to `max_tokens` through Apple's Foundation Models
+    /// client. So it reads as `Int.min ... Int.max`, digit by digit.
+    @Test
+    func unboundedIntegersFitAnInt() {
+        let n = schema([("n", .integer)], required: ["n"])
+        #expect(accepts("{\"n\":\(Int.max)}", n))
+        #expect(accepts("{\"n\":\(Int.min)}", n))
+        #expect(accepts("{\"n\":-0}", n))
+        #expect(walk("{\"n\":\(Int.max)0", n) == nil, "no twentieth digit")
+        #expect(walk("{\"n\":922337203685477580", n) != nil)
+        #expect(walk("{\"n\":9223372036854775808", n) == nil, "one past Int.max")
+        #expect(walk("{\"n\":-9223372036854775809", n) == nil, "one below Int.min")
+        #expect(!accepts("{\"n\":1.5}", n))
+        #expect(!accepts("{\"n\":1e3}", n))
+        #expect(!accepts("{\"n\":01}", n))
+        let root = SchemaConstraintState(root: .integer).walk(Array(String(Int.max).utf8))
+        #expect(root?.isComplete == true)
+        #expect(root?.walk(Array("0".utf8)) == nil)
+    }
+
     /// A bounded integer: a digit is legal only while some completion fits
     /// the range, and the number ends only on a value in it.
     @Test
@@ -386,8 +408,8 @@ struct SchemaConstraintStateTests {
         let atLeast = schema([("n", integers(7, nil))])
         #expect(accepts("{\"n\":7}", atLeast))
         #expect(accepts("{\"n\":700000000000000000}", atLeast))
-        #expect(accepts("{\"n\":\(String(repeating: "9", count: 19))}", atLeast), "19 digits is the most a value may have")
-        #expect(walk("{\"n\":\(String(repeating: "9", count: 20))", atLeast) == nil)
+        #expect(accepts("{\"n\":\(Int.max)}", atLeast), "the open side stops at the largest Int")
+        #expect(walk("{\"n\":\(String(repeating: "9", count: 19))", atLeast) == nil)
         #expect(!accepts("{\"n\":6}", atLeast))
         #expect(!accepts("{\"n\":-7}", atLeast))
         #expect(walk("{\"n\":-", atLeast) == nil, "nothing at or below zero is in [7, ...)")
@@ -588,16 +610,18 @@ struct SchemaConstraintStateTests {
         }
     }
 
-    /// Whether a value of `type` has unboundedly many legal prefixes: a bounded
-    /// number (every fraction digit opens ten more) or an integer bounded on
-    /// one side only. The trap search cannot finish on those.
+    /// Whether a value of `type` has too many legal prefixes to search whole: a
+    /// bounded number (every fraction digit opens ten more) or an integer
+    /// without bounds on both sides, which reads as `Int.min ... Int.max`. The
+    /// trap search cannot finish on those.
     private static func hasUnboundedPrefixes(_ type: SchemaValueType) -> Bool {
         switch type {
         case .boundedNumber: return true
+        case .integer: return true
         case .boundedInteger(let bounds): return bounds.minimum == nil || bounds.maximum == nil
         case .object(let object): return object.properties.contains { hasUnboundedPrefixes($0.type) }
         case .array(let items, _, _): return hasUnboundedPrefixes(items)
-        case .string, .number, .integer, .boolean, .stringEnum: return false
+        case .string, .number, .boolean, .stringEnum: return false
         }
     }
 
@@ -660,16 +684,16 @@ struct SchemaConstraintStateTests {
         let schemas: [JSONSchemaObject] = [
             schema([("a", .string)]),
             schema([("a", .string)], required: ["a"]),
-            schema([("a", .string), ("ab", .integer), ("b", .number)], required: ["ab"]),
+            schema([("a", .string), ("ab", integers(-12, 35)), ("b", .number)], required: ["ab"]),
             schema([("e", .stringEnum(["x", "xy"])), ("f", .boolean)], required: ["e", "f"]),
             schema([("", .stringEnum([""])), ("n", .number)]),
             // Nested: the same shapes one level down, and the array bounds.
             schema([("o", nested([("k", .boolean)]))]),
-            schema([("o", nested([("a", .integer), ("ab", .integer)], required: ["ab"]))], required: ["o"]),
+            schema([("o", nested([("a", integers(-12, 35)), ("ab", integers(0, 0))], required: ["ab"]))], required: ["o"]),
             schema([("t", .array(items: .string, minItems: 2, maxItems: 3))], required: ["t"]),
             schema([("z", .array(items: .boolean, minItems: 0, maxItems: 0))]),
-            schema([("m", .array(items: .array(items: .integer, minItems: 1, maxItems: 2), minItems: 0, maxItems: nil))]),
-            schema([("i", .array(items: nested([("id", .integer), ("t", .string)], required: ["id"]), minItems: 1, maxItems: 2))]),
+            schema([("m", .array(items: .array(items: integers(-5, 5), minItems: 1, maxItems: 2), minItems: 0, maxItems: nil))]),
+            schema([("i", .array(items: nested([("id", integers(0, 99)), ("t", .string)], required: ["id"]), minItems: 1, maxItems: 2))]),
             // Literals outside ASCII and ones that need escapes: the escape
             // paths (surrogate pairs included) must not strand the matcher.
             schema([("c", .stringEnum(["Lençóis", "Bogotá", "😀"]))], required: ["c"]),
@@ -681,9 +705,9 @@ struct SchemaConstraintStateTests {
         ]
         var roots: [SchemaValueType] = schemas.map { .object($0) }
         roots += [
-            .array(items: nested([("id", .integer)], required: ["id"]), minItems: 1, maxItems: 2),
+            .array(items: nested([("id", integers(0, 99))], required: ["id"]), minItems: 1, maxItems: 2),
             .array(items: .stringEnum(["é", "e"]), minItems: 0, maxItems: nil),
-            .string, .number, .integer, .boolean, .stringEnum(["😀", "x"]),
+            .string, .number, .boolean, .stringEnum(["😀", "x"]),
             integers(-12, 35), integers(0, 0),
         ]
         // A search the cap cuts off counts the frontier as live and could hide
@@ -705,11 +729,12 @@ struct SchemaConstraintStateTests {
         for _ in 0..<8 {
             seeded.append(generator.root())
         }
-        // A bounded number, or an integer bounded on one side only, has a
-        // state per prefix and always reaches the cap: checked as far as the
-        // search goes (`boundedPrefixesAlwaysComplete` walks them to depth).
+        // A bounded number, or an integer without bounds on both sides (it
+        // reads as `Int.min ... Int.max`), has a state per prefix and always
+        // reaches the cap: checked as far as the search goes
+        // (`boundedPrefixesAlwaysComplete` walks them to depth).
         let unbounded: [SchemaValueType] = [
-            numbers("0.5", "2.75"), numbers("0", "1", openBelow: true, openAbove: true), integers(7, nil),
+            numbers("0.5", "2.75"), numbers("0", "1", openBelow: true, openAbove: true), integers(7, nil), .integer,
             .object(schema([("p", numbers("-1.5", "-0.25")), ("n", integers(nil, -3))], required: ["p"])),
         ]
         let limit = 40_000
@@ -1134,9 +1159,9 @@ struct SchemaConstraintStateTests {
         // In an unbounded array the count holds at `minItems`, so two items in
         // and three items in are the same position; below `minItems` the count
         // still tells positions apart.
-        let unbounded = SchemaConstraintState(schema: schema([("t", .array(items: .integer, minItems: 2, maxItems: nil))]))
-        #expect(unbounded.walk(Array("{\"t\":[1".utf8)) != unbounded.walk(Array("{\"t\":[1,2".utf8)))
-        #expect(unbounded.walk(Array("{\"t\":[1,2".utf8)) == unbounded.walk(Array("{\"t\":[1,2,3".utf8)))
+        let unbounded = SchemaConstraintState(schema: schema([("t", .array(items: .boolean, minItems: 2, maxItems: nil))]))
+        #expect(unbounded.walk(Array("{\"t\":[true".utf8)) != unbounded.walk(Array("{\"t\":[true,true".utf8)))
+        #expect(unbounded.walk(Array("{\"t\":[true,true".utf8)) == unbounded.walk(Array("{\"t\":[true,true,true".utf8)))
         // Different paths to the same position are the same state.
         #expect(a.walk(Array("{\"o\":{\"k\":true}".utf8)) == a.walk(Array("{\"o\":{\"k\":false}".utf8)))
 
