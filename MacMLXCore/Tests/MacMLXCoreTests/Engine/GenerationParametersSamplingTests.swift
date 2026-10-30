@@ -1,3 +1,4 @@
+import MLXLMCommon
 import Testing
 @testable import MacMLXCore
 
@@ -20,5 +21,16 @@ struct GenerationParametersSamplingTests {
         #expect(GenerationParameters(temperature: 0.7, topP: 1).samplingTemperature == 0.7)
         #expect(GenerationParameters(temperature: 0.7, topP: 0.01).samplingTemperature == 0.7)
         #expect(GenerationParameters(temperature: 0, topP: 0.95).samplingTemperature == 0)
+    }
+
+    /// Both engine paths build mlx-swift-lm's parameters through
+    /// `mlxGenerateParameters`, so this is the temperature they sample at.
+    @Test("the mlx-swift-lm parameters carry the sampling temperature")
+    func mlxParametersSampleGreedilyAtZeroTopP() {
+        #expect(GenerationParameters(temperature: 0.7, topP: 0).mlxGenerateParameters.temperature == 0)
+        let sampled = GenerationParameters(temperature: 0.7, topP: 0.9, maxTokens: 300).mlxGenerateParameters
+        #expect(sampled.temperature == Float(0.7))
+        #expect(sampled.topP == Float(0.9))
+        #expect(sampled.maxTokens == 300)
     }
 }

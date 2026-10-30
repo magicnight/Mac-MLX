@@ -158,14 +158,7 @@ extension MLXSwiftEngine: BatchGenerationServing {
         let params = request.parameters
         let config = BatchSlotConfig(
             promptTokens: promptTokens,
-            parameters: GenerateParameters(
-                maxTokens: params.maxTokens,
-                temperature: Float(params.samplingTemperature),
-                topP: Float(params.topP),
-                // The batched path prefills by hand in `ModelBatchInferenceCore`
-                // and never reads this; set for parity with the single-stream
-                // path so a future consumer inherits the same stride.
-                prefill: PrefillParameters(chunking: .remainder)),
+            parameters: params.mlxGenerateParameters,
             // GenerateRequest carries no stop-strings field, so the batched path has
             // none to honour — parity with what the single-stream path receives.
             stopStrings: [])
