@@ -74,11 +74,12 @@ wins when both are present (the precedence mlx-lm's and vLLM's servers use).
 An assistant message's `reasoning_content` (else `reasoning`, OpenRouter's
 spelling; a non-string value is ignored) is that turn's reasoning: it reaches
 the chat template as the turn's `reasoning_content`, which thinking templates
-(Qwen3.x, Mellum2, GLM, Gemma 4) render for the turns after the last user
-query (Qwen3.6 for every turn with the template kwarg
-`preserve_thinking: true`). On a user, tool or system message it is ignored.
-Not rendered on a VLM, whose processor builds the prompt from messages without
-it, nor on the Ollama endpoints.
+render for the turns after the last user query: Qwen3.x and Mellum2 (Qwen3.6
+for every turn with the template kwarg `preserve_thinking: true`), and Gemma 4
+only on such turns that carry tool calls. On a user, tool or system message it
+is ignored. VLMs are out of scope: their processors build the prompt from
+messages without it, so a VLM (GLM-OCR among them) never renders it. Nor do
+the Ollama endpoints.
 
 ### POST /v1/responses
 
@@ -118,10 +119,10 @@ Request (the fields acted on; anything else is accepted and ignored):
 - `input`: a string (one user turn) or items. `system`/`developer` messages
   before the first other item, after `instructions`, become the system
   prompt (joined with a blank line); a later one is folded in place
-  (`MidConversationSystemFolding`): appended to the user or tool turn just
-  before it (the last one, after several tool turns), or, after an assistant
-  turn, opening a user turn there that a user message right after it
-  joins. Earlier turns never change, so folding
+  (`MidConversationSystemFolding`): appended to the user turn just before
+  it, or, after an assistant or tool turn, opening a user turn there that a
+  user message right after it joins (an instruction after a tool output
+  stays out of the tool response, unlike `/v1/messages`). Earlier turns never change, so folding
   does not force them to be prefilled again. On a model whose cache has a
   layer that cannot be trimmed (hybrid, e.g. Qwen3.6; sliding-window, e.g.
   Mellum2), the engine also stores the cache at the end of a request's last
@@ -272,18 +273,23 @@ Request (the fields acted on):
   `role:"system"` turns in `messages` are placed by
   `MidConversationSystemFolding`, `system` first: system turns before the
   first other turn join the system prompt; a later one is folded in place
-  as on `/v1/responses`. A system turn's image block becomes
+  as on `/v1/responses`, except that one right after a tool result is
+  appended to that result (the last one, after several) instead of opening
+  a user turn. A system turn's image block becomes
   `[image omitted from a system message]`.
 - User turns: `text` and base64 `image` blocks; each `tool_result` becomes a
   tool turn ahead of the turn's text. Assistant turns: `text` and `tool_use`,
   and `thinking` blocks, whose `thinking` text — or, when it is empty, the
   text a macMLX `signature` carries — is the turn's reasoning (rendered as on
   chat completions; several blocks join with a blank line).
-  `redacted_thinking` and another provider's signature carry nothing. A
-  `role:"system"` turn after a tool result (Claude Code ends every request
-  in a tool loop with one) is appended to that result, not opened as a user
-  turn, which Qwen3.6's and Mellum2's templates would count as a new query
-  and stop rendering the reasoning of the turns before it.
+  `redacted_thinking` and another provider's signature carry nothing. The
+  system turn Claude Code ends every tool-loop request with (its
+  `<total_tokens>` metadata) joins the tool result, as above: as a user turn,
+  Qwen3.6's and Mellum2's templates would count it as a new query and stop
+  rendering the reasoning of the turns before it. A user turn that carries
+  `text` blocks beside its `tool_result`s still yields a user turn after the
+  tool turns, which those templates do count as a new query, so the loop's
+  reasoning stops rendering from that request on.
 - `tool_choice`: `none` offers no tools; `auto`, `any` and `tool` (which
   needs a `name`) offer them all, not enforced; any other type is a 400.
   `disable_parallel_tool_use` is ignored.

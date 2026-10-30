@@ -26,11 +26,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   template's `enable_thinking` off. Without `max_output_tokens` (Codex sends
   none, and has no setting to send one) a response may run to 32,768 tokens,
   not the chat path's 2,048, so a long think still reaches its tool call. A
-  `system` or `developer` item after the first turn is folded in at the
-  place it was sent, since many chat templates accept a system turn only
-  first: it is appended to the user turn or tool output just before it, or,
-  after an assistant turn, starts a user turn of its own that a user message
-  right after it joins. Earlier turns are never
+  `system` or `developer` item after the first turn is folded into a user
+  turn, since many chat templates accept a system turn only first, at the
+  place it was sent: it is appended to the user turn just before it, or,
+  after an assistant turn or a tool output, starts a user turn of its own
+  that a user message right after it joins. Earlier turns are never
   rewritten, so folding no longer forces them to be prefilled again, and the
   prompt cache serves them on the next turn on hybrid (linear-attention) and
   sliding-window models too (see Fixed). A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
@@ -103,9 +103,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **Reasoning round trip.** When a client replays an earlier assistant
   turn's reasoning, the chat template now gets it as that turn's
   `reasoning_content`, so a thinking model sees its own reasoning inside a
-  tool loop, as the Qwen3.x, Mellum2, GLM and Gemma 4 templates are built
-  for (they render it for the turns after the last user query; Gemma 4 only
-  on turns with tool calls). Read from an assistant message's
+  tool loop, as the Qwen3.x, Mellum2 and Gemma 4 templates are built for
+  (they render it for the turns after the last user query; Gemma 4 only on
+  turns with tool calls). Read from an assistant message's
   `reasoning_content` (or `reasoning`) on chat completions, from `thinking`
   blocks on `/v1/messages`, and from `reasoning` items on `/v1/responses`
   (their `reasoning_text` content; a summary is never taken for the
@@ -128,11 +128,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   that one, 0). The Parameters Inspector's template kwarg
   `preserve_thinking: true` makes Qwen3.6 render every turn's reasoning,
   keeping the render append-only across queries (3,239 reused of 3,298).
-  Not rendered on VLMs or over the Ollama endpoints. Claude Code ends each
-  request in a tool loop with a system turn after the tool result; it is now
-  appended to that result rather than opening a user turn, which the
-  Qwen3.6 and Mellum2 templates would take for a new query and stop
-  rendering the loop's reasoning. Claude Code replays those system turns
+  VLMs are out of scope (their processors build the prompt without it, so
+  GLM-OCR and the other VLMs never get it), as are the Ollama endpoints. On
+  `/v1/messages` only, a system turn right after a tool result is now
+  appended to that result rather than opening a user turn: Claude Code ends
+  each request in a tool loop with one (`<total_tokens>…</total_tokens>`
+  metadata), and the Qwen3.6 and Mellum2 templates took the user turn for a
+  new query and stopped rendering the loop's reasoning. `/v1/responses`
+  still opens a user turn there, since a Codex developer item after a tool
+  output is an instruction the model should not read as tool output. A
+  Claude Code user turn that carries text blocks beside its `tool_result`s
+  still becomes a user turn of its own, so from that request on those
+  templates stop rendering the loop's earlier reasoning. Claude Code replays those system turns
   unchanged in later requests, so the prefix stays stable: in a real
   four-request Claude Code loop on Qwen3.6-27B-4bit the prompts carried 28,
   50 and 72 more tokens of earlier reasoning and reused 16,827 of 16,947,
