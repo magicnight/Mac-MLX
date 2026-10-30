@@ -1594,9 +1594,9 @@ public actor HummingbirdServer {
         }
 
         // GET /v1/models
-        router.get("/v1/models") { _, _ -> Response in
+        router.get("/v1/models") { request, _ -> Response in
             await server.incrementRequest()
-            return try await server.handleModels()
+            return try await server.handleModels(request)
         }
 
         // GET /x/status
@@ -1737,9 +1737,9 @@ public actor HummingbirdServer {
             await server.incrementRequest()
             return try await server.handleOllamaVersion()
         }
-        router.get("/api/tags") { _, _ -> Response in
+        router.get("/api/tags") { request, _ -> Response in
             await server.incrementRequest()
-            return try await server.handleOllamaTags()
+            return try await server.handleOllamaTags(request)
         }
         router.post("/api/chat") { request, context -> Response in
             await server.incrementRequest()
@@ -1790,24 +1790,26 @@ public actor HummingbirdServer {
         ])
     }
 
-    private func handleModels() async throws -> Response {
-        let data = await servableModelIDs().map { ["id": $0, "object": "model", "owned_by": "local"] }
+    private func handleModels(_ request: Request) async throws -> Response {
+        let data = await servableModelIDs(includeLibrary: Self.listsModelLibrary(request)).map { ["id": $0, "object": "model", "owned_by": "local"] }
         let body: [String: Any] = ["object": "list", "data": data]
         return try jsonResponseAny(body)
     }
 
     /// The models a request can name, as `GET /v1/models` and `/api/tags`
-    /// report them: the loaded one first, then every other chat model the
-    /// lister finds (text and vision; embedders, rerankers and audio models
-    /// are served elsewhere), each under its user-facing alias when one is set
-    /// (v0.5.1). Xcode 27's locally hosted provider reads an empty list as a
-    /// failed connection, so listing only the loaded model left it unusable
-    /// until a model was loaded by hand.
-    func servableModelIDs() async -> [String] {
+    /// report them: the loaded one first, then, with `includeLibrary`, every
+    /// other chat model the lister finds in id order (text and vision;
+    /// embedders, rerankers and audio models are served elsewhere), each under
+    /// its user-facing alias when one is set (v0.5.1). Xcode 27's locally
+    /// hosted provider reads an empty list as a failed connection, so listing
+    /// only the loaded model left it unusable until a model was loaded by hand.
+    func servableModelIDs(includeLibrary: Bool = true) async -> [String] {
         let loaded = await engineProvider()?.loadedModel
         var models = loaded.map { [$0] } ?? []
-        models += (await modelLister?() ?? []).filter {
-            ($0.format == .mlx || $0.format == .mlxVLM) && $0.id != loaded?.id
+        if includeLibrary {
+            models += (await modelLister?() ?? [])
+                .filter { ($0.format == .mlx || $0.format == .mlxVLM) && $0.id != loaded?.id }
+                .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
         }
         var ids: [String] = []
         for model in models {
@@ -2164,9 +2166,11 @@ public actor HummingbirdServer {
     /// Ollama `/api/tags` — list of locally-available models. We
     /// translate from our existing `/v1/models` shape into Ollama's
     /// `{"models":[{name, size, modified_at, digest, details}]}` shape.
-    private func handleOllamaTags() async throws -> Response {
+    private func handleOllamaTags(_ request: Request) async throws -> Response {
         // The same models as `GET /v1/models`, in Ollama's shape.
-        let entries: [[String: Any]] = await servableModelIDs().map { id in
+        let entries: [[String: Any]] = await servableModelIDs(
+            includeLibrary: Self.listsModelLibrary(request)
+        ).map { id in
             [
                 "name": id,
                 "model": id,
@@ -5747,6 +5751,15 @@ extension HummingbirdServer {
     /// carries one; native clients (Apple's Foundation Models client, Xcode,
     /// Claude Code, curl) send none and are served in full.
     static func exposeCacheFigures(_ request: Request) -> Bool {
+        request.headers[.origin] == nil
+    }
+
+    /// Whether `GET /v1/models` and `/api/tags` list the whole model library
+    /// rather than only the loaded model. By the same reasoning as
+    /// `exposeCacheFigures`, a page in a browser, which always sends `Origin`
+    /// and gets an answer by default, does not learn which models are
+    /// downloaded; it sees the loaded model, as before the library was listed.
+    static func listsModelLibrary(_ request: Request) -> Bool {
         request.headers[.origin] == nil
     }
 }

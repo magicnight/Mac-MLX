@@ -12,6 +12,7 @@ import Testing
 ///   loadedModelComesFirstAndOnlyOnce        : 23_510
 ///   withoutAListerOnlyTheLoadedModelIsShown : 23_520
 ///   ollamaTagsListTheSameModels             : 23_530
+///   aBrowserPageSeesOnlyTheLoadedModel      : 23_540
 @Suite("ModelListing")
 struct ModelListingTests {
 
@@ -44,22 +45,25 @@ struct ModelListingTests {
             format: format, quantization: nil, parameterCount: nil, architecture: nil)
     }
 
+    /// Not in id order, as a directory listing need not be.
     private let library: [LocalModel] = [
-        model("listing-text-a", .mlx),
+        model("listing-text-c", .mlx),
         model("listing-vision-b", .mlxVLM),
         model("listing-embedder", .embedder),
-        model("listing-text-c", .mlx),
+        model("listing-text-a", .mlx),
     ]
 
-    private func get(_ path: String, port: Int) async throws -> [String: Any] {
+    private func get(_ path: String, port: Int, origin: String? = nil) async throws -> [String: Any] {
         let url = try #require(URL(string: "http://127.0.0.1:\(port)\(path)"))
-        let (data, response) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        if let origin { request.setValue(origin, forHTTPHeaderField: "Origin") }
+        let (data, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    private func modelIDs(port: Int) async throws -> [String] {
-        let body = try await get("/v1/models", port: port)
+    private func modelIDs(port: Int, origin: String? = nil) async throws -> [String] {
+        let body = try await get("/v1/models", port: port, origin: origin)
         #expect(body["object"] as? String == "list")
         return (body["data"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
     }
@@ -80,13 +84,13 @@ struct ModelListingTests {
         let ids = try await modelIDs(port: port)
         await server.stop()
 
-        #expect(ids == ["listing-text-a", "listing-vision-b", "listing-text-c"])
+        #expect(ids == ["listing-text-a", "listing-text-c", "listing-vision-b"])
     }
 
     @Test
     func loadedModelComesFirstAndOnlyOnce() async throws {
         let engine = StubEngine()
-        try await engine.load(library[3])
+        try await engine.load(library[0])
         let library = library
         let server = server(engine, lister: { library })
         let port = try await server.start(preferredPort: 23_510)
@@ -102,7 +106,7 @@ struct ModelListingTests {
         let empty = server(engine, lister: nil)
         let port = try await empty.start(preferredPort: 23_520)
         let before = try await modelIDs(port: port)
-        try await engine.load(library[0])
+        try await engine.load(library[3])
         let after = try await modelIDs(port: port)
         await empty.stop()
 
@@ -122,5 +126,29 @@ struct ModelListingTests {
 
         let names = (tags["models"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
         #expect(names == ["listing-vision-b", "listing-text-a", "listing-text-c"])
+    }
+
+    /// A browser always sends `Origin`, and the server answers it by default,
+    /// so a web page does not learn which models are downloaded: it sees the
+    /// loaded model, as before the library was listed. Native clients send
+    /// no `Origin` and see the whole library.
+    @Test
+    func aBrowserPageSeesOnlyTheLoadedModel() async throws {
+        let engine = StubEngine()
+        let library = library
+        let server = server(engine, lister: { library })
+        let port = try await server.start(preferredPort: 23_540)
+        let idle = try await modelIDs(port: port, origin: "https://example.com")
+        try await engine.load(library[1])
+        let loaded = try await modelIDs(port: port, origin: "https://example.com")
+        let tags = try await get("/api/tags", port: port, origin: "https://example.com")
+        let native = try await modelIDs(port: port)
+        await server.stop()
+
+        #expect(idle.isEmpty)
+        #expect(loaded == ["listing-vision-b"])
+        let names = (tags["models"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+        #expect(names == ["listing-vision-b"])
+        #expect(native == ["listing-vision-b", "listing-text-a", "listing-text-c"])
     }
 }
