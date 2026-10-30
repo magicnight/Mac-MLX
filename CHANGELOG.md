@@ -26,11 +26,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   template's `enable_thinking` off. Without `max_output_tokens` (Codex sends
   none, and has no setting to send one) a response may run to 32,768 tokens,
   not the chat path's 2,048, so a long think still reaches its tool call. A
-  `system` or `developer` item after the first turn is folded into a user
-  turn, since many chat templates accept a system turn only first, at the
-  place it was sent: it is appended to the user turn just before it, or,
-  after an assistant turn or a tool output, starts a user turn of its own
-  that a user message right after it joins. Earlier turns are never
+  `system` or `developer` item after the first turn is folded in at the
+  place it was sent, since many chat templates accept a system turn only
+  first: it is appended to the user turn or tool output just before it, or,
+  after an assistant turn, starts a user turn of its own that a user message
+  right after it joins. Earlier turns are never
   rewritten, so folding no longer forces them to be prefilled again, and the
   prompt cache serves them on the next turn on hybrid (linear-attention) and
   sliding-window models too (see Fixed). A custom tool's input grammar (`format.definition`, such as `apply_patch`'s)
@@ -128,11 +128,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   that one, 0). The Parameters Inspector's template kwarg
   `preserve_thinking: true` makes Qwen3.6 render every turn's reasoning,
   keeping the render append-only across queries (3,239 reused of 3,298).
-  Not rendered on VLMs or over the Ollama endpoints. On Claude Code the
-  replayed reasoning reaches the template but Qwen3.6 does not render it
-  yet: Claude Code ends each request with a system turn, which becomes a
-  user turn after the tool result, and the template takes it for a new
-  query.
+  Not rendered on VLMs or over the Ollama endpoints. Claude Code ends each
+  request in a tool loop with a system turn after the tool result; it is now
+  appended to that result rather than opening a user turn, which the
+  Qwen3.6 and Mellum2 templates would take for a new query and stop
+  rendering the loop's reasoning.
 
 ### Fixed
 

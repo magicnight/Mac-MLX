@@ -118,9 +118,10 @@ Request (the fields acted on; anything else is accepted and ignored):
 - `input`: a string (one user turn) or items. `system`/`developer` messages
   before the first other item, after `instructions`, become the system
   prompt (joined with a blank line); a later one is folded in place
-  (`MidConversationSystemFolding`): appended to the user turn just before
-  it, or, after an assistant or tool turn, opening a user turn there that a
-  user message right after it joins. Earlier turns never change, so folding
+  (`MidConversationSystemFolding`): appended to the user or tool turn just
+  before it (the last one, after several tool turns), or, after an assistant
+  turn, opening a user turn there that a user message right after it
+  joins. Earlier turns never change, so folding
   does not force them to be prefilled again. On a model whose cache has a
   layer that cannot be trimmed (hybrid, e.g. Qwen3.6; sliding-window, e.g.
   Mellum2), the engine also stores the cache at the end of a request's last
@@ -279,10 +280,10 @@ Request (the fields acted on):
   text a macMLX `signature` carries — is the turn's reasoning (rendered as on
   chat completions; several blocks join with a blank line).
   `redacted_thinking` and another provider's signature carry nothing. A
-  `role:"system"` turn after a tool result opens a user turn (see above),
-  which Qwen3.6's and Mellum2's templates count as a new query, so they do
-  not render the reasoning of the turns before it; Claude Code ends every
-  request with such a turn.
+  `role:"system"` turn after a tool result (Claude Code ends every request
+  in a tool loop with one) is appended to that result, not opened as a user
+  turn, which Qwen3.6's and Mellum2's templates would count as a new query
+  and stop rendering the reasoning of the turns before it.
 - `tool_choice`: `none` offers no tools; `auto`, `any` and `tool` (which
   needs a `name`) offer them all, not enforced; any other type is a 400.
   `disable_parallel_tool_use` is ignored.
