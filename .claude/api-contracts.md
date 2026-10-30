@@ -70,6 +70,14 @@ figure is a prefix oracle against every cached prompt.
 
 `max_completion_tokens` is accepted as the newer spelling of `max_tokens` and
 wins when both are present (the precedence mlx-lm's and vLLM's servers use).
+With neither, the budget is 32768 (`defaultMaxOutputTokens`, as on
+`/v1/responses`): Xcode 27 sends neither, and a thinking model can spend 2048
+reasoning. `top_p` of 0 or below samples greedily
+(`GenerationParameters.samplingTemperature`), since mlx-swift-lm reads a
+`topP` of 0 as no filter; Apple's Foundation Models client sends `.greedy` as
+`top_p: 0`. The answer starts at its first non-whitespace text, as on
+`/v1/messages` and `/v1/responses` (thinking templates put blank lines after
+`</think>`).
 
 An assistant message's `reasoning_content` (else `reasoning`, OpenRouter's
 spelling; a non-string value is ignored) is that turn's reasoning: it reaches
