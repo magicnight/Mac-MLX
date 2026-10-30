@@ -19,7 +19,7 @@ import Testing
 //   thinkingDisabledTurnsTheTemplateOff               : 22_090
 //   adaptiveThinkingStreamsAThinkingBlockFirst        : 22_120
 //   adaptiveThinkingNonStreamingHasAThinkingBlock     : 22_150
-//   omittedThinkingDropsReasoningAndBlankText         : 22_180
+//   omittedThinkingReturnsATextlessBlockAndNoBlankText : 22_180
 //   omittedThinkingNonStreaming                       : 22_210
 //   thinkingAbsentReturnsNoReasoning                  : 22_240
 //   toolChoiceModes                                   : 22_270
@@ -266,15 +266,18 @@ struct AnthropicMessagesCompatTests {
 
         #expect(response.statusCode == 200)
         let request = try #require(captured)
-        try #require(request.messages.map(\.role) == [.user, .assistant, .tool, .user])
+        try #require(request.messages.map(\.role) == [.user, .assistant, .tool])
         // The first turn renders as it did on turn one: the reminder stays put.
         #expect(request.messages[0].content == "Run echo hi\n\n<system-reminder>memory</system-reminder>")
-        // Replayed thinking is ignored; the call and its result pair up.
+        // Replayed thinking becomes the turn's reasoning; the call and its
+        // result pair up.
         #expect(request.messages[1].content == "")
+        #expect(request.messages[1].reasoning == "I should run it.")
         #expect(request.messages[1].toolCalls?.map(\.id) == ["toolu_01"])
         #expect(request.messages[2].toolCallID == "toolu_01")
-        #expect(request.messages[2].content == "hi")
-        #expect(request.messages[3].content == "<total_tokens>9000 tokens left</total_tokens>")
+        // The trailing system turn joins the tool result: a user turn there
+        // would read as a new query to a thinking template.
+        #expect(request.messages[2].content == "hi\n\n<total_tokens>9000 tokens left</total_tokens>")
     }
 
     @Test
@@ -408,7 +411,8 @@ struct AnthropicMessagesCompatTests {
         #expect(thinkingStart["thinking"] as? String == "")
         #expect(thinkingStart["signature"] as? String == "")
         #expect(deltaTexts(events, key: "thinking") == "Let me think.")
-        #expect((deltaTexts(events, key: "signature")).isEmpty == false)
+        // The signature carries the block's reasoning back on the next turn.
+        #expect(ReasoningCarrier.decode(deltaTexts(events, key: "signature")) == "Let me think.")
         // The answer starts at its first non-whitespace text.
         #expect(deltaTexts(events, key: "text") == "Hello")
         let messageDelta = try #require(events.first { $0.event == "message_delta" }?.payload)
@@ -430,15 +434,17 @@ struct AnthropicMessagesCompatTests {
         let content = try #require(try json(data)["content"] as? [[String: Any]])
         #expect(content.compactMap { $0["type"] as? String } == ["thinking", "text", "tool_use"])
         #expect(content[0]["thinking"] as? String == "Let me think.")
-        #expect((content[0]["signature"] as? String)?.isEmpty == false)
+        #expect(ReasoningCarrier.decode(content[0]["signature"] as? String) == "Let me think.")
         #expect(content[1]["text"] as? String == "Hello")
         #expect(content[2]["id"] as? String == "toolu_01")
     }
 
     @Test
-    func omittedThinkingDropsReasoningAndBlankText() async throws {
-        // Claude Code's setting. A tool-only reply: the blank lines after
-        // `</think>` must not open a text block before the tool call.
+    func omittedThinkingReturnsATextlessBlockAndNoBlankText() async throws {
+        // Claude Code's setting. The reasoning comes back as a thinking block
+        // with empty text, as Anthropic returns one, its signature carrying
+        // the reasoning. A tool-only reply: the blank lines after `</think>`
+        // must not open a text block before the tool call.
         let engine = ScriptedEngine(chunks: [
             GenerateChunk(text: "Plan the call.</think>"),
             GenerateChunk(text: "\n\n"),
@@ -457,9 +463,14 @@ struct AnthropicMessagesCompatTests {
         let events = try events(data)
         #expect(labels(events) == [
             "message_start",
-            "start:tool_use@0", "delta:input_json_delta@0", "stop@0",
+            "start:thinking@0", "delta:signature_delta@0", "stop@0",
+            "start:tool_use@1", "delta:input_json_delta@1", "stop@1",
             "message_delta", "message_stop",
         ])
+        let thinkingStart = try #require(events.first { $0.event == "content_block_start" }?.payload["content_block"]
+            as? [String: Any])
+        #expect(thinkingStart["thinking"] as? String == "")
+        #expect(ReasoningCarrier.decode(deltaTexts(events, key: "signature")) == "Plan the call.")
         #expect(!String(decoding: data, as: UTF8.self).contains("Plan the call"))
     }
 
@@ -476,8 +487,10 @@ struct AnthropicMessagesCompatTests {
 
         #expect(response.statusCode == 200)
         let content = try #require(try json(data)["content"] as? [[String: Any]])
-        #expect(content.compactMap { $0["type"] as? String } == ["text", "tool_use"])
-        #expect(content[0]["text"] as? String == "Hello")
+        #expect(content.compactMap { $0["type"] as? String } == ["thinking", "text", "tool_use"])
+        #expect(content[0]["thinking"] as? String == "")
+        #expect(ReasoningCarrier.decode(content[0]["signature"] as? String) == "Let me think.")
+        #expect(content[1]["text"] as? String == "Hello")
     }
 
     @Test

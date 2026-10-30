@@ -71,6 +71,16 @@ figure is a prefix oracle against every cached prompt.
 `max_completion_tokens` is accepted as the newer spelling of `max_tokens` and
 wins when both are present (the precedence mlx-lm's and vLLM's servers use).
 
+An assistant message's `reasoning_content` (else `reasoning`, OpenRouter's
+spelling; a non-string value is ignored) is that turn's reasoning: it reaches
+the chat template as the turn's `reasoning_content`, which thinking templates
+render for the turns after the last user query: Qwen3.x and Mellum2 (Qwen3.6
+for every turn with the template kwarg `preserve_thinking: true`), and Gemma 4
+only on such turns that carry tool calls. On a user, tool or system message it
+is ignored. VLMs are out of scope: their processors build the prompt from
+messages without it, so a VLM (GLM-OCR among them) never renders it. Nor do
+the Ollama endpoints.
+
 ### POST /v1/responses
 
 OpenAI Responses API, stateless (`Server/HummingbirdServer+Responses.swift`,
@@ -111,7 +121,8 @@ Request (the fields acted on; anything else is accepted and ignored):
   prompt (joined with a blank line); a later one is folded in place
   (`MidConversationSystemFolding`): appended to the user turn just before
   it, or, after an assistant or tool turn, opening a user turn there that a
-  user message right after it joins. Earlier turns never change, so folding
+  user message right after it joins (an instruction after a tool output
+  stays out of the tool response, unlike `/v1/messages`). Earlier turns never change, so folding
   does not force them to be prefilled again. On a model whose cache has a
   layer that cannot be trimmed (hybrid, e.g. Qwen3.6; sliding-window, e.g.
   Mellum2), the engine also stores the cache at the end of a request's last
@@ -124,8 +135,14 @@ Request (the fields acted on; anything else is accepted and ignored):
   tokens can shift; earlier messages still do not. Consecutive `function_call` /
   `custom_tool_call` items, with an assistant message directly before them,
   form one assistant turn; `*_call_output` items become tool turns.
-  `reasoning` items are dropped. Content parts: `input_text`, `output_text`,
-  `text`, `refusal`, and `input_image` with a base64 data URL.
+  A `reasoning` item's text is the reasoning of the assistant turn the next
+  `message` or call item builds (rendered as on chat completions): its
+  `reasoning_text` content parts, else the text its `encrypted_content`
+  carries when macMLX wrote it (see the response below). `summary` is never
+  read, and another provider's `encrypted_content` carries nothing; a user,
+  system or tool item before the assistant turn drops it, and several items
+  before one turn join with a blank line. Content parts: `input_text`,
+  `output_text`, `text`, `refusal`, and `input_image` with a base64 data URL.
 - `tools`: `function` and `custom` tools are offered as chat function specs (a
   `custom` tool takes one required string `input`); a `namespace`'s tools are
   flattened under their bare names, qualified as `<namespace>__<name>` only
@@ -174,6 +191,13 @@ Response object (the non-streaming body adds `output_text`):
   "store": false, "previous_response_id": null, "metadata": {}
 }
 ```
+
+With `include: ["reasoning.encrypted_content"]` (Codex sends it) the reasoning
+item also carries `"encrypted_content": "macmlx.r1.<base64 of the reasoning>"`,
+in the non-streaming body and in the stream's `output_item.done` and terminal
+response. It is not encrypted — the server is local and the client holds the
+text anyway — only opaque to a client that replays it verbatim, and it lets
+the next turn recover the reasoning when `content` was not replayed.
 
 The message item is left out when the model only called tools. A freeform
 tool's call is a `custom_tool_call` (`ctc_…`) with `input` instead of
@@ -225,7 +249,7 @@ Request (the fields acted on):
     {"role": "user", "content": [{"type": "text", "text": "Run echo hi"}]},
     {"role": "system", "content": [{"type": "text", "text": "<system-reminder>…</system-reminder>"}]},
     {"role": "assistant", "content": [
-      {"type": "thinking", "thinking": "…", "signature": "macmlx"},
+      {"type": "thinking", "thinking": "", "signature": "macmlx.r1.…"},
       {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "echo hi"}}]},
     {"role": "user", "content": [
       {"type": "tool_result", "tool_use_id": "toolu_1", "content": "hi", "is_error": false}]}
@@ -249,18 +273,32 @@ Request (the fields acted on):
   `role:"system"` turns in `messages` are placed by
   `MidConversationSystemFolding`, `system` first: system turns before the
   first other turn join the system prompt; a later one is folded in place
-  as on `/v1/responses`. A system turn's image block becomes
+  as on `/v1/responses`, except that one right after a tool result is
+  appended to that result (the last one, after several) instead of opening
+  a user turn. A system turn's image block becomes
   `[image omitted from a system message]`.
 - User turns: `text` and base64 `image` blocks; each `tool_result` becomes a
-  tool turn ahead of the turn's text. Assistant turns: `text` and `tool_use`.
-  Replayed `thinking` / `redacted_thinking` blocks are ignored.
+  tool turn ahead of the turn's text. Assistant turns: `text` and `tool_use`,
+  and `thinking` blocks, whose `thinking` text — or, when it is empty, the
+  text a macMLX `signature` carries — is the turn's reasoning (rendered as on
+  chat completions; several blocks join with a blank line).
+  `redacted_thinking` and another provider's signature carry nothing. The
+  system turn Claude Code ends every tool-loop request with (its
+  `<total_tokens>` metadata) joins the tool result, as above: as a user turn,
+  Qwen3.6's and Mellum2's templates would count it as a new query and stop
+  rendering the reasoning of the turns before it. A user turn that carries
+  `text` blocks beside its `tool_result`s still yields a user turn after the
+  tool turns, which those templates do count as a new query, so the loop's
+  reasoning stops rendering from that request on.
 - `tool_choice`: `none` offers no tools; `auto`, `any` and `tool` (which
   needs a `name`) offer them all, not enforced; any other type is a 400.
   `disable_parallel_tool_use` is ignored.
 - `thinking.type`: `disabled` sets `enable_thinking=false` over the per-model
   template kwargs; `enabled` / `adaptive` keep the model's default and return
-  the reasoning as a `thinking` block unless `display` is `"omitted"`.
-  `budget_tokens` is not enforced. Without `thinking`, reasoning is dropped.
+  the reasoning as a `thinking` block, with empty `thinking` text when
+  `display` is `"omitted"` (Claude Code's setting, and what Anthropic returns
+  for it). `budget_tokens` is not enforced. Without `thinking`, reasoning is
+  dropped.
 - Accepted and ignored: `metadata`, `output_config` (`effort` is not mapped),
   `context_management`, `safeguards`, `cache_control`, `top_k`,
   `stop_sequences`, `service_tier`.
@@ -275,7 +313,10 @@ Request (the fields acted on):
   shape.
 
 Response content, in order: a `thinking` block (`{"type": "thinking",
-"thinking": "…", "signature": "macmlx"}`, only as above), a `text` block
+"thinking": "…", "signature": "macmlx.r1.<base64 of the reasoning>"}`, only
+as above and when the model reasoned; the signature is not a signature but
+the reasoning, opaque to a client that replays the block, so the next turn
+recovers it even when the text was omitted), a `text` block
 (starting at the first non-whitespace answer text; left out when the model
 only called tools), then one `tool_use` block per call. `usage` is
 `{"input_tokens", "output_tokens", "cache_read_input_tokens"}`, with
@@ -286,7 +327,8 @@ left out (and `input_tokens` is the whole prompt) for a request carrying an
 Streaming events: `message_start` (usage `input_tokens: 0` — the count is
 known only at the end), then each block as `content_block_start` → deltas →
 `content_block_stop`, indexed in emission order — thinking
-(`thinking_delta`*, then one `signature_delta`), text (`text_delta`*),
+(`thinking_delta`*, then one `signature_delta`; with `display: "omitted"` no
+`thinking_delta`, the block sent once the reasoning has ended), text (`text_delta`*),
 each tool call (one `input_json_delta`) — then `message_delta` carrying
 `stop_reason` and the real `usage`, then `message_stop`. No `ping`. A
 failure once the stream is open is an in-band `event: error`.

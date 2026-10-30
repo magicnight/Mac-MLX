@@ -4,8 +4,8 @@
 ///
 /// Only the fields macMLX acts on or echoes are declared; everything else a
 /// client sends (`prompt_cache_key`, `user`, `service_tier`, `truncation`,
-/// `safety_identifier`, `client_metadata`, `include`, …) is accepted and
-/// ignored by omission. The polymorphic fields — `input`, `tools`,
+/// `safety_identifier`, `client_metadata`, …) is accepted and ignored by
+/// omission. The polymorphic fields — `input`, `tools`,
 /// `tool_choice`, `text`, `reasoning`, `metadata` — stay `JSONValue` and are
 /// interpreted by `ResponsesInputTranslator`, which owns every 400 they can
 /// produce. Every field is optional so a missing `model` or `input` is
@@ -37,4 +37,16 @@ struct ResponsesRequest: Decodable, Sendable {
     let max_output_tokens: Int?
     let temperature: Double?
     let top_p: Double?
+    /// Extra output to include. Only `"reasoning.encrypted_content"` is acted
+    /// on (see `includesEncryptedReasoning`); a `JSONValue` so an unexpected
+    /// shape is ignored rather than failing the request.
+    let include: JSONValue?
+
+    /// Whether `include` asks for `reasoning.encrypted_content`, which Codex
+    /// does on every request: each reasoning item then carries the reasoning
+    /// in `encrypted_content` (`ReasoningCarrier`) as well.
+    var includesEncryptedReasoning: Bool {
+        guard case .array(let values)? = include else { return false }
+        return values.contains(.string("reasoning.encrypted_content"))
+    }
 }

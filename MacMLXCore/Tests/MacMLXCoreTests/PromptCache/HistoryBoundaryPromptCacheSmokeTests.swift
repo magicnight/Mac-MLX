@@ -64,8 +64,8 @@ import enum MacMLXCore.JSONValue
 /// from the same caches, so the stock path's texts must equal the hand-built
 /// pipeline's.
 ///
-/// Mellum2 (sliding-window, also drops reasoning from history) passes the same
-/// checks. Gemma 4 E4B would not pass the equality on `cachedPromptTokens`
+/// Mellum2 (sliding-window, also re-renders the previous turn differently)
+/// passes the same checks. Gemma 4 E4B would not pass the equality on `cachedPromptTokens`
 /// while its prompt is under its 512-token sliding window: its cache can then
 /// be trimmed, so no snapshot is taken and turn 2 reuses turn 1's own entry.
 ///
