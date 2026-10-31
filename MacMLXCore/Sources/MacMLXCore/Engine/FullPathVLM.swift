@@ -1,0 +1,100 @@
+// Copyright © 2026 macMLX. English comments only.
+
+import Foundation
+import MLX
+import MLXLMCommon
+import MLXVLM
+
+/// A vision-language load served on the text generation path
+/// (`runLLMGeneration`) instead of mlx-swift-lm's stock VLM decoder, so its
+/// requests keep the prompt cache, tool-call parsing, constraints and
+/// replayed reasoning (design:
+/// `docs/superpowers/specs/2026-10-31-gemma4-qwen35-vision-design.md`).
+///
+/// The engine decides it at load, from the checkpoint's `config.json`, for a
+/// model the VLM factory loaded. Only a family in ``servedFamilies`` is served
+/// this way, and a family joins that set only after its parity gate passed;
+/// until then every VLM keeps the stock path. `forced` is a test seam that
+/// reaches the path for a family not in the set yet.
+struct FullPathVLM: Sendable, Equatable {
+
+    /// The `model_type`s this path knows how to drive: the message generator
+    /// their processor renders with and the state a warm continuation needs.
+    enum Family: String, Sendable, CaseIterable {
+        case gemma4
+        case qwen35 = "qwen3_5"
+    }
+
+    /// Families whose checkpoints load through the VLM factory and run on the
+    /// text generation path. Empty until a family passes its parity gate.
+    static let servedFamilies: Set<Family> = []
+
+    let family: Family
+
+    /// The full path for the checkpoint whose `config.json` is at
+    /// `configURL`, or nil when it stays on the stock VLM path: an unreadable
+    /// config, a `model_type` this path does not know, or (unless `forced`) a
+    /// family not yet in ``servedFamilies``.
+    static func resolve(configURL: URL, forced: Bool) -> FullPathVLM? {
+        guard let data = try? Data(contentsOf: configURL),
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let modelType = root["model_type"] as? String,
+            let family = Family(rawValue: modelType.lowercased())
+        else { return nil }
+        guard forced || servedFamilies.contains(family) else { return nil }
+        return FullPathVLM(family: family)
+    }
+
+    /// The generator this family's processor renders `.chat` input with when
+    /// the configuration names none (`Gemma4Processor` and
+    /// `Qwen3VLProcessor` build theirs directly). The factory wraps the
+    /// processor in the configuration's generator when there is one, so the
+    /// engine takes that first, as it does for an LLM.
+    var processorMessageGenerator: any MessageGenerator {
+        switch family {
+        case .gemma4: Gemma4MessageGenerator()
+        case .qwen35: Qwen3VLMessageGenerator()
+        }
+    }
+
+    /// Upstream's `qwen35.ropeDeltas` state key (private there, in
+    /// `MLXVLM/Models/Qwen35.swift`), rebuilt from its id.
+    static let qwen35RopeDeltasKeyID = "qwen35.ropeDeltas"
+
+    /// The state every `TokenIterator` this load runs starts with, warm cache
+    /// or cold. Qwen3.5 resumes a warm cache only with the rope delta its
+    /// cached prefix accumulated: without one, `prepare` throws
+    /// `missingState` and a decode step trips a `precondition`. Every prefix
+    /// this path caches is image-free, so the delta is zero; a cold prefill
+    /// ignores it. Gemma 4 positions from the cache offset alone and needs
+    /// none. Built per call, since `LMOutput.State` holds an `MLXArray`.
+    func iteratorState() -> LMOutput.State? {
+        switch family {
+        case .gemma4:
+            return nil
+        case .qwen35:
+            var state = LMOutput.State()
+            state[LMOutput.Key<MLXArray>(Self.qwen35RopeDeltasKeyID)] = MLXArray(Int32(0))
+            return state
+        }
+    }
+
+    /// `input` as the text generation path expects a text-only prompt: `[N]`
+    /// tokens and no mask. The VLM processors return `[1, N]` tokens and an
+    /// all-ones mask even without an image, and the cache, the history
+    /// boundary and the draft all slice axis 0. An input carrying an image,
+    /// a video or audio is returned unchanged.
+    static func textOnlyInput(_ input: LMInput) -> LMInput {
+        guard !carriesMedia(input) else { return input }
+        let tokens = input.text.tokens
+        guard tokens.ndim == 2, tokens.dim(0) == 1 else {
+            return input.text.mask == nil ? input : LMInput(tokens: tokens)
+        }
+        return LMInput(tokens: tokens.reshaped(-1))
+    }
+
+    /// Whether the processor attached pixels or audio to `input`.
+    static func carriesMedia(_ input: LMInput) -> Bool {
+        input.image != nil || input.video != nil || input.audio != nil
+    }
+}

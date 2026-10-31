@@ -173,3 +173,21 @@ func fingerprintCoversNestedShards() throws {
     #expect(before != nil)
     #expect(before != after, "a nested shard change must move the fingerprint")
 }
+
+/// A VLM load's `loader` salt gives the same directory a different
+/// fingerprint, so a cold entry the text-path class wrote is never restored
+/// into the VLM class; no salt leaves a text load's digest as it was.
+@Test
+func loaderSaltSeparatesVLMLoadsAndLeavesTextLoadsAlone() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try writeConfig(#"{"model_type":"gemma4"}"#, in: dir)
+    try writeShard("model.safetensors", byteCount: 128, mtime: baseDate, in: dir)
+
+    let text = try #require(ModelFingerprint.compute(directory: dir))
+    let unsalted = try #require(ModelFingerprint.compute(directory: dir, loader: nil))
+    let vlm = try #require(ModelFingerprint.compute(directory: dir, loader: "vlm"))
+    #expect(unsalted == text, "no loader is the text load's digest")
+    #expect(vlm != text, "the VLM load's digest differs")
+    #expect(ModelFingerprint.compute(directory: dir, loader: "vlm") == vlm, "and is stable")
+}

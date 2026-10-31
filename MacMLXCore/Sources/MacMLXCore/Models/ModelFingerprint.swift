@@ -26,6 +26,7 @@ public enum ModelFingerprint {
     ///        resolvedBasename ‖ "\0" ‖ String(fileSize)
     ///                         ‖ "\0" ‖ String(mtimeNanoseconds) ‖ "\n"
     ///   ‖ <model.safetensors.index.json raw bytes, when present> // opportunistic
+    ///   ‖ 0x00 ‖ "loader:" ‖ loader                 // only when `loader` is set
     /// )
     /// ```
     ///
@@ -55,12 +56,18 @@ public enum ModelFingerprint {
     /// - Parameters:
     ///   - directory: the model's local directory (holding `config.json` and
     ///     `*.safetensors` shards at the top level).
+    ///   - loader: the factory that built the model, when it is not the text
+    ///     one. The same weights loaded as a VLM run a different class, whose
+    ///     KV layout need not match the text class's, so a VLM load passes
+    ///     `"vlm"` and its fingerprint differs. Nil (a text load) leaves the
+    ///     digest exactly what it was before the salt existed.
     ///   - fileManager: injection seam for tests; defaults to `.default`.
     /// - Returns: the lowercase hex digest, or `nil` when there is no readable
     ///   `config.json`. The caller MUST treat `nil` as "never reuse cold" — a
     ///   model that can't be fingerprinted must never match, never a wildcard.
     public static func compute(
         directory: URL,
+        loader: String? = nil,
         fileManager: FileManager = .default
     ) -> String? {
         let configURL = directory.appending(
@@ -119,6 +126,11 @@ public enum ModelFingerprint {
             path: "model.safetensors.index.json", directoryHint: .notDirectory)
         if let indexData = try? Data(contentsOf: indexURL) {
             hasher.update(data: indexData)
+        }
+
+        if let loader {
+            hasher.update(data: Data([0x00]))
+            hasher.update(data: Data("loader:\(loader)".utf8))
         }
 
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()

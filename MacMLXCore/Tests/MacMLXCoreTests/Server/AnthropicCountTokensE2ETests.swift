@@ -59,9 +59,7 @@ final class AnthropicCountTokensE2ETests: XCTestCase {
     func testCountEqualsGenerationPromptTokens() async throws {
         let (modelID, directory) = try gateAndResolveModel()
         let engine = MLXSwiftEngine()
-        try await engine.load(LocalModel(
-            id: modelID, displayName: modelID, directory: directory, sizeBytes: 0,
-            format: .mlx, quantization: nil, parameterCount: nil, architecture: nil))
+        try await GatedLoad.load(engine, id: modelID, directory: directory)
         let server = HummingbirdServer(engine: engine)
         let port = try await server.start(preferredPort: 22_600)
         defer { Task { await server.stop() } }

@@ -44,7 +44,7 @@ final class Qwen36ModelTests: XCTestCase {
             displayName: id,
             directory: directory,
             sizeBytes: 0,
-            format: .mlx,
+            format: GatedLoad.format,
             quantization: nil,
             parameterCount: nil,
             architecture: nil
@@ -86,7 +86,9 @@ final class Qwen36ModelTests: XCTestCase {
         }
 
         let engine = MLXSwiftEngine()
+        await GatedLoad.prepare(engine)
         try await engine.load(localModel(id: modelID, directory: directory))
+        try await GatedLoad.requireFullPathIfForced(engine)
 
         // Same fixed-answer prompt `SpeculativeDecodingModelTests` uses — greedy
         // decoding a competent model must continue the planet sequence with Mars.

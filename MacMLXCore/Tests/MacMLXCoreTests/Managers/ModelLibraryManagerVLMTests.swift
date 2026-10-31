@@ -180,26 +180,12 @@ struct ModelLibraryManagerVLMTests {
         #expect(Self.vlmRegistryKeys(in: "no registry here") == nil)
     }
 
-    static var requiresResolvedSource: Bool {
-        ProcessInfo.processInfo.environment["MACMLX_REQUIRE_RESOLVED_SOURCE"] == "1"
-    }
+    static var requiresResolvedSource: Bool { ResolvedUpstreamSource.isRequired }
 
     /// `VLMModelFactory.swift` in the mlx-swift-lm checkout SwiftPM resolved
-    /// for this build: under `checkouts/` in the scratch directory, found by
-    /// walking up from the test target's resource bundle, which sits in that
-    /// directory under any `--scratch-path`. Not from this source file: a
-    /// tree's own `.build` may hold an older checkout than the one this
-    /// build resolved (xcodebuild resolves into DerivedData instead).
+    /// for this build (see ``ResolvedUpstreamSource``).
     static func resolvedVLMFactorySource() -> String? {
-        let relative = "checkouts/mlx-swift-lm/Libraries/MLXVLM/VLMModelFactory.swift"
-        var directory = Bundle.module.bundleURL.deletingLastPathComponent()
-        for _ in 0..<8 {
-            if let text = try? String(contentsOf: directory.appending(path: relative), encoding: .utf8) {
-                return text
-            }
-            directory.deleteLastPathComponent()
-        }
-        return nil
+        ResolvedUpstreamSource.mlxSwiftLM("Libraries/MLXVLM/VLMModelFactory.swift")
     }
 
     /// A type kept on the text path must be one the LLM factory loads, or
