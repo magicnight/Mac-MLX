@@ -414,8 +414,8 @@ public actor ModelLibraryManager {
     ///
     /// Source of truth: `VLMTypeRegistry.shared` in `Libraries/MLXVLM/
     /// VLMModelFactory.swift` at the pinned revision, less
-    /// `vlmTypesServedAsText`. Every key of that registry is in exactly one
-    /// of the two sets. `ModelLibraryManagerVLMTests` keeps a copy of the
+    /// `vlmTypesServedAsText` and `fullPathVLMTypes`. Every key of that
+    /// registry is in exactly one of the three sets. `ModelLibraryManagerVLMTests` keeps a copy of the
     /// registry's keys, checks the copy against the checked-out
     /// `VLMModelFactory.swift` (under `swift test`) and both sets against the
     /// copy and the registries, so a bump that adds, drops or renames a key
@@ -442,18 +442,27 @@ public actor ModelLibraryManager {
 
     /// `model_type` values the VLM factory can load but macMLX loads as
     /// text, through `LLMModelFactory`, which registers them too. A
-    /// checkpoint loaded as a VLM loses the prompt cache, continuous
-    /// batching, replayed reasoning and history snapshots, which are
-    /// LLM-path only, and Gemma 4 and Qwen3.5/3.6 are what macMLX serves
-    /// agents with. Their images are dropped until the text and vision
-    /// paths can share a checkpoint. (Gemma 4's MTP emit hook is VLM-only,
-    /// see `MTPDrafterDetection`.)
+    /// checkpoint loaded on the stock VLM path loses the prompt cache, tool
+    /// calls, replayed reasoning and history snapshots, and these are what
+    /// macMLX serves agents with. Their images are dropped until each family
+    /// passes the full-path parity gate and moves to `fullPathVLMTypes`
+    /// (Qwen3.5/3.6 has not; `gemma4_unified` and `qwen3_5_moe` have no local
+    /// checkpoint to run it on).
     static let vlmTypesServedAsText: Set<String> = [
-        "gemma4",
         "gemma4_unified",
         "qwen3_5",
         "qwen3_5_moe",
     ]
+
+    /// `model_type` values loaded through the VLM factory and served on the
+    /// text generation path (``FullPathVLM/servedFamilies``), so images work
+    /// without losing what text requests have. Only a checkpoint that carries
+    /// the vision tower (``VisionCheckpoint``) and the shape the family's
+    /// parity run covered (``FullPathVLM/Family/parityRunCovers(_:)``) is
+    /// `.mlxVLM`; any other stays `.mlx` and loads as text, as it always has.
+    static var fullPathVLMTypes: Set<String> {
+        Set(FullPathVLM.servedFamilies.map(\.rawValue))
+    }
 
     /// `model_type` values that map to MLXEmbedders' encoder registry and
     /// are unambiguously text-embedding models.
@@ -478,7 +487,8 @@ public actor ModelLibraryManager {
 
     /// Peek `config.json` and upgrade `.mlx` to a more specific format:
     /// `.reranker` for a reranker checkpoint, `.mlxVLM` for a known
-    /// vision-language family, or `.embedder` for a known text-embedding
+    /// vision-language family (a `fullPathVLMTypes` one only with its vision
+    /// tower), or `.embedder` for a known text-embedding
     /// family. Vision-language wins when a `model_type` appears in both
     /// registries (e.g. `gemma3`). Returns `.mlx` when nothing matches.
     ///
@@ -537,6 +547,13 @@ public actor ModelLibraryManager {
            Self.isQwen3RerankerName(modelName),
            Self.logitScoreDeclaresBothTokens(directory: directory) {
             return .reranker
+        }
+        if let family = FullPathVLM.Family(rawValue: modelType),
+           FullPathVLM.servedFamilies.contains(family) {
+            return family.parityRunCovers(json)
+                && VisionCheckpoint.isComplete(
+                    directory: directory, config: json, family: family, fileManager: fileManager)
+                ? .mlxVLM : .mlx
         }
         if Self.knownVLMTypes.contains(modelType) {
             return .mlxVLM

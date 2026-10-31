@@ -186,6 +186,7 @@ final class ImagePrefixCacheSmokeTests: XCTestCase {
     /// load, so the checkpoint is resident once.
     private func stockVLMText(model: (id: String, url: URL), image: URL) async throws -> String {
         let engine = MLXSwiftEngine(promptCache: PromptCacheConfig(coldEnabled: false))
+        await engine.setKeepsStockVLMPath(true)
         try await engine.load(Self.localVLM(model))
         let servesFullPath = await engine.servesFullPathVLM
         XCTAssertFalse(servesFullPath, "the reference load is on the stock VLM path")
@@ -228,7 +229,7 @@ final class ImagePrefixCacheSmokeTests: XCTestCase {
             let path = logprobs ? "custom pipeline" : "stock path"
             let (turn1, turn2) = turns(modelID: model.id, image: image, logprobs: logprobs)
             let boundary = try historyBoundary(
-                turn1, generator: fullPath.processorMessageGenerator, tokenizer: tokenizer)
+                turn1, generator: fullPath.messageGenerator, tokenizer: tokenizer)
             XCTAssertGreaterThanOrEqual(
                 boundary, HistoryBoundary.minimumBoundarySnapshotTokens,
                 "\(path): the system prompt clears the snapshot minimum")

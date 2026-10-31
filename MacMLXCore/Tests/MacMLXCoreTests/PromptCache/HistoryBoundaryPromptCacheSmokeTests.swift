@@ -229,10 +229,11 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
     }
 
     private func loadedEngine(
-        _ model: (id: String, url: URL), coldEnabled: Bool, coldRoot: URL
+        _ model: (id: String, url: URL), coldEnabled: Bool, coldRoot: URL,
+        hotBytes: Int = PromptCacheConfig.defaultHotBytes
     ) async throws -> MLXSwiftEngine {
         let engine = MLXSwiftEngine(
-            promptCache: PromptCacheConfig(coldEnabled: coldEnabled), promptCacheRoot: coldRoot)
+            promptCache: PromptCacheConfig(hotBytes: hotBytes, coldEnabled: coldEnabled), promptCacheRoot: coldRoot)
         try await GatedLoad.load(engine, id: model.id, directory: model.url)
         addTeardownBlock {
             try await engine.unload()
@@ -331,6 +332,12 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
         }
     }
 
+    /// The in-memory tier for the SSD-tier test: smaller than the snapshot
+    /// of every checkpoint the suite runs on. Gemma 4 E4B's sliding window
+    /// and shared KV layers keep its 7k-token snapshot under the default
+    /// 512 MiB, which Qwen3.6's is over.
+    private static let ssdTestHotBytes = 32 << 20
+
     /// The SSD tier at an agent session's size: a history whose snapshot is
     /// larger than the in-memory tier, with the cold tier on. The snapshot goes
     /// straight to disk, turn 2 is served from disk without promoting it, and
@@ -339,7 +346,7 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
     func testAHistoryLargerThanTheInMemoryTierIsServedFromTheSSDTier() async throws {
         let model = try modelDirectory()
         let root = temporaryRoot()
-        let engine = try await loadedEngine(model, coldEnabled: true, coldRoot: root)
+        let engine = try await loadedEngine(model, coldEnabled: true, coldRoot: root, hotBytes: Self.ssdTestHotBytes)
         let loaded = try await HuggingFaceTokenizerLoader().load(from: model.url)
         let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
         let (turn1, turn2) = turns(modelID: model.id, logprobs: false, sections: 50)
@@ -364,7 +371,7 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
         print("\(label) turn 2 cold \(Self.describe(cold))")
         XCTAssertEqual(turn1Writes.count, 1, "turn 1 writes the snapshot once")
         XCTAssertGreaterThan(
-            turn1Writes.first ?? 0, PromptCacheConfig.defaultHotBytes, "the snapshot is larger than the in-memory tier")
+            turn1Writes.first ?? 0, Self.ssdTestHotBytes, "the snapshot is larger than the in-memory tier")
         XCTAssertEqual(turn1Resident, 0, "the snapshot never enters the in-memory tier")
         XCTAssertEqual(warm.cachedPromptTokens, boundary, "turn 2 reuses the snapshot from the SSD tier")
         XCTAssertLessThanOrEqual(turn2Writes.count, 1, "turn 2 writes at most its own entry")

@@ -14,7 +14,7 @@ import MLXVLM
 /// The engine decides it at load, from the checkpoint's `config.json`, for a
 /// model the VLM factory loaded. Only a family in ``servedFamilies`` is served
 /// this way, and a family joins that set only after its parity gate passed;
-/// until then every VLM keeps the stock path. `forced` is a test seam that
+/// until then a VLM of that family keeps the stock path. `forced` is a test seam that
 /// reaches the path for a family not in the set yet.
 struct FullPathVLM: Sendable, Equatable {
 
@@ -23,11 +23,61 @@ struct FullPathVLM: Sendable, Equatable {
     enum Family: String, Sendable, CaseIterable {
         case gemma4
         case qwen35 = "qwen3_5"
+
+        /// The `processor_class` the VLM factory builds this family's
+        /// processor from, as its checkpoints declare it. Upstream builds
+        /// whatever class a checkpoint names, so a checkpoint naming another
+        /// one would get another family's processor (see
+        /// ``VisionCheckpoint``).
+        var processorClass: String {
+            switch self {
+            case .gemma4: "Gemma4Processor"
+            case .qwen35: "Qwen3VLProcessor"
+            }
+        }
+
+        /// Whether a checkpoint with this `config.json` has the shape this
+        /// family's parity run covered; another stays text until it passes
+        /// its own run. Gemma 4 ran on E4B (`gemma-4-e4b-it-8bit`), whose
+        /// text config sets none of `attention_k_eq_v`, bidirectional vision
+        /// attention, the MoE block or the double-wide MLP. The 31B dense
+        /// checkpoint sets the first two, the 26B-A4B the third and E2B the
+        /// fourth, each read by separate code in the text and the vision
+        /// class. A vision load that fails is not retried as text, so an
+        /// unrun shape stays text. Read from `text_config`, else the root.
+        func parityRunCovers(_ config: [String: Any]) -> Bool {
+            switch self {
+            case .gemma4:
+                let text = config["text_config"] as? [String: Any] ?? config
+                return text["attention_k_eq_v"] as? Bool != true
+                    && text["use_bidirectional_attention"] as? String != "vision"
+                    && text["enable_moe_block"] as? Bool != true
+                    && text["use_double_wide_mlp"] as? Bool != true
+            case .qwen35:
+                return false
+            }
+        }
+
+        /// Tensor-name prefixes the vision tower's weights carry in an
+        /// mlx-community conversion, after a leading `model.` is dropped.
+        /// A checkpoint is complete only with every one present. Gemma 4
+        /// needs the encoder and its projection into the text model; the
+        /// audio tower is not needed, since upstream's `gemma4` sanitizer
+        /// drops it. Qwen3.5's raw Hugging Face layout (`model.visual.*`) is
+        /// not read yet; that family is not served.
+        var visionWeightPrefixes: [String] {
+            switch self {
+            case .gemma4: ["vision_tower.", "embed_vision."]
+            case .qwen35: ["vision_tower."]
+            }
+        }
     }
 
     /// Families whose checkpoints load through the VLM factory and run on the
-    /// text generation path. Empty until a family passes its parity gate.
-    static let servedFamilies: Set<Family> = []
+    /// text generation path, each only for a checkpoint that carries its
+    /// vision tower (``VisionCheckpoint``). A family joins once its parity
+    /// gate passed: Gemma 4 on `gemma-4-e4b-it-8bit`. Qwen3.5/3.6 has not.
+    static let servedFamilies: Set<Family> = [.gemma4]
 
     let family: Family
 
@@ -106,6 +156,28 @@ struct FullPathVLM: Sendable, Equatable {
         return Array(tokens[...start])
     }
 
+    /// Where an image request's remaining prefill splits: just past its last
+    /// media token, when text follows. The part with the media goes through
+    /// the model's `prepare` with the pixels; Gemma 4 runs that in one shot.
+    /// The text after it then prefills on the warm cache in chunks, as a text
+    /// request's does, so a long agent turn after an image no longer holds
+    /// the whole prompt's attention at once. Attention there is causal, so
+    /// splitting changes no position or mask; a block's bidirectional
+    /// attention stays within the first part.
+    ///
+    /// Gemma 4 only: it positions from the cache offset alone. Qwen3.5's text
+    /// after an image needs the rope delta the image leaves, which nothing
+    /// carries across a split yet. Nil for another family, a text-only input,
+    /// or one ending in its media.
+    func mediaPrefillSplit(_ input: LMInput) -> Int? {
+        guard family == .gemma4, Self.carriesMedia(input), input.text.tokens.ndim == 2 else { return nil }
+        let ids = input.text.tokens[0].asArray(Int.self)
+        guard let last = ids.lastIndex(where: mediaTokenIDs.contains), last + 1 < ids.count else {
+            return nil
+        }
+        return last + 1
+    }
+
     /// The generator this family's processor renders `.chat` input with when
     /// the configuration names none (`Gemma4Processor` and
     /// `Qwen3VLProcessor` build theirs directly). The factory wraps the
@@ -116,6 +188,13 @@ struct FullPathVLM: Sendable, Equatable {
         case .gemma4: Gemma4MessageGenerator()
         case .qwen35: Qwen3VLMessageGenerator()
         }
+    }
+
+    /// The generator a full-path load renders with when its configuration
+    /// names none: ``processorMessageGenerator`` for messages with media, the
+    /// text load's for the rest (``FullPathMessageGenerator``).
+    var messageGenerator: any MessageGenerator {
+        FullPathMessageGenerator(media: processorMessageGenerator)
     }
 
     /// Upstream's `qwen35.ropeDeltas` state key (private there, in

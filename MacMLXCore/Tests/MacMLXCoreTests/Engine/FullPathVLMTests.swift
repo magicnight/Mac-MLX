@@ -35,12 +35,39 @@ struct FullPathVLMTests {
             "unforced, only a served family takes the full path")
     }
 
-    /// No family has passed its parity gate yet, so no checkpoint changes
-    /// path in this build. A family joins with its own flip.
+    /// Gemma 4 passed its parity gate on `gemma-4-e4b-it-8bit`; Qwen3.5/3.6
+    /// has not run it. A family joins with its own flip.
     @Test
-    func noFamilyIsServedYet() {
-        #expect(FullPathVLM.servedFamilies.isEmpty)
+    func onlyGemma4IsServed() {
+        #expect(FullPathVLM.servedFamilies == [.gemma4])
     }
+
+    /// Each family's `processorClass` is the key the VLM factory's processor
+    /// registry builds that family's processor under, in the source this
+    /// build resolved, and no `model_type` resolver in the loading registry
+    /// overrides what a Gemma 4 checkpoint declares, so the class a
+    /// checkpoint declares is the processor it gets.
+    @Test(.enabled(if: ResolvedUpstreamSource.mlxSwiftLM(Self.factorySource) != nil
+                   || ResolvedUpstreamSource.isRequired,
+                   "no SwiftPM checkout of mlx-swift-lm next to the test bundle"))
+    func everyFamilyNamesTheProcessorUpstreamBuildsForIt() throws {
+        let factory = try #require(ResolvedUpstreamSource.mlxSwiftLM(Self.factorySource),
+                                   "MACMLX_REQUIRE_RESOLVED_SOURCE is set but no checkout was found")
+        let start = try #require(factory.range(of: "public enum VLMProcessorTypeRegistry"))
+        let entry = /"(\w+)"\s*:\s*create\(\s*\w+\.self\s*,\s*(\w+)\.init\s*\)/
+        let processors = Dictionary(
+            factory[start.upperBound...].matches(of: entry).map { (String($0.1), String($0.2)) },
+            uniquingKeysWith: { first, _ in first })
+        #expect(processors[FullPathVLM.Family.gemma4.processorClass] == "Gemma4Processor")
+        #expect(processors[FullPathVLM.Family.qwen35.processorClass] == "Qwen3VLProcessor")
+
+        let loading = try #require(ResolvedUpstreamSource.mlxSwiftLM(Self.loadingSource),
+                                   "no VLMProcessorLoadingRegistry.swift in the checkout")
+        #expect(!loading.contains(#""gemma4":"#), "a resolver now overrides Gemma 4's processor")
+    }
+
+    private static let factorySource = "Libraries/MLXVLM/VLMModelFactory.swift"
+    private static let loadingSource = "Libraries/MLXVLM/VLMProcessorLoadingRegistry.swift"
 
     /// The forcing seam reaches only the families this path knows how to
     /// drive; the siblings that share a generator but not a class, a text
@@ -71,7 +98,7 @@ struct FullPathVLMTests {
     func everyFamilyIsAVLMRegistryKey(_ family: FullPathVLM.Family) {
         #expect(
             ModelLibraryManager.vlmTypesServedAsText.contains(family.rawValue)
-                || ModelLibraryManager.knownVLMTypes.contains(family.rawValue))
+                || ModelLibraryManager.fullPathVLMTypes.contains(family.rawValue))
     }
 
     /// The generator each family's processor builds for itself
@@ -82,6 +109,69 @@ struct FullPathVLMTests {
     func eachFamilyRendersWithItsProcessorsGenerator() {
         #expect(FullPathVLM(family: .gemma4).processorMessageGenerator is Gemma4MessageGenerator)
         #expect(FullPathVLM(family: .qwen35).processorMessageGenerator is Qwen3VLMessageGenerator)
+    }
+
+    /// A full-path load always gets its generator's dictionaries, with or
+    /// without replayed reasoning; an LLM without reasoning keeps `.chat`.
+    @Test
+    func aFullPathInputIsAlwaysTheGeneratorsMessages() throws {
+        let generator = FullPathVLM(family: .gemma4).messageGenerator
+        let plain = GenerateRequest(
+            model: "m", messages: [ChatMessage(role: .user, content: "Hi.")],
+            parameters: GenerationParameters())
+        var reasoned = plain
+        reasoned.messages = [
+            ChatMessage(role: .user, content: "Hi."),
+            ChatMessage(role: .assistant, content: "Hello.", reasoning: "Greet back."),
+            ChatMessage(role: .user, content: "Again."),
+        ]
+        func messages(_ input: UserInput) -> [[String: any Sendable]]? {
+            if case .messages(let messages) = input.prompt { return messages }
+            return nil
+        }
+        let full = try #require(messages(MLXSwiftEngine.userInput(
+            for: plain, isVLM: true, messageGenerator: generator, logsDroppedInputs: false)))
+        #expect(full.first?["content"] as? String == "Hi.")
+        let withReasoning = try #require(messages(MLXSwiftEngine.userInput(
+            for: reasoned, isVLM: true, messageGenerator: generator, logsDroppedInputs: false)))
+        #expect(withReasoning[1]["reasoning_content"] as? String == "Greet back.")
+        let probe = MLXSwiftEngine.userInput(
+            for: plain, isVLM: false, messageGenerator: generator, rendersThroughGenerator: true,
+            logsDroppedInputs: false)
+        #expect(messages(probe) != nil, "a caller that drops the images still renders through it")
+        let llm = MLXSwiftEngine.userInput(
+            for: plain, isVLM: false, messageGenerator: DefaultMessageGenerator(), logsDroppedInputs: false)
+        #expect(messages(llm) == nil, "an LLM without reasoning keeps `.chat`")
+    }
+
+    /// A message without media renders as the text load renders it, string
+    /// content and tool metadata, so a tool call with no text keeps empty
+    /// content, which Gemma 4's template needs to keep the model turn open
+    /// after the tool result. A message with an image gets the family's
+    /// parts, the image placeholder among them.
+    @Test(arguments: FullPathVLM.Family.allCases)
+    func onlyAMessageWithMediaRendersAsParts(_ family: FullPathVLM.Family) throws {
+        let generator = FullPathVLM(family: family).messageGenerator
+        let call = ToolCall(
+            function: .init(name: "Bash", arguments: ["command": "ls"] as [String: any Sendable]), id: "call_1")
+        let messages: [Chat.Message] = [
+            .system("Be brief."),
+            .user("List the files."),
+            .assistant("", toolCalls: [call]),
+            .tool("a.swift", id: "call_1"),
+            .user("What does this say?", images: [.url(URL(fileURLWithPath: "/nonexistent/a.png"))]),
+        ]
+        let rendered = generator.generate(messages: messages)
+        let reference = DefaultMessageGenerator().generate(messages: messages)
+        try #require(rendered.count == messages.count)
+        for index in 0..<4 {
+            #expect(rendered[index]["content"] as? String == reference[index]["content"] as? String)
+            #expect(rendered[index].keys.sorted() == reference[index].keys.sorted())
+        }
+        #expect(rendered[2]["content"] as? String == "")
+        #expect(rendered[2]["tool_calls"] != nil)
+        let parts = try #require(rendered[4]["content"] as? [[String: any Sendable]])
+        #expect(parts.contains { $0["type"] as? String == "image" })
     }
 
     /// The media ids are read with upstream's keys, so the cap on an image

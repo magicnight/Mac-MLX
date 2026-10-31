@@ -69,8 +69,9 @@ public actor MLXSwiftEngine: InferenceEngine {
         case none
         case llm(ModelContainer, messageGenerator: any MessageGenerator)
         /// `fullPath` is non-nil when the VLM runs on the text generation
-        /// path (see ``FullPathVLM``), with the generator its processor
-        /// renders with.
+        /// path (see ``FullPathVLM``), with the generator the engine renders
+        /// its prompts with (``FullPathMessageGenerator`` unless the
+        /// configuration names one).
         case vlm(ModelContainer, fullPath: (FullPathVLM, messageGenerator: any MessageGenerator)?)
 
         var container: ModelContainer? {
@@ -123,6 +124,17 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Test seam for ``forcesFullPathVLM``; takes effect at the next load.
     func setForcesFullPathVLM(_ forced: Bool) {
         forcesFullPathVLM = forced
+    }
+
+    /// Test seam: load every VLM on the stock VLM path, a family in
+    /// ``FullPathVLM/servedFamilies`` included, for a reference run of the
+    /// decoder image requests took before the full path. Wins over
+    /// ``forcesFullPathVLM``; takes effect at the next load.
+    private(set) var keepsStockVLMPath = false
+
+    /// Test seam for ``keepsStockVLMPath``.
+    func setKeepsStockVLMPath(_ keeps: Bool) {
+        keepsStockVLMPath = keeps
     }
 
     /// Test seam: whether the resident model is a VLM served on the full
@@ -240,7 +252,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     ) {
         loadedSupport = container.map { container in
             if let fullPath {
-                return .vlm(container, fullPath: (fullPath, fullPath.processorMessageGenerator))
+                return .vlm(container, fullPath: (fullPath, fullPath.messageGenerator))
             }
             return .llm(container, messageGenerator: DefaultMessageGenerator())
         } ?? .none
@@ -579,7 +591,8 @@ public actor MLXSwiftEngine: InferenceEngine {
                 // from `model.architecture`, which hand-built models leave
                 // nil. A failure above is not retried through the LLM
                 // factory, so a broken vision load is never masked as text.
-                if let fullPath = FullPathVLM.resolve(configURL: configURL, forced: forcesFullPathVLM) {
+                if !keepsStockVLMPath,
+                   let fullPath = FullPathVLM.resolve(configURL: configURL, forced: forcesFullPathVLM) {
                     // The same backfill as the LLM branch: these requests
                     // stream through the `ToolCallProcessor` too.
                     if let fallback = Self.inferToolCallFormatFallback(configURL: configURL) {
@@ -589,15 +602,16 @@ public actor MLXSwiftEngine: InferenceEngine {
                             }
                         }
                     }
-                    // The factory wraps the processor in the configuration's
-                    // generator when it names one; otherwise the processor
-                    // renders with its family's own.
+                    // The configuration's generator when it names one, as the
+                    // factory wraps the processor in it; otherwise the full
+                    // path's, which renders a message without media as the
+                    // text load does. `userInput` renders through it.
                     let configured = await container.perform { context in
                         context.configuration.messageGenerator
                     }
                     support = .vlm(
                         container,
-                        fullPath: (fullPath, configured ?? fullPath.processorMessageGenerator))
+                        fullPath: (fullPath, configured ?? fullPath.messageGenerator))
                 } else {
                     support = .vlm(container, fullPath: nil)
                 }
@@ -1172,10 +1186,12 @@ public actor MLXSwiftEngine: InferenceEngine {
         beginGenerationRun()
         defer { endGenerationRun() }
         // Without image attachments (`isVLM: false`): this heuristic only
-        // inspects the rendered token tail.
+        // inspects the rendered token tail. A full-path load still renders
+        // through its generator, as generation does.
         do {
             let lmInput = try await container.prepare(input: Self.userInput(
-                for: request, isVLM: false, messageGenerator: support.messageGenerator, logsDroppedInputs: false))
+                for: request, isVLM: false, messageGenerator: support.messageGenerator,
+                rendersThroughGenerator: support.fullPath != nil, logsDroppedInputs: false))
             let ids = lmInput.text.tokens.asArray(Int32.self).suffix(Self.thinkProbeTailTokens).map(Int.init)
             let text = await container.decode(tokenIds: ids)
             return MessageSegmenter.promptOpensThink(text)
@@ -1213,6 +1229,53 @@ public actor MLXSwiftEngine: InferenceEngine {
         return lmInput.text.tokens.size
     }
 
+    /// Test seam for the full-path parity gate (`FullPathVLMParitySmokeTests`):
+    /// the prompt `request` renders to on the resident load, as generation
+    /// feeds it (``FullPathVLM/textOnlyInput(_:)`` on the full path), and the
+    /// float32 logits a cold prefill of it gives for the next token, before
+    /// any processor or sampler touches them. The prefill is generation's:
+    /// a `TokenIterator` over a fresh cache, with the request's prefill
+    /// parameters and the full path's iterator state, in one leg (no
+    /// history-boundary split). Throws `modelNotLoaded` with no model.
+    func coldNextTokenLogits(_ request: GenerateRequest) async throws -> (tokens: [Int], logits: [Float]) {
+        let support = loadedSupport
+        guard let container = support.container else { throw EngineError.modelNotLoaded }
+        beginGenerationRun()
+        defer { endGenerationRun() }
+        let prepared = try await container.prepare(input: Self.userInput(
+            for: request, isVLM: support.isVLM, messageGenerator: support.messageGenerator,
+            logsDroppedInputs: false))
+        let fullPath = support.fullPath
+        let input = NonSendableBox(fullPath == nil ? prepared : FullPathVLM.textOnlyInput(prepared))
+        let generateParams = request.parameters.mlxGenerateParameters
+        return try await container.perform(nonSendable: input) { context, input in
+            let sink = NextTokenLogitsSink()
+            _ = try TokenIterator(
+                input: input.value, model: context.model,
+                cache: try context.model.newCache(parameters: generateParams),
+                state: fullPath?.iteratorState(), processor: NextTokenLogitsCapture(sink: sink),
+                sampler: ArgMaxSampler(), prefill: generateParams.prefill, maxTokens: 1)
+            return (input.value.text.tokens.asArray(Int.self), sink.logits)
+        }
+    }
+
+    /// Where ``NextTokenLogitsCapture`` leaves the first logits it sees.
+    private final class NextTokenLogitsSink: @unchecked Sendable {
+        var logits: [Float] = []
+    }
+
+    /// Records the first logits the iterator hands its processor (the
+    /// prompt's last position), in float32, and changes nothing.
+    private struct NextTokenLogitsCapture: LogitProcessor {
+        let sink: NextTokenLogitsSink
+        mutating func prompt(_ prompt: MLXArray) {}
+        func process(logits: MLXArray) -> MLXArray {
+            if sink.logits.isEmpty { sink.logits = logits.asType(.float32).asArray(Float.self) }
+            return logits
+        }
+        mutating func didSample(token: MLXArray) {}
+    }
+
     /// The `UserInput` `request` renders from — the one place generation
     /// (`runGeneration`), `countPromptTokens`, `promptOpensThinkBlock` and the
     /// batched path build it, so all of them render one prompt.
@@ -1220,7 +1283,9 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// so its notes (dropped images, dropped tool specs) are logged once.
     ///
     /// `messageGenerator` is the loaded LLM's or full-path VLM's (nil for any
-    /// other VLM). When an assistant message carries reasoning, the input is
+    /// other VLM). A full-path VLM's input is always that generator's message
+    /// dictionaries (``FullPathMessageGenerator``), with any reasoning added.
+    /// For an LLM, when an assistant message carries reasoning, the input is
     /// built as the generator's message dictionaries with that reasoning
     /// added as `reasoning_content` (see `injectingReasoning`), which the
     /// input processor passes to the template unchanged: `Chat.Message` has
@@ -1234,6 +1299,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         for request: GenerateRequest,
         isVLM: Bool,
         messageGenerator: (any MessageGenerator)?,
+        rendersThroughGenerator: Bool? = nil,
         logsDroppedInputs: Bool = true
     ) -> UserInput {
         // Map our ChatMessage array to MLXLMCommon Chat.Message array.
@@ -1283,16 +1349,27 @@ public actor MLXSwiftEngine: InferenceEngine {
         let chatInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
 
         let assistantReasoning = request.allMessages.filter { $0.role == .assistant }.map(\.reasoning)
-        if let messageGenerator, assistantReasoning.contains(where: { $0?.isEmpty == false }) {
+        let hasReasoning = assistantReasoning.contains(where: { $0?.isEmpty == false })
+        // A full-path VLM (the only VLM handed a generator) always renders
+        // through it: from `.chat`, its processor would render with its
+        // family's own generator, which lays out a message without media
+        // differently from the text load (see `FullPathMessageGenerator`).
+        // A caller that drops the images (`isVLM: false`) says so itself.
+        let rendersThroughGenerator = rendersThroughGenerator ?? (isVLM && messageGenerator != nil)
+        if let messageGenerator, hasReasoning || rendersThroughGenerator {
             // The generator's own entry point over the input the processor
             // would get, so one that reads `additionalContext` (TranslateGemma)
             // builds what it always builds; its `.messages` output then passes
             // through the processor's `generate(from:)` unchanged.
-            if let messages = injectingReasoning(
-                messageGenerator.generate(from: chatInput), assistantReasoning: assistantReasoning) {
-                return UserInput(
+            let messages = messageGenerator.generate(from: chatInput)
+            func rendered(_ messages: [[String: any Sendable]]) -> UserInput {
+                UserInput(
                     messages: messages, images: chatInput.images, videos: chatInput.videos,
                     tools: toolSpecs, additionalContext: additionalContext)
+            }
+            if !hasReasoning { return rendered(messages) }
+            if let injected = injectingReasoning(messages, assistantReasoning: assistantReasoning) {
+                return rendered(injected)
             }
             if logsDroppedInputs {
                 Task.detached {
@@ -1303,6 +1380,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     )
                 }
             }
+            if rendersThroughGenerator { return rendered(messages) }
         }
         return chatInput
     }
@@ -1977,6 +2055,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     generateParams: generateParams,
                     numDraftTokens: numDraftTokens,
                     hasTools: hasTools,
+                    fullPath: fullPath,
                     into: continuation
                 )
                 return
@@ -2121,7 +2200,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             toolCallFormat: ToolCallFormat?,
             stopTokenIDs: Set<Int>,
             history: HistoryBoundarySnapshot?,
-            historySkip: String?
+            historySkip: String?,
+            mediaHead: (prefilledTokens: Int, seconds: TimeInterval)?
         ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = try priorCacheBox?.caches
@@ -2165,6 +2245,21 @@ public actor MLXSwiftEngine: InferenceEngine {
                         historySkip = reason
                     }
                 }
+                // An image request's text after its last media block is
+                // prefilled as a text request's is, in chunks: the processor's
+                // input runs in one shot, and a long agent turn after an image
+                // otherwise holds the whole prompt's attention at once.
+                var mediaHead: (prefilledTokens: Int, seconds: TimeInterval)?
+                if let split = fullPath?.mediaPrefillSplit(generationInput) {
+                    let head = LMInput(
+                        text: generationInput.text[0..., ..<split], image: generationInput.image,
+                        video: generationInput.video, audio: generationInput.audio)
+                    let seconds = try Self.prefill(
+                        head, into: cache, context: context, state: fullPath?.iteratorState(),
+                        prefill: generateParams.prefill)
+                    mediaHead = (split, seconds)
+                    generationInput = LMInput(tokens: generationInput.text.tokens[0, split...])
+                }
                 let generation: (stream: AsyncStream<TokenGeneration>, worker: Task<Void, Never>)
                 if usesCustomPipeline {
                     // Track C constraint AND the Track E sampling extensions
@@ -2204,7 +2299,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 return (
                     PromptCacheSnapshot(cache), generation.stream, generation.worker,
                     context.configuration.toolCallFormat, Self.stopTokenIDs(context),
-                    history, historySkip
+                    history, historySkip, mediaHead
                 )
             }
         let workingCache = setup.cache.caches
@@ -2329,9 +2424,9 @@ public actor MLXSwiftEngine: InferenceEngine {
                 // The boundary prefill ran before the iterator that reports
                 // this; count it, so usage and the phase summary cover the
                 // whole prefill as they did before the split.
-                completionInfo = setup.history.map {
-                    Self.completionInfo(info, addingPrefillOf: $0.prefilledTokens, seconds: $0.seconds)
-                } ?? info
+                completionInfo = [setup.history.map { ($0.prefilledTokens, $0.seconds) }, setup.mediaHead]
+                    .compactMap { $0 }
+                    .reduce(info) { Self.completionInfo($0, addingPrefillOf: $1.0, seconds: $1.1) }
             }
         }
 
@@ -2467,6 +2562,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         generateParams: GenerateParameters,
         numDraftTokens: Int?,
         hasTools: Bool,
+        fullPath: FullPathVLM?,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
         // Fast-fail re-entrancy guard (speculative path only — see
@@ -2533,6 +2629,11 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         let setup: (stream: AsyncStream<TokenGeneration>, toolCallFormat: ToolCallFormat?) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
+                // A full-path VLM's `prepare` returns logits, which upstream's
+                // speculative iterator would drop the first token of (see
+                // `LastPromptTokenTarget`).
+                var context = context
+                if fullPath != nil { context.model = LastPromptTokenTarget(context.model) }
                 let stream: AsyncStream<TokenGeneration>
                 // Omit `numDraftTokens` entirely (rather than substitute a
                 // number we hardcode) when the request didn't set one, so a

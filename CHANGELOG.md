@@ -10,6 +10,46 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Images on Gemma 4 E4B.** A Gemma 4 checkpoint that ships its vision
+  tower, in the shape the parity run covered, now loads as a vision model, so
+  the chat window shows the image button and
+  chat completions, Anthropic messages and responses read the images sent to
+  it. Before, the checkpoint loaded as text and its images were dropped. It
+  loads through the VLM factory but runs on the text generation path, so it
+  keeps what its text requests had: the prompt cache and its history-boundary
+  snapshots, tool calls, structured output, logit bias, logprobs, replayed
+  reasoning and speculative decoding. A checkpoint is a vision model only
+  with a `vision_config`, the `vision_tower` and `embed_vision` weights, and
+  processor metadata naming `Gemma4Processor` in the file mlx-swift-lm reads
+  first, and only in E4B's shape: no `attention_k_eq_v`, no bidirectional
+  vision attention, no MoE block, no double-wide MLP. Those run in separate
+  code in the text and vision classes, so the 31B dense, the 26B-A4B and E2B
+  stay text until each passes its own run; only E4B was run. Any other Gemma 4 checkpoint loads
+  as text, as before. A vision
+  Gemma 4 stays in the draft-model picker, loaded as text. An image request
+  reuses the prompt cache up to its first image, records nothing, never
+  speculates, and prefills the text after its last image in chunks, as a
+  text request is prefilled. Checked on gemma-4-e4b-it-8bit against its text
+  load: agent-shaped prompts (tools, tool calls and results, replayed
+  reasoning) render to the same tokens, the next-token log-probabilities
+  differ by at most 0.38 against a bound of 0.5 (four bfloat16 steps of the
+  top logit), a greedy continuation is the same up to the first near-tie,
+  the second turn reuses the same 1,452 tokens, speculating with the model
+  as its own draft gives the same text, and the vision tower adds 0.34 GB
+  resident. Over the API it read text from an image, passed it to a tool
+  call, and still read it behind replayed reasoning and a tool result. An
+  agent session with an image re-prefills from that image on every later
+  turn, since image requests record nothing (in the session measured, the
+  image came in turn 1, so from the start): turn 5 of a 22.7k-token session
+  started in 3.9 s at an 11.1 GB peak, against 3.0 s and 9.5 GB without the
+  image in the same run. The parity run caught two differences, fixed before the switch: the
+  family's message generator rendered a tool call with no text as a list,
+  which Gemma 4's template reads as a closed turn, so a prompt ending in a
+  tool result opened no model turn; and mlx-swift-lm 3.32.3's speculative
+  iterator drops the first token of a target whose `prepare` returns logits,
+  as Gemma 4's vision class does. Prompt-cache entries a Gemma 4 vision
+  checkpoint left on SSD under the text load miss once. Qwen3.5/3.6 and
+  `gemma4_unified` still load as text.
 - **OpenAI Responses API: `POST /v1/responses`.** Codex, and any other client
   that speaks the Responses API, can run its agent loop against macMLX: text,
   streamed reasoning, function tools (Codex's namespaced tools included, with

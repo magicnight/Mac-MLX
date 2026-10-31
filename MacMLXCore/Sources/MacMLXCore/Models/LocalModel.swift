@@ -66,9 +66,12 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
     /// (Track F GUI over the D1 engine plumbing).
     ///
     /// A candidate must be:
-    /// 1. `.mlx` format — an obviously-wrong-shape filter for
-    ///    `.mlxVLM`/`.embedder`/`.gguf`, not a full compatibility probe;
-    ///    tokenizer/cache compatibility is still checked (and silently
+    /// 1. `.mlx` format, or `.mlxVLM` of a family served on the text
+    ///    generation path (``FullPathVLM/servedFamilies``), which the engine
+    ///    loads as a draft through `LLMModelFactory`, text-only, as it did
+    ///    before the family flipped. An obviously-wrong-shape filter for
+    ///    other VLMs, `.embedder` and `.gguf`, not a full compatibility
+    ///    probe; tokenizer/cache compatibility is still checked (and silently
     ///    falls back) at generation time by the engine.
     /// 2. Not the currently-loaded target model itself.
     /// 3. Not an HF-cache external reference (`isExternalReference`):
@@ -87,8 +90,18 @@ public struct LocalModel: Codable, Hashable, Identifiable, Sendable {
         from models: [LocalModel], excluding currentModelID: String?
     ) -> [LocalModel] {
         models.filter {
-            $0.format == .mlx && $0.id != currentModelID && !$0.isExternalReference
+            ($0.format == .mlx || $0.isServedOnTheTextPathAsVLM)
+                && $0.id != currentModelID && !$0.isExternalReference
         }
+    }
+
+    /// Whether this is a `.mlxVLM` whose `model_type` (`architecture`) is a
+    /// family served on the text generation path.
+    var isServedOnTheTextPathAsVLM: Bool {
+        guard format == .mlxVLM, let architecture,
+            let family = FullPathVLM.Family(rawValue: architecture.lowercased())
+        else { return false }
+        return FullPathVLM.servedFamilies.contains(family)
     }
 
     /// Whether this entry is an ``AudioEngine`` model rather than something the

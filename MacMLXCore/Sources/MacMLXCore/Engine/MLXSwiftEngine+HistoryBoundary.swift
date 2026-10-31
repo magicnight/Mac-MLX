@@ -17,7 +17,8 @@ extension MLXSwiftEngine {
     /// `messageGenerator`, the generator the engine took at load as the one
     /// that processor renders with (for an LLM the factory's choice: the
     /// configuration's, else the model's, else the default; for a full-path
-    /// VLM the configuration's, else its processor's), over the same
+    /// VLM the configuration's, else ``FullPathMessageGenerator``, whose
+    /// dictionaries the processor is handed), over the same
     /// `UserInput` (messages, tools, template kwargs), then the resident
     /// tokenizer's chat template, chat-template override included, through the
     /// same call generation's render goes through, with `addGenerationPrompt`
@@ -119,9 +120,21 @@ extension MLXSwiftEngine {
         state: LMOutput.State? = nil,
         prefill: PrefillParameters
     ) throws -> TimeInterval {
+        try Self.prefill(LMInput(tokens: tokens), into: cache, context: context, state: state, prefill: prefill)
+    }
+
+    /// Prefill `input` into `cache` and return how long it took: one
+    /// iterator's prefill, whose first sampled token is discarded.
+    static func prefill(
+        _ input: LMInput,
+        into cache: [any KVCache],
+        context: ModelContext,
+        state: LMOutput.State? = nil,
+        prefill: PrefillParameters
+    ) throws -> TimeInterval {
         let start = Date.timeIntervalSinceReferenceDate
         _ = try TokenIterator(
-            input: LMInput(tokens: tokens),
+            input: input,
             model: context.model,
             cache: cache,
             state: state,

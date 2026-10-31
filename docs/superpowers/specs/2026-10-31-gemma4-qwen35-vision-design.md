@@ -2,7 +2,8 @@
 
 Status: approved 2026-10-31. Rollout PR 1 (the engine seam) is split in
 two: the seam itself first (#165), with every image request running cold,
-then image cache step 1.
+then image cache step 1 (#166). PR 2 flips Gemma 4; its parity run changed
+three things, listed under "What the Gemma 4 parity run changed" below.
 
 ## Why
 
@@ -394,6 +395,55 @@ for a checkpoint with a vision tower.
 
 Later, and not committed: `gemma4_unified` and `qwen3_5_moe` flip after
 their own parity runs, and other VLMs move to the full path after theirs.
+
+## What the Gemma 4 parity run changed
+
+The gates ran on `gemma-4-e4b-it-8bit` (suites `FullPathVLMParitySmokeTests`
+and `FullPathVLMImageGateSmokeTests`). Three findings changed the engine
+before the flip:
+
+- **Rendering (gate 1).** Upstream's family generators render every
+  non-system message as content parts. Gemma 4's template keeps the model
+  turn open after a tool result only when the calling assistant message has
+  empty content, and a one-part list is not empty, so a prompt ending in a
+  tool result closed the turn and opened none (|Δ log p| 5.7). The full path
+  now renders a message without media with `DefaultMessageGenerator`, as the
+  text load does, the family's generator only for a message with media
+  (`FullPathMessageGenerator`), and always hands the processor `.messages`,
+  since the processors render `.chat` with their own generator.
+- **Speculation (gate 7).** mlx-swift-lm 3.32.3's `SpeculativeTokenIterator`
+  never emits the first token when the target's `prepare` returns logits,
+  which VLM `Gemma4.prepare` does, and the draft runs a token behind. The
+  full path wraps its speculative target (`LastPromptTokenTarget`) so
+  `prepare` leaves the last prompt token, as an LLM's does. A tiny-model test
+  keeps the upstream drop pinned, so the wrapper can go when it is fixed.
+  This is an upstream report candidate, sent only with the user's approval.
+- **Image session (gate 5).** An image request's processor input runs in one
+  shot. In the five-turn session, turn 5 (22.7k tokens) took 23.5 s to its
+  first token at a 43.9 GB peak, against 3.2 s and 9.5 GB without the image
+  in the same run. Rather than the guard the gate allowed for, Gemma 4 now
+  prefills up to the last media token with the pixels and the text after it
+  in chunks on the warm cache (`FullPathVLM.mediaPrefillSplit`): 3.9 s and
+  11.1 GB, flat across turns, against 3.0 s and 9.5 GB without the image in
+  that run. Attention past the block is causal. Qwen3.5 does not split;
+  its text after an image needs the rope delta the image leaves, which the
+  Qwen flip has to carry or measure without.
+
+The weight check requires both `vision_tower.*` and `embed_vision.*`, since
+the VLM class loads both.
+
+The flip is narrowed to the shape the run covered
+(`FullPathVLM.Family.parityRunCovers`): a Gemma 4 text config with
+`attention_k_eq_v`, `use_bidirectional_attention: "vision"`,
+`enable_moe_block` or `use_double_wide_mlp` stays text. The 31B dense sets
+the first two, the 26B-A4B the third and E2B the fourth; each is read by
+separate code in the two classes and needs its own run. Step 1's bidirectional rule still applies to them under the
+forcing seam.
+
+`HistoryBoundaryPromptCacheSmokeTests`' SSD-tier case assumed a snapshot
+larger than the default 512 MiB in-memory tier. E4B's 7k-token snapshot is
+smaller (sliding window, shared KV layers), so it failed on both loads alike;
+the case now runs with a 32 MiB in-memory tier, so it holds on both models.
 
 ## Goals, non-goals, anti-goals
 

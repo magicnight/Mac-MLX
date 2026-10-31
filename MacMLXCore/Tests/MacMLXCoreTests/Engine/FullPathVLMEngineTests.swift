@@ -161,12 +161,51 @@ struct FullPathVLMEngineTests {
         #expect(out.promptTokens == total, "usage counts the whole prompt")
         #expect(await engine.lastPromptCacheRecord == nil, "an image request records no entry")
 
-        let warm = try #require(recorder.calls.last)
-        #expect(warm.cacheOffset == blockStart)
-        #expect(warm.tokensShape == [1, total - blockStart])
-        #expect(warm.maskShape == [1, total - blockStart])
-        #expect(warm.hasImage)
-        #expect(warm.hasRopeDelta == (family == .qwen35))
+        switch family {
+        case .qwen35:
+            let warm = try #require(recorder.calls.last)
+            #expect(warm.cacheOffset == blockStart)
+            #expect(warm.tokensShape == [1, total - blockStart])
+            #expect(warm.maskShape == [1, total - blockStart])
+            #expect(warm.hasImage)
+            #expect(warm.hasRopeDelta)
+        case .gemma4:
+            // The block with its pixels, then the text after it on its own
+            // (``FullPathVLM/mediaPrefillSplit(_:)``).
+            let calls = recorder.calls.suffix(2)
+            try #require(calls.count == 2)
+            let (head, tail) = (calls[calls.startIndex], calls[calls.startIndex + 1])
+            let blockEnd = blockStart + BatchShapedProcessor.block.count
+            #expect(head.cacheOffset == blockStart)
+            #expect(head.tokensShape == [1, blockEnd - blockStart])
+            #expect(head.maskShape == [1, blockEnd - blockStart])
+            #expect(head.hasImage)
+            #expect(tail.cacheOffset == blockEnd)
+            #expect(tail.tokensShape == [total - blockEnd])
+            #expect(tail.maskShape == nil)
+            #expect(!tail.hasImage)
+            #expect(!head.hasRopeDelta && !tail.hasRopeDelta)
+        }
+    }
+
+    /// An input that ends in its block has no text to split off, Qwen3.5
+    /// never splits, and the engine hands the pixels over once.
+    @Test
+    func anImageAtTheEndPrefillsInOnePiece() async throws {
+        let recorder = PrepareRecorder()
+        let engine = try await engine(family: .gemma4, recorder: recorder)
+        let vlm = FullPathVLM(family: .gemma4, mediaTokenIDs: BatchShapedProcessor.mediaTokenIDs)
+        let ids = [1, 2] + BatchShapedProcessor.block
+        let endsInBlock = LMInput(
+            text: .init(tokens: MLXArray(ids.map(Int32.init)).reshaped(1, ids.count)),
+            image: .init(pixels: MLXArray.zeros([1, 3, 2, 2])))
+        #expect(vlm.mediaPrefillSplit(endsInBlock) == nil)
+        #expect(FullPathVLM(family: .qwen35, mediaTokenIDs: BatchShapedProcessor.mediaTokenIDs)
+            .mediaPrefillSplit(LMInput(
+                text: .init(tokens: MLXArray((ids + [3]).map(Int32.init)).reshaped(1, ids.count + 1)),
+                image: .init(pixels: MLXArray.zeros([1, 3, 2, 2])))) == nil, "Qwen3.5 does not split")
+        _ = try await collect(engine, request(turns: 1, imageAt: 0))
+        #expect(recorder.calls.filter(\.hasImage).count == 1)
     }
 
     /// An entry whose ids run on past the block (a text prompt that spelled
@@ -270,11 +309,22 @@ private struct BatchShapedProcessor: UserInputProcessor {
         4 + messages * tokensPerMessage + blocks * block.count
     }
 
+    /// Whether `message` carries an image part or text starting with
+    /// ``imageMarker``.
+    static func opensWithABlock(_ message: [String: any Sendable]) -> Bool {
+        if let content = message["content"] as? String { return content.hasPrefix(imageMarker) }
+        let parts = message["content"] as? [[String: any Sendable]] ?? []
+        return parts.contains { $0["type"] as? String == "image" }
+            || parts.contains { ($0["text"] as? String)?.hasPrefix(imageMarker) == true }
+    }
+
     /// Where the block opens when the only one is in message `imageAt`.
     static func blockStart(imageAt: Int) -> Int { tokenCount(messages: imageAt) }
 
     func prepare(input: UserInput) async throws -> LMInput {
-        guard case .chat(let messages) = input.prompt else {
+        // A full-path load hands its generator's dictionaries over, as a
+        // real processor gets them; an image is a part of type `image`.
+        guard case .messages(let messages) = input.prompt else {
             throw CocoaError(.featureUnsupported)
         }
         var text = 0
@@ -284,7 +334,7 @@ private struct BatchShapedProcessor: UserInputProcessor {
         }
         var ids = textIDs(4)
         for message in messages {
-            if !message.images.isEmpty || message.content.hasPrefix(Self.imageMarker) {
+            if Self.opensWithABlock(message) {
                 ids += Self.block.map(Int32.init)
             }
             ids += textIDs(Self.tokensPerMessage)
