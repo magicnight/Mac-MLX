@@ -207,7 +207,9 @@ KV answer for another, so image requests are handled in two steps.
       `"vision"`, a warm image request would therefore silently attend
       causally inside the image block. Step 1 is off for those checkpoints,
       and their image requests run cold.
-    - The local e4b has the flag unset, so it is unaffected.
+    - The local e4b has the flag unset, so it is unaffected. No local
+      checkpoint sets it, so a unit test drives the flag decision from a
+      `config.json` fixture.
     - The overlay gap goes upstream as an issue report only, and only with
       the user's approval of the text.
 - **Step 2: image-digest keys (a follow-up design, not this one).** Until it
@@ -317,11 +319,12 @@ full-path load.
    tool results and replayed reasoning.
 2. **Same distribution.** On those prompts, compare the two loads in float32
    log-softmax over the text load's top 20 tokens:
-   - the largest |Δ log p| stays within 4 bf16 ULPs at the observed logit
-     magnitude;
-   - the KL over those tokens stays below the value that bound implies;
+   - the largest |Δ log p| stays within 4 bf16 ULPs of the text load's top-1
+     logit for that prompt, written δ below;
+   - the KL over those tokens stays below δ²/2, the second-order KL of a
+     δ-sized shift;
    - a greedy 64-token continuation is token-identical up to the first
-     position where the text load's top-2 margin is below 4 ULPs.
+     position where the text load's top-2 margin is below δ.
 
    Both checkpoints compute in bf16, and Gemma 4 softcaps logits at 30, so one
    ULP is 0.0625–0.125 at typical top-logit sizes. The two paths are separate
