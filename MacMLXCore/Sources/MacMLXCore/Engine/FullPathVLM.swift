@@ -45,14 +45,21 @@ struct FullPathVLM: Sendable, Equatable {
         /// fourth, each read by separate code in the text and the vision
         /// class. A vision load that fails is not retried as text, so an
         /// unrun shape stays text. Read from `text_config`, else the root.
+        /// A missing key reads as both classes decode it: off, except
+        /// `use_double_wide_mlp`, which both default to on, so E4B's
+        /// explicit `false` is required. A unified text config
+        /// (`gemma4_unified_text` or `gemma4_unified`) would turn the vision
+        /// class's defaults for the first two on, so it stays text too.
         func parityRunCovers(_ config: [String: Any]) -> Bool {
             switch self {
             case .gemma4:
                 let text = config["text_config"] as? [String: Any] ?? config
-                return text["attention_k_eq_v"] as? Bool != true
+                let modelType = text["model_type"] as? String ?? ""
+                return !["gemma4_unified_text", "gemma4_unified"].contains(modelType)
+                    && text["attention_k_eq_v"] as? Bool != true
                     && text["use_bidirectional_attention"] as? String != "vision"
                     && text["enable_moe_block"] as? Bool != true
-                    && text["use_double_wide_mlp"] as? Bool != true
+                    && text["use_double_wide_mlp"] as? Bool == false
             case .qwen35:
                 return false
             }

@@ -27,7 +27,10 @@ import enum MacMLXCore.JSONValue
 /// - and, on the engine, image cache step 1: an image request after a long
 ///   text turn, warm against cold, meets gate 2's bounds on its first
 ///   token. Compared on the top 10 logprobs the engine reports (its
-///   `top_logprobs` cap), with δ from the cold prefill's top-1 logit.
+///   `top_logprobs` cap), with δ from the cold prefill's top-1 logit;
+/// - also on the engine: the image is read with `kv_bits` 8 and 4, and a
+///   cancel during a long image prefill streams nothing and leaves the
+///   entry it reused intact, and the next image request is read.
 ///
 /// Gate 5: five turns of an agent conversation that reaches about 16k tokens,
 /// with an image in turn 1 and without it, recording each turn's prompt,
@@ -216,6 +219,159 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         // The tenth place can swap with the eleventh between two prefills.
         XCTAssertTrue(splitMissing.count <= 1, "gate 4: the split run's top 10 lacks \(splitMissing)")
         XCTAssertLessThanOrEqual(splitDelta, delta, "gate 4: split against one-shot prefill, |Δ log p|")
+    }
+
+    // MARK: - Gate 4, on the engine
+
+    /// `kv_bits` with an image: the split head prefills into a plain cache,
+    /// and the quantization plan the tail's iterator applies after its
+    /// prefill then covers every full-attention layer's whole length, head
+    /// included (sliding-window layers are not quantized). The answer must
+    /// still read the image. Whether the cache was quantized is not
+    /// observable here.
+    func testAnImageIsReadWithAQuantizedKVCache() async throws {
+        let (modelID, directory) = try gateAndResolveModel()
+        let image = try Self.renderTextImage(Self.anchor)
+        defer { try? FileManager.default.removeItem(at: image) }
+        let engine = try await fullPathEngine(modelID, directory)
+
+        for kvBits in [nil, 8, 4] as [Int?] {
+            let request = Self.readRequest(
+                modelID, image: image,
+                parameters: GenerationParameters(
+                    temperature: 0, topP: 1.0, maxTokens: Self.answerTokens, stream: true,
+                    kvBits: kvBits, quantizedKVStart: kvBits == nil ? nil : 0))
+            let result = try await run(engine, request)
+            let answer = Self.answer(result.text)
+            let label = kvBits.map(String.init) ?? "none"
+            print("[image-gate] \(modelID) kv_bits=\(label): \(answer.debugDescription)")
+            XCTAssertNotNil(result.promptTokens, "kv_bits=\(label): the request did not complete")
+            XCTAssertTrue(Self.reads(answer), "kv_bits=\(label): the image is not read: \(answer)")
+        }
+    }
+
+    /// A cancel that lands while a long image request prefills: the stream
+    /// ends without a token, and the engine serves the next requests as
+    /// before. The request reuses a text turn's entry up to its image, then
+    /// prefills the image in one shot (not interruptible) and the long text
+    /// after it in chunks; upstream stops those at the next chunk once
+    /// cancelled (`PrefillParameters.forEachChunk` checks). A cache hit is a
+    /// copy, so the stopped prefill leaves the entry it reused intact: the
+    /// text turn is reused and answered the same afterwards. The text turn's
+    /// wall time is printed: no more than its cold run if the prefill
+    /// stopped, the rest of a 22k-token prefill if it ran on. A cancel that
+    /// lands before the cache lookup passes too, without testing the
+    /// prefill; it landed after it here (removing the copy on a hit fails
+    /// this test).
+    func testCancellingDuringAnImagePrefillLeavesTheEngineServing() async throws {
+        let (modelID, directory) = try gateAndResolveModel()
+        let image = try Self.renderTextImage(Self.anchor)
+        defer { try? FileManager.default.removeItem(at: image) }
+        let engine = try await fullPathEngine(modelID, directory)
+
+        // The text turn records a snapshot of its conversation, which the
+        // image request, a later turn of it, starts with.
+        let text = Self.textTurn(modelID)
+        let firstStart = Date()
+        let before = try await run(engine, text)
+        let beforeSeconds = Date().timeIntervalSince(firstStart)
+        let entries = await engine.promptCacheResidentCount
+        XCTAssertGreaterThan(entries, 0, "the text turn recorded nothing")
+
+        let long = Self.imageTurnAfter(text, image: image)
+        let cancelled = Task { () -> (streamed: String, completed: Bool) in
+            var streamed = ""
+            var completed = false
+            do {
+                for try await chunk in engine.generate(long) {
+                    streamed += chunk.text
+                    if chunk.usage != nil { completed = true }
+                }
+            } catch {}
+            return (streamed, completed)
+        }
+        // About 22k tokens after the image: one second in, the request is
+        // still before its first token.
+        try await Task.sleep(for: .seconds(1))
+        cancelled.cancel()
+        let outcome = await cancelled.value
+        print("[image-gate] \(modelID) cancelled in prefill: text=\(outcome.streamed.debugDescription) "
+            + "completed=\(outcome.completed)")
+        XCTAssertEqual(outcome.streamed, "", "a cancelled image request streamed text")
+        XCTAssertFalse(outcome.completed, "a cancelled image request reported usage")
+
+        // The text turn waits until the stopped prefill lets go of the model,
+        // then finds its entry as it left it.
+        let start = Date()
+        let after = try await run(engine, text)
+        print("[image-gate] \(modelID) text turn after the cancel: "
+            + String(format: "%.2f s (%.2f s before) ", Date().timeIntervalSince(start), beforeSeconds)
+            + "reused=\(after.cachedPromptTokens ?? -1) same text: \(after.text == before.text)")
+        XCTAssertGreaterThan(after.cachedPromptTokens ?? 0, 0, "after a cancel, the text turn reused nothing")
+        XCTAssertEqual(after.text, before.text, "after a cancel, the text turn answers differently")
+
+        // The same image request, run through, reuses the text turn (so the
+        // cancelled one did too) and reads the image.
+        var whole = long
+        whole.parameters.maxTokens = 1
+        let served = try await run(engine, whole)
+        var read = Self.imageTurnAfter(text, image: image, rounds: 0)
+        read.parameters.maxTokens = Self.answerTokens
+        let answer = Self.answer(try await run(engine, read).text)
+        print("[image-gate] \(modelID) image turn after the cancel: prompt=\(served.promptTokens ?? -1) "
+            + "reused=\(served.cachedPromptTokens ?? -1) read: \(answer.debugDescription)")
+        XCTAssertGreaterThan(served.cachedPromptTokens ?? 0, 0, "the image turn did not reuse the text turn")
+        XCTAssertTrue(Self.reads(answer), "after a cancel, the image is not read: \(answer)")
+    }
+
+    /// A first turn: a question, with the session's system prompt and tool.
+    private static func textTurn(_ modelID: String) -> GenerateRequest {
+        GenerateRequest(
+            model: modelID,
+            messages: [ChatMessage(role: .user, content: "I will send you a screenshot of the build next.")],
+            systemPrompt: systemPrompt(),
+            parameters: GenerationParameters(temperature: 0, topP: 1.0, maxTokens: 16, stream: true),
+            tools: [bashTool])
+    }
+
+    /// `text`'s conversation continued: an answer, the image with the read
+    /// question, then `rounds` tool calls with long results.
+    private static func imageTurnAfter(_ text: GenerateRequest, image: URL, rounds: Int = 4) -> GenerateRequest {
+        var request = text
+        request.messages += [
+            ChatMessage(role: .assistant, content: "Send it."),
+            ChatMessage(
+                role: .user, content: readQuestion,
+                images: [ImageAttachment(fileURL: image, mimeType: "image/png")]),
+        ]
+        for round in 0..<rounds {
+            request.messages.append(ChatMessage(
+                role: .assistant, content: "",
+                toolCalls: [ToolCallRequest(
+                    id: "call_\(round)", name: "Bash", arguments: ["command": .string("ls -la Module\(round)")])]))
+            request.messages.append(ChatMessage(
+                role: .tool, content: listing("Module\(round)", count: 140), toolCallID: "call_\(round)"))
+        }
+        request.parameters.maxTokens = 256
+        return request
+    }
+
+    private static func readRequest(
+        _ modelID: String, image: URL, parameters: GenerationParameters
+    ) -> GenerateRequest {
+        GenerateRequest(
+            model: modelID,
+            messages: [ChatMessage(
+                role: .user, content: readQuestion,
+                images: [ImageAttachment(fileURL: image, mimeType: "image/png")])],
+            parameters: parameters)
+    }
+
+    /// The text after a thinking template's reasoning, which the engine
+    /// streams inline (the API splits it into `content`).
+    private static func answer(_ text: String) -> String {
+        guard let close = text.range(of: "</think>", options: .backwards) else { return text }
+        return String(text[close.upperBound...])
     }
 
     // MARK: - Gate 5
