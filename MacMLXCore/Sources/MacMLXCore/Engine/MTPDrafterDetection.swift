@@ -24,8 +24,8 @@ import MLXLMCommon
 /// - In mlx-swift-lm the only model that emits them is `Gemma4` in **MLXVLM**
 ///   (via its `callAsFunction(_:cache:state:)` overload). MLXLLM's
 ///   `Gemma4Model` has no emit path at all.
-/// - macMLX classifies a Gemma 4 checkpoint as `.mlx` (`gemma4` is not in
-///   `ModelLibraryManager.knownVLMTypes`), so it loads through
+/// - macMLX classifies a Gemma 4 checkpoint as `.mlx` (`gemma4` is in
+///   `ModelLibraryManager.vlmTypesServedAsText`), so it loads through
 ///   `LLMModelFactory` as the non-emitting `Gemma4Model`.
 ///
 /// Wiring the iterator up before that is fixed would cost a resident drafter

@@ -184,7 +184,9 @@ job_spm() {
     local core="$CACHE/spm/MacMLXCore" cli="$CACHE/spm/macmlx-cli"
     echo "### swift test MacMLXCore"
     swift package --package-path MacMLXCore --scratch-path "$core" resolve
-    swift test --package-path MacMLXCore --scratch-path "$core"
+    # The VLM registry mirror test reads mlx-swift-lm's source from the
+    # scratch directory; here a missing checkout fails it rather than skips it.
+    MACMLX_REQUIRE_RESOLVED_SOURCE=1 swift test --package-path MacMLXCore --scratch-path "$core"
     echo "### swift test macmlx-cli"
     swift package --package-path macmlx-cli --scratch-path "$cli" resolve
     swift test --package-path macmlx-cli --scratch-path "$cli"

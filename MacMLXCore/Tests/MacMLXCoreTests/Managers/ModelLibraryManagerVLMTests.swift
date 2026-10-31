@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import MLXLLM
+import MLXVLM
 @testable import MacMLXCore
 
 /// Filesystem-backed tests run serialised — swift-testing's default
@@ -94,6 +96,135 @@ struct ModelLibraryManagerVLMTests {
         let byID = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0.format) })
         #expect(byID["qwen3-text"] == .mlx)
         #expect(byID["qwen-vl"] == .mlxVLM)
+    }
+
+    /// The keys of mlx-swift-lm's `VLMTypeRegistry.shared` at the pinned
+    /// revision (3.32.3), as `Libraries/MLXVLM/VLMModelFactory.swift` lists
+    /// them. `vlmRegistryMirrorMatchesTheResolvedSource` fails when the
+    /// resolved mlx-swift-lm lists other keys, so a bump that adds one is
+    /// caught there; the tests after it then say which side it belongs on.
+    private static let upstreamVLMRegistryKeys: Set<String> = [
+        "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
+        "qwen3_5", "qwen3_5_moe", "idefics3", "gemma3", "gemma4", "gemma4_unified",
+        "smolvlm", "fastvlm", "llava_qwen2", "pixtral", "mistral3", "lfm2_vl",
+        "lfm2-vl", "glm_ocr", "muse_glimmer",
+    ]
+
+    /// Every registry key is classified exactly once: loaded as a VLM, or on
+    /// purpose as text. A stale list (it once held `fast_vlm` and
+    /// `qwen3_5_vl`, which upstream never registered) fails here.
+    @Test
+    func everyVLMRegistryKeyIsClassifiedOnce() async {
+        let vlm = ModelLibraryManager.knownVLMTypes
+        let text = ModelLibraryManager.vlmTypesServedAsText
+        #expect(vlm.isDisjoint(with: text))
+        #expect(vlm.union(text) == Self.upstreamVLMRegistryKeys)
+        for key in Self.upstreamVLMRegistryKeys {
+            #expect(await VLMTypeRegistry.shared.contains(key), "\(key) is not in the VLM registry")
+        }
+    }
+
+    /// The mirror above against the registry the package actually resolved:
+    /// its keys read from the checked-out `VLMModelFactory.swift`, since
+    /// `ModelTypeRegistry` can only answer `contains`, not list. Every line
+    /// of the registry's dictionary that opens with a quoted key counts,
+    /// whatever creates the model; a type registered elsewhere through
+    /// `registerModelType` would not be seen (there is none at 3.32.3).
+    ///
+    /// Runs under `swift test`, where the checkout sits in the scratch
+    /// directory next to the test bundle; under xcodebuild there is none and
+    /// it is skipped. The spm job, in CI and ci-local, sets
+    /// `MACMLX_REQUIRE_RESOLVED_SOURCE=1`, which turns a missing checkout
+    /// into a failure there, so the gate cannot pass by skipping.
+    @Test(.enabled(if: Self.resolvedVLMFactorySource() != nil || Self.requiresResolvedSource,
+                   "no SwiftPM checkout of mlx-swift-lm next to the test bundle"))
+    func vlmRegistryMirrorMatchesTheResolvedSource() throws {
+        let source = try #require(Self.resolvedVLMFactorySource(),
+                                  "MACMLX_REQUIRE_RESOLVED_SOURCE is set but no checkout was found")
+        let keys = try #require(Self.vlmRegistryKeys(in: source), "no VLMTypeRegistry in VLMModelFactory.swift")
+        #expect(!keys.isEmpty, "found no registry entries; has VLMModelFactory.swift changed shape?")
+        #expect(keys == Self.upstreamVLMRegistryKeys,
+                "mirror out of date: added \(keys.subtracting(Self.upstreamVLMRegistryKeys).sorted()), removed \(Self.upstreamVLMRegistryKeys.subtracting(keys).sorted())")
+    }
+
+    /// The keys of the `VLMTypeRegistry` dictionary in `source`: every line
+    /// between it and `VLMProcessorTypeRegistry` that opens with a quoted key
+    /// and a colon, whatever value follows. Nil without the registry.
+    static func vlmRegistryKeys(in source: String) -> Set<String>? {
+        guard let start = source.range(of: "public enum VLMTypeRegistry") else { return nil }
+        let end = source.range(of: "public enum VLMProcessorTypeRegistry", range: start.upperBound..<source.endIndex)
+        let block = source[start.upperBound..<(end?.lowerBound ?? source.endIndex)]
+        let entry = /^\s*"([^"]+)"\s*:/.anchorsMatchLineEndings()
+        return Set(block.matches(of: entry).map { String($0.1) })
+    }
+
+    /// A key is read whatever creates its model, as `LLMModelFactory` already
+    /// registers one with a plain function; the processor registry after it
+    /// and comments are not read.
+    @Test
+    func registryKeysAreReadWhateverCreatesTheModel() {
+        let source = """
+            /// Registry of model type, e.g "llama": not an entry.
+            public enum VLMTypeRegistry {
+                public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
+                    "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
+                    "qwen3": createQwen3CompatibleModel,
+                    "closure_vl" : { data in try make(data) },
+                ])
+            }
+            public enum VLMProcessorTypeRegistry {
+                    "PaliGemmaProcessor": create(PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
+            }
+            """
+        #expect(Self.vlmRegistryKeys(in: source) == ["paligemma", "qwen3", "closure_vl"])
+        #expect(Self.vlmRegistryKeys(in: "no registry here") == nil)
+    }
+
+    static var requiresResolvedSource: Bool {
+        ProcessInfo.processInfo.environment["MACMLX_REQUIRE_RESOLVED_SOURCE"] == "1"
+    }
+
+    /// `VLMModelFactory.swift` in the mlx-swift-lm checkout SwiftPM resolved
+    /// for this build: under `checkouts/` in the scratch directory, found by
+    /// walking up from the test target's resource bundle, which sits in that
+    /// directory under any `--scratch-path`. Not from this source file: a
+    /// tree's own `.build` may hold an older checkout than the one this
+    /// build resolved (xcodebuild resolves into DerivedData instead).
+    static func resolvedVLMFactorySource() -> String? {
+        let relative = "checkouts/mlx-swift-lm/Libraries/MLXVLM/VLMModelFactory.swift"
+        var directory = Bundle.module.bundleURL.deletingLastPathComponent()
+        for _ in 0..<8 {
+            if let text = try? String(contentsOf: directory.appending(path: relative), encoding: .utf8) {
+                return text
+            }
+            directory.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    /// A type kept on the text path must be one the LLM factory loads, or
+    /// its checkpoints would not load at all.
+    @Test
+    func typesServedAsTextLoadThroughTheLLMFactory() async {
+        for key in ModelLibraryManager.vlmTypesServedAsText {
+            #expect(await LLMTypeRegistry.shared.contains(key), "\(key) is not in the LLM registry")
+        }
+    }
+
+    @Test(arguments: ["fastvlm", "llava_qwen2", "qwen3_vl_moe", "muse_glimmer", "lfm2-vl"])
+    func detectsTheVLMTypesTheListUsedToMiss(modelType: String) async throws {
+        let temp = try TemporaryDirectory()
+        try writeModel(in: temp.url, name: "vlm-\(modelType)", modelType: modelType)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models.first?.format == .mlxVLM)
+    }
+
+    @Test(arguments: ["gemma4", "gemma4_unified", "qwen3_5", "qwen3_5_moe"])
+    func multimodalAgentModelsStayOnTheTextPath(modelType: String) async throws {
+        let temp = try TemporaryDirectory()
+        try writeModel(in: temp.url, name: "text-\(modelType)", modelType: modelType)
+        let models = try await ModelLibraryManager().scan(temp.url)
+        #expect(models.first?.format == .mlx)
     }
 
     // MARK: - Helpers
