@@ -1,6 +1,8 @@
 # Images for Gemma 4 and Qwen3.5/3.6 on the full serving path — design
 
-Status: draft for review, 2026-10-31. Nothing here is built yet.
+Status: approved 2026-10-31. Rollout PR 1 (the engine seam) is split in
+two: the seam itself first, with every image request running cold, then
+image cache step 1.
 
 ## Why
 

@@ -124,6 +124,7 @@ final class Gemma4PromptCacheSmokeTests: XCTestCase {
         let oracle = MLXSwiftEngine(promptCache: noColdTier)
         await GatedLoad.prepare(oracle)
         try await oracle.load(localModel(id: modelID, directory: directory))
+        try await GatedLoad.requireFullPathIfForced(oracle)
         addTeardownBlock { try await oracle.unload() }
         let cold = try await collect(oracle, turn2)
         print(

@@ -42,7 +42,7 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     public private(set) var loadedModel: LocalModel?
 
-    /// Weight-identity fingerprint (``ModelFingerprint/compute(directory:fileManager:)``)
+    /// Weight-identity fingerprint (``ModelFingerprint/compute(directory:loader:fileManager:)``)
     /// of the resident model's on-disk bytes, captured at load beside
     /// ``loadedModel``. Threaded into every cold-tier prompt-cache read/write so a
     /// restored KV snapshot is only ever reused against the exact weights it was
@@ -1668,16 +1668,20 @@ public actor MLXSwiftEngine: InferenceEngine {
                 into: continuation
             )
         } else {
-            // D1: bring the draft container in line with this request
-            // BEFORE dispatching — throws (rather than silently falling
-            // back to non-speculative generation) if the requested draft
-            // model fails to load.
-            try await ensureDraftContainer(requestedDraftModelID: request.draftModelID)
             // A full-path VLM's processor hands back `[1, N]` tokens and a
             // mask even for text; the text path slices `[N]`. An input with
             // media keeps its shape, and `carriesMedia` keeps it off every
             // path that would slice it.
             let carriesMedia = fullPath != nil && FullPathVLM.carriesMedia(lmInput)
+            // D1: bring the draft container in line with this request
+            // BEFORE dispatching — throws (rather than silently falling
+            // back to non-speculative generation) if the requested draft
+            // model fails to load. A request with images never speculates,
+            // so, as on the stock VLM path, its `draftModelID` is not
+            // reconciled: no draft is loaded for it, or failed on.
+            if !carriesMedia {
+                try await ensureDraftContainer(requestedDraftModelID: request.draftModelID)
+            }
             try await runLLMGeneration(
                 lmInput: fullPath == nil ? lmInput : FullPathVLM.textOnlyInput(lmInput),
                 // A second copy of the same `UserInput`: `prepare` consumed the

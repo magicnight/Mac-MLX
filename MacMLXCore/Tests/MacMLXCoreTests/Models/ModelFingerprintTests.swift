@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -190,4 +191,22 @@ func loaderSaltSeparatesVLMLoadsAndLeavesTextLoadsAlone() throws {
     #expect(unsalted == text, "no loader is the text load's digest")
     #expect(vlm != text, "the VLM load's digest differs")
     #expect(ModelFingerprint.compute(directory: dir, loader: "vlm") == vlm, "and is stable")
+}
+
+/// A text load's digest is the documented preimage, byte for byte, with no
+/// salt in it: salting the nil case would orphan every cold entry written
+/// before the salt existed.
+@Test
+func aTextLoadHashesExactlyTheDocumentedPreimage() throws {
+    let dir = makeTestDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let config = #"{"model_type":"gemma4"}"#
+    try writeConfig(config, in: dir)
+    try writeShard("model.safetensors", byteCount: 128, mtime: baseDate, in: dir)
+
+    var preimage = Data(config.utf8)
+    preimage.append(0x00)
+    preimage.append(Data("model.safetensors\u{0}model.safetensors\u{0}128\u{0}1700000000000000000\n".utf8))
+    let expected = SHA256.hash(data: preimage).map { String(format: "%02x", $0) }.joined()
+    #expect(ModelFingerprint.compute(directory: dir) == expected)
 }
