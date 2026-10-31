@@ -119,9 +119,21 @@ extension MLXSwiftEngine {
         state: LMOutput.State? = nil,
         prefill: PrefillParameters
     ) throws -> TimeInterval {
+        try Self.prefill(LMInput(tokens: tokens), into: cache, context: context, state: state, prefill: prefill)
+    }
+
+    /// Prefill `input` into `cache` and return how long it took: one
+    /// iterator's prefill, whose first sampled token is discarded.
+    static func prefill(
+        _ input: LMInput,
+        into cache: [any KVCache],
+        context: ModelContext,
+        state: LMOutput.State? = nil,
+        prefill: PrefillParameters
+    ) throws -> TimeInterval {
         let start = Date.timeIntervalSinceReferenceDate
         _ = try TokenIterator(
-            input: LMInput(tokens: tokens),
+            input: input,
             model: context.model,
             cache: cache,
             state: state,

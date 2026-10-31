@@ -134,6 +134,28 @@ struct FullPathVLM: Sendable, Equatable {
         return Array(tokens[...start])
     }
 
+    /// Where an image request's remaining prefill splits: just past its last
+    /// media token, when text follows. The part with the media goes through
+    /// the model's `prepare` with the pixels; Gemma 4 runs that in one shot.
+    /// The text after it then prefills on the warm cache in chunks, as a text
+    /// request's does, so a long agent turn after an image no longer holds
+    /// the whole prompt's attention at once. Attention there is causal, so
+    /// splitting changes no position or mask; a block's bidirectional
+    /// attention stays within the first part.
+    ///
+    /// Gemma 4 only: it positions from the cache offset alone. Qwen3.5's text
+    /// after an image needs the rope delta the image leaves, which nothing
+    /// carries across a split yet. Nil for another family, a text-only input,
+    /// or one ending in its media.
+    func mediaPrefillSplit(_ input: LMInput) -> Int? {
+        guard family == .gemma4, Self.carriesMedia(input), input.text.tokens.ndim == 2 else { return nil }
+        let ids = input.text.tokens[0].asArray(Int.self)
+        guard let last = ids.lastIndex(where: mediaTokenIDs.contains), last + 1 < ids.count else {
+            return nil
+        }
+        return last + 1
+    }
+
     /// The generator this family's processor renders `.chat` input with when
     /// the configuration names none (`Gemma4Processor` and
     /// `Qwen3VLProcessor` build theirs directly). The factory wraps the

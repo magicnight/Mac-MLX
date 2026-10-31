@@ -2195,7 +2195,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             toolCallFormat: ToolCallFormat?,
             stopTokenIDs: Set<Int>,
             history: HistoryBoundarySnapshot?,
-            historySkip: String?
+            historySkip: String?,
+            mediaHead: (prefilledTokens: Int, seconds: TimeInterval)?
         ) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
                 let cache: [any KVCache] = try priorCacheBox?.caches
@@ -2239,6 +2240,21 @@ public actor MLXSwiftEngine: InferenceEngine {
                         historySkip = reason
                     }
                 }
+                // An image request's text after its last media block is
+                // prefilled as a text request's is, in chunks: the processor's
+                // input runs in one shot, and a long agent turn after an image
+                // otherwise holds the whole prompt's attention at once.
+                var mediaHead: (prefilledTokens: Int, seconds: TimeInterval)?
+                if let split = fullPath?.mediaPrefillSplit(generationInput) {
+                    let head = LMInput(
+                        text: generationInput.text[0..., ..<split], image: generationInput.image,
+                        video: generationInput.video, audio: generationInput.audio)
+                    let seconds = try Self.prefill(
+                        head, into: cache, context: context, state: fullPath?.iteratorState(),
+                        prefill: generateParams.prefill)
+                    mediaHead = (split, seconds)
+                    generationInput = LMInput(tokens: generationInput.text.tokens[0, split...])
+                }
                 let generation: (stream: AsyncStream<TokenGeneration>, worker: Task<Void, Never>)
                 if usesCustomPipeline {
                     // Track C constraint AND the Track E sampling extensions
@@ -2278,7 +2294,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 return (
                     PromptCacheSnapshot(cache), generation.stream, generation.worker,
                     context.configuration.toolCallFormat, Self.stopTokenIDs(context),
-                    history, historySkip
+                    history, historySkip, mediaHead
                 )
             }
         let workingCache = setup.cache.caches
@@ -2403,9 +2419,9 @@ public actor MLXSwiftEngine: InferenceEngine {
                 // The boundary prefill ran before the iterator that reports
                 // this; count it, so usage and the phase summary cover the
                 // whole prefill as they did before the split.
-                completionInfo = setup.history.map {
-                    Self.completionInfo(info, addingPrefillOf: $0.prefilledTokens, seconds: $0.seconds)
-                } ?? info
+                completionInfo = [setup.history.map { ($0.prefilledTokens, $0.seconds) }, setup.mediaHead]
+                    .compactMap { $0 }
+                    .reduce(info) { Self.completionInfo($0, addingPrefillOf: $1.0, seconds: $1.1) }
             }
         }
 
