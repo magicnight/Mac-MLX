@@ -69,8 +69,9 @@ public actor MLXSwiftEngine: InferenceEngine {
         case none
         case llm(ModelContainer, messageGenerator: any MessageGenerator)
         /// `fullPath` is non-nil when the VLM runs on the text generation
-        /// path (see ``FullPathVLM``), with the generator its processor
-        /// renders with.
+        /// path (see ``FullPathVLM``), with the generator the engine renders
+        /// its prompts with (``FullPathMessageGenerator`` unless the
+        /// configuration names one).
         case vlm(ModelContainer, fullPath: (FullPathVLM, messageGenerator: any MessageGenerator)?)
 
         var container: ModelContainer? {
@@ -1185,10 +1186,12 @@ public actor MLXSwiftEngine: InferenceEngine {
         beginGenerationRun()
         defer { endGenerationRun() }
         // Without image attachments (`isVLM: false`): this heuristic only
-        // inspects the rendered token tail.
+        // inspects the rendered token tail. A full-path load still renders
+        // through its generator, as generation does.
         do {
             let lmInput = try await container.prepare(input: Self.userInput(
-                for: request, isVLM: false, messageGenerator: support.messageGenerator, logsDroppedInputs: false))
+                for: request, isVLM: false, messageGenerator: support.messageGenerator,
+                rendersThroughGenerator: support.fullPath != nil, logsDroppedInputs: false))
             let ids = lmInput.text.tokens.asArray(Int32.self).suffix(Self.thinkProbeTailTokens).map(Int.init)
             let text = await container.decode(tokenIds: ids)
             return MessageSegmenter.promptOpensThink(text)
@@ -1296,6 +1299,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         for request: GenerateRequest,
         isVLM: Bool,
         messageGenerator: (any MessageGenerator)?,
+        rendersThroughGenerator: Bool? = nil,
         logsDroppedInputs: Bool = true
     ) -> UserInput {
         // Map our ChatMessage array to MLXLMCommon Chat.Message array.
@@ -1350,7 +1354,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         // through it: from `.chat`, its processor would render with its
         // family's own generator, which lays out a message without media
         // differently from the text load (see `FullPathMessageGenerator`).
-        let rendersThroughGenerator = isVLM && messageGenerator != nil
+        // A caller that drops the images (`isVLM: false`) says so itself.
+        let rendersThroughGenerator = rendersThroughGenerator ?? (isVLM && messageGenerator != nil)
         if let messageGenerator, hasReasoning || rendersThroughGenerator {
             // The generator's own entry point over the input the processor
             // would get, so one that reads `additionalContext` (TranslateGemma)

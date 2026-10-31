@@ -10,8 +10,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Images on Gemma 4.** A Gemma 4 checkpoint that ships its vision tower
-  now loads as a vision model, so the chat window shows the image button and
+- **Images on Gemma 4 E4B.** A Gemma 4 checkpoint that ships its vision
+  tower, in the shape the parity run covered, now loads as a vision model, so
+  the chat window shows the image button and
   chat completions, Anthropic messages and responses read the images sent to
   it. Before, the checkpoint loaded as text and its images were dropped. It
   loads through the VLM factory but runs on the text generation path, so it
@@ -20,7 +21,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   reasoning and speculative decoding. A checkpoint is a vision model only
   with a `vision_config`, the `vision_tower` and `embed_vision` weights, and
   processor metadata naming `Gemma4Processor` in the file mlx-swift-lm reads
-  first; any other Gemma 4 checkpoint loads as text, as before. A vision
+  first, and only in E4B's shape: no `attention_k_eq_v`, no bidirectional
+  vision attention, no MoE block. Those run in separate code in the text and
+  vision classes, so the 31B dense and the 26B-A4B stay text until each
+  passes its own run; only E4B was run. Any other Gemma 4 checkpoint loads
+  as text, as before. A vision
   Gemma 4 stays in the draft-model picker, loaded as text. An image request
   reuses the prompt cache up to its first image, records nothing, never
   speculates, and prefills the text after its last image in chunks, as a
@@ -33,10 +38,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   as its own draft gives the same text, and the vision tower adds 0.34 GB
   resident. Over the API it read text from an image, passed it to a tool
   call, and still read it behind replayed reasoning and a tool result. An
-  agent session with an image re-prefills from the start on every later
-  turn, since image requests record nothing: turn 5 of a 22.7k-token session
+  agent session with an image re-prefills from that image on every later
+  turn, since image requests record nothing (in the session measured, the
+  image came in turn 1, so from the start): turn 5 of a 22.7k-token session
   started in 3.9 s at an 11.1 GB peak, against 3.0 s and 9.5 GB without the
-  image. The parity run caught two differences, fixed before the switch: the
+  image in the same run. The parity run caught two differences, fixed before the switch: the
   family's message generator rendered a tool call with no text as a list,
   which Gemma 4's template reads as a closed turn, so a prompt ending in a
   tool result opened no model turn; and mlx-swift-lm 3.32.3's speculative

@@ -3,12 +3,13 @@
 macMLX's in-process engine runs the architectures bundled with
 [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-examples) — the full
 text family plus 15 VLM architectures (17 `model_type`s) — with no work on our
-side. Gemma 4 is one of them: a checkpoint with its vision tower loads through
-the VLM factory and runs on macMLX's text generation path, so it keeps the
-prompt cache, tool calls and replayed reasoning (one without the tower loads
-as text). Qwen3.5/3.6 are VLM architectures there too, but macMLX still loads
-them as text until they pass the same parity run; images sent to them are
-dropped. This page
+side. Gemma 4 is one of them: an E4B-shaped checkpoint with its vision tower
+loads through the VLM factory and runs on macMLX's text generation path, so
+it keeps the prompt cache, tool calls and replayed reasoning. One without the
+tower, and the 31B dense and 26B-A4B (attention and MoE variants the parity
+run did not cover), load as text. Qwen3.5/3.6 are VLM architectures there
+too, but macMLX still loads them as text until they pass the same parity run;
+images sent to them are dropped. This page
 tracks the **architectures macMLX itself ports in pure Swift** and registers
 into the model factory as external overlays, together with their support
 tier.

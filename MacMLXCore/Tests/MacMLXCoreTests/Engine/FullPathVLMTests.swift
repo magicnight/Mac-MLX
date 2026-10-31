@@ -111,6 +111,39 @@ struct FullPathVLMTests {
         #expect(FullPathVLM(family: .qwen35).processorMessageGenerator is Qwen3VLMessageGenerator)
     }
 
+    /// A full-path load always gets its generator's dictionaries, with or
+    /// without replayed reasoning; an LLM without reasoning keeps `.chat`.
+    @Test
+    func aFullPathInputIsAlwaysTheGeneratorsMessages() throws {
+        let generator = FullPathVLM(family: .gemma4).messageGenerator
+        let plain = GenerateRequest(
+            model: "m", messages: [ChatMessage(role: .user, content: "Hi.")],
+            parameters: GenerationParameters())
+        var reasoned = plain
+        reasoned.messages = [
+            ChatMessage(role: .user, content: "Hi."),
+            ChatMessage(role: .assistant, content: "Hello.", reasoning: "Greet back."),
+            ChatMessage(role: .user, content: "Again."),
+        ]
+        func messages(_ input: UserInput) -> [[String: any Sendable]]? {
+            if case .messages(let messages) = input.prompt { return messages }
+            return nil
+        }
+        let full = try #require(messages(MLXSwiftEngine.userInput(
+            for: plain, isVLM: true, messageGenerator: generator, logsDroppedInputs: false)))
+        #expect(full.first?["content"] as? String == "Hi.")
+        let withReasoning = try #require(messages(MLXSwiftEngine.userInput(
+            for: reasoned, isVLM: true, messageGenerator: generator, logsDroppedInputs: false)))
+        #expect(withReasoning[1]["reasoning_content"] as? String == "Greet back.")
+        let probe = MLXSwiftEngine.userInput(
+            for: plain, isVLM: false, messageGenerator: generator, rendersThroughGenerator: true,
+            logsDroppedInputs: false)
+        #expect(messages(probe) != nil, "a caller that drops the images still renders through it")
+        let llm = MLXSwiftEngine.userInput(
+            for: plain, isVLM: false, messageGenerator: DefaultMessageGenerator(), logsDroppedInputs: false)
+        #expect(messages(llm) == nil, "an LLM without reasoning keeps `.chat`")
+    }
+
     /// A message without media renders as the text load renders it, string
     /// content and tool metadata, so a tool call with no text keeps empty
     /// content, which Gemma 4's template needs to keep the model turn open

@@ -420,16 +420,30 @@ before the flip:
   This is an upstream report candidate, sent only with the user's approval.
 - **Image session (gate 5).** An image request's processor input runs in one
   shot. In the five-turn session, turn 5 (22.7k tokens) took 23.5 s to its
-  first token at a 43.9 GB peak, against 3.2 s and 9.5 GB without the image.
-  Rather than the guard the gate allowed for, Gemma 4 now prefills up to the
-  last media token with the pixels and the text after it in chunks on the
-  warm cache (`FullPathVLM.mediaPrefillSplit`): 3.9 s and 11.1 GB, flat
-  across turns. Attention past the block is causal. Qwen3.5 does not split;
+  first token at a 43.9 GB peak, against 3.2 s and 9.5 GB without the image
+  in the same run. Rather than the guard the gate allowed for, Gemma 4 now
+  prefills up to the last media token with the pixels and the text after it
+  in chunks on the warm cache (`FullPathVLM.mediaPrefillSplit`): 3.9 s and
+  11.1 GB, flat across turns, against 3.0 s and 9.5 GB without the image in
+  that run. Attention past the block is causal. Qwen3.5 does not split;
   its text after an image needs the rope delta the image leaves, which the
   Qwen flip has to carry or measure without.
 
 The weight check requires both `vision_tower.*` and `embed_vision.*`, since
 the VLM class loads both.
+
+The flip is narrowed to the shape the run covered
+(`FullPathVLM.Family.parityRunCovers`): a Gemma 4 text config with
+`attention_k_eq_v`, `use_bidirectional_attention: "vision"` or
+`enable_moe_block` stays text. The 31B dense sets the first two and the
+26B-A4B the third; each runs in separate code in the two classes and needs
+its own run. Step 1's bidirectional rule still applies to them under the
+forcing seam.
+
+`HistoryBoundaryPromptCacheSmokeTests`' SSD-tier case assumed a snapshot
+larger than the default 512 MiB in-memory tier. E4B's 7k-token snapshot is
+smaller (sliding window, shared KV layers), so it failed on both loads alike;
+the case now runs with a 32 MiB in-memory tier, so it holds on both models.
 
 ## Goals, non-goals, anti-goals
 

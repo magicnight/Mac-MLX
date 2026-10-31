@@ -17,8 +17,9 @@ import Testing
 /// same paths with the same children, or an adapter trained against one
 /// would not apply to the other.
 ///
-/// Built from one tiny configuration both classes decode. The weights are
-/// never evaluated.
+/// Built from one tiny configuration both classes decode, in E4B's shape:
+/// per-layer inputs and a KV-shared last layer. The weights are never
+/// evaluated.
 @Suite("Gemma 4 LoRA layers", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
 struct Gemma4LoRALayerPathTests {
 
@@ -28,13 +29,13 @@ struct Gemma4LoRALayerPathTests {
           "image_token_id": 60, "boi_token_id": 61, "eoi_token_id": 62,
           "vision_soft_tokens_per_image": 4,
           "text_config": {
-            "model_type": "gemma4_text", "hidden_size": 32, "num_hidden_layers": 2,
+            "model_type": "gemma4_text", "hidden_size": 32, "num_hidden_layers": 3,
             "intermediate_size": 64, "num_attention_heads": 4, "num_key_value_heads": 2,
             "rms_norm_eps": 1e-6, "vocab_size": 64, "head_dim": 8, "global_head_dim": 8,
-            "num_global_key_value_heads": 2, "num_kv_shared_layers": 0,
-            "hidden_size_per_layer_input": 0, "vocab_size_per_layer_input": 64,
+            "num_global_key_value_heads": 2, "num_kv_shared_layers": 1,
+            "hidden_size_per_layer_input": 8, "vocab_size_per_layer_input": 64,
             "use_double_wide_mlp": false, "sliding_window": 512,
-            "layer_types": ["sliding_attention", "full_attention"]
+            "layer_types": ["sliding_attention", "full_attention", "full_attention"]
           },
           "vision_config": {
             "model_type": "gemma4_vision", "num_hidden_layers": 1, "hidden_size": 16,
@@ -53,7 +54,7 @@ struct Gemma4LoRALayerPathTests {
             try JSONDecoder().decode(MLXVLM.Gemma4Configuration.self, from: Self.config))
 
         let textPaths = paths(of: text.loraLayers, in: text)
-        #expect(textPaths == ["language_model.model.layers.0", "language_model.model.layers.1"])
+        #expect(textPaths == (0..<3).map { "language_model.model.layers.\($0)" })
         #expect(paths(of: vision.loraLayers, in: vision) == textPaths)
 
         #expect(text.loraLayers.count == vision.loraLayers.count)

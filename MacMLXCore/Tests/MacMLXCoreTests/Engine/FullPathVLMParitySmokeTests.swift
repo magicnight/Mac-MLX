@@ -90,6 +90,23 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
         }
     }
 
+    // MARK: - Classification
+
+    /// The model library makes the gated checkpoint what a user gets: a VLM
+    /// once its family is served (read-only scan of its models directory).
+    func testTheModelLibraryClassifiesTheCheckpoint() async throws {
+        let (modelID, directory) = try gateAndResolveModel()
+        let models = try await ModelLibraryManager().scan(directory.deletingLastPathComponent())
+        let model = try XCTUnwrap(models.first { $0.id == modelID })
+        let config = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "config.json")))
+                as? [String: Any])
+        let family = try XCTUnwrap(FullPathVLM.Family(rawValue: model.architecture?.lowercased() ?? ""))
+        let served = FullPathVLM.servedFamilies.contains(family) && family.parityRunCovers(config)
+        print("[full-path-parity] \(modelID) library format: \(model.format)")
+        XCTAssertEqual(model.format, served ? .mlxVLM : .mlx)
+    }
+
     // MARK: - Gate 3
 
     func testTheSecondAgentTurnReusesTheSameOnBothLoads() async throws {

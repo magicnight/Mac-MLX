@@ -36,6 +36,25 @@ struct FullPathVLM: Sendable, Equatable {
             }
         }
 
+        /// Whether a checkpoint with this `config.json` has the shape this
+        /// family's parity run covered; another stays text until it passes
+        /// its own run. Gemma 4 ran on E4B (`gemma-4-e4b-it-8bit`), whose
+        /// text config sets none of `attention_k_eq_v`, bidirectional vision
+        /// attention or the MoE block. The 31B dense checkpoint sets the first
+        /// two, the 26B-A4B the third, and each runs in separate code in the
+        /// text and the vision class. Read from `text_config`, else the root.
+        func parityRunCovers(_ config: [String: Any]) -> Bool {
+            switch self {
+            case .gemma4:
+                let text = config["text_config"] as? [String: Any] ?? config
+                return text["attention_k_eq_v"] as? Bool != true
+                    && text["use_bidirectional_attention"] as? String != "vision"
+                    && text["enable_moe_block"] as? Bool != true
+            case .qwen35:
+                return false
+            }
+        }
+
         /// Tensor-name prefixes the vision tower's weights carry in an
         /// mlx-community conversion, after a leading `model.` is dropped.
         /// A checkpoint is complete only with every one present. Gemma 4

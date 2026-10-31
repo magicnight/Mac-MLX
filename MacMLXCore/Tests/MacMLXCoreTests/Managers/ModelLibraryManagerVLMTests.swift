@@ -296,6 +296,22 @@ struct ModelLibraryManagerVLMTests {
         #expect(VisionCheckpoint.safetensorsHeaderKeys(huge) == nil)
     }
 
+    /// A complete checkpoint in a shape the parity run did not cover stays
+    /// text: the 31B dense's `attention_k_eq_v` and bidirectional vision
+    /// attention, the 26B-A4B's MoE block. E4B's own values (all off) keep
+    /// it a VLM.
+    @Test(arguments: [
+        (#"{"attention_k_eq_v": true}"#, ModelFormat.mlx),
+        (#"{"use_bidirectional_attention": "vision"}"#, .mlx),
+        (#"{"enable_moe_block": true}"#, .mlx),
+        (#"{"attention_k_eq_v": false, "use_bidirectional_attention": null, "enable_moe_block": false}"#, .mlxVLM),
+    ])
+    func onlyTheShapeTheParityRunCoveredIsAVLM(textConfig: String, format: ModelFormat) async throws {
+        let temp = try TemporaryDirectory()
+        try writeGemma4(in: temp.url, name: "gemma-4-shape", textConfig: textConfig)
+        #expect(try await scanFormat(temp.url) == format)
+    }
+
     /// Qwen3.5 has not flipped, so a complete-looking Qwen3.5 checkpoint is
     /// still text.
     @Test
@@ -320,14 +336,14 @@ struct ModelLibraryManagerVLMTests {
     @discardableResult
     private func writeGemma4(
         in root: URL, name: String, modelType: String = "gemma4", gap: Gemma4Gap? = nil,
-        withIndex: Bool = true
+        withIndex: Bool = true, textConfig: String = "{}"
     ) throws -> URL {
         let dir = root.appending(path: name)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data("{}".utf8).write(to: dir.appending(path: "tokenizer.json"))
         try Data("\u{00}".utf8).write(to: dir.appending(path: "model.safetensors"))
         let vision = gap == .visionConfig ? "" : #", "vision_config": {"model_type": "gemma4_vision"}"#
-        try Data(#"{"model_type": "\#(modelType)", "text_config": {}\#(vision)}"#.utf8)
+        try Data(#"{"model_type": "\#(modelType)", "text_config": \#(textConfig)\#(vision)}"#.utf8)
             .write(to: dir.appending(path: "config.json"))
         if withIndex {
             var names = ["language_model.model.embed_tokens.weight", "audio_tower.layers.0.weight"]

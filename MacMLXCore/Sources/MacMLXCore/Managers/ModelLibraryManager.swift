@@ -457,8 +457,9 @@ public actor ModelLibraryManager {
     /// `model_type` values loaded through the VLM factory and served on the
     /// text generation path (``FullPathVLM/servedFamilies``), so images work
     /// without losing what text requests have. Only a checkpoint that carries
-    /// the vision tower is `.mlxVLM` (``VisionCheckpoint``); any other stays
-    /// `.mlx` and loads as text, as it always has.
+    /// the vision tower (``VisionCheckpoint``) and the shape the family's
+    /// parity run covered (``FullPathVLM/Family/parityRunCovers(_:)``) is
+    /// `.mlxVLM`; any other stays `.mlx` and loads as text, as it always has.
     static var fullPathVLMTypes: Set<String> {
         Set(FullPathVLM.servedFamilies.map(\.rawValue))
     }
@@ -549,8 +550,9 @@ public actor ModelLibraryManager {
         }
         if let family = FullPathVLM.Family(rawValue: modelType),
            FullPathVLM.servedFamilies.contains(family) {
-            return VisionCheckpoint.isComplete(
-                directory: directory, config: json, family: family, fileManager: fileManager)
+            return family.parityRunCovers(json)
+                && VisionCheckpoint.isComplete(
+                    directory: directory, config: json, family: family, fileManager: fileManager)
                 ? .mlxVLM : .mlx
         }
         if Self.knownVLMTypes.contains(modelType) {
