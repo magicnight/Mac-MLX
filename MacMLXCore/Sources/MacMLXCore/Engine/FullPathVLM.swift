@@ -14,7 +14,7 @@ import MLXVLM
 /// The engine decides it at load, from the checkpoint's `config.json`, for a
 /// model the VLM factory loaded. Only a family in ``servedFamilies`` is served
 /// this way, and a family joins that set only after its parity gate passed;
-/// until then every VLM keeps the stock path. `forced` is a test seam that
+/// until then a VLM of that family keeps the stock path. `forced` is a test seam that
 /// reaches the path for a family not in the set yet.
 struct FullPathVLM: Sendable, Equatable {
 
@@ -23,11 +23,39 @@ struct FullPathVLM: Sendable, Equatable {
     enum Family: String, Sendable, CaseIterable {
         case gemma4
         case qwen35 = "qwen3_5"
+
+        /// The `processor_class` the VLM factory builds this family's
+        /// processor from, as its checkpoints declare it. Upstream builds
+        /// whatever class a checkpoint names, so a checkpoint naming another
+        /// one would get another family's processor (see
+        /// ``VisionCheckpoint``).
+        var processorClass: String {
+            switch self {
+            case .gemma4: "Gemma4Processor"
+            case .qwen35: "Qwen3VLProcessor"
+            }
+        }
+
+        /// Tensor-name prefixes the vision tower's weights carry in an
+        /// mlx-community conversion, after a leading `model.` is dropped.
+        /// A checkpoint is complete only with every one present. Gemma 4
+        /// needs the encoder and its projection into the text model; the
+        /// audio tower is not needed, since upstream's `gemma4` sanitizer
+        /// drops it. Qwen3.5's raw Hugging Face layout (`model.visual.*`) is
+        /// not read yet; that family is not served.
+        var visionWeightPrefixes: [String] {
+            switch self {
+            case .gemma4: ["vision_tower.", "embed_vision."]
+            case .qwen35: ["vision_tower."]
+            }
+        }
     }
 
     /// Families whose checkpoints load through the VLM factory and run on the
-    /// text generation path. Empty until a family passes its parity gate.
-    static let servedFamilies: Set<Family> = []
+    /// text generation path, each only for a checkpoint that carries its
+    /// vision tower (``VisionCheckpoint``). A family joins once its parity
+    /// gate passed: Gemma 4 on `gemma-4-e4b-it-8bit`. Qwen3.5/3.6 has not.
+    static let servedFamilies: Set<Family> = [.gemma4]
 
     let family: Family
 

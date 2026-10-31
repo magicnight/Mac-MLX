@@ -24,15 +24,18 @@ import MLXLMCommon
 /// - In mlx-swift-lm the only model that emits them is `Gemma4` in **MLXVLM**
 ///   (via its `callAsFunction(_:cache:state:)` overload). MLXLLM's
 ///   `Gemma4Model` has no emit path at all.
-/// - macMLX classifies a Gemma 4 checkpoint as `.mlx` (`gemma4` is in
-///   `ModelLibraryManager.vlmTypesServedAsText`), so it loads through
-///   `LLMModelFactory` as the non-emitting `Gemma4Model`.
+/// - A Gemma 4 checkpoint with its vision tower is `.mlxVLM` and loads
+///   through the VLM factory as that emitting `Gemma4`, served on the text
+///   generation path (``FullPathVLM``). One without it is `.mlx` and loads
+///   through `LLMModelFactory` as the non-emitting `Gemma4Model`.
 ///
-/// Wiring the iterator up before that is fixed would cost a resident drafter
-/// and a bypassed prompt cache while never once speculating — strictly slower
-/// than leaving it off. Reaching it needs the target to load through the VLM
-/// factory AND text-only requests to stop short-circuiting past draft-model
-/// resolution, or an upstream change that moves the emit hook into MLXLLM.
+/// So the target side is now reachable for a vision Gemma 4 checkpoint, but
+/// `runLLMGeneration` decodes only with `TokenIterator` or upstream's
+/// draft-model `generateTokens(..., draftModel:)` (the classic
+/// `SpeculativeTokenIterator`), and a draft model always loads through
+/// `LLMModelFactory`, which registers no MTP drafter types. Wiring it means
+/// routing an MTP drafter to `MTPDrafterModelFactory` and its iterator, on
+/// the full path only.
 ///
 /// ## The signal
 ///

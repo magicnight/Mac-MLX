@@ -35,12 +35,39 @@ struct FullPathVLMTests {
             "unforced, only a served family takes the full path")
     }
 
-    /// No family has passed its parity gate yet, so no checkpoint changes
-    /// path in this build. A family joins with its own flip.
+    /// Gemma 4 passed its parity gate on `gemma-4-e4b-it-8bit`; Qwen3.5/3.6
+    /// has not run it. A family joins with its own flip.
     @Test
-    func noFamilyIsServedYet() {
-        #expect(FullPathVLM.servedFamilies.isEmpty)
+    func onlyGemma4IsServed() {
+        #expect(FullPathVLM.servedFamilies == [.gemma4])
     }
+
+    /// Each family's `processorClass` is the key the VLM factory's processor
+    /// registry builds that family's processor under, in the source this
+    /// build resolved, and no `model_type` resolver in the loading registry
+    /// overrides what a Gemma 4 checkpoint declares, so the class a
+    /// checkpoint declares is the processor it gets.
+    @Test(.enabled(if: ResolvedUpstreamSource.mlxSwiftLM(Self.factorySource) != nil
+                   || ResolvedUpstreamSource.isRequired,
+                   "no SwiftPM checkout of mlx-swift-lm next to the test bundle"))
+    func everyFamilyNamesTheProcessorUpstreamBuildsForIt() throws {
+        let factory = try #require(ResolvedUpstreamSource.mlxSwiftLM(Self.factorySource),
+                                   "MACMLX_REQUIRE_RESOLVED_SOURCE is set but no checkout was found")
+        let start = try #require(factory.range(of: "public enum VLMProcessorTypeRegistry"))
+        let entry = /"(\w+)"\s*:\s*create\(\s*\w+\.self\s*,\s*(\w+)\.init\s*\)/
+        let processors = Dictionary(
+            factory[start.upperBound...].matches(of: entry).map { (String($0.1), String($0.2)) },
+            uniquingKeysWith: { first, _ in first })
+        #expect(processors[FullPathVLM.Family.gemma4.processorClass] == "Gemma4Processor")
+        #expect(processors[FullPathVLM.Family.qwen35.processorClass] == "Qwen3VLProcessor")
+
+        let loading = try #require(ResolvedUpstreamSource.mlxSwiftLM(Self.loadingSource),
+                                   "no VLMProcessorLoadingRegistry.swift in the checkout")
+        #expect(!loading.contains(#""gemma4":"#), "a resolver now overrides Gemma 4's processor")
+    }
+
+    private static let factorySource = "Libraries/MLXVLM/VLMModelFactory.swift"
+    private static let loadingSource = "Libraries/MLXVLM/VLMProcessorLoadingRegistry.swift"
 
     /// The forcing seam reaches only the families this path knows how to
     /// drive; the siblings that share a generator but not a class, a text
@@ -71,7 +98,7 @@ struct FullPathVLMTests {
     func everyFamilyIsAVLMRegistryKey(_ family: FullPathVLM.Family) {
         #expect(
             ModelLibraryManager.vlmTypesServedAsText.contains(family.rawValue)
-                || ModelLibraryManager.knownVLMTypes.contains(family.rawValue))
+                || ModelLibraryManager.fullPathVLMTypes.contains(family.rawValue))
     }
 
     /// The generator each family's processor builds for itself

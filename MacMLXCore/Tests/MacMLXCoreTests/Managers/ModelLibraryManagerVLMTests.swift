@@ -117,8 +117,12 @@ struct ModelLibraryManagerVLMTests {
     func everyVLMRegistryKeyIsClassifiedOnce() async {
         let vlm = ModelLibraryManager.knownVLMTypes
         let text = ModelLibraryManager.vlmTypesServedAsText
+        let fullPath = ModelLibraryManager.fullPathVLMTypes
         #expect(vlm.isDisjoint(with: text))
-        #expect(vlm.union(text) == Self.upstreamVLMRegistryKeys)
+        #expect(vlm.isDisjoint(with: fullPath))
+        #expect(text.isDisjoint(with: fullPath))
+        #expect(vlm.union(text).union(fullPath) == Self.upstreamVLMRegistryKeys)
+        #expect(fullPath == ["gemma4"])
         for key in Self.upstreamVLMRegistryKeys {
             #expect(await VLMTypeRegistry.shared.contains(key), "\(key) is not in the VLM registry")
         }
@@ -189,10 +193,11 @@ struct ModelLibraryManagerVLMTests {
     }
 
     /// A type kept on the text path must be one the LLM factory loads, or
-    /// its checkpoints would not load at all.
+    /// its checkpoints would not load at all. So must a full-path type: its
+    /// checkpoints without a vision tower stay `.mlx`.
     @Test
     func typesServedAsTextLoadThroughTheLLMFactory() async {
-        for key in ModelLibraryManager.vlmTypesServedAsText {
+        for key in ModelLibraryManager.vlmTypesServedAsText.union(ModelLibraryManager.fullPathVLMTypes) {
             #expect(await LLMTypeRegistry.shared.contains(key), "\(key) is not in the LLM registry")
         }
     }
@@ -205,12 +210,156 @@ struct ModelLibraryManagerVLMTests {
         #expect(models.first?.format == .mlxVLM)
     }
 
+    /// With no vision tower in sight (the config names no `vision_config`),
+    /// a Gemma 4 checkpoint is text, and the types not served on the full path
+    /// are text whatever they carry.
     @Test(arguments: ["gemma4", "gemma4_unified", "qwen3_5", "qwen3_5_moe"])
     func multimodalAgentModelsStayOnTheTextPath(modelType: String) async throws {
         let temp = try TemporaryDirectory()
         try writeModel(in: temp.url, name: "text-\(modelType)", modelType: modelType)
         let models = try await ModelLibraryManager().scan(temp.url)
         #expect(models.first?.format == .mlx)
+    }
+
+    // MARK: - Gemma 4 on the full path
+
+    /// A Gemma 4 checkpoint as mlx-community converts it: a `vision_config`,
+    /// the encoder and its projection in the index, and processor metadata
+    /// naming `Gemma4Processor`.
+    @Test
+    func aGemma4CheckpointWithItsVisionTowerIsAVLM() async throws {
+        let temp = try TemporaryDirectory()
+        try writeGemma4(in: temp.url, name: "gemma-4-vision")
+        #expect(try await scanFormat(temp.url) == .mlxVLM)
+    }
+
+    /// Each requirement on its own: without it the checkpoint loads as text,
+    /// as it did before Gemma 4 flipped, rather than going to the VLM
+    /// factory and failing there.
+    @Test(arguments: Gemma4Gap.allCases)
+    func aGemma4CheckpointMissingAnyPieceStaysText(_ gap: Gemma4Gap) async throws {
+        let temp = try TemporaryDirectory()
+        try writeGemma4(in: temp.url, name: "gemma-4-\(gap)", gap: gap)
+        #expect(try await scanFormat(temp.url) == .mlx)
+    }
+
+    /// Upstream reads `preprocessor_config.json` first and builds whatever it
+    /// names, so a `processor_config.json` naming the right class beside it
+    /// does not help.
+    @Test
+    func thePreprocessorConfigIsTheOneRead() async throws {
+        let temp = try TemporaryDirectory()
+        let dir = try writeGemma4(in: temp.url, name: "gemma-4-two-configs")
+        try Data(#"{"processor_class": "Gemma3Processor"}"#.utf8)
+            .write(to: dir.appending(path: "preprocessor_config.json"))
+        #expect(try await scanFormat(temp.url) == .mlx)
+        try Data(#"{"processor_class": "Gemma4Processor"}"#.utf8)
+            .write(to: dir.appending(path: "preprocessor_config.json"))
+        #expect(try await scanFormat(temp.url) == .mlxVLM)
+    }
+
+    /// Without an index, the tensor names come from the `.safetensors`
+    /// headers. A raw Hugging Face layout's leading `model.` is dropped, as
+    /// upstream's sanitizer drops it.
+    @Test(arguments: [false, true])
+    func withoutAnIndexTheHeadersAreRead(rawLayout: Bool) async throws {
+        let temp = try TemporaryDirectory()
+        let dir = try writeGemma4(in: temp.url, name: "gemma-4-headers", withIndex: false)
+        let prefix = rawLayout ? "model." : ""
+        try writeSafetensors(
+            at: dir.appending(path: "model.safetensors"),
+            names: ["\(prefix)language_model.model.embed_tokens.weight",
+                    "\(prefix)vision_tower.encoder.layers.0.mlp.down_proj.weight",
+                    "\(prefix)embed_vision.embedding_projection.weight"])
+        #expect(try await scanFormat(temp.url) == .mlxVLM)
+
+        try writeSafetensors(
+            at: dir.appending(path: "model.safetensors"),
+            names: ["\(prefix)language_model.model.embed_tokens.weight",
+                    "\(prefix)vision_tower.encoder.layers.0.mlp.down_proj.weight"])
+        #expect(try await scanFormat(temp.url) == .mlx, "no embed_vision")
+    }
+
+    /// A header too short to read or claiming more bytes than the file has
+    /// gives no names, and the checkpoint stays text.
+    @Test
+    func anUnreadableHeaderGivesNoNames() throws {
+        let temp = try TemporaryDirectory()
+        let short = temp.url.appending(path: "short.safetensors")
+        try Data([1, 2, 3]).write(to: short)
+        #expect(VisionCheckpoint.safetensorsHeaderKeys(short) == nil)
+        let truncated = temp.url.appending(path: "truncated.safetensors")
+        try (withUnsafeBytes(of: UInt64(4096).littleEndian) { Data($0) } + Data("{}".utf8)).write(to: truncated)
+        #expect(VisionCheckpoint.safetensorsHeaderKeys(truncated) == nil)
+        let huge = temp.url.appending(path: "huge.safetensors")
+        try withUnsafeBytes(of: (VisionCheckpoint.maxHeaderBytes + 1).littleEndian) { Data($0) }.write(to: huge)
+        #expect(VisionCheckpoint.safetensorsHeaderKeys(huge) == nil)
+    }
+
+    /// Qwen3.5 has not flipped, so a complete-looking Qwen3.5 checkpoint is
+    /// still text.
+    @Test
+    func aCompleteQwen35CheckpointIsStillText() async throws {
+        let temp = try TemporaryDirectory()
+        let dir = try writeGemma4(in: temp.url, name: "qwen-3-5", modelType: "qwen3_5")
+        try Data(#"{"processor_class": "Qwen3VLProcessor"}"#.utf8)
+            .write(to: dir.appending(path: "processor_config.json"))
+        #expect(try await scanFormat(temp.url) == .mlx)
+    }
+
+    enum Gemma4Gap: String, CaseIterable, CustomStringConvertible {
+        case visionConfig, visionTower, visionEmbedding, processorConfig, processorClass, wrongProcessor, unreadableIndex
+        var description: String { rawValue }
+    }
+
+    private func scanFormat(_ root: URL) async throws -> ModelFormat? {
+        try await ModelLibraryManager().scan(root).first?.format
+    }
+
+    /// A Gemma 4 checkpoint in mlx-community's layout, less `gap`.
+    @discardableResult
+    private func writeGemma4(
+        in root: URL, name: String, modelType: String = "gemma4", gap: Gemma4Gap? = nil,
+        withIndex: Bool = true
+    ) throws -> URL {
+        let dir = root.appending(path: name)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: dir.appending(path: "tokenizer.json"))
+        try Data("\u{00}".utf8).write(to: dir.appending(path: "model.safetensors"))
+        let vision = gap == .visionConfig ? "" : #", "vision_config": {"model_type": "gemma4_vision"}"#
+        try Data(#"{"model_type": "\#(modelType)", "text_config": {}\#(vision)}"#.utf8)
+            .write(to: dir.appending(path: "config.json"))
+        if withIndex {
+            var names = ["language_model.model.embed_tokens.weight", "audio_tower.layers.0.weight"]
+            if gap != .visionTower { names.append("vision_tower.encoder.layers.0.mlp.down_proj.weight") }
+            if gap != .visionEmbedding { names.append("embed_vision.embedding_projection.weight") }
+            let map = Dictionary(uniqueKeysWithValues: names.map { ($0, "model.safetensors") })
+            let index = gap == .unreadableIndex
+                ? Data("not json".utf8)
+                : try JSONSerialization.data(withJSONObject: ["metadata": [:], "weight_map": map])
+            try index.write(to: dir.appending(path: "model.safetensors.index.json"))
+        }
+        switch gap {
+        case .processorConfig: break
+        case .processorClass:
+            try Data(#"{"image_seq_length": 280}"#.utf8).write(to: dir.appending(path: "processor_config.json"))
+        case .wrongProcessor:
+            try Data(#"{"processor_class": "Gemma4UnifiedProcessor"}"#.utf8)
+                .write(to: dir.appending(path: "processor_config.json"))
+        default:
+            try Data(#"{"processor_class": "Gemma4Processor"}"#.utf8)
+                .write(to: dir.appending(path: "processor_config.json"))
+        }
+        return dir
+    }
+
+    /// A `.safetensors` file holding only a header that lists `names`.
+    private func writeSafetensors(at url: URL, names: [String]) throws {
+        var header: [String: Any] = ["__metadata__": ["format": "mlx"]]
+        for name in names { header[name] = ["dtype": "F32", "shape": [1], "data_offsets": [0, 4]] }
+        let body = try JSONSerialization.data(withJSONObject: header)
+        let length = withUnsafeBytes(of: UInt64(body.count).littleEndian) { Data($0) }
+        try (length + body + Data(count: 4)).write(to: url)
     }
 
     // MARK: - Helpers
