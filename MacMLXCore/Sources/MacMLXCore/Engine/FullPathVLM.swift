@@ -72,8 +72,8 @@ struct FullPathVLM: Sendable, Equatable {
     /// upstream's configuration types use (`Qwen35Configuration`,
     /// `Gemma4Configuration`), so the cap lands where the model finds the
     /// block. Qwen3.6 checkpoints set `vision_start_token_id` to 248053;
-    /// upstream's default, 248045, is `<|im_start|>`, which only caps reuse
-    /// earlier.
+    /// upstream's default, 248045, is `<|im_start|>`, which opens every Qwen
+    /// chat, so a config without the key runs image requests cold.
     private static func mediaTokenIDs(family: Family, config: [String: Any]) -> Set<Int> {
         func id(_ key: String) -> Int? { config[key] as? Int }
         switch family {
@@ -97,7 +97,8 @@ struct FullPathVLM: Sendable, Equatable {
     /// media token plus that token. The store always leaves a key's last
     /// token to prefill, so reuse ends at the block, and an entry stored
     /// under exactly the prefix is reused whole rather than trimmed by one,
-    /// which a `MambaCache` cannot do.
+    /// which a `MambaCache` cannot do. A hit from the cold tier is promoted to
+    /// the hot one as for any request; that entry holds only text KV.
     func imageRequestLookupKey(_ tokens: [Int]) -> [Int]? {
         guard reusesPrefixBeforeMedia,
             let start = tokens.firstIndex(where: mediaTokenIDs.contains), start > 0

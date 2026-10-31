@@ -91,7 +91,7 @@ struct FullPathVLMTests {
     func theMediaTokenIDsAreReadFromTheConfig() throws {
         let qwen = try config(#"""
             {"model_type": "qwen3_5", "vision_start_token_id": 248053,
-             "image_token_id": 248056, "video_token_id": 248057}
+             "image_token_id": 248056, "video_token_id": 248057, "image_token_index": 248060}
             """#)
         let gemma = try config(#"""
             {"model_type": "gemma4", "boi_token_id": 255999, "image_token_id": 258880,
@@ -100,7 +100,7 @@ struct FullPathVLMTests {
         defer {
             for url in [qwen, gemma] { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         }
-        #expect(FullPathVLM.resolve(configURL: qwen, forced: true)?.mediaTokenIDs == [248_053, 248_056, 248_057])
+        #expect(FullPathVLM.resolve(configURL: qwen, forced: true)?.mediaTokenIDs == [248_053, 248_056, 248_057, 248_060])
         #expect(
             FullPathVLM.resolve(configURL: gemma, forced: true)?.mediaTokenIDs
                 == [255_999, 258_880, 258_884, 258_881])
@@ -140,6 +140,24 @@ struct FullPathVLMTests {
         #expect(vlm.imageRequestLookupKey([8, 1, 2]) == nil, "nothing before the block")
         let cold = FullPathVLM(family: .gemma4, mediaTokenIDs: [8], reusesPrefixBeforeMedia: false)
         #expect(cold.imageRequestLookupKey([1, 2, 8]) == nil)
+    }
+
+    /// What the store makes of the key, with a history-boundary entry stored
+    /// under exactly the prefix and the text turn's longer entry beside it:
+    /// the boundary is the only candidate and is reused whole, with no trim,
+    /// which a `MambaCache` (Qwen3.5) or a sliding window past its size
+    /// (Gemma 4) needs. A key without the opening token would make the
+    /// boundary an exact match, trimmed by one.
+    @Test
+    func anEntryStoredUnderExactlyThePrefixIsReusedWhole() throws {
+        let trie = PromptTrie<Int>()
+        trie.add(model: "m", tokens: [1, 2, 3], value: 0)
+        trie.add(model: "m", tokens: [1, 2, 3, 4, 5], value: 1)
+        let vlm = FullPathVLM(family: .qwen35, mediaTokenIDs: [8])
+        let key = try #require(vlm.imageRequestLookupKey([1, 2, 3, 8, 6, 7]))
+        #expect(
+            PromptCacheStore.resolveReuse(trie.search(model: "m", tokens: key), tokenCount: key.count)
+                == [.init(key: [1, 2, 3], heldCount: 3, targetReuse: 3, requiresTrim: false)])
     }
 
     /// The key id is rebuilt from a string because upstream keeps the key
