@@ -54,6 +54,9 @@ import enum MacMLXCore.JSONValue
 ///     -only-testing:MacMLXCoreTests/FullPathVLMParitySmokeTests
 final class FullPathVLMParitySmokeTests: XCTestCase {
 
+    /// The other chunking the noise-floor read prefills with.
+    static let noiseFloorPrefill = PrefillParameters(stepSize: 128, chunking: .remainder)
+
     /// Gate 6's allowance for what is resident besides the weights.
     static let memoryTolerance = 32 << 20
 
@@ -73,6 +76,13 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             let comparison = try XCTUnwrap(
                 LogitComparison(reference: textRun.logits, candidate: fullRun.logits, top: 20))
             print("[full-path-parity] \(modelID) \(name): prompt=\(textRun.tokens.count) \(comparison)")
+            // For the record, not asserted: the text load against itself
+            // prefilled in other chunks, the size of the difference chunking
+            // alone makes on this checkpoint.
+            let rechunked = try await text.coldNextTokenLogits(request, prefill: Self.noiseFloorPrefill)
+            if let noise = LogitComparison(reference: textRun.logits, candidate: rechunked.logits, top: 20) {
+                print("[full-path-parity] \(modelID) \(name): text load rechunked \(noise)")
+            }
             XCTAssertLessThanOrEqual(comparison.maxLogProbDelta, comparison.delta, "\(name): gate 2, |Δ log p|")
             XCTAssertLessThan(comparison.kl, comparison.klBound, "\(name): gate 2, KL")
 
@@ -125,7 +135,7 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             let second = try await usage(engine, turn2)
             reused[fullPath] = second.cachedPromptTokens ?? 0
             print("[full-path-parity] \(modelID) \(fullPath ? "full path" : "text load"): turn 2 "
-                + "prompt=\(second.promptTokens ?? -1) reused=\(second.cachedPromptTokens ?? 0)")
+                + "prompt=\(second.promptTokens) reused=\(second.cachedPromptTokens ?? 0)")
             try await engine.unload()
         }
         XCTAssertGreaterThan(reused[false] ?? 0, 0, "the text load reuses turn 1")
@@ -158,7 +168,9 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
     // MARK: - Gate 7
 
     /// Run on the text load too, as the reference for what speculation does
-    /// there; the gate is on the full path.
+    /// there; the gate is on the full path. A family whose text load cannot
+    /// speculate (Qwen3.5's `MambaCache` cannot be trimmed) must not start
+    /// to on the full path; one that can must keep doing so.
     func testTheFullPathStillSpeculatesWithADraft() async throws {
         let (modelID, directory) = try gateAndResolveModel()
         var plain = GenerateRequest(
@@ -169,6 +181,7 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
         var drafted = plain
         drafted.draftModelID = modelID
 
+        var textLoadSpeculates = false
         for fullPath in [false, true] {
             let engine = try await loadedEngine(modelID, directory, fullPath: fullPath)
             let without = try await textAndUsage(engine, plain)
@@ -180,8 +193,18 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
                 + "accepted=\(speculation?.acceptedTokens ?? 0); same text: \(with.text == without.text); "
                 + "with draft \(with.text.prefix(24).debugDescription), without \(without.text.prefix(24).debugDescription)")
             try await engine.unload()
-            guard fullPath else { continue }
-            XCTAssertGreaterThan(speculation?.proposedTokens ?? 0, 0, "gate 7: the full-path load did not speculate")
+            guard fullPath else {
+                textLoadSpeculates = (speculation?.proposedTokens ?? 0) > 0
+                continue
+            }
+            XCTAssertEqual(
+                (speculation?.proposedTokens ?? 0) > 0, textLoadSpeculates,
+                "gate 7: the full path speculates where the text load does not, or the reverse")
+            // Gemma 4's caches trim, so its text load must speculate: parity
+            // alone would pass if both loads had stopped.
+            if Self.modelType(directory) == FullPathVLM.Family.gemma4.rawValue {
+                XCTAssertTrue(textLoadSpeculates, "gate 7: the Gemma 4 text load did not speculate")
+            }
             XCTAssertEqual(with.text, without.text, "gate 7: greedy output changes with a draft")
         }
     }
@@ -416,6 +439,14 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             if let chunkSpeculation = chunk.speculativeDecoding { speculation = chunkSpeculation }
         }
         return (text, usage, speculation)
+    }
+
+    /// The checkpoint's `model_type`, lowercased.
+    static func modelType(_ directory: URL) -> String? {
+        guard let data = try? Data(contentsOf: directory.appending(path: "config.json")),
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return (root["model_type"] as? String)?.lowercased()
     }
 
     /// The bytes of the vision tower's tensors (`vision_tower.*` and
