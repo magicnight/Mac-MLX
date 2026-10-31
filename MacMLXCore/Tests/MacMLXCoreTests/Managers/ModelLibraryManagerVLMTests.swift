@@ -298,13 +298,14 @@ struct ModelLibraryManagerVLMTests {
 
     /// A complete checkpoint in a shape the parity run did not cover stays
     /// text: the 31B dense's `attention_k_eq_v` and bidirectional vision
-    /// attention, the 26B-A4B's MoE block. E4B's own values (all off) keep
-    /// it a VLM.
+    /// attention, the 26B-A4B's MoE block, E2B's double-wide MLP. E4B's own
+    /// values (all off) keep it a VLM.
     @Test(arguments: [
         (#"{"attention_k_eq_v": true}"#, ModelFormat.mlx),
         (#"{"use_bidirectional_attention": "vision"}"#, .mlx),
         (#"{"enable_moe_block": true}"#, .mlx),
-        (#"{"attention_k_eq_v": false, "use_bidirectional_attention": null, "enable_moe_block": false}"#, .mlxVLM),
+        (#"{"use_double_wide_mlp": true}"#, .mlx),
+        (#"{"attention_k_eq_v": false, "use_bidirectional_attention": null, "enable_moe_block": false, "use_double_wide_mlp": false}"#, .mlxVLM),
     ])
     func onlyTheShapeTheParityRunCoveredIsAVLM(textConfig: String, format: ModelFormat) async throws {
         let temp = try TemporaryDirectory()

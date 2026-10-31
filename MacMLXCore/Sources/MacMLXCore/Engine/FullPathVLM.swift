@@ -40,9 +40,11 @@ struct FullPathVLM: Sendable, Equatable {
         /// family's parity run covered; another stays text until it passes
         /// its own run. Gemma 4 ran on E4B (`gemma-4-e4b-it-8bit`), whose
         /// text config sets none of `attention_k_eq_v`, bidirectional vision
-        /// attention or the MoE block. The 31B dense checkpoint sets the first
-        /// two, the 26B-A4B the third, and each runs in separate code in the
-        /// text and the vision class. Read from `text_config`, else the root.
+        /// attention, the MoE block or the double-wide MLP. The 31B dense
+        /// checkpoint sets the first two, the 26B-A4B the third and E2B the
+        /// fourth, each read by separate code in the text and the vision
+        /// class. A vision load that fails is not retried as text, so an
+        /// unrun shape stays text. Read from `text_config`, else the root.
         func parityRunCovers(_ config: [String: Any]) -> Bool {
             switch self {
             case .gemma4:
@@ -50,6 +52,7 @@ struct FullPathVLM: Sendable, Equatable {
                 return text["attention_k_eq_v"] as? Bool != true
                     && text["use_bidirectional_attention"] as? String != "vision"
                     && text["enable_moe_block"] as? Bool != true
+                    && text["use_double_wide_mlp"] as? Bool != true
             case .qwen35:
                 return false
             }

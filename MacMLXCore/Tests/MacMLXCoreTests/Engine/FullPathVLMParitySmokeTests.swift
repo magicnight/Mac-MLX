@@ -102,9 +102,15 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "config.json")))
                 as? [String: Any])
         let family = try XCTUnwrap(FullPathVLM.Family(rawValue: model.architecture?.lowercased() ?? ""))
-        let served = FullPathVLM.servedFamilies.contains(family) && family.parityRunCovers(config)
         print("[full-path-parity] \(modelID) library format: \(model.format)")
-        XCTAssertEqual(model.format, served ? .mlxVLM : .mlx)
+        if ProcessInfo.processInfo.environment["MACMLX_FULL_PATH_PARITY_MODEL"] == nil {
+            // The checkpoint the gate ran on, asserted outright so a filter
+            // that wrongly excluded it would fail here.
+            XCTAssertEqual(model.format, .mlxVLM)
+        } else {
+            let served = FullPathVLM.servedFamilies.contains(family) && family.parityRunCovers(config)
+            XCTAssertEqual(model.format, served ? .mlxVLM : .mlx)
+        }
     }
 
     // MARK: - Gate 3

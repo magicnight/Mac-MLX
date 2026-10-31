@@ -434,10 +434,10 @@ the VLM class loads both.
 
 The flip is narrowed to the shape the run covered
 (`FullPathVLM.Family.parityRunCovers`): a Gemma 4 text config with
-`attention_k_eq_v`, `use_bidirectional_attention: "vision"` or
-`enable_moe_block` stays text. The 31B dense sets the first two and the
-26B-A4B the third; each runs in separate code in the two classes and needs
-its own run. Step 1's bidirectional rule still applies to them under the
+`attention_k_eq_v`, `use_bidirectional_attention: "vision"`,
+`enable_moe_block` or `use_double_wide_mlp` stays text. The 31B dense sets
+the first two, the 26B-A4B the third and E2B the fourth; each is read by
+separate code in the two classes and needs its own run. Step 1's bidirectional rule still applies to them under the
 forcing seam.
 
 `HistoryBoundaryPromptCacheSmokeTests`' SSD-tier case assumed a snapshot

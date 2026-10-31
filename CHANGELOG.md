@@ -22,9 +22,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   with a `vision_config`, the `vision_tower` and `embed_vision` weights, and
   processor metadata naming `Gemma4Processor` in the file mlx-swift-lm reads
   first, and only in E4B's shape: no `attention_k_eq_v`, no bidirectional
-  vision attention, no MoE block. Those run in separate code in the text and
-  vision classes, so the 31B dense and the 26B-A4B stay text until each
-  passes its own run; only E4B was run. Any other Gemma 4 checkpoint loads
+  vision attention, no MoE block, no double-wide MLP. Those run in separate
+  code in the text and vision classes, so the 31B dense, the 26B-A4B and E2B
+  stay text until each passes its own run; only E4B was run. Any other Gemma 4 checkpoint loads
   as text, as before. A vision
   Gemma 4 stays in the draft-model picker, loaded as text. An image request
   reuses the prompt cache up to its first image, records nothing, never
