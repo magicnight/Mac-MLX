@@ -467,27 +467,32 @@ The same suites ran on `Qwen3.6-27B-4bit` through the forcing seam on
     δ = 0.5. KL is at most 2.0e-2, and greedy decoding agrees up to the first
     near-tie.
   - The text load against itself, prefilled in 128-token chunks instead,
-    differs by 1.37, 1.73 and 0.87. The gap is the hybrid model's own
-    chunking noise in the low-probability tail (the linear-attention
-    recurrence), not a difference between the two classes.
+    differs by 1.37, 1.73 and 0.87: the same size as the gap between the
+    two classes. That suggests the gap is the hybrid model's own chunking
+    noise in the low-probability tail, plausibly the linear-attention
+    recurrence; the cause was not isolated.
   - On Gemma 4 E4B the same read is 0.24 to 0.50, under the bound.
   - Gate 2 for this family should compare against that noise rather than a
     fixed δ. That is a change to the gate, so it is left for the user.
 - **Gate 4 failed on reading.**
   - Over the API, Qwen3.6 read the fixture "MACMLX 2026" as "MAXLX COROS",
     and as "MAXX 2000" in a tool call.
-  - The stock VLM path reads the same as the full path. So did Python
-    mlx-vlm 0.7.11 on the same checkpoint and PNGs: "MAX MACHINES" for a
-    1280×320 render, and "HILL" for "HELLO WORLD" at 1024×1024. Colors are
-    read right.
-  - The vision tower is unquantized bf16, and swapping the patch kernel's
-    axes made it worse. So this is neither quantization nor a transposed
-    kernel, and not the Swift port alone. It is this mlx-community
-    conversion (mlx-vlm 0.4.4) or something both MLX implementations share.
-  - Telling which needs a reference outside MLX (transformers on the
-    original weights) or another Qwen3.5-family checkpoint.
-  - Step 1, warm against cold, differs by 0.75, inside the chunking noise
-    above.
+  - On renders of the same sizes and text, the stock VLM path read exactly
+    as the full path did, and Python mlx-vlm 0.7.11 on the same checkpoint
+    misread too: "MAX MACHINES" for a 1280×320 render of "MACMLX 2026", and
+    "HILL" for "HELLO WORLD" at 1024×1024. Both read colors right. The
+    Swift and Python runs rendered their own PNGs.
+  - The vision tower is unquantized bf16, so its quantization is ruled out.
+    Swapping the patch kernel's H/W or T axes at runtime made the reading
+    worse, so the loaded layout is not transposed by either of those. The
+    misread is not the Swift port's alone.
+  - Candidates: this mlx-community conversion (mlx-vlm 0.4.4), something
+    both MLX implementations share, or the 4-bit language model reading
+    the image features poorly. Telling which needs a reference outside MLX
+    (transformers on the original weights) or another Qwen3.5-family
+    checkpoint.
+  - Step 1, warm against cold, differs by 0.75: comparable to the chunking
+    noise above, which was measured on the text prompts, not this one.
 
 The suites take the family through `MACMLX_FULL_PATH_PARITY_MODEL` and
 `MACMLX_FULL_PATH_IMAGE_MODEL`. Gate 7 asserts unchanged speculation (the

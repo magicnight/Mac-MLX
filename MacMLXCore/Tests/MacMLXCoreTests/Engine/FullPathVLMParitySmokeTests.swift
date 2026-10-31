@@ -128,7 +128,6 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
     func testTheSecondAgentTurnReusesTheSameOnBothLoads() async throws {
         let (modelID, directory) = try gateAndResolveModel()
         var reused: [Bool: Int] = [:]
-        var textLoadSpeculates = false
         for fullPath in [false, true] {
             let engine = try await loadedEngine(modelID, directory, fullPath: fullPath)
             let (turn1, turn2) = Self.twoTurns(modelID)
@@ -136,7 +135,7 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             let second = try await usage(engine, turn2)
             reused[fullPath] = second.cachedPromptTokens ?? 0
             print("[full-path-parity] \(modelID) \(fullPath ? "full path" : "text load"): turn 2 "
-                + "prompt=\(second.promptTokens ?? -1) reused=\(second.cachedPromptTokens ?? 0)")
+                + "prompt=\(second.promptTokens) reused=\(second.cachedPromptTokens ?? 0)")
             try await engine.unload()
         }
         XCTAssertGreaterThan(reused[false] ?? 0, 0, "the text load reuses turn 1")
@@ -201,6 +200,11 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             XCTAssertEqual(
                 (speculation?.proposedTokens ?? 0) > 0, textLoadSpeculates,
                 "gate 7: the full path speculates where the text load does not, or the reverse")
+            // Gemma 4's caches trim, so its text load must speculate: parity
+            // alone would pass if both loads had stopped.
+            if Self.modelType(directory) == FullPathVLM.Family.gemma4.rawValue {
+                XCTAssertTrue(textLoadSpeculates, "gate 7: the Gemma 4 text load did not speculate")
+            }
             XCTAssertEqual(with.text, without.text, "gate 7: greedy output changes with a draft")
         }
     }
@@ -435,6 +439,14 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             if let chunkSpeculation = chunk.speculativeDecoding { speculation = chunkSpeculation }
         }
         return (text, usage, speculation)
+    }
+
+    /// The checkpoint's `model_type`, lowercased.
+    static func modelType(_ directory: URL) -> String? {
+        guard let data = try? Data(contentsOf: directory.appending(path: "config.json")),
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return (root["model_type"] as? String)?.lowercased()
     }
 
     /// The bytes of the vision tower's tensors (`vision_tower.*` and
