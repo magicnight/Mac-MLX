@@ -39,22 +39,34 @@ description said otherwise. That was wrong, and it changes nothing here.
 ## Upstream facts this relies on (mlx-swift-lm 3.32.3, 3b339ad)
 
 - `VLMModelFactory` registers `gemma4`, `gemma4_unified`, `qwen3_5`, and
-  `qwen3_5_moe`. The processors are `Gemma4Processor` and `Qwen3VLProcessor`.
-  Both render through a message generator (`Gemma4MessageGenerator`,
-  `Qwen3VLMessageGenerator`). Both pass a `.messages` prompt through, with
-  images taken from `UserInput.images`.
+  `qwen3_5_moe`. `gemma4` uses `Gemma4Processor`, `qwen3_5` uses
+  `Qwen3VLProcessor`. Both render through a message generator
+  (`Gemma4MessageGenerator`, `Qwen3VLMessageGenerator`), and both pass a
+  `.messages` prompt through, with images taken from `UserInput.images`.
+- `gemma4_unified` is a different class (`Gemma4Unified`) with a different
+  processor (`Gemma4UnifiedProcessor`). It shares `Gemma4MessageGenerator`,
+  but its vision weights sit under `vision_embedder` / `embed_vision` and it
+  keeps `embed_audio` resident. `qwen3_5_moe` is a subclass of `Qwen35`.
 - VLM `Gemma4.prepare`, text-only input: `gemma4PrepareTextOnly`, with
   chunked prefill and any cache offset. VLM Gemma4 also has an MTP emit path,
-  which the text path's `Gemma4Model` lacks. The VLM sanitizer drops the
-  audio tower.
+  which the text path's `Gemma4Model` lacks. The `gemma4` VLM sanitizer
+  drops the audio tower. With an image, `prepare` prefills in one shot, with
+  no chunking.
 - VLM `Qwen35.prepare` continues a warm cache only when `state` carries
   `qwen35.ropeDeltas`. Otherwise it throws
   `ContinuationStateError.missingState` (`QwenVL.continuationAnchor`). For an
   image-free prefix the delta is zero. `TokenIterator` has an `init` that
   takes `state:`. `LMOutput.Key` is public, so the key can be built from its
   id. The upstream constant is private.
-- VLM `Qwen35` conforms to `SpeculativeCacheRewindModel`. VLM `Gemma4` does
-  not. Neither VLM class conforms to `LoRAModel`.
+- `VLMModel` refines `LoRAModel`. VLM `Gemma4`, `Gemma4Unified` and `Qwen35`
+  all expose `loraLayers` as `languageModel.model.layers`, the same module
+  path as the text-path classes.
+- Draft-model speculative decoding (`SpeculativeTokenIterator`) needs
+  trimmable caches. macMLX gates on `canTrimPromptCache` in
+  `runLLMGeneration`. Gemma 4's caches pass, so Gemma 4 speculates today.
+  Qwen3.5's `MambaCache` never trims, so Qwen3.5 falls back to plain
+  decoding today. `SpeculativeCacheRewindModel` matters only to the MTP
+  iterator.
 
 ## Measured cost
 
@@ -63,7 +75,7 @@ the local checkpoints' safetensors headers:
 
 | Checkpoint | Total | Vision tower (loaded) |
 |---|---|---|
-| gemma-4-e4b-it-8bit | 8.35 GiB | 0.31 GiB (the 0.57 GiB audio tower is dropped) |
+| gemma-4-e4b-it-8bit | 8.35 GiB | 0.31 GiB (the `gemma4` sanitizer drops the 0.57 GiB audio tower) |
 | Qwen3.6-27B-4bit | 14.95 GiB | 0.86 GiB |
 
 ## Options considered
@@ -85,8 +97,8 @@ the local checkpoints' safetensors headers:
 
 ### Classification
 
-`gemma4`, `gemma4_unified`, `qwen3_5`, and `qwen3_5_moe` become `.mlxVLM` only
-when the checkpoint really carries the vision tower:
+The types in the full-path set become `.mlxVLM` only when the checkpoint
+really carries the vision tower:
 
 - `config.json` has `vision_config`, and
 - the weights hold vision-tower tensors, as listed in
@@ -95,15 +107,19 @@ when the checkpoint really carries the vision tower:
 Everything else stays `.mlx`. `Qwen3.6-27B-AEON…-8Bit` has neither, so it is
 the guard case. `gemma4_text` and `qwen3_5_text` are untouched.
 
-The four types move out of `vlmTypesServedAsText` into a new set, the
-"full-path VLM families". The #163 guard tests must still classify every
+A type moves out of `vlmTypesServedAsText` into a new set, the "full-path
+VLM families", only after its own parity run (see the gate below). This work
+moves `gemma4` and `qwen3_5`, the two types with a local checkpoint.
+`gemma4_unified` (different class, processor, weight names and resident
+audio) and `qwen3_5_moe` (never run here) stay on text until a checkpoint of
+each has passed the gate. The #163 guard tests must still classify every
 registry key exactly once.
 
 ### Engine
 
 - `LoadedSupport.vlm` gains the message generator its processor renders with.
-  For the full-path families that is `Gemma4MessageGenerator` or
-  `Qwen3VLMessageGenerator`, picked by `model_type`. Other VLMs get `nil`, as
+  For the full-path families that is `Gemma4MessageGenerator` (`gemma4`) or
+  `Qwen3VLMessageGenerator` (`qwen3_5`), picked by `model_type`. Other VLMs get `nil`, as
   today. The `inferToolCallFormatFallback` backfill runs on these containers
   too.
 - `generate` dispatch:
@@ -118,21 +134,31 @@ registry key exactly once.
   - Text-only requests use the cache exactly as on the text path.
   - Cost: a chat that once had an image re-prefills every later turn. That
     matches every VLM today.
-- **Qwen3.5 warm continuation.** When a restored prefix is reused, the
-  iterator gets `state` with `qwen35.ropeDeltas` = 0. The prefix is image-free
-  by the rule above, so zero is the right delta.
+- **Qwen3.5 warm continuation.** Every `TokenIterator` that starts on a
+  non-empty cache gets `state` with `qwen35.ropeDeltas` = 0. That covers a
+  restored prefix, and also the history-boundary path, which starts warm
+  inside one request even on a cache miss: `prefillHistory` throws its
+  iterator's state away, and the generation leg after it starts on a
+  non-empty cache. The call sites are `prefillHistory`, `customTokenStream`
+  and the stock `generateTokensTask` call. Any warm start carries an
+  image-free prefix, by the rule above, so zero is the right delta.
   - A test pins the key id against the resolved upstream source, the same way
     #163 pins the registry.
   - A second test drives a real warm continuation and checks it does not
     throw.
-- **Speculative decoding.** It stays on for text requests when the model
-  conforms to `SpeculativeCacheRewindModel` (Qwen3.5 yes, Gemma 4 no), and is
-  ignored with the existing log line otherwise. It is always off for image
-  requests.
-- **LoRA adapters.** Neither VLM class is a `LoRAModel`. A request naming an
-  adapter on these loads fails with a clear error, never silently ignored.
-  Today, as `Gemma4Model`, Gemma 4 accepts adapters, so this is a regression
-  and goes in the CHANGELOG.
+- **Speculative decoding.** Text requests keep today's `canTrimPromptCache`
+  gate unchanged: Gemma 4 keeps speculating, Qwen3.5 keeps falling back.
+  Image requests never speculate (the existing log line).
+- **Draft models.** `LocalModel.draftCandidates` keeps only `.mlx`, so a
+  flipped small checkpoint (Gemma 4 E2B) would fall out of the draft picker.
+  The filter also admits `.mlxVLM` models of a full-path family, and
+  `ensureDraftContainer` keeps loading drafts through `LLMModelFactory`,
+  text-only, as now.
+- **LoRA adapters.** These loads keep accepting adapters. The layer path is
+  the same, so an adapter trained against the text-path class should apply
+  unchanged. The gate checks it when a local adapter for the family exists.
+  Without one, a unit test pins that the VLM class's `loraLayers` paths match
+  the text class's.
 - **Batching.** No change. VLM loads keep `clearBatchServingState()`.
 - **MTP.** No change in this work. `MTPDrafterDetection`'s comments assume
   `gemma4` loads as `Gemma4Model`. They get updated, and the MTP work picks up
@@ -141,7 +167,8 @@ registry key exactly once.
 ### GUI and server
 
 There is nothing new to build. The image button and the "Vision" badge follow
-`.mlxVLM`, and the server already decodes images on all three APIs.
+`.mlxVLM`, and the server already decodes images on chat completions, Anthropic
+messages and responses (Ollama chat does not, and stays that way).
 
 ## Parity gate (each family, before it flips)
 
@@ -159,10 +186,18 @@ Gated real-model tests, run through xcodebuild with `TEST_RUNNER_` env, on
 4. **Image.** A fixture image is described correctly. An image request with
    tools returns a parsed tool call. A text-only request after an image
    request never gets a hit from the image request's KV.
-5. **Memory.** Resident growth after load is the vision-tower size, within
+5. **Agent-sized image prompt.** An image request behind a 16k-token prompt,
+   the shape Xcode and Claude Code send. Gemma 4 prefills it in one shot,
+   so record its peak memory. If it does not fit where the same text-only
+   prompt fits, add a guard that refuses the request with a clear error
+   above a measured size, rather than letting Metal fail.
+6. **Memory.** Resident growth after load is the vision-tower size, within
    the noise.
+7. **Unchanged text features.** Gemma 4 still speculates with a draft model
+   on text requests, and a LoRA adapter, if one exists locally, gives the same
+   output as on the text-path load.
 
-If 1 or 2 fails for a family, that family stays on text, and the finding goes
+If 1, 2 or 7 fails for a family, that family stays on text, and the finding goes
 upstream as a report only, not a code PR.
 
 ## Rollout, one small PR each
@@ -173,7 +208,13 @@ upstream as a report only, not a code PR.
 2. Gemma 4 flips: classification with the weight check, plus CHANGELOG and
    README.
 3. Qwen3.5/3.6 flips, the same way.
-4. Later, and not committed: other VLMs move to the full path after their own
+
+Qwen3.5 MTP (v0.11, waiting on mlx-swift-lm 3.33) is wired after this flip
+and targets whatever class the flip leaves loaded. MLXVLM has its own
+`Qwen35MTP.swift`, so that is the VLM `Qwen35` for a checkpoint with a
+vision tower.
+4. Later, and not committed: `gemma4_unified` and `qwen3_5_moe` flip after
+   their own parity runs, other VLMs move to the full path after their own
    parity run, and an image-aware cache key folds image digests into the hash.
 
 ## Goals, non-goals, anti-goals
@@ -187,6 +228,21 @@ upstream as a report only, not a code PR.
     families;
   - resident memory beyond the vision tower;
   - an image answer built on another image's cache.
+
+## Calls made without asking
+
+A builder check raised these, and I settled them from decisions already
+made. Each can be overruled.
+
+- Only `gemma4` and `qwen3_5` flip in this work. `gemma4_unified` and
+  `qwen3_5_moe` wait for their own parity runs.
+- Speculative decoding keeps today's gate, so nothing about it changes for
+  text requests.
+- Adapters keep working rather than being refused.
+- Qwen3.5 MTP comes after the flip and targets the VLM class.
+- Agent-sized image prompts are measured. A size guard is added only if the
+  measurement calls for one, and there is no upstream fix (no code PRs to
+  mlx-swift-lm).
 
 ## Left to the builder
 
