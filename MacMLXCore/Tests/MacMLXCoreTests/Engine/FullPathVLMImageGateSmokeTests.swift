@@ -51,6 +51,11 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
     private static let anchor = "MACMLX 2026"
     private static let readQuestion = "What text is written in this image? Output only the text."
 
+    /// Room for a thinking template (Qwen3.x thinks by default; chat
+    /// completions take no per-request switch) to reach its answer, which
+    /// `content` carries apart from the reasoning.
+    private static let answerTokens = 1024
+
     // MARK: - Gate 4 over the API
 
     func testImagesWorkOnTheChatCompletionsPath() async throws {
@@ -65,7 +70,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
 
         // Read the image.
         let read = try await post(port, [
-            "model": modelID, "temperature": 0, "max_tokens": 16,
+            "model": modelID, "temperature": 0, "max_tokens": Self.answerTokens,
             "messages": [["role": "user", "content": [["type": "text", "text": Self.readQuestion], imagePart]]],
         ])
         let readText = try Self.content(read)
@@ -74,7 +79,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
 
         // The same image with a tool.
         let called = try await post(port, [
-            "model": modelID, "temperature": 0, "max_tokens": 64,
+            "model": modelID, "temperature": 0, "max_tokens": Self.answerTokens,
             "tools": [Self.recordTextTool],
             "messages": [["role": "user", "content": [
                 ["type": "text", "text": "Read the text in this image and pass it to the record_text tool."],
@@ -88,7 +93,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
 
         // Replayed reasoning and a tool result before the image.
         let history = try await post(port, [
-            "model": modelID, "temperature": 0, "max_tokens": 16,
+            "model": modelID, "temperature": 0, "max_tokens": Self.answerTokens,
             "tools": [Self.bashToolJSON],
             "messages": [
                 ["role": "user", "content": "How many files are in Sources?"],

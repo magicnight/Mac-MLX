@@ -1236,8 +1236,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// any processor or sampler touches them. The prefill is generation's:
     /// a `TokenIterator` over a fresh cache, with the request's prefill
     /// parameters and the full path's iterator state, in one leg (no
-    /// history-boundary split). Throws `modelNotLoaded` with no model.
-    func coldNextTokenLogits(_ request: GenerateRequest) async throws -> (tokens: [Int], logits: [Float]) {
+    /// history-boundary split). `prefill` overrides the request's prefill
+    /// parameters, for a read of a load's own chunking noise. Throws
+    /// `modelNotLoaded` with no model.
+    func coldNextTokenLogits(
+        _ request: GenerateRequest, prefill: PrefillParameters? = nil
+    ) async throws -> (tokens: [Int], logits: [Float]) {
         let support = loadedSupport
         guard let container = support.container else { throw EngineError.modelNotLoaded }
         beginGenerationRun()
@@ -1254,7 +1258,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                 input: input.value, model: context.model,
                 cache: try context.model.newCache(parameters: generateParams),
                 state: fullPath?.iteratorState(), processor: NextTokenLogitsCapture(sink: sink),
-                sampler: ArgMaxSampler(), prefill: generateParams.prefill, maxTokens: 1)
+                sampler: ArgMaxSampler(), prefill: prefill ?? generateParams.prefill, maxTokens: 1)
             return (input.value.text.tokens.asArray(Int.self), sink.logits)
         }
     }

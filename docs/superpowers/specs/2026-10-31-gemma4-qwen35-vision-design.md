@@ -2,8 +2,10 @@
 
 Status: approved 2026-10-31. Rollout PR 1 (the engine seam) is split in
 two: the seam itself first (#165), with every image request running cold,
-then image cache step 1 (#166). PR 2 flips Gemma 4; its parity run changed
-three things, listed under "What the Gemma 4 parity run changed" below.
+then image cache step 1 (#166). PR 2 flips Gemma 4 (#167); its parity run
+changed three things, listed under "What the Gemma 4 parity run changed"
+below. Qwen3.5/3.6 did not pass its run and stays on text (see "What the
+Qwen3.6 parity run found").
 
 ## Why
 
@@ -444,6 +446,53 @@ forcing seam.
 larger than the default 512 MiB in-memory tier. E4B's 7k-token snapshot is
 smaller (sliding window, shared KV layers), so it failed on both loads alike;
 the case now runs with a 32 MiB in-memory tier, so it holds on both models.
+
+## What the Qwen3.6 parity run found
+
+The same suites ran on `Qwen3.6-27B-4bit` through the forcing seam on
+2026-10-31. Qwen3.5/3.6 stays on text.
+
+- **Passed.**
+  - Gate 1: the agent prompts render the same tokens on both loads.
+  - Gate 3: turn 2 reuses 1,662 tokens on both.
+  - Gate 6: growth is 921.7 MB against 921.5 MB of vision-tower tensors.
+  - Gate 7: neither load speculates, since the `MambaCache` cannot be
+    trimmed, and the text is the same.
+  - Gate 5: the five-turn image session completes at an 18.6 GB peak,
+    against 18.8 GB without the image. Upstream's `Qwen35.prepare` already
+    runs an image remainder in windows (`prepareContinuation`), so this
+    family needs no split.
+- **Gate 2 failed on its absolute bound.**
+  - Max |Δ log p| over the text load's top 20 is 1.44, 2.01 and 0.62 against
+    δ = 0.5. KL is at most 2.0e-2, and greedy decoding agrees up to the first
+    near-tie.
+  - The text load against itself, prefilled in 128-token chunks instead,
+    differs by 1.37, 1.73 and 0.87. The gap is the hybrid model's own
+    chunking noise in the low-probability tail (the linear-attention
+    recurrence), not a difference between the two classes.
+  - On Gemma 4 E4B the same read is 0.24 to 0.50, under the bound.
+  - Gate 2 for this family should compare against that noise rather than a
+    fixed δ. That is a change to the gate, so it is left for the user.
+- **Gate 4 failed on reading.**
+  - Over the API, Qwen3.6 read the fixture "MACMLX 2026" as "MAXLX COROS",
+    and as "MAXX 2000" in a tool call.
+  - The stock VLM path reads the same as the full path. So did Python
+    mlx-vlm 0.7.11 on the same checkpoint and PNGs: "MAX MACHINES" for a
+    1280×320 render, and "HILL" for "HELLO WORLD" at 1024×1024. Colors are
+    read right.
+  - The vision tower is unquantized bf16, and swapping the patch kernel's
+    axes made it worse. So this is neither quantization nor a transposed
+    kernel, and not the Swift port alone. It is this mlx-community
+    conversion (mlx-vlm 0.4.4) or something both MLX implementations share.
+  - Telling which needs a reference outside MLX (transformers on the
+    original weights) or another Qwen3.5-family checkpoint.
+  - Step 1, warm against cold, differs by 0.75, inside the chunking noise
+    above.
+
+The suites take the family through `MACMLX_FULL_PATH_PARITY_MODEL` and
+`MACMLX_FULL_PATH_IMAGE_MODEL`. Gate 7 asserts unchanged speculation (the
+full path speculates exactly where the text load does). Gate 2 prints the
+rechunked read next to the bound.
 
 ## Goals, non-goals, anti-goals
 

@@ -54,6 +54,9 @@ import enum MacMLXCore.JSONValue
 ///     -only-testing:MacMLXCoreTests/FullPathVLMParitySmokeTests
 final class FullPathVLMParitySmokeTests: XCTestCase {
 
+    /// The other chunking the noise-floor read prefills with.
+    static let noiseFloorPrefill = PrefillParameters(stepSize: 128, chunking: .remainder)
+
     /// Gate 6's allowance for what is resident besides the weights.
     static let memoryTolerance = 32 << 20
 
@@ -73,6 +76,13 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             let comparison = try XCTUnwrap(
                 LogitComparison(reference: textRun.logits, candidate: fullRun.logits, top: 20))
             print("[full-path-parity] \(modelID) \(name): prompt=\(textRun.tokens.count) \(comparison)")
+            // For the record, not asserted: the text load against itself
+            // prefilled in other chunks, the size of the difference chunking
+            // alone makes on this checkpoint.
+            let rechunked = try await text.coldNextTokenLogits(request, prefill: Self.noiseFloorPrefill)
+            if let noise = LogitComparison(reference: textRun.logits, candidate: rechunked.logits, top: 20) {
+                print("[full-path-parity] \(modelID) \(name): text load rechunked \(noise)")
+            }
             XCTAssertLessThanOrEqual(comparison.maxLogProbDelta, comparison.delta, "\(name): gate 2, |Δ log p|")
             XCTAssertLessThan(comparison.kl, comparison.klBound, "\(name): gate 2, KL")
 
@@ -118,6 +128,7 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
     func testTheSecondAgentTurnReusesTheSameOnBothLoads() async throws {
         let (modelID, directory) = try gateAndResolveModel()
         var reused: [Bool: Int] = [:]
+        var textLoadSpeculates = false
         for fullPath in [false, true] {
             let engine = try await loadedEngine(modelID, directory, fullPath: fullPath)
             let (turn1, turn2) = Self.twoTurns(modelID)
@@ -158,7 +169,9 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
     // MARK: - Gate 7
 
     /// Run on the text load too, as the reference for what speculation does
-    /// there; the gate is on the full path.
+    /// there; the gate is on the full path. A family whose text load cannot
+    /// speculate (Qwen3.5's `MambaCache` cannot be trimmed) must not start
+    /// to on the full path; one that can must keep doing so.
     func testTheFullPathStillSpeculatesWithADraft() async throws {
         let (modelID, directory) = try gateAndResolveModel()
         var plain = GenerateRequest(
@@ -169,6 +182,7 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
         var drafted = plain
         drafted.draftModelID = modelID
 
+        var textLoadSpeculates = false
         for fullPath in [false, true] {
             let engine = try await loadedEngine(modelID, directory, fullPath: fullPath)
             let without = try await textAndUsage(engine, plain)
@@ -180,8 +194,13 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
                 + "accepted=\(speculation?.acceptedTokens ?? 0); same text: \(with.text == without.text); "
                 + "with draft \(with.text.prefix(24).debugDescription), without \(without.text.prefix(24).debugDescription)")
             try await engine.unload()
-            guard fullPath else { continue }
-            XCTAssertGreaterThan(speculation?.proposedTokens ?? 0, 0, "gate 7: the full-path load did not speculate")
+            guard fullPath else {
+                textLoadSpeculates = (speculation?.proposedTokens ?? 0) > 0
+                continue
+            }
+            XCTAssertEqual(
+                (speculation?.proposedTokens ?? 0) > 0, textLoadSpeculates,
+                "gate 7: the full path speculates where the text load does not, or the reverse")
             XCTAssertEqual(with.text, without.text, "gate 7: greedy output changes with a draft")
         }
     }
