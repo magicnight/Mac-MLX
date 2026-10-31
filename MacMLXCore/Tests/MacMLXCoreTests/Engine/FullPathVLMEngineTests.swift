@@ -169,6 +169,18 @@ struct FullPathVLMEngineTests {
         #expect(await engine.lastPromptTokensHash != nil, "the image request took the plain path")
         #expect(await engine.hasDraftContainer, "and left the resident draft alone")
     }
+
+    /// An image request that names no draft leaves the resident one alone:
+    /// it never speculates, so its `draftModelID` is not reconciled (a text
+    /// request naming none would unload it).
+    @Test
+    func anImageRequestDoesNotReconcileTheDraft() async throws {
+        let engine = try await engine(family: .gemma4, withDraft: true)
+        _ = try await collect(engine, request(turns: 1, image: true))
+        #expect(await engine.hasDraftContainer)
+        _ = try await collect(engine, request(turns: 1))
+        #expect(await engine.hasDraftContainer == false, "a text request naming no draft unloads it")
+    }
 }
 
 /// Answers like the VLM processors do: `[1, N]` tokens and an all-ones int8

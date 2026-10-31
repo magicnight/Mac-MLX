@@ -22,9 +22,9 @@ public enum ModelFingerprint {
     ///                                               //   layers, rope, scale,
     ///                                               //   quantization.bits/group
     ///   ‖ 0x00
-    ///   ‖ for each *.safetensors in <dir>, sorted by filename:   // weight-value changes
-    ///        resolvedBasename ‖ "\0" ‖ String(fileSize)
-    ///                         ‖ "\0" ‖ String(mtimeNanoseconds) ‖ "\n"
+    ///   ‖ for each *.safetensors under <dir>, lines sorted:      // weight-value changes
+    ///        relativePath ‖ "\0" ‖ resolvedBasename ‖ "\0" ‖ String(fileSize)
+    ///                     ‖ "\0" ‖ String(mtimeNanoseconds) ‖ "\n"
     ///   ‖ <model.safetensors.index.json raw bytes, when present> // opportunistic
     ///   ‖ 0x00 ‖ "loader:" ‖ loader                 // only when `loader` is set
     /// )
