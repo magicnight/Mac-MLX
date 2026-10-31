@@ -18,8 +18,9 @@ import os
 /// - every iterator on a warm cache starts from the family's state, so a
 ///   Qwen3.5 continuation finds its rope delta (the stock, constrained and
 ///   boundary iterators all start one);
-/// - a request with an image is never served from the cache, never leaves an
-///   entry or a boundary snapshot behind, and never speculates.
+/// - a request with an image reuses the cache only up to its first media
+///   block, never leaves an entry or a boundary snapshot behind, and never
+///   speculates.
 @Suite(
     "MLXSwiftEngine full-path VLM input",
     .serialized, .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
@@ -60,27 +61,37 @@ struct FullPathVLMEngineTests {
     }
 
     private func engine(
-        family: FullPathVLM.Family, recorder: PrepareRecorder = PrepareRecorder(), withDraft: Bool = false
+        family: FullPathVLM.Family, recorder: PrepareRecorder = PrepareRecorder(), withDraft: Bool = false,
+        reusesPrefixBeforeMedia: Bool = true
     ) async throws -> MLXSwiftEngine {
         let target = RecordingModel(try TinyRandomLanguageModel.qwen3.make(), recorder: recorder)
         let draft = withDraft ? container(try TinyRandomLanguageModel.qwen3.make()) : nil
         let engine = MLXSwiftEngine(promptCache: Self.noColdTier)
         await engine.installForTesting(
-            container: container(target), draft: draft, model: Self.model, fullPath: FullPathVLM(family: family))
+            container: container(target), draft: draft, model: Self.model,
+            fullPath: FullPathVLM(
+                family: family, mediaTokenIDs: BatchShapedProcessor.mediaTokenIDs,
+                reusesPrefixBeforeMedia: reusesPrefixBeforeMedia))
         return engine
     }
 
+    /// `imageAt` puts a media block in that message. `pixels: false` leaves
+    /// the block's ids in a text prompt with no image attached, the same ids
+    /// an image request would have.
     private func request(
-        turns: Int, image: Bool = false, logprobs: Bool = false, draft: Bool = false
+        turns: Int, imageAt: Int? = nil, pixels: Bool = true, logprobs: Bool = false, draft: Bool = false,
+        kvBits: Int? = nil
     ) -> GenerateRequest {
         let picture = ImageAttachment(fileURL: URL(fileURLWithPath: "/nonexistent/cat.png"), mimeType: "image/png")
         let messages = (0..<turns).map {
             ChatMessage(
-                role: $0.isMultiple(of: 2) ? .user : .assistant, content: "turn \($0)",
-                images: image && $0 == 0 ? [picture] : [])
+                role: $0.isMultiple(of: 2) ? .user : .assistant,
+                content: ($0 == imageAt ? BatchShapedProcessor.imageMarker : "") + "turn \($0)",
+                images: $0 == imageAt && pixels ? [picture] : [])
         }
         var parameters = GenerationParameters(temperature: 0, topP: 1.0, maxTokens: 3, stream: true)
         parameters.logprobs = logprobs
+        parameters.kvBits = kvBits
         var request = GenerateRequest(model: "tiny-vlm", messages: messages, parameters: parameters)
         // `installForTesting` names the draft it holds `<model>-draft`, so
         // this keeps it rather than loading one.
@@ -135,26 +146,83 @@ struct FullPathVLMEngineTests {
 
     // MARK: Prompts with an image
 
-    @Test
-    func aRepeatedImageRequestIsNeverServedFromTheCache() async throws {
-        let engine = try await engine(family: .gemma4)
-        _ = try await collect(engine, request(turns: 1, image: true))
+    /// The warm `prepare` gets the remainder in the processor's shape, its
+    /// mask sliced with it (Qwen3.5's `getRopeIndex` reads it), the image
+    /// still attached, and the family's state.
+    @Test(arguments: FullPathVLM.Family.allCases)
+    func anImageRequestReusesTheCacheUpToItsFirstBlock(_ family: FullPathVLM.Family) async throws {
+        let recorder = PrepareRecorder()
+        let engine = try await engine(family: family, recorder: recorder)
+        _ = try await collect(engine, request(turns: 3))
+        let out = try await collect(engine, request(turns: 3, imageAt: 2))
+        let blockStart = BatchShapedProcessor.blockStart(imageAt: 2)
+        let total = BatchShapedProcessor.tokenCount(messages: 3, blocks: 1)
+        #expect(out.cachedPromptTokens == blockStart)
+        #expect(out.promptTokens == total, "usage counts the whole prompt")
         #expect(await engine.lastPromptCacheRecord == nil, "an image request records no entry")
-        let repeated = try await collect(engine, request(turns: 1, image: true))
-        #expect(repeated.cachedPromptTokens ?? 0 == 0, "the same placeholder ids must not reuse the first image's KV")
-        #expect(await engine.lastPromptCacheRecord == nil)
+
+        let warm = try #require(recorder.calls.last)
+        #expect(warm.cacheOffset == blockStart)
+        #expect(warm.tokensShape == [1, total - blockStart])
+        #expect(warm.maskShape == [1, total - blockStart])
+        #expect(warm.hasImage)
+        #expect(warm.hasRopeDelta == (family == .qwen35))
     }
 
-    /// A text prompt that shares the image request's token ids (the stub
-    /// ignores the image) finds nothing it left: no entry, no boundary
-    /// snapshot.
+    /// An entry whose ids run on past the block (a text prompt that spelled
+    /// out the block's ids) is still reused only up to the block: past it the
+    /// KV depends on pixels the ids do not name.
+    @Test
+    func anImageRequestNeverReusesPastItsFirstBlock() async throws {
+        let engine = try await engine(family: .gemma4)
+        _ = try await collect(engine, request(turns: 3, imageAt: 2, pixels: false))
+        #expect(await engine.lastPromptCacheRecord?.recorded == true, "the text prompt recorded its entry")
+        let out = try await collect(engine, request(turns: 3, imageAt: 2))
+        #expect(out.cachedPromptTokens == BatchShapedProcessor.blockStart(imageAt: 2))
+    }
+
+    @Test
+    func aRepeatedImageRequestReusesNothingPastItsBlock() async throws {
+        let engine = try await engine(family: .gemma4)
+        _ = try await collect(engine, request(turns: 1))
+        for _ in 0..<2 {
+            let out = try await collect(engine, request(turns: 1, imageAt: 0))
+            #expect(
+                out.cachedPromptTokens == BatchShapedProcessor.blockStart(imageAt: 0),
+                "the same placeholder ids must not reuse the first image's KV")
+            #expect(await engine.lastPromptCacheRecord == nil)
+        }
+    }
+
+    @Test
+    func aBidirectionalGemma4CheckpointRunsImageRequestsCold() async throws {
+        let engine = try await engine(family: .gemma4, reusesPrefixBeforeMedia: false)
+        _ = try await collect(engine, request(turns: 3))
+        let image = try await collect(engine, request(turns: 3, imageAt: 2))
+        #expect(image.cachedPromptTokens ?? 0 == 0)
+        let text = try await collect(engine, request(turns: 3))
+        #expect(text.cachedPromptTokens ?? 0 > 0, "text requests keep the cache")
+    }
+
+    /// `kv_bits` keeps a request off the cache whatever it carries (logprobs
+    /// keep the tiny model off quantization; the bypass reads `kv_bits` alone).
+    @Test
+    func anImageRequestThatBypassesTheCacheLooksNothingUp() async throws {
+        let engine = try await engine(family: .gemma4)
+        _ = try await collect(engine, request(turns: 3))
+        let out = try await collect(engine, request(turns: 3, imageAt: 2, logprobs: true, kvBits: 4))
+        #expect(out.cachedPromptTokens ?? 0 == 0)
+    }
+
+    /// A text prompt with the image request's token ids finds nothing it
+    /// left: no entry, no boundary snapshot.
     @Test
     func anImageRequestLeavesNoBoundarySnapshotBehind() async throws {
         let engine = try await engine(family: .gemma4)
         await engine.setForcedHistoryBoundary(BatchShapedProcessor.tokenCount(messages: 1))
-        _ = try await collect(engine, request(turns: 3, image: true))
+        _ = try await collect(engine, request(turns: 3, imageAt: 0))
         await engine.setForcedHistoryBoundary(nil)
-        let text = try await collect(engine, request(turns: 3))
+        let text = try await collect(engine, request(turns: 3, imageAt: 0, pixels: false))
         #expect(text.cachedPromptTokens ?? 0 == 0, "nothing the image request computed is served")
     }
 
@@ -165,7 +233,7 @@ struct FullPathVLMEngineTests {
         let engine = try await engine(family: .gemma4, withDraft: true)
         _ = try await collect(engine, request(turns: 1, draft: true))
         #expect(await engine.lastPromptTokensHash == nil, "the text request took the speculative path")
-        _ = try await collect(engine, request(turns: 1, image: true, draft: true))
+        _ = try await collect(engine, request(turns: 1, imageAt: 0, draft: true))
         #expect(await engine.lastPromptTokensHash != nil, "the image request took the plain path")
         #expect(await engine.hasDraftContainer, "and left the resident draft alone")
     }
@@ -176,7 +244,7 @@ struct FullPathVLMEngineTests {
     @Test
     func anImageRequestDoesNotReconcileTheDraft() async throws {
         let engine = try await engine(family: .gemma4, withDraft: true)
-        _ = try await collect(engine, request(turns: 1, image: true))
+        _ = try await collect(engine, request(turns: 1, imageAt: 0))
         #expect(await engine.hasDraftContainer)
         _ = try await collect(engine, request(turns: 1))
         #expect(await engine.hasDraftContainer == false, "a text request naming no draft unloads it")
@@ -185,19 +253,42 @@ struct FullPathVLMEngineTests {
 
 /// Answers like the VLM processors do: `[1, N]` tokens and an all-ones int8
 /// mask, plus a placeholder image when the request carries one. Each message
-/// adds a fixed run of tokens, so a longer conversation's prompt extends a
-/// shorter one's; the image does not change the ids, as a real image's
-/// placeholders do not depend on its pixels.
+/// adds a fixed run of text tokens, so a longer conversation's prompt extends
+/// a shorter one's. A message with an image, or whose content starts with
+/// ``imageMarker``, opens with a media block (an opening token and
+/// placeholders) whose ids do not depend on the pixels, as a real image's do
+/// not.
 private struct BatchShapedProcessor: UserInputProcessor {
     static let tokensPerMessage = 12
+    static let opener = 60
+    static let placeholder = 61
+    static let mediaTokenIDs: Set<Int> = [opener, placeholder]
+    static let block = [opener, placeholder, placeholder, placeholder]
+    static let imageMarker = "[image] "
 
-    static func tokenCount(messages: Int) -> Int { 4 + messages * tokensPerMessage }
+    static func tokenCount(messages: Int, blocks: Int = 0) -> Int {
+        4 + messages * tokensPerMessage + blocks * block.count
+    }
+
+    /// Where the block opens when the only one is in message `imageAt`.
+    static func blockStart(imageAt: Int) -> Int { tokenCount(messages: imageAt) }
 
     func prepare(input: UserInput) async throws -> LMInput {
         guard case .chat(let messages) = input.prompt else {
             throw CocoaError(.featureUnsupported)
         }
-        let ids = (0..<Self.tokenCount(messages: messages.count)).map { Int32($0 % 50 + 1) }
+        var text = 0
+        func textIDs(_ count: Int) -> [Int32] {
+            defer { text += count }
+            return (text..<text + count).map { Int32($0 % 50 + 1) }
+        }
+        var ids = textIDs(4)
+        for message in messages {
+            if !message.images.isEmpty || message.content.hasPrefix(Self.imageMarker) {
+                ids += Self.block.map(Int32.init)
+            }
+            ids += textIDs(Self.tokensPerMessage)
+        }
         return LMInput(
             text: .init(
                 tokens: MLXArray(ids).reshaped(1, ids.count),
@@ -210,7 +301,10 @@ private struct BatchShapedProcessor: UserInputProcessor {
 private struct PrepareCall: Sendable, CustomStringConvertible {
     let cacheOffset: Int
     let hasRopeDelta: Bool
-    var description: String { "(offset \(cacheOffset), delta \(hasRopeDelta))" }
+    let tokensShape: [Int]
+    let maskShape: [Int]?
+    let hasImage: Bool
+    var description: String { "(offset \(cacheOffset), delta \(hasRopeDelta), tokens \(tokensShape))" }
 }
 
 private final class PrepareRecorder: Sendable {
@@ -237,7 +331,11 @@ private final class RecordingModel: Module, LanguageModel {
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
         let key = LMOutput.Key<MLXArray>(FullPathVLM.qwen35RopeDeltasKeyID)
-        recorder.append(PrepareCall(cacheOffset: cache.first?.offset ?? 0, hasRopeDelta: state?[key] != nil))
+        recorder.append(
+            PrepareCall(
+                cacheOffset: cache.first?.offset ?? 0, hasRopeDelta: state?[key] != nil,
+                tokensShape: input.text.tokens.shape, maskShape: input.text.mask?.shape,
+                hasImage: input.image != nil))
         return try inner.prepare(
             LMInput(tokens: input.text.tokens.reshaped(-1)), cache: cache, state: state, prefill: prefill)
     }
