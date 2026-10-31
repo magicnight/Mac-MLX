@@ -111,6 +111,36 @@ struct FullPathVLMTests {
         #expect(FullPathVLM(family: .qwen35).processorMessageGenerator is Qwen3VLMessageGenerator)
     }
 
+    /// A message without media renders as the text load renders it, string
+    /// content and tool metadata, so a tool call with no text keeps empty
+    /// content, which Gemma 4's template needs to keep the model turn open
+    /// after the tool result. A message with an image gets the family's
+    /// parts, the image placeholder among them.
+    @Test(arguments: FullPathVLM.Family.allCases)
+    func onlyAMessageWithMediaRendersAsParts(_ family: FullPathVLM.Family) throws {
+        let generator = FullPathVLM(family: family).messageGenerator
+        let call = ToolCall(
+            function: .init(name: "Bash", arguments: ["command": "ls"] as [String: any Sendable]), id: "call_1")
+        let messages: [Chat.Message] = [
+            .system("Be brief."),
+            .user("List the files."),
+            .assistant("", toolCalls: [call]),
+            .tool("a.swift", id: "call_1"),
+            .user("What does this say?", images: [.url(URL(fileURLWithPath: "/nonexistent/a.png"))]),
+        ]
+        let rendered = generator.generate(messages: messages)
+        let reference = DefaultMessageGenerator().generate(messages: messages)
+        try #require(rendered.count == messages.count)
+        for index in 0..<4 {
+            #expect(rendered[index]["content"] as? String == reference[index]["content"] as? String)
+            #expect(rendered[index].keys.sorted() == reference[index].keys.sorted())
+        }
+        #expect(rendered[2]["content"] as? String == "")
+        #expect(rendered[2]["tool_calls"] != nil)
+        let parts = try #require(rendered[4]["content"] as? [[String: any Sendable]])
+        #expect(parts.contains { $0["type"] as? String == "image" })
+    }
+
     /// The media ids are read with upstream's keys, so the cap on an image
     /// request's reuse lands where the model finds the block. Qwen3.6 sets a
     /// `vision_start_token_id` other than upstream's default.

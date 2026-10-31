@@ -146,6 +146,13 @@ struct FullPathVLM: Sendable, Equatable {
         }
     }
 
+    /// The generator a full-path load renders with when its configuration
+    /// names none: ``processorMessageGenerator`` for messages with media, the
+    /// text load's for the rest (``FullPathMessageGenerator``).
+    var messageGenerator: any MessageGenerator {
+        FullPathMessageGenerator(media: processorMessageGenerator)
+    }
+
     /// Upstream's `qwen35.ropeDeltas` state key (private there, in
     /// `MLXVLM/Models/Qwen35.swift`), rebuilt from its id.
     static let qwen35RopeDeltasKeyID = "qwen35.ropeDeltas"

@@ -270,11 +270,22 @@ private struct BatchShapedProcessor: UserInputProcessor {
         4 + messages * tokensPerMessage + blocks * block.count
     }
 
+    /// Whether `message` carries an image part or text starting with
+    /// ``imageMarker``.
+    static func opensWithABlock(_ message: [String: any Sendable]) -> Bool {
+        if let content = message["content"] as? String { return content.hasPrefix(imageMarker) }
+        let parts = message["content"] as? [[String: any Sendable]] ?? []
+        return parts.contains { $0["type"] as? String == "image" }
+            || parts.contains { ($0["text"] as? String)?.hasPrefix(imageMarker) == true }
+    }
+
     /// Where the block opens when the only one is in message `imageAt`.
     static func blockStart(imageAt: Int) -> Int { tokenCount(messages: imageAt) }
 
     func prepare(input: UserInput) async throws -> LMInput {
-        guard case .chat(let messages) = input.prompt else {
+        // A full-path load hands its generator's dictionaries over, as a
+        // real processor gets them; an image is a part of type `image`.
+        guard case .messages(let messages) = input.prompt else {
             throw CocoaError(.featureUnsupported)
         }
         var text = 0
@@ -284,7 +295,7 @@ private struct BatchShapedProcessor: UserInputProcessor {
         }
         var ids = textIDs(4)
         for message in messages {
-            if !message.images.isEmpty || message.content.hasPrefix(Self.imageMarker) {
+            if Self.opensWithABlock(message) {
                 ids += Self.block.map(Int32.init)
             }
             ids += textIDs(Self.tokensPerMessage)
