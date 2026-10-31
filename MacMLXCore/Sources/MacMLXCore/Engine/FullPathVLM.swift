@@ -31,6 +31,24 @@ struct FullPathVLM: Sendable, Equatable {
 
     let family: Family
 
+    /// The token ids where a media block can begin: the family's opening
+    /// token (Qwen3.5's `<|vision_start|>`, Gemma 4's `boi`) and its
+    /// placeholders. KV before the first of them does not depend on pixels.
+    let mediaTokenIDs: Set<Int>
+
+    /// Whether an image request may reuse the cache up to its first media
+    /// block. Off for a Gemma 4 checkpoint with bidirectional vision
+    /// attention: on a warm cache, upstream's overlay sees a mask wider than
+    /// the remainder's token types and falls back to causal attention inside
+    /// the image block, without an error.
+    let reusesPrefixBeforeMedia: Bool
+
+    init(family: Family, mediaTokenIDs: Set<Int>? = nil, reusesPrefixBeforeMedia: Bool = true) {
+        self.family = family
+        self.mediaTokenIDs = mediaTokenIDs ?? Self.mediaTokenIDs(family: family, config: [:])
+        self.reusesPrefixBeforeMedia = reusesPrefixBeforeMedia
+    }
+
     /// The full path for the checkpoint whose `config.json` is at
     /// `configURL`, or nil when it stays on the stock VLM path: an unreadable
     /// config, a `model_type` this path does not know, or (unless `forced`) a
@@ -42,7 +60,49 @@ struct FullPathVLM: Sendable, Equatable {
             let family = Family(rawValue: modelType.lowercased())
         else { return nil }
         guard forced || servedFamilies.contains(family) else { return nil }
-        return FullPathVLM(family: family)
+        let textConfig = root["text_config"] as? [String: Any]
+        return FullPathVLM(
+            family: family,
+            mediaTokenIDs: mediaTokenIDs(family: family, config: root),
+            reusesPrefixBeforeMedia: !(family == .gemma4
+                && textConfig?["use_bidirectional_attention"] as? String == "vision"))
+    }
+
+    /// The media token ids `config` names, read with the keys and defaults
+    /// upstream's configuration types use (`Qwen35Configuration`,
+    /// `Gemma4Configuration`), so the cap lands where the model finds the
+    /// block. Qwen3.6 checkpoints set `vision_start_token_id` to 248053;
+    /// upstream's default, 248045, is `<|im_start|>`, which only caps reuse
+    /// earlier.
+    private static func mediaTokenIDs(family: Family, config: [String: Any]) -> Set<Int> {
+        func id(_ key: String) -> Int? { config[key] as? Int }
+        switch family {
+        case .qwen35:
+            let image = id("image_token_id") ?? 248_056
+            let video = id("video_token_id") ?? 248_057
+            return [
+                id("vision_start_token_id") ?? 248_045, image, video,
+                id("image_token_index") ?? image, id("video_token_index") ?? video,
+            ]
+        case .gemma4:
+            return Set(
+                [id("boi_token_id") ?? 255_999, id("image_token_id") ?? 258_880]
+                    + [id("video_token_id"), id("audio_token_id")].compactMap { $0 })
+        }
+    }
+
+    /// The key an image request looks the prompt cache up with, or nil when
+    /// it runs cold: no media token in `tokens`, one at the very start, or
+    /// ``reusesPrefixBeforeMedia`` off. It is the prefix before the first
+    /// media token plus that token. The store always leaves a key's last
+    /// token to prefill, so reuse ends at the block, and an entry stored
+    /// under exactly the prefix is reused whole rather than trimmed by one,
+    /// which a `MambaCache` cannot do.
+    func imageRequestLookupKey(_ tokens: [Int]) -> [Int]? {
+        guard reusesPrefixBeforeMedia,
+            let start = tokens.firstIndex(where: mediaTokenIDs.contains), start > 0
+        else { return nil }
+        return Array(tokens[...start])
     }
 
     /// The generator this family's processor renders `.chat` input with when
@@ -65,8 +125,9 @@ struct FullPathVLM: Sendable, Equatable {
     /// or cold. Qwen3.5 resumes a warm cache only with the rope delta its
     /// cached prefix accumulated: without one, `prepare` throws
     /// `missingState` and a decode step trips a `precondition`. Every prefix
-    /// this path caches is image-free, so the delta is zero; a cold prefill
-    /// ignores it. Gemma 4 positions from the cache offset alone and needs
+    /// this path caches is image-free, and so is the prefix an image request
+    /// reuses (``imageRequestLookupKey(_:)``), so the delta is zero; a cold
+    /// prefill ignores it. Gemma 4 positions from the cache offset alone and needs
     /// none. Built per call, since `LMOutput.State` holds an `MLXArray`.
     func iteratorState() -> LMOutput.State? {
         switch family {

@@ -1671,7 +1671,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             // A full-path VLM's processor hands back `[1, N]` tokens and a
             // mask even for text; the text path slices `[N]`. An input with
             // media keeps its shape, and `carriesMedia` keeps it off every
-            // path that would slice it.
+            // path that slices axis 0.
             let carriesMedia = fullPath != nil && FullPathVLM.carriesMedia(lmInput)
             // D1: bring the draft container in line with this request
             // BEFORE dispatching — throws (rather than silently falling
@@ -1837,10 +1837,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     ///
     /// A full-path VLM (`fullPath` non-nil) runs here too: every iterator
     /// starts from `fullPath.iteratorState()`. A request whose input
-    /// `carriesMedia` runs cold and records nothing, takes no history
-    /// boundary and never speculates: a key of token ids alone would let one
-    /// image's KV answer for another, and the cache, the boundary and the
-    /// draft all slice a text-only `[N]` prompt.
+    /// `carriesMedia` records nothing, takes no history boundary and never
+    /// speculates: a key of token ids alone would let one image's KV answer
+    /// for another, and the boundary and the draft slice a text-only `[N]`
+    /// prompt. It reuses the cache only up to its first media block
+    /// (``FullPathVLM/imageRequestLookupKey(_:)``), the part of the prompt
+    /// whose KV does not depend on pixels.
     private func runLLMGeneration(
         lmInput: LMInput,
         historyInput: UserInput,
@@ -1895,8 +1897,9 @@ public actor MLXSwiftEngine: InferenceEngine {
         // base-model cache entry would otherwise be wrongly reused for the adapted
         // model (different weights, same id) — and vice versa. `reconcileAdapter`
         // above has already settled `loadedAdapterID` for this request.
-        let bypassPromptCache = carriesMedia || Self.shouldBypassPromptCache(
+        let bypassesForWeights = Self.shouldBypassPromptCache(
             kvBits: sampling.kvBits, adapterID: loadedAdapterID)
+        let bypassPromptCache = carriesMedia || bypassesForWeights
 
         // Track C: a structured-output request must NOT speculate. A draft
         // model proposes tokens from its own logits, which the constraint mask
@@ -2015,22 +2018,47 @@ public actor MLXSwiftEngine: InferenceEngine {
         // snapshot it never asked for. A `kv_bits` request therefore always cold-
         // prefills and never persists its cache (mirrors the speculative path's
         // deliberate prompt-cache bypass).
-        let hit = bypassPromptCache
-            ? nil
-            : await promptCacheStore.fetchNearest(
-                modelID: modelID, tokens: inputTokens, modelFingerprint: modelFingerprint)
+        // An image request bypasses the cache for everything but this lookup,
+        // and looks up only the prefix before its first media block. Its
+        // remainder is sliced on the last axis below, so it must keep the
+        // processor's `[1, N]` shape.
+        let lookupTokens: [Int]? =
+            if !bypassPromptCache {
+                inputTokens
+            } else if carriesMedia, !bypassesForWeights, lmInput.text.tokens.ndim == 2 {
+                fullPath?.imageRequestLookupKey(inputTokens)
+            } else {
+                nil
+            }
+        let hit: PromptCacheHit? =
+            if let lookupTokens {
+                await promptCacheStore.fetchNearest(
+                    modelID: modelID, tokens: lookupTokens, modelFingerprint: modelFingerprint)
+            } else {
+                nil
+            }
         let priorCache: [any KVCache]?
         let promptInput: LMInput
-        if let hit {
+        if let hit, carriesMedia {
+            priorCache = hit.snapshot.caches
+            // The processor's `[1, N]` shape, sliced on the last axis with its
+            // mask (Qwen3.5's `getRopeIndex` reads it), the media unchanged:
+            // every media token lies past the reused prefix.
+            promptInput = LMInput(
+                text: lmInput.text[0..., hit.reusedTokenCount...], image: lmInput.image,
+                video: lmInput.video, audio: lmInput.audio)
+            await LogManager.shared.debug(
+                "Prompt cache HIT before the first media block — reused "
+                    + "\(hit.reusedTokenCount)/\(inputTokens.count) tokens (model=\(modelID))",
+                category: .inference
+            )
+        } else if let hit {
             priorCache = hit.snapshot.caches
             // Suffix-only prefill input, reconstructed from the sliced token
             // array alone: `lmInput.text.mask` is intentionally dropped here.
-            // On this text-only single-sequence path the mask is `nil` anyway
-            // (no padding, no batch), so nothing is lost today. If a future
-            // path ever attaches an attention mask to a cached-prefix request,
-            // it must likewise be sliced to `[reusedTokenCount...]` and threaded
-            // through this `LMInput` — otherwise the suffix would be prefilled
-            // against a full-length mask.
+            // A text prompt reaches this point as `[N]` with no mask (a
+            // full-path VLM's was normalized), so nothing is lost; an image
+            // request takes the branch above.
             promptInput = LMInput(tokens: lmInput.text.tokens[hit.reusedTokenCount...])
             await LogManager.shared.debug(
                 "Prompt cache HIT — reused \(hit.reusedTokenCount)/\(inputTokens.count) tokens, "

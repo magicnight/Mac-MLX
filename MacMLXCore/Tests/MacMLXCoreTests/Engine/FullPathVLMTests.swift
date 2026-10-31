@@ -10,8 +10,8 @@ import Testing
 
 /// The engine seam that serves a VLM on the text generation path
 /// (``FullPathVLM``): which checkpoints it applies to, what it renders with,
-/// the state a warm continuation starts from, and the input shape the text
-/// path slices.
+/// the state a warm continuation starts from, the input shape the text
+/// path slices, and where an image request's reuse stops.
 @Suite("FullPathVLM")
 struct FullPathVLMTests {
 
@@ -82,6 +82,64 @@ struct FullPathVLMTests {
     func eachFamilyRendersWithItsProcessorsGenerator() {
         #expect(FullPathVLM(family: .gemma4).processorMessageGenerator is Gemma4MessageGenerator)
         #expect(FullPathVLM(family: .qwen35).processorMessageGenerator is Qwen3VLMessageGenerator)
+    }
+
+    /// The media ids are read with upstream's keys, so the cap on an image
+    /// request's reuse lands where the model finds the block. Qwen3.6 sets a
+    /// `vision_start_token_id` other than upstream's default.
+    @Test
+    func theMediaTokenIDsAreReadFromTheConfig() throws {
+        let qwen = try config(#"""
+            {"model_type": "qwen3_5", "vision_start_token_id": 248053,
+             "image_token_id": 248056, "video_token_id": 248057}
+            """#)
+        let gemma = try config(#"""
+            {"model_type": "gemma4", "boi_token_id": 255999, "image_token_id": 258880,
+             "video_token_id": 258884, "audio_token_id": 258881}
+            """#)
+        defer {
+            for url in [qwen, gemma] { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        }
+        #expect(FullPathVLM.resolve(configURL: qwen, forced: true)?.mediaTokenIDs == [248_053, 248_056, 248_057])
+        #expect(
+            FullPathVLM.resolve(configURL: gemma, forced: true)?.mediaTokenIDs
+                == [255_999, 258_880, 258_884, 258_881])
+    }
+
+    @Test
+    func missingMediaKeysFallBackToUpstreamsDefaults() {
+        #expect(FullPathVLM(family: .qwen35).mediaTokenIDs == [248_045, 248_056, 248_057])
+        #expect(FullPathVLM(family: .gemma4).mediaTokenIDs == [255_999, 258_880])
+    }
+
+    /// Only Gemma 4's bidirectional vision attention breaks on a warm cache
+    /// (upstream's overlay falls back to causal attention inside the image
+    /// block), and only the value that turns it on.
+    @Test(arguments: [
+        ("gemma4", #""vision""#, false), ("gemma4", "null", true), ("gemma4", #""all""#, true),
+        ("qwen3_5", #""vision""#, true),
+    ])
+    func onlyBidirectionalVisionAttentionKeepsImageRequestsCold(
+        _ modelType: String, _ flag: String, _ reuses: Bool
+    ) throws {
+        let url = try config(#"""
+            {"model_type": "\#(modelType)", "text_config": {"use_bidirectional_attention": \#(flag)}}
+            """#)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(FullPathVLM.resolve(configURL: url, forced: true)?.reusesPrefixBeforeMedia == reuses)
+    }
+
+    /// The key is the prefix before the first media token plus that token,
+    /// whichever media id comes first.
+    @Test
+    func anImageRequestsLookupKeyEndsAtItsFirstMediaToken() {
+        let vlm = FullPathVLM(family: .gemma4, mediaTokenIDs: [8, 9])
+        #expect(vlm.imageRequestLookupKey([1, 2, 3, 8, 9, 4]) == [1, 2, 3, 8])
+        #expect(vlm.imageRequestLookupKey([1, 2, 9, 8, 4]) == [1, 2, 9])
+        #expect(vlm.imageRequestLookupKey([1, 2, 3]) == nil, "no block to cap at")
+        #expect(vlm.imageRequestLookupKey([8, 1, 2]) == nil, "nothing before the block")
+        let cold = FullPathVLM(family: .gemma4, mediaTokenIDs: [8], reusesPrefixBeforeMedia: false)
+        #expect(cold.imageRequestLookupKey([1, 2, 8]) == nil)
     }
 
     /// The key id is rebuilt from a string because upstream keeps the key

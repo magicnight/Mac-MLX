@@ -1,8 +1,8 @@
 # Images for Gemma 4 and Qwen3.5/3.6 on the full serving path — design
 
 Status: approved 2026-10-31. Rollout PR 1 (the engine seam) is split in
-two: the seam itself first, with every image request running cold, then
-image cache step 1.
+two: the seam itself first (#165), with every image request running cold,
+then image cache step 1.
 
 ## Why
 
@@ -192,9 +192,15 @@ KV answer for another, so image requests are handled in two steps.
   - The block start is each family's opening token:
     - Qwen3.5: `<|vision_start|>`, which is how `getRopeIndex` finds images;
     - Gemma 4: `boi` (255999), which the processor inserts.
-  - Lookup is `fetchNearest(tokens: inputTokens[..<blockStart])`, a capped
+  - The ids come from `config.json`, with upstream's keys and defaults. The
+    first placeholder token counts too, which can only cap reuse earlier.
+    Qwen3.6 sets `vision_start_token_id` to 248053, not upstream's default.
+  - Lookup is `fetchNearest(tokens: inputTokens[...blockStart])`, a capped
     key. It is not "longest common prefix, then clamp", because a `MambaCache`
-    cannot be trimmed to a clamped length.
+    cannot be trimmed to a clamped length. The key ends with the opening
+    token because the store always leaves a key's last token to prefill:
+    reuse still ends at the block, and an entry stored under exactly the
+    prefix is reused whole rather than trimmed by one.
   - The request records no entry and takes no history-boundary snapshot.
   - **Qwen3.5.** A warm `prepare` routes to `prepareContinuation`
     (`Qwen35.swift:1243-1248`). It runs the vision tower over the remainder
