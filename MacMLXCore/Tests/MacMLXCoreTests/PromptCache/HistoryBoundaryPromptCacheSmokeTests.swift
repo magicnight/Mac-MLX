@@ -254,10 +254,7 @@ final class HistoryBoundaryPromptCacheSmokeTests: XCTestCase {
     ) async throws -> MLXSwiftEngine {
         let engine = MLXSwiftEngine(
             promptCache: PromptCacheConfig(coldEnabled: coldEnabled), promptCacheRoot: coldRoot)
-        try await engine.load(
-            LocalModel(
-                id: model.id, displayName: model.id, directory: model.url, sizeBytes: 0,
-                format: .mlx, quantization: nil, parameterCount: nil, architecture: nil))
+        try await GatedLoad.load(engine, id: model.id, directory: model.url)
         addTeardownBlock {
             try await engine.unload()
             try? FileManager.default.removeItem(at: coldRoot)

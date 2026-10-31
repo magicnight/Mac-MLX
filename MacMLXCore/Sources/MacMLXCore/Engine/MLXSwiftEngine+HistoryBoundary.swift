@@ -2,7 +2,6 @@
 
 import Foundation
 import MLX
-import MLXLLM
 import MLXLMCommon
 
 /// The history-boundary prompt-cache snapshot (see ``HistoryBoundary``): the
@@ -14,9 +13,11 @@ extension MLXSwiftEngine {
     /// Where to split this request's prefill, decided from the chat rendered
     /// with and without the generation prompt.
     ///
-    /// The render mirrors upstream `LLMUserInputProcessor.prepare`, the one
-    /// that produced `promptTokens`: the message generator the factory chose
-    /// (the configuration's, else the model's, else the default) over the same
+    /// The render mirrors the input processor that produced `promptTokens`:
+    /// `messageGenerator`, the generator the engine took at load as the one
+    /// that processor renders with (for an LLM the factory's choice: the
+    /// configuration's, else the model's, else the default; for a full-path
+    /// VLM the configuration's, else its processor's), over the same
     /// `UserInput` (messages, tools, template kwargs), then the resident
     /// tokenizer's chat template, chat-template override included, through the
     /// same call generation's render goes through, with `addGenerationPrompt`
@@ -31,6 +32,7 @@ extension MLXSwiftEngine {
     /// bridge, has no chat template, or the render throws.
     static func historyBoundary(
         for input: UserInput,
+        messageGenerator: any MessageGenerator,
         cache: [any KVCache],
         context: ModelContext,
         promptTokens: [Int],
@@ -49,11 +51,7 @@ extension MLXSwiftEngine {
         guard let tokenizer = context.tokenizer as? TokenizerBridge else {
             return .skip(reason: "the resident tokenizer cannot render without the generation prompt")
         }
-        let generator =
-            context.configuration.messageGenerator
-            ?? (context.model as? LLMModel)?.messageGenerator(tokenizer: context.tokenizer)
-            ?? DefaultMessageGenerator()
-        let messages = generator.generate(from: input)
+        let messages = messageGenerator.generate(from: input)
         do {
             let history = try tokenizer.applyChatTemplate(
                 messages: messages, tools: input.tools, additionalContext: input.additionalContext,
@@ -107,6 +105,10 @@ extension MLXSwiftEngine {
     /// place. The cache state is evaluated before returning — the sampled
     /// token alone would not force a recurrent layer's next state — so a copy
     /// taken now holds computed arrays rather than a graph over the prefill.
+    /// `state` seeds the iterator as it seeds generation's (see
+    /// ``FullPathVLM/iteratorState()``); the state the iterator ends with is
+    /// dropped with it, so the generation after this starts from the same
+    /// seed on a now-warm cache.
     ///
     /// - Returns: the wall time the prefill took, which the caller adds to the
     ///   request's prompt time.
@@ -114,6 +116,7 @@ extension MLXSwiftEngine {
         _ tokens: MLXArray,
         into cache: [any KVCache],
         context: ModelContext,
+        state: LMOutput.State? = nil,
         prefill: PrefillParameters
     ) throws -> TimeInterval {
         let start = Date.timeIntervalSinceReferenceDate
@@ -121,6 +124,7 @@ extension MLXSwiftEngine {
             input: LMInput(tokens: tokens),
             model: context.model,
             cache: cache,
+            state: state,
             processor: nil,
             sampler: ArgMaxSampler(),
             prefill: prefill

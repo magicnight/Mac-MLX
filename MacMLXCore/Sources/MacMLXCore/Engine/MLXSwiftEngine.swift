@@ -42,7 +42,7 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     public private(set) var loadedModel: LocalModel?
 
-    /// Weight-identity fingerprint (``ModelFingerprint/compute(directory:fileManager:)``)
+    /// Weight-identity fingerprint (``ModelFingerprint/compute(directory:loader:fileManager:)``)
     /// of the resident model's on-disk bytes, captured at load beside
     /// ``loadedModel``. Threaded into every cold-tier prompt-cache read/write so a
     /// restored KV snapshot is only ever reused against the exact weights it was
@@ -58,42 +58,76 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// What's currently loaded — text-only LLM (`MLXLLM`), vision-
     /// language VLM (`MLXVLM`), or nothing. Both modalities wrap a
     /// `ModelContainer`; the case discriminates which factory built
-    /// it so generation can choose the right code path (LLM gets the
-    /// prompt cache; VLM bypasses it for now — multimodal cache keys
-    /// would need to fold image bytes into the hash, deferred to a
-    /// follow-up). An LLM keeps the message generator its input processor
-    /// renders with, so `userInput(for:isVLM:messageGenerator:)` can build
-    /// the message dictionaries itself when history carries reasoning.
+    /// it so generation can choose the right code path (an LLM, and a VLM
+    /// served on the full path, get the prompt cache; any other VLM bypasses
+    /// it — multimodal cache keys would need to fold image bytes into the
+    /// hash, deferred to a follow-up). An LLM, and a full-path VLM, keep the
+    /// message generator their input processor renders with, so
+    /// `userInput(for:isVLM:messageGenerator:)` can build the message
+    /// dictionaries itself when history carries reasoning.
     private enum LoadedSupport {
         case none
         case llm(ModelContainer, messageGenerator: any MessageGenerator)
-        case vlm(ModelContainer)
+        /// `fullPath` is non-nil when the VLM runs on the text generation
+        /// path (see ``FullPathVLM``), with the generator its processor
+        /// renders with.
+        case vlm(ModelContainer, fullPath: (FullPathVLM, messageGenerator: any MessageGenerator)?)
 
         var container: ModelContainer? {
             switch self {
             case .none: return nil
             case .llm(let c, _): return c
-            case .vlm(let c): return c
+            case .vlm(let c, _): return c
             }
         }
 
-        /// The LLM's message generator; nil for a VLM or nothing loaded.
+        /// The message generator of an LLM or a full-path VLM; nil for any
+        /// other VLM or nothing loaded.
         var messageGenerator: (any MessageGenerator)? {
-            if case .llm(_, let generator) = self { return generator }
-            return nil
+            switch self {
+            case .llm(_, let generator): return generator
+            case .vlm(_, let fullPath): return fullPath?.messageGenerator
+            case .none: return nil
+            }
         }
 
         var isVLM: Bool {
             if case .vlm = self { return true }
             return false
         }
+
+        /// The full path a VLM is served on; nil for an LLM, another VLM or
+        /// nothing loaded.
+        var fullPath: FullPathVLM? {
+            if case .vlm(_, let fullPath) = self { return fullPath?.0 }
+            return nil
+        }
     }
 
     private var loadedSupport: LoadedSupport = .none
 
-    /// The resident LLM's message generator (nil for a VLM or no model), for
-    /// the batched path's prompt build, which lives in another file.
-    var loadedLLMMessageGenerator: (any MessageGenerator)? { loadedSupport.messageGenerator }
+    /// The resident LLM's message generator (nil for a VLM, full path or not,
+    /// and for no model), for the batched path's prompt build, which lives in
+    /// another file. A VLM never batches.
+    var loadedLLMMessageGenerator: (any MessageGenerator)? {
+        if case .llm(_, let generator) = loadedSupport { return generator }
+        return nil
+    }
+
+    /// Test seam: load a VLM of a family ``FullPathVLM`` knows on the full
+    /// path even when the family is not in ``FullPathVLM/servedFamilies``
+    /// yet, so the gated suites and the parity gate can run it before it
+    /// flips.
+    private(set) var forcesFullPathVLM = false
+
+    /// Test seam for ``forcesFullPathVLM``; takes effect at the next load.
+    func setForcesFullPathVLM(_ forced: Bool) {
+        forcesFullPathVLM = forced
+    }
+
+    /// Test seam: whether the resident model is a VLM served on the full
+    /// path.
+    var servesFullPathVLM: Bool { loadedSupport.fullPath != nil }
 
     /// The drain the engine runs after releasing a resident model, from
     /// `unload()`, from the catches in `load()` and `ensureDraftContainer`,
@@ -202,9 +236,14 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Internal, like `hasDraftContainer`.
     func installForTesting(
         container: ModelContainer?, draft: ModelContainer? = nil, batch: ModelContainer? = nil,
-        model: LocalModel
+        model: LocalModel, fullPath: FullPathVLM? = nil
     ) {
-        loadedSupport = container.map { .llm($0, messageGenerator: DefaultMessageGenerator()) } ?? .none
+        loadedSupport = container.map { container in
+            if let fullPath {
+                return .vlm(container, fullPath: (fullPath, fullPath.processorMessageGenerator))
+            }
+            return .llm(container, messageGenerator: DefaultMessageGenerator())
+        } ?? .none
         draftContainer = draft
         loadedDraftModelID = draft == nil ? nil : "\(model.id)-draft"
         batchServingContainer = batch
@@ -263,7 +302,8 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     /// Two-tier prompt cache (hot dict + cold safetensors sidecar). Used
     /// by `runGeneration` to reuse KV state across successive turns on
-    /// the same LLM. VLM generations bypass it.
+    /// the same LLM or full-path VLM. Other VLM generations, and requests
+    /// that carry images, bypass it.
     private let promptCacheStore: PromptCacheStore
 
     /// Per-model token→JSON-classification tables (Track C structured output).
@@ -535,7 +575,32 @@ public actor MLXSwiftEngine: InferenceEngine {
                     from: model.directory,
                     using: HuggingFaceTokenizerLoader()
                 )
-                support = .vlm(container)
+                // Decided again here, from `config.json`, rather than taken
+                // from `model.architecture`, which hand-built models leave
+                // nil. A failure above is not retried through the LLM
+                // factory, so a broken vision load is never masked as text.
+                if let fullPath = FullPathVLM.resolve(configURL: configURL, forced: forcesFullPathVLM) {
+                    // The same backfill as the LLM branch: these requests
+                    // stream through the `ToolCallProcessor` too.
+                    if let fallback = Self.inferToolCallFormatFallback(configURL: configURL) {
+                        await container.update { ctx in
+                            if ctx.configuration.toolCallFormat == nil {
+                                ctx.configuration.toolCallFormat = fallback
+                            }
+                        }
+                    }
+                    // The factory wraps the processor in the configuration's
+                    // generator when it names one; otherwise the processor
+                    // renders with its family's own.
+                    let configured = await container.perform { context in
+                        context.configuration.messageGenerator
+                    }
+                    support = .vlm(
+                        container,
+                        fullPath: (fullPath, configured ?? fullPath.processorMessageGenerator))
+                } else {
+                    support = .vlm(container, fullPath: nil)
+                }
 
             case .gguf, .unknown, .embedder, .reranker, .audioSTT, .audioTTS:
                 // Surfaced via the Models tab — these formats never
@@ -555,7 +620,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             // Wave 2a: fingerprint the resident weights so the cold prompt-cache
             // tier can reject a restored KV snapshot whose weights changed under
             // the same directory path (a re-download / re-quantize / swap).
-            let newFingerprint = ModelFingerprint.compute(directory: model.directory)
+            // A VLM load salts it with its loader, so a cold entry written by
+            // the text-path class of the same checkpoint is never restored
+            // into the VLM class, and the reverse.
+            let newFingerprint = ModelFingerprint.compute(
+                directory: model.directory, loader: support.isVLM ? "vlm" : nil)
             EngineMemory.noteModelLoaded()
             // No clear-on-reload here for the HOT tier: `PromptCacheStore.fetchNearest`
             // now gates every hot hit on this fingerprint, so a stale entry left by a
@@ -757,9 +826,9 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// The `hashValue` of the prompt tokens the last text generation
     /// prefilled, so a gated test can check they are the tokens it rendered
     /// (hashes compare within one process). A test seam, reset at the start
-    /// of every LLM generation and left nil when it takes the speculative
-    /// path. VLM generations don't touch it, so after one it still holds the
-    /// previous LLM generation's value.
+    /// of every text-path generation (an LLM's or a full-path VLM's) and left
+    /// nil when it takes the speculative path. Other VLM generations don't
+    /// touch it, so after one it still holds the previous value.
     private(set) var lastPromptTokensHash: Int?
 
     /// Whether a text generation may split its prefill at the history
@@ -1150,14 +1219,17 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// `logsDroppedInputs` is false for a second build of the same request,
     /// so its notes (dropped images, dropped tool specs) are logged once.
     ///
-    /// `messageGenerator` is the loaded LLM's (nil for a VLM). When an
-    /// assistant message carries reasoning, the input is built as the
-    /// generator's message dictionaries with that reasoning added as
-    /// `reasoning_content` (see `injectingReasoning`), which the input
-    /// processor passes to the template unchanged: `Chat.Message` has no
-    /// reasoning slot. Otherwise it is the `.chat` input it always was, so a
-    /// request without reasoning renders exactly as before. A VLM's processor
-    /// handles images on `.chat`, so a VLM never gets the reasoning.
+    /// `messageGenerator` is the loaded LLM's or full-path VLM's (nil for any
+    /// other VLM). When an assistant message carries reasoning, the input is
+    /// built as the generator's message dictionaries with that reasoning
+    /// added as `reasoning_content` (see `injectingReasoning`), which the
+    /// input processor passes to the template unchanged: `Chat.Message` has
+    /// no reasoning slot. Otherwise it is the `.chat` input it always was, so
+    /// a request without reasoning renders exactly as before. The
+    /// dictionaries carry only image placeholders, so the input keeps the
+    /// `.chat` input's images and videos, which the processor reads from
+    /// `UserInput.images` either way. Another VLM has no generator here and
+    /// never gets the reasoning.
     static func userInput(
         for request: GenerateRequest,
         isVLM: Bool,
@@ -1218,7 +1290,9 @@ public actor MLXSwiftEngine: InferenceEngine {
             // through the processor's `generate(from:)` unchanged.
             if let messages = injectingReasoning(
                 messageGenerator.generate(from: chatInput), assistantReasoning: assistantReasoning) {
-                return UserInput(messages: messages, tools: toolSpecs, additionalContext: additionalContext)
+                return UserInput(
+                    messages: messages, images: chatInput.images, videos: chatInput.videos,
+                    tools: toolSpecs, additionalContext: additionalContext)
             }
             if logsDroppedInputs {
                 Task.detached {
@@ -1553,7 +1627,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             throw EngineError.modelLoadFailed(reason: error.localizedDescription)
         }
 
-        if isVLM {
+        let fullPath = support.fullPath
+        if isVLM, fullPath == nil {
             // VLM path: bypass the prompt cache (the cache key would
             // need to fold image content hashes into the chained hash
             // — deferred to a follow-up).
@@ -1593,19 +1668,29 @@ public actor MLXSwiftEngine: InferenceEngine {
                 into: continuation
             )
         } else {
+            // A full-path VLM's processor hands back `[1, N]` tokens and a
+            // mask even for text; the text path slices `[N]`. An input with
+            // media keeps its shape, and `carriesMedia` keeps it off every
+            // path that would slice it.
+            let carriesMedia = fullPath != nil && FullPathVLM.carriesMedia(lmInput)
             // D1: bring the draft container in line with this request
             // BEFORE dispatching — throws (rather than silently falling
             // back to non-speculative generation) if the requested draft
-            // model fails to load.
-            try await ensureDraftContainer(requestedDraftModelID: request.draftModelID)
+            // model fails to load. A request with images never speculates,
+            // so, as on the stock VLM path, its `draftModelID` is not
+            // reconciled: no draft is loaded for it, or failed on.
+            if !carriesMedia {
+                try await ensureDraftContainer(requestedDraftModelID: request.draftModelID)
+            }
             try await runLLMGeneration(
-                lmInput: lmInput,
+                lmInput: fullPath == nil ? lmInput : FullPathVLM.textOnlyInput(lmInput),
                 // A second copy of the same `UserInput`: `prepare` consumed the
                 // first, and the history-boundary snapshot renders it again.
                 // The first build already logged anything it dropped.
                 historyInput: Self.userInput(
                     for: request, isVLM: false, messageGenerator: support.messageGenerator,
                     logsDroppedInputs: false),
+                historyGenerator: support.messageGenerator ?? DefaultMessageGenerator(),
                 container: container,
                 generateParams: generateParams,
                 sampling: params,
@@ -1614,6 +1699,8 @@ public actor MLXSwiftEngine: InferenceEngine {
                 hasTools: request.tools?.isEmpty == false,
                 numDraftTokens: request.numDraftTokens,
                 responseFormat: request.responseFormat,
+                fullPath: fullPath,
+                carriesMedia: carriesMedia,
                 into: continuation
             )
         }
@@ -1647,6 +1734,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     private static func customTokenStream(
         input: LMInput,
         cache: [any KVCache],
+        state: LMOutput.State?,
         generateParams: GenerateParameters,
         context: ModelContext,
         responseFormat: ResponseFormat?,
@@ -1713,6 +1801,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             input: input,
             model: context.model,
             cache: cache,
+            state: state,
             processor: processor,
             sampler: sampler,
             prefill: generateParams.prefill,
@@ -1741,9 +1830,21 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// the cache is stored under the history's tokens, and generation resumes
     /// from the boundary, so the next turn of an agent loop reuses everything
     /// up to it even on a cache that cannot be trimmed.
+    ///
+    /// `historyGenerator` is the generator the prompt was rendered with (the
+    /// LLM's, or a full-path VLM's processor's), so the history render
+    /// matches it.
+    ///
+    /// A full-path VLM (`fullPath` non-nil) runs here too: every iterator
+    /// starts from `fullPath.iteratorState()`. A request whose input
+    /// `carriesMedia` runs cold and records nothing, takes no history
+    /// boundary and never speculates: a key of token ids alone would let one
+    /// image's KV answer for another, and the cache, the boundary and the
+    /// draft all slice a text-only `[N]` prompt.
     private func runLLMGeneration(
         lmInput: LMInput,
         historyInput: UserInput,
+        historyGenerator: any MessageGenerator,
         container: ModelContainer,
         generateParams: GenerateParameters,
         sampling: GenerationParameters,
@@ -1752,6 +1853,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         hasTools: Bool,
         numDraftTokens: Int?,
         responseFormat: ResponseFormat?,
+        fullPath: FullPathVLM? = nil,
+        carriesMedia: Bool = false,
         into continuation: AsyncThrowingStream<GenerateChunk, Error>.Continuation
     ) async throws {
         lastPromptCacheRecord = nil
@@ -1792,7 +1895,7 @@ public actor MLXSwiftEngine: InferenceEngine {
         // base-model cache entry would otherwise be wrongly reused for the adapted
         // model (different weights, same id) — and vice versa. `reconcileAdapter`
         // above has already settled `loadedAdapterID` for this request.
-        let bypassPromptCache = Self.shouldBypassPromptCache(
+        let bypassPromptCache = carriesMedia || Self.shouldBypassPromptCache(
             kvBits: sampling.kvBits, adapterID: loadedAdapterID)
 
         // Track C: a structured-output request must NOT speculate. A draft
@@ -1829,7 +1932,16 @@ public actor MLXSwiftEngine: InferenceEngine {
                 category: .inference
             )
         }
-        if let draftContainer, !usesCustomPipeline {
+        if carriesMedia, draftContainer != nil {
+            // The draft is a text LLM: it cannot read the image, and its
+            // iterator would slice a prompt that keeps the processor's shape.
+            await LogManager.shared.debug(
+                "Ignoring the draft model on a request with images: speculative decoding "
+                    + "is text-only.",
+                category: .inference
+            )
+        }
+        if let draftContainer, !usesCustomPipeline, !carriesMedia {
             // D1 follow-up fix: cache-trimmability precheck BEFORE
             // committing to the speculative branch. mlx-swift-lm's
             // `SpeculativeTokenIterator.init` (invoked inside
@@ -2004,7 +2116,8 @@ public actor MLXSwiftEngine: InferenceEngine {
                             : .skip(reason: "the forced boundary \(forcedBoundary) is outside the prefill")
                     } else {
                         decision = Self.historyBoundary(
-                            for: historyInput, cache: cache, context: context, promptTokens: inputTokens,
+                            for: historyInput, messageGenerator: historyGenerator, cache: cache,
+                            context: context, promptTokens: inputTokens,
                             reusedTokenCount: reusedPromptTokens)
                     }
                     switch decision {
@@ -2013,7 +2126,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                         let suffix = generationInput.text.tokens
                         let seconds = try Self.prefillHistory(
                             suffix[..<split], into: cache, context: context,
-                            prefill: generateParams.prefill)
+                            state: fullPath?.iteratorState(), prefill: generateParams.prefill)
                         let copies = cache.map { $0.copy() }
                         eval(copies.flatMap { $0.state })
                         history = HistoryBoundarySnapshot(
@@ -2034,6 +2147,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     generation = try Self.customTokenStream(
                         input: generationInput,
                         cache: cache,
+                        state: fullPath?.iteratorState(),
                         generateParams: generateParams,
                         context: context,
                         responseFormat: responseFormat,
@@ -2051,6 +2165,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     generation = try MLXLMCommon.generateTokensTask(
                         input: generationInput,
                         cache: cache,
+                        state: fullPath?.iteratorState(),
                         parameters: generateParams,
                         context: context,
                         includeStopToken: true

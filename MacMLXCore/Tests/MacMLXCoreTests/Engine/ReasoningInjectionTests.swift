@@ -1,6 +1,7 @@
 import Foundation
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import Testing
 
 @testable import MacMLXCore
@@ -148,8 +149,26 @@ struct ReasoningInjectionTests {
         #expect(input.tools?.count == 1)
     }
 
-    /// A VLM (no message generator) keeps `.chat`: its processor handles the
-    /// images there, so reasoning is not rendered on a VLM.
+    /// A full-path VLM renders replayed reasoning through its processor's
+    /// generator, and the `.messages` input keeps the images: the
+    /// dictionaries carry only placeholders, and the processor reads the
+    /// pixels from `UserInput.images`. Dropping them would leave the
+    /// template's image tokens with no image behind them.
+    @Test
+    func aFullPathVLMKeepsTheImagesWhenItReplaysReasoning() throws {
+        let image = ImageAttachment(fileURL: URL(fileURLWithPath: "/tmp/cat.png"), mimeType: "image/png")
+        var messages = conversation
+        messages[0] = ChatMessage(role: .user, content: "What is this?", images: [image, image])
+        let input = MLXSwiftEngine.userInput(
+            for: request(messages), isVLM: true, messageGenerator: Gemma4MessageGenerator(),
+            logsDroppedInputs: false)
+        let dictionaries = try dicts(input)
+        #expect(reasoning(dictionaries).contains("Run ls."))
+        #expect(input.images.count == 2)
+    }
+
+    /// Any other VLM (no message generator) keeps `.chat`: its processor
+    /// handles the images there, so reasoning is not rendered on it.
     @Test
     func withoutAGeneratorTheInputIsChat() {
         let input = MLXSwiftEngine.userInput(

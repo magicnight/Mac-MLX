@@ -311,7 +311,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// (the default, and any value explicitly set back to `nil`) disables
     /// speculative decoding for this request and unloads any draft model the
     /// engine currently has resident — there is no separate "unload draft"
-    /// verb. Ignored on VLM requests (text-only, D1).
+    /// verb. Ignored on VLM requests served by the stock VLM path, and on any
+    /// request carrying images (text-only, D1).
     ///
     /// - Note: Silently falls back to plain (non-speculative) decoding when
     ///   either the target or draft model's KV cache isn't trimmable — e.g. a

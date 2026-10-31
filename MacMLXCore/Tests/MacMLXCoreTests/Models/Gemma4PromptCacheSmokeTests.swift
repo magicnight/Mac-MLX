@@ -58,7 +58,7 @@ final class Gemma4PromptCacheSmokeTests: XCTestCase {
     private func localModel(id: String, directory: URL) -> LocalModel {
         LocalModel(
             id: id, displayName: id, directory: directory, sizeBytes: 0,
-            format: .mlx, quantization: nil, parameterCount: nil, architecture: nil)
+            format: GatedLoad.format, quantization: nil, parameterCount: nil, architecture: nil)
     }
 
     func testATurnThatEndedOnTheStopTokenIsExtendedByTheNext() async throws {
@@ -76,7 +76,9 @@ final class Gemma4PromptCacheSmokeTests: XCTestCase {
 
         let noColdTier = PromptCacheConfig(coldEnabled: false)
         let engine = MLXSwiftEngine(promptCache: noColdTier)
+        await GatedLoad.prepare(engine)
         try await engine.load(localModel(id: modelID, directory: directory))
+        try await GatedLoad.requireFullPathIfForced(engine)
         addTeardownBlock { try await engine.unload() }
 
         let question = ChatMessage(
@@ -120,7 +122,9 @@ final class Gemma4PromptCacheSmokeTests: XCTestCase {
         let secondOrNil = await engine.lastPromptCacheRecord
         let second = try XCTUnwrap(secondOrNil, "turn 2 went through the prompt cache")
         let oracle = MLXSwiftEngine(promptCache: noColdTier)
+        await GatedLoad.prepare(oracle)
         try await oracle.load(localModel(id: modelID, directory: directory))
+        try await GatedLoad.requireFullPathIfForced(oracle)
         addTeardownBlock { try await oracle.unload() }
         let cold = try await collect(oracle, turn2)
         print(
