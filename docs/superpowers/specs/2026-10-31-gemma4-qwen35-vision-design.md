@@ -185,36 +185,62 @@ these containers too.
 ids whatever its pixels. A key made only of token ids would let one image's
 KV answer for another, so image requests are handled in two steps.
 
-- **Step 1 (engine PR).** An image-bearing request may reuse a cached prefix
-  that ends before its first image block:
-  - reused length = `min(longest common prefix, start of the first image
-    block)`;
-  - the block boundary is never split, since Gemma 4 attends
-    bidirectionally inside an image block;
-  - before the first image, KV and positions do not depend on pixels;
-  - the request records no entry and takes no history-boundary snapshot.
-  - Qwen3.5 continues warm through an image-bearing remainder upstream
-    (`Qwen35.swift:1287-1385`). Gemma 4's warm image `prepare` must be shown
-    to work, by gate 4, before Gemma 4 uses this step. If it fails, Gemma 4
-    image requests run cold.
-- **Step 2 (its own PR, in scope).** Image-digest keys:
-  - each image block's placeholder ids are replaced in the cache key, and
-    only there, by ids derived from the image file's SHA-256, out of the
-    vocabulary's range, so different images never match;
-  - with that, image requests record entries and later turns of an image
-    session reuse the whole history;
-  - Qwen3.5 needs its rope delta stored with the entry, in both hot and cold
-    tiers, because after an image it is no longer zero;
-  - Gemma 4 has no such state;
-  - until step 2 lands for a family, a session that once had an image
-    re-prefills from its first image on every turn, and gate 5 measures what
-    that costs.
+- **Step 1 (engine PR): reuse up to the first image block.**
+  - Before the first image, KV and positions do not depend on pixels.
+  - The block start is each family's opening token:
+    - Qwen3.5: `<|vision_start|>`, which is how `getRopeIndex` finds images;
+    - Gemma 4: `boi` (255999), which the processor inserts.
+  - Lookup is `fetchNearest(tokens: inputTokens[..<blockStart])`, a capped
+    key. It is not "longest common prefix, then clamp", because a `MambaCache`
+    cannot be trimmed to a clamped length.
+  - The request records no entry and takes no history-boundary snapshot.
+  - **Qwen3.5.** A warm `prepare` routes to `prepareContinuation`
+    (`Qwen35.swift:1243-1248`). It runs the vision tower over the remainder
+    and anchors positions at `cacheOffset + seed`, so a seed of 0 is right.
+    The remainder's mask is sliced along the last axis together with its
+    tokens, because `getRopeIndex` reads it.
+  - **Gemma 4.** On a warm cache the mask is `[n, offset + n]`.
+    `tokenTypeIds` covers only the remainder, so the bidirectional overlay's
+    shape guard (`Gemma4.swift:309-311`) returns the plain causal mask, and
+    no error is raised.
+    - For a checkpoint whose `text_config.use_bidirectional_attention` is
+      `"vision"`, a warm image request would therefore silently attend
+      causally inside the image block. Step 1 is off for those checkpoints,
+      and their image requests run cold.
+    - The local e4b has the flag unset, so it is unaffected.
+    - The overlay gap goes upstream as an issue report only, and only with
+      the user's approval of the text.
+- **Step 2: image-digest keys (a follow-up design, not this one).** Until it
+  lands, a session that once had an image re-prefills from its first image
+  on every turn, and gate 5 measures what that costs. The review found these
+  constraints, and that design must meet all of them:
+  - **Snapshots.** Cross-turn reuse for both families goes through
+    history-boundary snapshots. Qwen's `MambaCache` cannot trim, and Gemma's
+    sliding window cannot trim past 512 tokens. So image requests must take
+    boundary snapshots, and `prefillHistory` must carry the images the
+    boundary leg covers: only those after the reused prefix, which means a
+    subset of the processed pixels, or reprocessing.
+  - **Qwen rope delta.** It is read from a self-built `TokenIterator`'s
+    `state` after `init` (`Evaluate.swift:720`), since `getRopeIndex` is
+    internal and `generateTokenTask` consumes the iterator. It is stored with
+    the entry as is (it is already offset-relative). It also seeds the
+    generation leg after an image-bearing history leg in the same request.
+  - **Key ids.** One per placeholder, so the key keeps its length and its
+    alignment with the real tokens. Each comes from (image SHA-256, index in
+    the block), mapped into `[vocabSize, Int32.max)`, because
+    `PromptCacheKey.hash` converts with `Int32(tok)` and traps on overflow.
+  - **Processor config.** The digest also covers the bytes of the processor
+    config.
+  - **Gemma 4 flag.** A new image on a warm cache hits the same overlay gap
+    as step 1, so the same `"vision"` flag rule applies.
+  - **Gate.** The same text with different images reuses exactly up to the
+    block start.
 
 **Qwen3.5 warm continuation.** Every `TokenIterator` that starts on a
 non-empty cache gets `state` carrying `qwen35.ropeDeltas`:
 
 - zero for an image-free prefix (all of step 1, and every text request);
-- the stored delta for a step-2 entry.
+- for step 2, the delta its design specifies.
 
 The call sites are `prefillHistory` (which throws its iterator's state
 away, so the generation leg after it starts warm even on a cache miss),
@@ -289,16 +315,19 @@ full-path load.
    identical prompt token ids. The prompts are over 256 tokens, so the
    boundary snapshot runs, and they carry a system turn, tools, tool calls,
    tool results and replayed reasoning.
-2. **Same distribution.** On those prompts, the two loads stay close:
-   - first-step logits within max |Δlogit| ≤ 0.05;
-   - KL(text ‖ vision) ≤ 1e-3;
-   - a greedy 64-token continuation token-identical up to the first position
-     where the text load's top-2 margin falls below 0.05.
+2. **Same distribution.** On those prompts, compare the two loads in float32
+   log-softmax over the text load's top 20 tokens:
+   - the largest |Δ log p| stays within 4 bf16 ULPs at the observed logit
+     magnitude;
+   - the KL over those tokens stays below the value that bound implies;
+   - a greedy 64-token continuation is token-identical up to the first
+     position where the text load's top-2 margin is below 4 ULPs.
 
-   The two paths are separate implementations (norm classes, prefill
-   chunking, M-RoPE vs 1-D RoPE), so bit-identity is not expected. These
-   bounds are the starting point, and the builder may tighten them after the
-   first run, never loosen them.
+   Both checkpoints compute in bf16, and Gemma 4 softcaps logits at 30, so one
+   ULP is 0.0625–0.125 at typical top-logit sizes. The two paths are separate
+   implementations (norm classes, prefill chunking, M-RoPE vs 1-D RoPE), so
+   bit-identity is not expected. The builder records the observed values
+   alongside the bounds.
 3. **Cache.** On the same agent-shaped two-turn conversation, the full-path
    load reuses the same number of tokens as the text-path load, and the
    Qwen3.5 warm path runs.
@@ -309,20 +338,21 @@ full-path load.
      image;
    - a text request after an image request never gets a hit from the image
      request's KV;
-   - step 1: an image request after a long text prefix reuses that prefix
-     and answers about its own image.
+   - step 1: an image request after a long text prefix, warm vs cold, meets
+     the gate 2 bounds on both families. This is compared on logits, not
+     judged by the answer.
 5. **Image session.** Five turns of a 16k-token agent conversation with an
    image in turn 1, recording the prefill time and peak memory of each turn.
    Gemma 4 prefills an image remainder in one shot. If a turn does not fit
    where the same conversation without the image fits, a guard refuses image
    requests above a measured size with a clear error, before Metal fails.
-   The gate states what the guard does to a session mid-way. After step 2,
-   turns 2–5 reuse the history.
+   The gate states what the guard does to a session mid-way.
 6. **Memory.** Resident growth after load is the vision-tower size, within
    the noise.
 7. **Unchanged speculation.** Gemma 4 E4B, with itself as a draft loaded
    through `LLMModelFactory`, still speculates on a text request on the
-   full-path load, with the same output as on the text-path load.
+   full-path load. Under greedy, its output is identical to the full-path
+   load decoding without a draft.
 
 Any failed gate, or any existing suite failing on the full-path load, keeps
 that family on text. A finding that is upstream's goes there as a report
@@ -345,7 +375,7 @@ only, not a code PR.
 2. **Gemma 4 flips.** Classification with the weight and processor checks,
    the draft filter, and CHANGELOG and README.
 3. **Qwen3.5/3.6 flips**, the same way.
-4. **Image cache step 2** (digest keys, with Qwen's stored rope delta).
+4. **Image cache step 2**, after its own design is approved.
 
 Qwen3.5 MTP (v0.11, waiting on mlx-swift-lm 3.33) is wired after Qwen
 flips. MLXVLM has its own `Qwen35MTP.swift`, so it targets the VLM `Qwen35`
@@ -357,8 +387,7 @@ their own parity runs, and other VLMs move to the full path after theirs.
 ## Goals, non-goals, anti-goals
 
 - **Goal:** images work on these two families with tool calls, constraints,
-  reasoning replay and the text-request cache intact, and a long agent
-  session with an image stays usable.
+  reasoning replay and the text-request cache intact.
 - **Non-goals:** batching, video and audio input, moving other VLM families,
   MTP.
 - **Anti-goals**, each a failure even if images work:
@@ -376,8 +405,11 @@ Each can be overruled.
 - Only `gemma4` and `qwen3_5` flip in this work.
 - Speculation keeps today's gate for text and is off for images.
 - Adapters keep working rather than being refused.
-- Image-digest cache keys are in scope as their own PR, because without them
-  an agent session that once had an image re-prefills every turn.
+- Image-digest cache keys get a design of their own, with the constraints
+  listed above. Until then, an agent session that once had an image
+  re-prefills from that image on every turn, and gate 5 puts a number on it.
+- Gemma 4 checkpoints with bidirectional vision attention run image requests
+  cold rather than reuse a warm prefix.
 - Pre-flip cold-tier entries are dropped (fingerprint salt) rather than
   restored into the other implementation.
 - A failed VLM load is not retried as text.
@@ -391,4 +423,3 @@ Each can be overruled.
 - The prompt set for the gates, within the shape stated above.
 - How the weight check reads the index.
 - Where the full-path set lives (`ModelLibraryManager` or the engine).
-- The id range for image-digest key tokens.
