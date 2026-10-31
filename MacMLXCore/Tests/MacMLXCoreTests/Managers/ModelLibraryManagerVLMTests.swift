@@ -299,12 +299,18 @@ struct ModelLibraryManagerVLMTests {
     /// A complete checkpoint in a shape the parity run did not cover stays
     /// text: the 31B dense's `attention_k_eq_v` and bidirectional vision
     /// attention, the 26B-A4B's MoE block, E2B's double-wide MLP. E4B's own
-    /// values (all off) keep it a VLM.
+    /// values (all off) keep it a VLM. A missing `use_double_wide_mlp` is
+    /// double-wide to both classes, and a unified text config defaults the
+    /// vision class to the 31B's attention, so both stay text.
     @Test(arguments: [
-        (#"{"attention_k_eq_v": true}"#, ModelFormat.mlx),
-        (#"{"use_bidirectional_attention": "vision"}"#, .mlx),
-        (#"{"enable_moe_block": true}"#, .mlx),
+        (#"{"attention_k_eq_v": true, "use_double_wide_mlp": false}"#, ModelFormat.mlx),
+        (#"{"use_bidirectional_attention": "vision", "use_double_wide_mlp": false}"#, .mlx),
+        (#"{"enable_moe_block": true, "use_double_wide_mlp": false}"#, .mlx),
         (#"{"use_double_wide_mlp": true}"#, .mlx),
+        (#"{}"#, .mlx),
+        (#"{"model_type": "gemma4_unified_text", "use_double_wide_mlp": false}"#, .mlx),
+        (#"{"model_type": "gemma4_unified", "use_double_wide_mlp": false}"#, .mlx),
+        (#"{"use_double_wide_mlp": false}"#, .mlxVLM),
         (#"{"attention_k_eq_v": false, "use_bidirectional_attention": null, "enable_moe_block": false, "use_double_wide_mlp": false}"#, .mlxVLM),
     ])
     func onlyTheShapeTheParityRunCoveredIsAVLM(textConfig: String, format: ModelFormat) async throws {
@@ -337,7 +343,7 @@ struct ModelLibraryManagerVLMTests {
     @discardableResult
     private func writeGemma4(
         in root: URL, name: String, modelType: String = "gemma4", gap: Gemma4Gap? = nil,
-        withIndex: Bool = true, textConfig: String = "{}"
+        withIndex: Bool = true, textConfig: String = #"{"use_double_wide_mlp": false}"#
     ) throws -> URL {
         let dir = root.appending(path: name)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

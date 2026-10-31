@@ -439,7 +439,9 @@ The flip is narrowed to the shape the run covered
 `attention_k_eq_v`, `use_bidirectional_attention: "vision"`,
 `enable_moe_block` or `use_double_wide_mlp` stays text. The 31B dense sets
 the first two, the 26B-A4B the third and E2B the fourth; each is read by
-separate code in the two classes and needs its own run. Step 1's bidirectional rule still applies to them under the
+separate code in the two classes and needs its own run. A missing key reads
+as both classes decode it, which for `use_double_wide_mlp` is `true`, so only
+an explicit `false` (E4B's value) passes. Step 1's bidirectional rule still applies to them under the
 forcing seam.
 
 `HistoryBoundaryPromptCacheSmokeTests`' SSD-tier case assumed a snapshot
