@@ -426,14 +426,18 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
     }
 
     /// Gate 5's other end: four text turns of the same session, then an
-    /// image in a fifth. On a checkpoint whose image requests run cold the
-    /// whole history up to the image prefills in one shot, so this is where
-    /// its peak is.
+    /// image in a fifth. The text before the image prefills in chunks, as the
+    /// turns before it did, so the image turn's peak stays within
+    /// ``lateImagePeakAllowance`` of the text turn's before it. On a
+    /// checkpoint whose image requests run cold the whole history up to the
+    /// image prefills in one shot instead (88 GB at this size on Gemma 4
+    /// 31B); there the turn must only complete.
     func testAnImageLateInALongSessionCompletes() async throws {
         let (modelID, directory) = try gateAndResolveModel()
         let image = try Self.renderTextImage(Self.anchor)
         defer { try? FileManager.default.removeItem(at: image) }
         let engine = try await fullPathEngine(modelID, directory)
+        var textPeak = 0
         for turn in 1...5 {
             var request = Self.sessionRequest(modelID, turn: turn, image: nil)
             if turn == 5 {
@@ -450,8 +454,21 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
                 + String(format: "first token %.2f s ", result.firstTokenSeconds ?? seconds)
                 + "peak=\(Memory.peakMemory >> 20) MiB")
             XCTAssertNotNil(result.promptTokens, "gate 5: late-image turn \(turn) did not complete")
+            guard turn == 5 else {
+                textPeak = Memory.peakMemory
+                continue
+            }
+            if try Self.reusesPrefixBeforeMedia(directory) {
+                XCTAssertLessThanOrEqual(
+                    Memory.peakMemory - textPeak, Self.lateImagePeakAllowance,
+                    "gate 5: the late image turn's peak is far above the text turn's")
+            }
         }
     }
+
+    /// How far above the text turn before it a late image turn may peak: the
+    /// image's own activations, not the history's.
+    private static let lateImagePeakAllowance = 1 << 30
 
     // MARK: - Session
 
