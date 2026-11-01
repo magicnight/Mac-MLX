@@ -59,12 +59,12 @@ struct QuantizedMatmulParityTests {
         let queryHeads = kvHeads * repeats
         let groupSize = 64, keyBits = 8
 
-        MLXRandom.seed(42)
-        let keys = MLXRandom.normal([batch, kvHeads, n, headDim]).asType(.float16)
+        let random = MLXRandom.RandomState(seed: 42)
+        let keys = MLXRandom.normal([batch, kvHeads, n, headDim], key: random).asType(.float16)
         let (keysQ, keyScales, keyBiases) = MLX.quantized(
             keys, groupSize: groupSize, bits: keyBits)
 
-        let queries = (MLXRandom.normal([batch, queryHeads, m, headDim])
+        let queries = (MLXRandom.normal([batch, queryHeads, m, headDim], key: random)
             * pow(Float(headDim), -0.5)).asType(.float16)
         let grouped = queries.reshaped([batch, kvHeads, repeats, m, headDim])
 
@@ -74,7 +74,7 @@ struct QuantizedMatmulParityTests {
         // which is the scores @ values product. Testing the keys product alone
         // never touches the defect.
         let valueBits = 4
-        let values = MLXRandom.normal([batch, kvHeads, n, headDim]).asType(.float16)
+        let values = MLXRandom.normal([batch, kvHeads, n, headDim], key: random).asType(.float16)
         let (valuesQ, valueScales, valueBiases) = MLX.quantized(
             values, groupSize: groupSize, bits: valueBits)
 
@@ -146,15 +146,15 @@ struct QuantizedMatmulParityTests {
         let k = 2560, n = 73448, m = 16  // n % 64 == 40, n > 2^15, m % 32 != 0
         let groupSize = 64, bits = 4
 
-        MLXRandom.seed(0)
-        let weights = MLXRandom.normal([n, k]).asType(.float16)
+        let random = MLXRandom.RandomState(seed: 0)
+        let weights = MLXRandom.normal([n, k], key: random).asType(.float16)
         let (weightsQ, scales, biases) = MLX.quantized(
             weights, groupSize: groupSize, bits: bits)
         let dequantized = MLX.dequantized(
             weightsQ, scales: scales, biases: biases,
             groupSize: groupSize, bits: bits).asType(.float32)
 
-        let x = MLXRandom.normal([m, k]).asType(.bfloat16)
+        let x = MLXRandom.normal([m, k], key: random).asType(.bfloat16)
         let underTest = MLX.quantizedMatmul(
             x, weightsQ, scales: scales, biases: biases,
             transpose: true, groupSize: groupSize, bits: bits)
@@ -198,15 +198,15 @@ struct QuantizedMatmulParityTests {
         let k = 2048, n = 96, m = 1  // K >= 1024 → split-K; n % 64 == 32 → tail
         let groupSize = 32, bits = 4
 
-        MLXRandom.seed(3)
-        let weights = MLXRandom.normal([k, n]).asType(.float16)
+        let random = MLXRandom.RandomState(seed: 3)
+        let weights = MLXRandom.normal([k, n], key: random).asType(.float16)
         let (weightsQ, scales, biases) = MLX.quantized(
             weights, groupSize: groupSize, bits: bits)
         let dequantized = MLX.dequantized(
             weightsQ, scales: scales, biases: biases,
             groupSize: groupSize, bits: bits).asType(.float32)
 
-        let x = MLXRandom.normal([m, k]).asType(.bfloat16)
+        let x = MLXRandom.normal([m, k], key: random).asType(.bfloat16)
         let underTest = MLX.quantizedMatmul(
             x, weightsQ, scales: scales, biases: biases,
             transpose: false, groupSize: groupSize, bits: bits)
@@ -245,12 +245,12 @@ struct QuantizedMatmulParityTests {
         let m = 32769, k = 256, n = 64, experts = 2  // m > 32768 is the seam
         let groupSize = 64, bits = 4
 
-        MLXRandom.seed(5)
-        let weights = MLXRandom.normal([experts, n, k]).asType(.float16)
+        let random = MLXRandom.RandomState(seed: 5)
+        let weights = MLXRandom.normal([experts, n, k], key: random).asType(.float16)
         let (weightsQ, scales, biases) = MLX.quantized(
             weights, groupSize: groupSize, bits: bits)
 
-        let x = MLXRandom.normal([m, k], scale: 0.5).asType(.bfloat16)
+        let x = MLXRandom.normal([m, k], scale: 0.5, key: random).asType(.bfloat16)
         // Sorted: every row of the first half hits expert 0, the rest expert 1.
         let rhsIndices = MLX.concatenated([
             MLXArray.zeros([m / 2], type: Int32.self),
@@ -302,15 +302,15 @@ struct QuantizedMatmulParityTests {
         let m = 64, k = 160, n = 64, experts = 2  // k % 64 == 32 is the seam
         let groupSize = 32, bits = 4
 
-        MLXRandom.seed(7)
-        let weights = MLXRandom.normal([experts, n, k]).asType(.float16)
+        let random = MLXRandom.RandomState(seed: 7)
+        let weights = MLXRandom.normal([experts, n, k], key: random).asType(.float16)
         let (weightsQ, scales, biases) = MLX.quantized(
             weights, groupSize: groupSize, bits: bits)
         let dequantized = MLX.dequantized(
             weightsQ, scales: scales, biases: biases,
             groupSize: groupSize, bits: bits).asType(.float32)
 
-        let x = MLXRandom.normal([m, k], scale: 0.5).asType(.bfloat16)
+        let x = MLXRandom.normal([m, k], scale: 0.5, key: random).asType(.bfloat16)
         // Sorted: the first half of the rows hit expert 0, the rest expert 1,
         // which keeps the batch on the sorted-RHS path (B >= 16, B / E >= 4).
         let rhsIndices = MLX.concatenated([

@@ -35,12 +35,13 @@ final class DeepseekV32IndexerTests: XCTestCase {
     func testShortCircuitReturnsNilWhenContextFitsInTopK() throws {
         try requireMLXRuntimeOrSkip()
         let config = try tinyConfig(indexTopK: 8)
-        let indexer = DeepseekV32Indexer(config)
+        let random = MLXRandom.RandomState(seed: 0)
+        let indexer = withRandomState(random) { DeepseekV32Indexer(config) }
 
         // s = 4 ≤ index_topk = 8 ⇒ no sparsification, expect nil.
         let b = 1, s = 4
-        let x = MLXRandom.normal([b, s, config.hiddenSize])
-        let qr = MLXRandom.normal([b, s, config.qLoraRank])
+        let x = MLXRandom.normal([b, s, config.hiddenSize], key: random)
+        let qr = MLXRandom.normal([b, s, config.qLoraRank], key: random)
         let result = indexer(x, qr, nil)
         XCTAssertNil(result, "indexer must return nil when s <= index_topk")
     }
@@ -48,12 +49,13 @@ final class DeepseekV32IndexerTests: XCTestCase {
     func testReturnsTopKIndicesWhenContextExceedsTopK() throws {
         try requireMLXRuntimeOrSkip()
         let config = try tinyConfig(indexTopK: 4)
-        let indexer = DeepseekV32Indexer(config)
+        let random = MLXRandom.RandomState(seed: 0)
+        let indexer = withRandomState(random) { DeepseekV32Indexer(config) }
 
         // s = 10 > index_topk = 4 ⇒ expect indices of shape [b, 1, s, 4].
         let b = 1, s = 10
-        let x = MLXRandom.normal([b, s, config.hiddenSize])
-        let qr = MLXRandom.normal([b, s, config.qLoraRank])
+        let x = MLXRandom.normal([b, s, config.hiddenSize], key: random)
+        let qr = MLXRandom.normal([b, s, config.qLoraRank], key: random)
         let result = indexer(x, qr, nil)
 
         let indices = try XCTUnwrap(result, "indexer must return indices when s > index_topk")

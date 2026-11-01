@@ -52,10 +52,13 @@ struct NAXAttentionAndAddMMParityTests {
     /// references are built from.
     private func inputs(kvLength: Int, seed: UInt64) -> (q: MLXArray, k: MLXArray, v: MLXArray, logits: MLXArray) {
         let heads = Self.heads, headDim = Self.headDim, queries = Self.queries
-        MLXRandom.seed(seed)
-        let q = MLXRandom.normal([1, heads, queries, headDim], scale: Self.inputScale).asType(.bfloat16)
-        let k = MLXRandom.normal([1, heads, kvLength, headDim], scale: Self.inputScale).asType(.bfloat16)
-        let v = MLXRandom.normal([1, heads, kvLength, headDim], scale: Self.inputScale).asType(.bfloat16)
+        let random = MLXRandom.RandomState(seed: seed)
+        let q = MLXRandom.normal([1, heads, queries, headDim], scale: Self.inputScale, key: random)
+            .asType(.bfloat16)
+        let k = MLXRandom.normal([1, heads, kvLength, headDim], scale: Self.inputScale, key: random)
+            .asType(.bfloat16)
+        let v = MLXRandom.normal([1, heads, kvLength, headDim], scale: Self.inputScale, key: random)
+            .asType(.bfloat16)
         let scale = 1.0 / Float(headDim).squareRoot()
         let logits = MLX.matmul(
             q.asType(.float32) * scale, k.asType(.float32).transposed(0, 1, 3, 2))
@@ -179,10 +182,10 @@ struct NAXAttentionAndAddMMParityTests {
         "addmm matches an explicit bias-plus-matmul",
         arguments: [(512, 512, 512), (1024, 768, 2048), (2048, 2048, 512)])
     func addmmMatchesExplicitBiasPlusMatmul(m: Int, k: Int, n: Int) {
-        MLXRandom.seed(7)
-        let a = MLXRandom.normal([m, k], scale: 0.05).asType(.bfloat16)
-        let b = MLXRandom.normal([k, n], scale: 0.05).asType(.bfloat16)
-        let bias = MLXRandom.normal([n], scale: 0.05).asType(.bfloat16)
+        let random = MLXRandom.RandomState(seed: 7)
+        let a = MLXRandom.normal([m, k], scale: 0.05, key: random).asType(.bfloat16)
+        let b = MLXRandom.normal([k, n], scale: 0.05, key: random).asType(.bfloat16)
+        let bias = MLXRandom.normal([n], scale: 0.05, key: random).asType(.bfloat16)
 
         let viaAddMM = MLX.addMM(bias, a, b)
         let explicit = MLX.matmul(a, b) + bias

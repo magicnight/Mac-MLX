@@ -33,7 +33,8 @@ final class BatchedScalarRoPETests: XCTestCase {
     /// row. Materialized so it is a genuine contiguous array, exactly like the
     /// real harness's batched decode input.
     private func identicalRows(dim: Int, batch: Int) -> MLXArray {
-        let row = MLXRandom.normal([1, 1, 1, dim]).asType(.float16)
+        let row = MLXRandom.normal([1, 1, 1, dim], key: MLXRandom.RandomState(seed: 0))
+            .asType(.float16)
         let stacked = concatenated(Array(repeating: row, count: batch), axis: 0)
         stacked.eval()
         return stacked
