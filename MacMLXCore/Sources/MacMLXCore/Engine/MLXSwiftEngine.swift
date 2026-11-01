@@ -816,6 +816,13 @@ public actor MLXSwiftEngine: InferenceEngine {
         get async { await promptCacheStore.residentCount }
     }
 
+    /// Test seam: entries in the prompt cache's cold tier. A snapshot larger
+    /// than the in-memory tier (Gemma 4 31B's at 1.5k tokens) is recorded
+    /// only here.
+    var promptCacheColdCount: Int {
+        get async { await promptCacheStore.coldEntriesSnapshot().count }
+    }
+
     /// Test seam: bytes held by the prompt cache's in-memory tier, for the
     /// gated smoke that measures what a history-boundary snapshot costs.
     var promptCacheResidentBytes: Int {
