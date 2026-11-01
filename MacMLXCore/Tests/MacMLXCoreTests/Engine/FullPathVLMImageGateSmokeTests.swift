@@ -25,9 +25,11 @@ import enum MacMLXCore.JSONValue
 /// - an image request records nothing, so a text request after it with the
 ///   same prefix reuses nothing;
 /// - and, on the engine, image cache step 1: an image request after a long
-///   text turn, warm against cold, has |Δ log p| within δ and KL below δ²/2
-///   on its first token. Compared on the top 10 logprobs the engine reports
-///   (its `top_logprobs` cap), with δ from the cold prefill's top-1 logit. A
+///   text turn, warm against cold, has |Δ log p| within gate 2's bound and
+///   KL below δ²/2 on its first token. Compared on the top 10 logprobs the
+///   engine reports (its `top_logprobs` cap), with δ from the cold prefill's
+///   top-1 logit and the noise from the same request prefilled in 128-token
+///   chunks. A
 ///   checkpoint whose image requests run cold (Gemma 4 with bidirectional
 ///   vision attention) must reuse nothing instead;
 /// - also on the engine: the image is read with `kv_bits` 8 and 4, and a
@@ -179,6 +181,13 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let coldLogits = try await engine.coldNextTokenLogits(turn2)
         let top1 = try XCTUnwrap(coldLogits.logits.max())
         let delta = 4 * FullPathVLMParitySmokeTests.LogitComparison.bf16ULP(top1)
+        // Gate 2's bound: δ, or this load's own difference on the same image
+        // request prefilled in other chunks, with the margin, if larger.
+        let rechunked = try await engine.coldNextTokenLogits(
+            turn2, prefill: FullPathVLMParitySmokeTests.noiseFloorPrefill)
+        let noise = try XCTUnwrap(FullPathVLMParitySmokeTests.LogitComparison(
+            reference: coldLogits.logits, candidate: rechunked.logits, top: 10))
+        let bound = FullPathVLMParitySmokeTests.logProbBound(delta: delta, noise: noise.maxLogProbDelta)
 
         let warmTop = try XCTUnwrap(warm.logprobs.first?.topLogprobs)
         let coldTop = try XCTUnwrap(cold.logprobs.first?.topLogprobs)
@@ -198,6 +207,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
         print("[image-gate] \(modelID) step 1: reused=\(warm.cachedPromptTokens ?? 0) "
             + String(format: "δ=%.4f max|Δlogp|=%.5f KL=%.2e (bound %.2e) ", delta, maxDelta, kl, delta * delta / 2)
+            + String(format: "rechunked max|Δlogp|=%.5f |Δ log p| bound %.5f ", noise.maxLogProbDelta, bound)
             + "missing=\(missing) warm=\(warm.text.debugDescription) cold=\(cold.text.debugDescription)")
         XCTAssertEqual(cold.cachedPromptTokens ?? 0, 0, "the reference run is cold")
         guard try Self.reusesPrefixBeforeMedia(directory) else {
@@ -208,7 +218,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
         XCTAssertGreaterThan(warm.cachedPromptTokens ?? 0, 0, "step 1: the warm image request reused nothing")
         XCTAssertTrue(missing.isEmpty, "gate 4: the warm run's top 10 lacks \(missing)")
-        XCTAssertLessThanOrEqual(maxDelta, delta, "gate 4: warm against cold, |Δ log p|")
+        XCTAssertLessThanOrEqual(maxDelta, bound, "gate 4: warm against cold, |Δ log p|")
         XCTAssertLessThan(kl, delta * delta / 2, "gate 4: warm against cold, KL")
 
         // Both runs above prepare the block on a cached prefix: the warm one
@@ -235,7 +245,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
                 + String(format: "max|Δlogp|=%.5f ", splitDelta) + "missing=\(splitMissing)")
             // The tenth place can swap with the eleventh between two prefills.
             XCTAssertTrue(splitMissing.count <= 1, "gate 4: the \(label) run's top 10 lacks \(splitMissing)")
-            XCTAssertLessThanOrEqual(splitDelta, delta, "gate 4: \(label) against one-shot prefill, |Δ log p|")
+            XCTAssertLessThanOrEqual(splitDelta, bound, "gate 4: \(label) against one-shot prefill, |Δ log p|")
         }
     }
 
@@ -667,19 +677,30 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         text.uppercased().filter { !$0.isWhitespace }.contains(anchor.filter { !$0.isWhitespace })
     }
 
-    /// High-contrast text drawn to a temporary PNG, large enough to read.
+    /// High-contrast text drawn to a temporary 3840×960-pixel PNG. The size
+    /// is in pixels, not points, so it does not follow the display's backing
+    /// scale. Qwen3.5/3.6 needs it this large: on the original Qwen3.6-27B
+    /// weights, the reference implementation (transformers) reads the year
+    /// as "2020" at 2560×640 and 3200×800, and reads it right at this size
+    /// with the text moved by a few pixels or drawn in a regular weight.
     private static func renderTextImage(_ text: String) throws -> URL {
-        let size = NSSize(width: 640, height: 160)
-        let image = NSImage(size: size)
-        image.lockFocus()
+        let (width, height) = (3840, 960)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0),
+            let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { throw XCTSkip("Could not render the test image") }
+        rep.size = NSSize(width: width, height: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
         NSColor.white.setFill()
-        NSRect(origin: .zero, size: size).fill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
         (text as NSString).draw(
-            at: NSPoint(x: 24, y: 52),
-            withAttributes: [.font: NSFont.systemFont(ofSize: 56, weight: .bold), .foregroundColor: NSColor.black])
-        image.unlockFocus()
-        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
-            let png = rep.representation(using: .png, properties: [:])
+            at: NSPoint(x: 144, y: 312),
+            withAttributes: [.font: NSFont.systemFont(ofSize: 336, weight: .bold), .foregroundColor: NSColor.black])
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:])
         else { throw XCTSkip("Could not render the test image") }
         let url = FileManager.default.temporaryDirectory
             .appending(path: "full-path-image-gate-\(UUID().uuidString).png")
