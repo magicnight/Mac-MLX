@@ -12,13 +12,15 @@ import Foundation
 /// conversion that kept the multimodal `model_type` would otherwise go to
 /// the VLM factory and fail, and a failed VLM load is never retried as text.
 ///
-/// Three things must hold:
+/// Four things must hold:
 /// - `config.json` has a `vision_config` object;
 /// - the weights hold the family's vision-tower tensors
 ///   (``FullPathVLM/Family/visionWeightPrefixes``, every one of them), as
 ///   listed in `model.safetensors.index.json`, or else in the headers of the
 ///   `.safetensors` files. A leading `model.` is dropped first, as upstream's
 ///   sanitizer does for raw Hugging Face layouts;
+/// - the vision class loads every tensor name as it is
+///   (``FullPathVLM/Family/visionClassLoads(_:config:)``);
 /// - the processor metadata upstream reads declares the processor the
 ///   family's checkpoints load with (``FullPathVLM/Family/processorClass``).
 ///   Upstream prefers `preprocessor_config.json` to `processor_config.json`
@@ -40,7 +42,7 @@ enum VisionCheckpoint {
         let names = keys.map { $0.hasPrefix("model.") ? String($0.dropFirst("model.".count)) : $0 }
         return family.visionWeightPrefixes.allSatisfy { prefix in
             names.contains { $0.hasPrefix(prefix) }
-        }
+        } && family.visionClassLoads(keys, config: config)
     }
 
     /// The `processor_class` of the processor metadata file upstream selects:

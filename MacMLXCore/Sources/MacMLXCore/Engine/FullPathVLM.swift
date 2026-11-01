@@ -50,6 +50,22 @@ struct FullPathVLM: Sendable, Equatable {
         /// explicit `false` is required. A unified text config
         /// (`gemma4_unified_text` or `gemma4_unified`) would turn the vision
         /// class's defaults for the first two on, so it stays text too.
+        ///
+        /// Qwen3.5/3.6 ran on Qwen3.6-27B (`Qwen3.6-27B-4bit`). The two
+        /// classes are separate copies of one architecture, and only four
+        /// config values send them down different code:
+        /// - a RoPE type other than `default`, which the text class scales
+        ///   and the vision class ignores (it always runs unscaled M-RoPE).
+        ///   The vision class reads only `rope_parameters`, so a config
+        ///   without it stays text too;
+        /// - experts (`num_experts` above 0), two separate MoE blocks;
+        /// - a `linear_conv_kernel_dim` other than 4, which the two
+        ///   convolutions handle differently at 1;
+        /// - a missing `vocab_size`, defaulted to different values.
+        /// `full_attention_interval` is held at the 4 that ran. Read from
+        /// `text_config` only, since the vision class requires it.
+        /// `tie_word_embeddings` takes the same code in both, so a tied
+        /// checkpoint (Qwen3.5-4B) is covered.
         func parityRunCovers(_ config: [String: Any]) -> Bool {
             switch self {
             case .gemma4:
@@ -61,7 +77,37 @@ struct FullPathVLM: Sendable, Equatable {
                     && text["enable_moe_block"] as? Bool != true
                     && text["use_double_wide_mlp"] as? Bool == false
             case .qwen35:
-                return false
+                guard let text = config["text_config"] as? [String: Any],
+                    let rope = text["rope_parameters"] as? [String: Any]
+                else { return false }
+                return (rope["type"] ?? rope["rope_type"]) as? String == "default"
+                    && text["num_experts"] as? Int ?? 0 == 0
+                    && text["linear_conv_kernel_dim"] as? Int ?? 4 == 4
+                    && text["full_attention_interval"] as? Int ?? 4 == 4
+                    && text["vocab_size"] is Int
+            }
+        }
+
+        /// Whether the vision class loads tensors with these names as they
+        /// are. Qwen3.5's vision class skips its sanitizer for an MLX-format
+        /// checkpoint, and the loader refuses a tensor the model does not
+        /// use, so a checkpoint the text class loads fails as a VLM when it
+        /// keeps what the text class's sanitizer drops (`mtp.` tensors, an
+        /// `lm_head` with tied embeddings) or names a language-model tensor
+        /// outside `language_model.`. A failed vision load is not retried as
+        /// text, so such a checkpoint stays text. Gemma 4 has no such check.
+        func visionClassLoads(_ names: [String], config: [String: Any]) -> Bool {
+            switch self {
+            case .gemma4:
+                return true
+            case .qwen35:
+                let text = config["text_config"] as? [String: Any] ?? [:]
+                let tied = text["tie_word_embeddings"] as? Bool ?? false
+                return names.allSatisfy { name in
+                    (name.hasPrefix("language_model.") || name.hasPrefix("vision_tower."))
+                        && !name.contains("mtp.")
+                        && !(tied && name.contains("lm_head"))
+                }
             }
         }
 
@@ -71,7 +117,7 @@ struct FullPathVLM: Sendable, Equatable {
         /// needs the encoder and its projection into the text model; the
         /// audio tower is not needed, since upstream's `gemma4` sanitizer
         /// drops it. Qwen3.5's raw Hugging Face layout (`model.visual.*`) is
-        /// not read yet; that family is not served.
+        /// not read, so a raw checkpoint stays text.
         var visionWeightPrefixes: [String] {
             switch self {
             case .gemma4: ["vision_tower.", "embed_vision."]
@@ -83,8 +129,9 @@ struct FullPathVLM: Sendable, Equatable {
     /// Families whose checkpoints load through the VLM factory and run on the
     /// text generation path, each only for a checkpoint that carries its
     /// vision tower (``VisionCheckpoint``). A family joins once its parity
-    /// gate passed: Gemma 4 on `gemma-4-e4b-it-8bit`. Qwen3.5/3.6 has not.
-    static let servedFamilies: Set<Family> = [.gemma4]
+    /// gate passed: Gemma 4 on `gemma-4-e4b-it-8bit`, Qwen3.5/3.6 on
+    /// `Qwen3.6-27B-4bit` and `Qwen3.5-4B-MLX-8bit`.
+    static let servedFamilies: Set<Family> = [.gemma4, .qwen35]
 
     let family: Family
 
