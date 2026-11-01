@@ -89,8 +89,7 @@ final class Gemma2OverlayTests: XCTestCase {
         let model = try XCTUnwrap(
             try TinyRandomLanguageModel.gemma2Overlay.make() as? Gemma2OverlayModel)
         let attention = try XCTUnwrap(model.model.layers.first).attention
-        MLXRandom.seed(11)
-        let x = MLXRandom.normal([1, 5, 32])
+        let x = MLXRandom.normal([1, 5, 32], key: MLXRandom.RandomState(seed: 11))
         let symbolic = attention(x, mask: .causal, cache: nil)
         let array = attention(x, mask: .array(createCausalMask(n: 5, offset: 0)), cache: nil)
         XCTAssertEqual(abs(symbolic - array).max().item(Float.self), 0)
@@ -143,7 +142,6 @@ final class Gemma2OverlayTests: XCTestCase {
     /// can quantize at group size 32.
     func testDecodeOnAQuantizedKVCacheMatchesTheDenseCache() throws {
         try requireMLXRuntimeOrSkip()
-        MLXRandom.seed(5)
         let configuration = try JSONDecoder().decode(
             Gemma2OverlayConfiguration.self,
             from: Data(#"""
@@ -152,7 +150,11 @@ final class Gemma2OverlayTests: XCTestCase {
                 "vocab_size": 64, "head_dim": 32, "attn_logit_softcapping": 50.0,
                 "final_logit_softcapping": 30.0, "query_pre_attn_scalar": 32 }
                 """#.utf8))
-        let model = Gemma2OverlayModel(configuration)
+        // Seed 5's weights, from a random state of their own: suites running in
+        // parallel draw from the global one.
+        let model = withRandomState(MLXRandom.RandomState(seed: 5)) {
+            Gemma2OverlayModel(configuration)
+        }
         eval(model.parameters().flattened().map { $0.1 })
         let input = MLXArray(prompt.map { Int32($0) }, [1, prompt.count])
         let next = MLXArray([Int32(5)], [1, 1])

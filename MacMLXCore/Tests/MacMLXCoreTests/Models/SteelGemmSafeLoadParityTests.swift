@@ -44,9 +44,9 @@ struct SteelGemmSafeLoadParityTests {
             (2049, 2049, 129),   // large and ragged in both output dimensions
         ])
     func raggedShapeMatmulMatchesFloat32Reference(m: Int, n: Int, k: Int) {
-        MLXRandom.seed(0xA11CE)
-        let a = MLXRandom.normal([m, k], scale: 0.05)
-        let b = MLXRandom.normal([k, n], scale: 0.05)
+        let random = MLXRandom.RandomState(seed: 0xA11CE)
+        let a = MLXRandom.normal([m, k], scale: 0.05, key: random)
+        let b = MLXRandom.normal([k, n], scale: 0.05, key: random)
 
         let reference = MLX.matmul(a, b)
         let underTest = MLX.matmul(a.asType(.bfloat16), b.asType(.bfloat16))

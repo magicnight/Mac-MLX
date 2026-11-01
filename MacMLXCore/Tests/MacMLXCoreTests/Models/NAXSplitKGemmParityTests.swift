@@ -58,9 +58,11 @@ struct NAXSplitKGemmParityTests {
 
         // Deterministic operands: a fixed seed keeps a failure reproducible,
         // and small magnitudes keep the float32 reference well inside range.
-        MLXRandom.seed(0x5EED)
-        let aF32 = MLXRandom.normal([m, k], scale: 0.02)
-        let bF32 = MLXRandom.normal([k, n], scale: 0.02)
+        // They come from a random state of their own, not the global one,
+        // which suites running in parallel draw from.
+        let random = MLXRandom.RandomState(seed: 0x5EED)
+        let aF32 = MLXRandom.normal([m, k], scale: 0.02, key: random)
+        let bF32 = MLXRandom.normal([k, n], scale: 0.02, key: random)
 
         let reference = MLX.matmul(aF32, bF32)
         let underTest = MLX.matmul(aF32.asType(.bfloat16), bF32.asType(.bfloat16))
@@ -96,9 +98,9 @@ struct NAXSplitKGemmParityTests {
     func bf16BelowSplitKThresholdMatchesFloat32Reference() {
         let m = 2048, n = 2048, k = 8192  // K < 10240 → ordinary path
 
-        MLXRandom.seed(0x5EED)
-        let aF32 = MLXRandom.normal([m, k], scale: 0.02)
-        let bF32 = MLXRandom.normal([k, n], scale: 0.02)
+        let random = MLXRandom.RandomState(seed: 0x5EED)
+        let aF32 = MLXRandom.normal([m, k], scale: 0.02, key: random)
+        let bF32 = MLXRandom.normal([k, n], scale: 0.02, key: random)
 
         let reference = MLX.matmul(aF32, bF32)
         let underTest = MLX.matmul(aF32.asType(.bfloat16), bF32.asType(.bfloat16))
