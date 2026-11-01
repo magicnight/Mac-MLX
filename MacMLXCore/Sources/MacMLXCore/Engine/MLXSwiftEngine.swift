@@ -534,22 +534,8 @@ public actor MLXSwiftEngine: InferenceEngine {
             overlayRegistered = true
         }
 
-        // Preflight: refuse Gemma 4 MoE checkpoints until one has been run
-        // here; under mlx-swift-lm 3.31.x the factory failed on them with a
-        // cryptic "Unhandled keys" error (see mlx-swift-lm#219).
         let configURL = model.directory.appending(
             path: "config.json", directoryHint: .notDirectory)
-        if Self.isUnsupportedGemma4MoE(configURL: configURL) {
-            let reason = "Gemma 4 Mixture-of-Experts variants (e.g. `a4b`) are refused by "
-                + "this build until a run of one has been verified "
-                + "(see https://github.com/ml-explore/mlx-swift-lm/issues/219). "
-                + "Use a dense Gemma 4 checkpoint (E2B / E4B) in the meantime."
-            status = .error(reason)
-            loadedSupport = .none
-            loadedModel = nil
-            throw EngineError.modelLoadFailed(reason: reason)
-        }
-
         do {
             let support: LoadedSupport
             switch model.format {
@@ -687,41 +673,6 @@ public actor MLXSwiftEngine: InferenceEngine {
         }
     }
 
-    // MARK: Preflight
-
-    /// Inspect the model's `config.json` for Gemma 4 MoE markers. Returns
-    /// `true` when the config declares Mixture-of-Experts fields, which this
-    /// build refuses: mlx-swift-lm 3.32.3 added the text-side MoE block, but
-    /// no run of a Gemma 4 MoE checkpoint has been verified here (see
-    /// mlx-swift-lm#219 for the history).
-    ///
-    /// Kept internal so tests can exercise it. Any IO / JSON error is
-    /// treated as "not MoE" — preflight should never hijack load errors
-    /// from unrelated causes; we only want to catch the specific
-    /// Gemma 4 MoE case.
-    static func isUnsupportedGemma4MoE(configURL: URL) -> Bool {
-        guard let data = try? Data(contentsOf: configURL),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            return false
-        }
-        // Gemma 4 configs sometimes nest their text fields under "text_config".
-        let containers: [[String: Any]] = [
-            root,
-            root["text_config"] as? [String: Any] ?? [:],
-        ]
-        let isGemma4 = containers.contains { container in
-            guard let modelType = container["model_type"] as? String else { return false }
-            return modelType.hasPrefix("gemma4") || modelType.hasPrefix("gemma_4")
-        }
-        guard isGemma4 else { return false }
-        return containers.contains { container in
-            if let n = container["num_experts"] as? Int, n > 0 { return true }
-            if let n = container["num_local_experts"] as? Int, n > 0 { return true }
-            return false
-        }
-    }
-
     /// macMLX-side backfill for `ModelConfiguration.toolCallFormat` when upstream
     /// `ToolCallFormat.infer` leaves it nil for a tool-capable family. Upstream
     /// maps only `qwen3_5` / `qwen3_next` (→ `.xmlFunction`), so plain Qwen3 —
@@ -806,14 +757,20 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// Test seam: whether a draft container is currently resident. Internal
     /// (not `private`) so `@testable import` tests can observe D1
     /// draft-state resets (e.g. after `unload()` / a successful `load(_:)`)
-    /// without needing a real model load — mirrors `isUnsupportedGemma4MoE`'s
-    /// "kept internal so tests can exercise it" precedent below.
+    /// without needing a real model load.
     var hasDraftContainer: Bool { draftContainer != nil }
 
     /// Test seam: entries in the prompt cache's in-memory tier, for the gated
     /// smoke that checks a cancelled response records none.
     var promptCacheResidentCount: Int {
         get async { await promptCacheStore.residentCount }
+    }
+
+    /// Test seam: entries in the prompt cache's cold tier. A snapshot larger
+    /// than the in-memory tier (Gemma 4 31B's at 1.5k tokens) is recorded
+    /// only here.
+    var promptCacheColdCount: Int {
+        get async { await promptCacheStore.coldEntriesSnapshot().count }
     }
 
     /// Test seam: bytes held by the prompt cache's in-memory tier, for the

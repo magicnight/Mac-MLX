@@ -23,8 +23,10 @@ import enum MacMLXCore.JSONValue
 ///   to the same token ids on both loads.
 /// - Gate 2, same distribution: on those prompts, over the text load's top
 ///   20 next tokens, in float32 log-softmax, the largest |Δ log p| is within
-///   δ = 4 bf16 ULPs of the text load's top-1 logit, the KL over those
-///   tokens is below δ²/2, and a greedy 64-token continuation is
+///   the larger of δ = 4 bf16 ULPs of the text load's top-1 logit and
+///   ``noiseMargin`` times the text load's own |Δ log p| when the same prompt
+///   is prefilled in other chunks, the KL over those tokens is below δ²/2,
+///   and a greedy 64-token continuation is
 ///   token-identical up to the first position where the text load's top-2
 ///   margin is below δ.
 /// - Gate 3, cache: the second turn of an agent conversation reuses the
@@ -37,7 +39,11 @@ import enum MacMLXCore.JSONValue
 ///   draft.
 ///
 /// The full-path load goes through the forcing seam, so the suite runs for a
-/// family before it flips. Every engine keeps its cold tier off. Observed
+/// family before it flips. Every engine keeps its cold tier off unless
+/// `MACMLX_FULL_PATH_COLD_TIER=1`, which gives each engine the default cold
+/// tier in a throwaway directory: a checkpoint whose snapshot is larger than
+/// the hot tier (Gemma 4 31B's is about 0.9 GB at 1.5k tokens) reuses nothing
+/// without it, on either load. Observed
 /// values are printed with their bounds.
 ///
 /// GATED — never runs in CI. Self-skips unless ALL hold:
@@ -56,6 +62,19 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
 
     /// The other chunking the noise-floor read prefills with.
     static let noiseFloorPrefill = PrefillParameters(stepSize: 128, chunking: .remainder)
+
+    /// How far past the text load's own rechunking noise gate 2's |Δ log p|
+    /// may go.
+    static let noiseMargin = 1.25
+
+    /// Gate 2's |Δ log p| bound: δ, or the text load's own rechunking noise
+    /// on the same prompt with ``noiseMargin`` on top when that is larger.
+    /// The gap between two loads of a checkpoint is measured in the
+    /// low-probability tail, where chunking alone moves log p by more than δ
+    /// on several checkpoints (Gemma 4 E2B and 31B, Qwen3.6).
+    static func logProbBound(delta: Double, noise: Double) -> Double {
+        max(delta, noiseMargin * noise)
+    }
 
     /// Gate 6's allowance for what is resident besides the weights.
     static let memoryTolerance = 32 << 20
@@ -76,14 +95,15 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
             let comparison = try XCTUnwrap(
                 LogitComparison(reference: textRun.logits, candidate: fullRun.logits, top: 20))
             print("[full-path-parity] \(modelID) \(name): prompt=\(textRun.tokens.count) \(comparison)")
-            // For the record, not asserted: the text load against itself
-            // prefilled in other chunks, the size of the difference chunking
-            // alone makes on this checkpoint.
+            // The text load against itself prefilled in other chunks: the
+            // size of the difference chunking alone makes on this checkpoint.
             let rechunked = try await text.coldNextTokenLogits(request, prefill: Self.noiseFloorPrefill)
-            if let noise = LogitComparison(reference: textRun.logits, candidate: rechunked.logits, top: 20) {
-                print("[full-path-parity] \(modelID) \(name): text load rechunked \(noise)")
-            }
-            XCTAssertLessThanOrEqual(comparison.maxLogProbDelta, comparison.delta, "\(name): gate 2, |Δ log p|")
+            let noise = try XCTUnwrap(
+                LogitComparison(reference: textRun.logits, candidate: rechunked.logits, top: 20))
+            let bound = Self.logProbBound(delta: comparison.delta, noise: noise.maxLogProbDelta)
+            print("[full-path-parity] \(modelID) \(name): text load rechunked \(noise); "
+                + String(format: "|Δ log p| bound %.5f", bound))
+            XCTAssertLessThanOrEqual(comparison.maxLogProbDelta, bound, "\(name): gate 2, |Δ log p|")
             XCTAssertLessThan(comparison.kl, comparison.klBound, "\(name): gate 2, KL")
 
             var greedy = request
@@ -403,10 +423,18 @@ final class FullPathVLMParitySmokeTests: XCTestCase {
         return (modelID, directory)
     }
 
+    /// Whether the engines get a cold tier (see the type's documentation).
+    static var usesColdTier: Bool {
+        ProcessInfo.processInfo.environment["MACMLX_FULL_PATH_COLD_TIER"] == "1"
+    }
+
     /// An engine with `modelID` resident: as text, or on the full path
-    /// through the forcing seam, checked to have taken it.
+    /// through the forcing seam, checked to have taken it. With a cold tier,
+    /// the engine's throwaway directory is cleared when the test ends (a 31B
+    /// run leaves about 2 GB in it).
     private func loadedEngine(_ modelID: String, _ directory: URL, fullPath: Bool) async throws -> MLXSwiftEngine {
-        let engine = MLXSwiftEngine(promptCache: PromptCacheConfig(coldEnabled: false))
+        let engine = MLXSwiftEngine(promptCache: PromptCacheConfig(coldEnabled: Self.usesColdTier))
+        if Self.usesColdTier { addTeardownBlock { await engine.clearPromptCache() } }
         await engine.setForcesFullPathVLM(fullPath)
         try await engine.load(LocalModel(
             id: modelID, displayName: modelID, directory: directory, sizeBytes: 0,

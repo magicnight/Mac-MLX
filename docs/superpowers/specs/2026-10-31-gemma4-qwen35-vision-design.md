@@ -5,7 +5,8 @@ two: the seam itself first (#165), with every image request running cold,
 then image cache step 1 (#166). PR 2 flips Gemma 4 (#167); its parity run
 changed three things, listed under "What the Gemma 4 parity run changed"
 below. Qwen3.5/3.6 did not pass its run and stays on text (see "What the
-Qwen3.6 parity run found").
+Qwen3.6 parity run found"). E2B, the 26B-A4B and the 31B dense were run
+too and stay text (see "What the other Gemma 4 sizes' runs found").
 
 ## Why
 
@@ -331,7 +332,10 @@ full-path load.
 2. **Same distribution.** On those prompts, compare the two loads in float32
    log-softmax over the text load's top 20 tokens:
    - the largest |Δ log p| stays within 4 bf16 ULPs of the text load's top-1
-     logit for that prompt, written δ below;
+     logit for that prompt, written δ below, or within 1.25 times the text
+     load's own |Δ log p| when the same prompt is prefilled in 128-token
+     chunks, whichever is larger (changed on 2026-11-01, see "What the
+     other Gemma 4 sizes' runs found");
    - the KL over those tokens stays below δ²/2, the second-order KL of a
      δ-sized shift;
    - a greedy 64-token continuation is token-identical up to the first
@@ -439,7 +443,8 @@ The flip is narrowed to the shape the run covered
 `attention_k_eq_v`, `use_bidirectional_attention: "vision"`,
 `enable_moe_block` or `use_double_wide_mlp` stays text. The 31B dense sets
 the first two, the 26B-A4B the third and E2B the fourth; each is read by
-separate code in the two classes and needs its own run. A missing key reads
+separate code in the two classes and needs its own run (each had one on
+2026-11-01 and stays text; see "What the other Gemma 4 sizes' runs found"). A missing key reads
 as both classes decode it, which for `use_double_wide_mlp` is `true`, so only
 an explicit `false` (E4B's value) passes. Step 1's bidirectional rule still applies to them under the
 forcing seam.
@@ -475,7 +480,9 @@ The same suites ran on `Qwen3.6-27B-4bit` through the forcing seam on
     recurrence; the cause was not isolated.
   - On Gemma 4 E4B the same read is 0.24 to 0.50, under the bound.
   - Gate 2 for this family should compare against that noise rather than a
-    fixed δ. That is a change to the gate, so it is left for the user.
+    fixed δ. On 2026-11-01 the user chose that bound (δ or 1.25 times the
+    rechunked noise, whichever is larger); these numbers are inside it, but
+    Qwen3.6 was not run again under it.
 - **Gate 4 failed on reading.**
   - Over the API, Qwen3.6 read the fixture "MACMLX 2026" as "MAXLX COROS",
     and as "MAXX 2000" in a tool call.
@@ -488,11 +495,19 @@ The same suites ran on `Qwen3.6-27B-4bit` through the forcing seam on
     Swapping the patch kernel's H/W or T axes at runtime made the reading
     worse, so the loaded layout is not transposed by either of those. The
     misread is not the Swift port's alone.
-  - Candidates: this mlx-community conversion (mlx-vlm 0.4.4), something
-    both MLX implementations share, or the 4-bit language model reading
-    the image features poorly. Telling which needs a reference outside MLX
-    (transformers on the original weights) or another Qwen3.5-family
-    checkpoint.
+  - Found on 2026-11-01: the checkpoint misreads these renders itself.
+    transformers 5.22 on the original bf16 weights (`Qwen/Qwen3.6-27B`)
+    reads the 1280×320 render as "maxsong", on MPS and on CPU alike, and
+    as "MAX 2016" with thinking on. mlx-community's 8-bit conversion
+    misreads it in mlx-vlm too ("maxson"), so neither the 4-bit language
+    model nor the conversion is the cause, and neither MLX implementation.
+    Qwen3.5-4B (8-bit) misreads it as "LILX 2026". The same render scaled
+    up 2× (2560×640) reads "MACMLX 2026", and a tight crop nearly does
+    ("MACMLX2020"): at this resolution each 32-pixel merged patch carries
+    too little of each glyph for this family.
+  - So gate 4 for this family needs a fixture this family reads in the
+    reference implementation; the 2× render is one. The fixture change is
+    left to the Qwen flip.
   - Step 1, warm against cold, differs by 0.75: comparable to the chunking
     noise above, which was measured on the text prompts, not this one.
 
@@ -500,6 +515,71 @@ The suites take the family through `MACMLX_FULL_PATH_PARITY_MODEL` and
 `MACMLX_FULL_PATH_IMAGE_MODEL`. Gate 7 asserts unchanged speculation (the
 full path speculates exactly where the text load does). Gate 2 prints the
 rechunked read next to the bound.
+
+## What the other Gemma 4 sizes' runs found
+
+On 2026-11-01 the parity and image suites ran on the three other mlx-community
+8-bit checkpoints: `gemma-4-e2b-it-8bit`, `gemma-4-26b-a4b-it-8bit` and
+`gemma-4-31b-it-8bit`.
+
+- **Gate 2 changed.** On all three, and on Qwen3.6, the first run missed the
+  fixed δ while KL stayed far under its bound and greedy decoding agreed. The
+  gap was of the same order as the text load's own difference when the same
+  prompt is prefilled in 128-token chunks (up to 1.6 times it). The user chose a bound of δ or
+  1.25 times that rechunked difference, whichever is larger. KL and greedy
+  agreement are unchanged.
+- **The cold tier, when a snapshot outgrows the hot tier.** A 31B
+  history-boundary snapshot at 1.5k tokens is about 0.9 GB (50 sliding
+  layers of 16 KV heads), more than the 512 MiB hot tier, and the suites ran
+  without a cold tier, so turn 2 reused nothing on either load. With
+  `MACMLX_FULL_PATH_COLD_TIER=1` each engine gets the default cold tier in a
+  throwaway directory, and both loads reuse 1,452 tokens.
+- **Image requests run cold on 31B and 26B-A4B, as designed.** Both use
+  bidirectional vision attention, so `reusesPrefixBeforeMedia` is off. The
+  image gate's step 1 and its cancel test now expect no reuse on such a
+  checkpoint instead of failing on it.
+- **31B dense: passes the gates, stays text.** Gate 2's largest |Δ log p| is 0.57, 0.60
+  and 0.43, under bounds of 0.64, 0.78 and 0.50; KL at most 2.0e-7; greedy
+  identical. Gate 3 reuses 1,452 on both loads with the cold tier; gate 6
+  grows by 1,146.7 MB against 1,145.7 MB of vision tower; gate 7 speculates
+  24/24 on both loads with the same text. The image is read, with `kv_bits` 8
+  and 4 too, through a tool call and behind replayed reasoning, and the
+  five-turn session completes at a 36,786 MiB peak.
+- **An image late in a long session is the costly case, and it blocks the
+  31B.** Gate 5 put the image in turn 1. With it in turn 5 instead (four
+  text turns, then the image; `testAnImageLateInALongSessionCompletes`),
+  everything before the image goes through `prepare` in one shot, with no
+  cancel point, because the split only chunks the text after the last
+  image:
+  - E4B: 22,684 tokens, 1,450 reused, first token after 17.4 s at a 41,957
+    MiB peak, 32,620 MiB above turn 4's.
+  - 31B: 22,688 tokens, none reused (its image requests run cold), first
+    token after 304.6 s at an 88,476 MiB peak, which a 64 GB Mac cannot
+    hold.
+
+  For E4B the text before the first image could be prefilled in chunks
+  first, as the warm path already does with a cached prefix. For a
+  bidirectional checkpoint that is the case `reusesPrefixBeforeMedia` turns
+  off, so the 31B needs a bounded head another way before it flips.
+- **E2B: one prompt over, stays text.** On "after a tool result" the gap is
+  0.42 against a bound of 0.37 (rechunked difference 0.30). Gates 1 and 3-7
+  pass and the image gate passes. Sampled over more chunkings (64 to 4,096
+  tokens), the text load moves by up to 0.46 on that prompt, so the gap is
+  inside what chunking does to this checkpoint; the rule as chosen measures
+  one chunking, and E2B misses it.
+- **26B-A4B: text verified, images stay off.** The load guard that refused
+  Gemma 4 MoE checkpoints "until a run of one has been verified" is removed:
+  on the three agent prompts the text load's top-1 token matches mlx-lm
+  0.32.2's, greedy decoding is token-identical through each tool call
+  (19, 19 and 20 tokens), and |Δ log p| against mlx-lm's one-shot prefill
+  (1.91, 0.70 and 1.11 per prompt) is no larger than mlx-lm's own when it
+  prefills in 128-, 512- or 2,048-token chunks (up to 2.06, 1.00 and
+  2.27). On the full path, gate 2 misses on "opening" (1.23 against 0.98)
+  and passes the other two; the other gates and the image gate pass. With
+  itself as a draft, the text load's greedy output differs from its own
+  output without one (22 of 24 drafts accepted); the full path's does not.
+- Qwen3.6's numbers from the first run are inside the new gate 2 bound, but
+  it was not run again; its reading is covered above.
 
 ## Goals, non-goals, anti-goals
 

@@ -25,12 +25,15 @@ import enum MacMLXCore.JSONValue
 /// - an image request records nothing, so a text request after it with the
 ///   same prefix reuses nothing;
 /// - and, on the engine, image cache step 1: an image request after a long
-///   text turn, warm against cold, meets gate 2's bounds on its first
-///   token. Compared on the top 10 logprobs the engine reports (its
-///   `top_logprobs` cap), with δ from the cold prefill's top-1 logit;
+///   text turn, warm against cold, has |Δ log p| within δ and KL below δ²/2
+///   on its first token. Compared on the top 10 logprobs the engine reports
+///   (its `top_logprobs` cap), with δ from the cold prefill's top-1 logit. A
+///   checkpoint whose image requests run cold (Gemma 4 with bidirectional
+///   vision attention) must reuse nothing instead;
 /// - also on the engine: the image is read with `kv_bits` 8 and 4, and a
 ///   cancel during a long image prefill streams nothing and leaves the
-///   entry it reused intact, and the next image request is read.
+///   entry it reused intact, and the next image request is read (and
+///   reuses that entry, unless the checkpoint's image requests run cold).
 ///
 /// Gate 5: five turns of an agent conversation that reaches about 16k tokens,
 /// with an image in turn 1 and without it, recording each turn's prompt,
@@ -43,6 +46,9 @@ import enum MacMLXCore.JSONValue
 ///   3. the model directory exists (env `MACMLX_FULL_PATH_IMAGE_MODEL`
 ///      overrides the directory name under `~/.mac-mlx/models`; default
 ///      `gemma-4-e4b-it-8bit`).
+///
+/// `MACMLX_FULL_PATH_COLD_TIER=1` gives the engines a cold tier, as in
+/// `FullPathVLMParitySmokeTests`.
 ///
 /// Run:
 ///   MACMLX_RUN_FULL_PATH_IMAGE_GATE=1 TEST_RUNNER_MACMLX_RUN_FULL_PATH_IMAGE_GATE=1 \
@@ -130,7 +136,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
                 ["role": "user", "content": [["type": "text", "text": Self.readQuestion], imagePart]],
             ],
         ])
-        let entriesAfterImage = await engine.promptCacheResidentCount
+        let entriesAfterImage = await engine.promptCacheResidentCount + engine.promptCacheColdCount
         let text = try await post(port, [
             "model": modelID, "temperature": 0, "max_tokens": 4,
             "messages": [["role": "system", "content": system], ["role": "user", "content": Self.readQuestion]],
@@ -193,8 +199,14 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         print("[image-gate] \(modelID) step 1: reused=\(warm.cachedPromptTokens ?? 0) "
             + String(format: "δ=%.4f max|Δlogp|=%.5f KL=%.2e (bound %.2e) ", delta, maxDelta, kl, delta * delta / 2)
             + "missing=\(missing) warm=\(warm.text.debugDescription) cold=\(cold.text.debugDescription)")
-        XCTAssertGreaterThan(warm.cachedPromptTokens ?? 0, 0, "step 1: the warm image request reused nothing")
         XCTAssertEqual(cold.cachedPromptTokens ?? 0, 0, "the reference run is cold")
+        guard try Self.reusesPrefixBeforeMedia(directory) else {
+            // Bidirectional vision attention: image requests run cold by
+            // design, so the warm run is a second cold one.
+            XCTAssertEqual(warm.cachedPromptTokens ?? 0, 0, "step 1: an image request reused the cache")
+            return
+        }
+        XCTAssertGreaterThan(warm.cachedPromptTokens ?? 0, 0, "step 1: the warm image request reused nothing")
         XCTAssertTrue(missing.isEmpty, "gate 4: the warm run's top 10 lacks \(missing)")
         XCTAssertLessThanOrEqual(maxDelta, delta, "gate 4: warm against cold, |Δ log p|")
         XCTAssertLessThan(kl, delta * delta / 2, "gate 4: warm against cold, KL")
@@ -275,7 +287,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let firstStart = Date()
         let before = try await run(engine, text)
         let beforeSeconds = Date().timeIntervalSince(firstStart)
-        let entries = await engine.promptCacheResidentCount
+        let entries = await engine.promptCacheResidentCount + engine.promptCacheColdCount
         XCTAssertGreaterThan(entries, 0, "the text turn recorded nothing")
 
         let long = Self.imageTurnAfter(text, image: image)
@@ -311,7 +323,8 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         XCTAssertEqual(after.text, before.text, "after a cancel, the text turn answers differently")
 
         // The same image request, run through, reuses the text turn (so the
-        // cancelled one did too) and reads the image.
+        // cancelled one did too) and reads the image. A checkpoint whose image
+        // requests run cold reuses nothing here, by design.
         var whole = long
         whole.parameters.maxTokens = 1
         let served = try await run(engine, whole)
@@ -320,8 +333,20 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let answer = Self.answer(try await run(engine, read).text)
         print("[image-gate] \(modelID) image turn after the cancel: prompt=\(served.promptTokens ?? -1) "
             + "reused=\(served.cachedPromptTokens ?? -1) read: \(answer.debugDescription)")
-        XCTAssertGreaterThan(served.cachedPromptTokens ?? 0, 0, "the image turn did not reuse the text turn")
+        if try Self.reusesPrefixBeforeMedia(directory) {
+            XCTAssertGreaterThan(served.cachedPromptTokens ?? 0, 0, "the image turn did not reuse the text turn")
+        } else {
+            XCTAssertEqual(served.cachedPromptTokens ?? 0, 0, "an image request reused the cache")
+        }
         XCTAssertTrue(Self.reads(answer), "after a cancel, the image is not read: \(answer)")
+    }
+
+    /// Whether the checkpoint's image requests reuse the cache before their
+    /// first media block (off for Gemma 4 with bidirectional vision
+    /// attention, which runs them cold).
+    private static func reusesPrefixBeforeMedia(_ directory: URL) throws -> Bool {
+        let configURL = directory.appending(path: "config.json")
+        return try XCTUnwrap(FullPathVLM.resolve(configURL: configURL, forced: true)).reusesPrefixBeforeMedia
     }
 
     /// A first turn: a question, with the session's system prompt and tool.
@@ -397,6 +422,34 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
                     + "peak=\(Memory.peakMemory >> 20) MiB")
                 XCTAssertNotNil(result.promptTokens, "gate 5: \(label) turn \(turn) did not complete")
             }
+        }
+    }
+
+    /// Gate 5's other end: four text turns of the same session, then an
+    /// image in a fifth. On a checkpoint whose image requests run cold the
+    /// whole history up to the image prefills in one shot, so this is where
+    /// its peak is.
+    func testAnImageLateInALongSessionCompletes() async throws {
+        let (modelID, directory) = try gateAndResolveModel()
+        let image = try Self.renderTextImage(Self.anchor)
+        defer { try? FileManager.default.removeItem(at: image) }
+        let engine = try await fullPathEngine(modelID, directory)
+        for turn in 1...5 {
+            var request = Self.sessionRequest(modelID, turn: turn, image: nil)
+            if turn == 5 {
+                request.messages.append(ChatMessage(
+                    role: .user, content: "Here is the screenshot.",
+                    images: [ImageAttachment(fileURL: image, mimeType: "image/png")]))
+            }
+            Memory.peakMemory = 0
+            let start = Date()
+            let result = try await run(engine, request)
+            let seconds = Date().timeIntervalSince(start)
+            print("[image-gate] \(modelID) late image turn \(turn)\(turn == 5 ? " (image)" : ""): "
+                + "prompt=\(result.promptTokens ?? -1) reused=\(result.cachedPromptTokens ?? 0) "
+                + String(format: "first token %.2f s ", result.firstTokenSeconds ?? seconds)
+                + "peak=\(Memory.peakMemory >> 20) MiB")
+            XCTAssertNotNil(result.promptTokens, "gate 5: late-image turn \(turn) did not complete")
         }
     }
 
@@ -533,12 +586,15 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
     }
 
     private func fullPathEngine(_ modelID: String, _ directory: URL) async throws -> MLXSwiftEngine {
-        let engine = MLXSwiftEngine(promptCache: PromptCacheConfig(coldEnabled: false))
+        let engine = MLXSwiftEngine(
+            promptCache: PromptCacheConfig(coldEnabled: FullPathVLMParitySmokeTests.usesColdTier))
         await engine.setForcesFullPathVLM(true)
         try await engine.load(LocalModel(
             id: modelID, displayName: modelID, directory: directory, sizeBytes: 0,
             format: .mlxVLM, quantization: nil, parameterCount: nil, architecture: nil))
         addTeardownBlock { try await engine.unload() }
+        // Runs first: teardown blocks run last-added first.
+        if FullPathVLMParitySmokeTests.usesColdTier { addTeardownBlock { await engine.clearPromptCache() } }
         let served = await engine.servesFullPathVLM
         XCTAssertTrue(served, "the load is on the full path")
         return engine
