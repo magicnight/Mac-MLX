@@ -163,6 +163,23 @@ struct FullPathVLM: Sendable, Equatable {
         return Array(tokens[...start])
     }
 
+    /// How many tokens of an image request's remaining prefill come before
+    /// its first media token, when that text can prefill on its own: in
+    /// chunks, as text, before the media go through `prepare`. A warm image
+    /// request already starts at the block (``imageRequestLookupKey(_:)``);
+    /// this gives a cold one, or one whose hit ends short of the block, the
+    /// same start, so an image sent late in a long conversation no longer
+    /// prefills the whole history in one shot. Nil when
+    /// ``reusesPrefixBeforeMedia`` is off (bidirectional vision attention
+    /// needs the history and the block in one `prepare`), for a text-only
+    /// input, and when the input starts at its media.
+    func textPrefillBeforeMedia(_ input: LMInput) -> Int? {
+        guard reusesPrefixBeforeMedia, Self.carriesMedia(input), input.text.tokens.ndim == 2 else { return nil }
+        let ids = input.text.tokens[0].asArray(Int.self)
+        guard let first = ids.firstIndex(where: mediaTokenIDs.contains), first > 0 else { return nil }
+        return first
+    }
+
     /// Where an image request's remaining prefill splits: just past its last
     /// media token, when text follows. The part with the media goes through
     /// the model's `prepare` with the pixels; Gemma 4 runs that in one shot.

@@ -188,6 +188,56 @@ struct FullPathVLMEngineTests {
         }
     }
 
+    /// A cold image request prefills the text before its block on its own,
+    /// as text, so its `prepare` with the pixels starts at the block as a
+    /// warm one does (``FullPathVLM/textPrefillBeforeMedia(_:)``).
+    @Test(arguments: FullPathVLM.Family.allCases)
+    func aColdImageRequestPrefillsTheTextBeforeItsBlockOnItsOwn(_ family: FullPathVLM.Family) async throws {
+        let recorder = PrepareRecorder()
+        let engine = try await engine(family: family, recorder: recorder)
+        let out = try await collect(engine, request(turns: 3, imageAt: 2))
+        let blockStart = BatchShapedProcessor.blockStart(imageAt: 2)
+        let total = BatchShapedProcessor.tokenCount(messages: 3, blocks: 1)
+        #expect(out.cachedPromptTokens ?? 0 == 0)
+        #expect(out.promptTokens == total)
+
+        let calls = recorder.calls
+        let text = try #require(calls.first)
+        #expect(text.cacheOffset == 0)
+        #expect(text.tokensShape == [blockStart])
+        #expect(!text.hasImage)
+        let withImage = calls.filter(\.hasImage)
+        try #require(withImage.count == 1, "the pixels go over once: \(calls)")
+        #expect(withImage[0].cacheOffset == blockStart)
+        let wantsDelta = family == .qwen35
+        #expect(calls.allSatisfy { $0.hasRopeDelta == wantsDelta }, "\(calls)")
+        switch family {
+        case .qwen35:
+            #expect(withImage[0].tokensShape == [1, total - blockStart])
+        case .gemma4:
+            let blockEnd = blockStart + BatchShapedProcessor.block.count
+            #expect(withImage[0].tokensShape == [1, blockEnd - blockStart])
+            let tail = try #require(calls.last)
+            #expect(tail.cacheOffset == blockEnd)
+            #expect(tail.tokensShape == [total - blockEnd])
+        }
+    }
+
+    /// With bidirectional vision attention the history and the block go to
+    /// `prepare` together, since a warm start would lose the attention
+    /// inside the block.
+    @Test
+    func aBidirectionalCheckpointPrefillsTheTextBeforeItsBlockWithIt() async throws {
+        let recorder = PrepareRecorder()
+        let engine = try await engine(family: .gemma4, recorder: recorder, reusesPrefixBeforeMedia: false)
+        _ = try await collect(engine, request(turns: 3, imageAt: 2))
+        let head = try #require(recorder.calls.first)
+        let blockEnd = BatchShapedProcessor.blockStart(imageAt: 2) + BatchShapedProcessor.block.count
+        #expect(head.cacheOffset == 0)
+        #expect(head.tokensShape == [1, blockEnd])
+        #expect(head.hasImage)
+    }
+
     /// An input that ends in its block has no text to split off, Qwen3.5
     /// never splits, and the engine hands the pixels over once.
     @Test

@@ -2206,11 +2206,21 @@ public actor MLXSwiftEngine: InferenceEngine {
                         historySkip = reason
                     }
                 }
-                // An image request's text after its last media block is
-                // prefilled as a text request's is, in chunks: the processor's
-                // input runs in one shot, and a long agent turn after an image
-                // otherwise holds the whole prompt's attention at once.
+                // An image request's text before its first media block and
+                // after its last is prefilled as a text request's is, in
+                // chunks: the processor's input runs in one shot, so an image
+                // late in a long conversation, or a long agent turn after
+                // one, otherwise holds the whole prompt's attention at once.
                 var mediaHead: (prefilledTokens: Int, seconds: TimeInterval)?
+                if let first = fullPath?.textPrefillBeforeMedia(generationInput) {
+                    let seconds = try Self.prefillHistory(
+                        generationInput.text.tokens[0, ..<first], into: cache, context: context,
+                        state: fullPath?.iteratorState(), prefill: generateParams.prefill)
+                    mediaHead = (first, seconds)
+                    generationInput = LMInput(
+                        text: generationInput.text[0..., first...], image: generationInput.image,
+                        video: generationInput.video, audio: generationInput.audio)
+                }
                 if let split = fullPath?.mediaPrefillSplit(generationInput) {
                     let head = LMInput(
                         text: generationInput.text[0..., ..<split], image: generationInput.image,
@@ -2218,7 +2228,7 @@ public actor MLXSwiftEngine: InferenceEngine {
                     let seconds = try Self.prefill(
                         head, into: cache, context: context, state: fullPath?.iteratorState(),
                         prefill: generateParams.prefill)
-                    mediaHead = (split, seconds)
+                    mediaHead = ((mediaHead?.prefilledTokens ?? 0) + split, (mediaHead?.seconds ?? 0) + seconds)
                     generationInput = LMInput(tokens: generationInput.text.tokens[0, split...])
                 }
                 let generation: (stream: AsyncStream<TokenGeneration>, worker: Task<Void, Never>)
