@@ -61,8 +61,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   vision tower now loads as a vision model on the same path as Gemma 4 E4B,
   so it keeps the prompt cache, tool calls, structured output, logprobs and
   replayed reasoning when it reads images. It needs a `vision_config`, the
-  `vision_tower` weights and `preprocessor_config.json` naming
-  `Qwen3VLProcessor`, and the shape the parity runs covered: a `default`
+  `vision_tower` weights and processor metadata naming `Qwen3VLProcessor`
+  in the file mlx-swift-lm reads first, and the shape the parity runs covered: a `default`
   RoPE type in `text_config.rope_parameters`, no experts, a
   `linear_conv_kernel_dim` of 4, a `full_attention_interval` of 4 and a
   `vocab_size`. The text and vision classes run separate code for the
@@ -70,13 +70,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   tensors without its sanitizer, so a checkpoint that keeps `mtp.` tensors,
   an `lm_head` beside tied embeddings, or a language-model tensor outside
   `language_model.` stays text, where it loads; a failed vision load is not
-  retried as text. `qwen3_5_moe` still loads as text. Checked on
+  retried as text. So does a raw Hugging Face layout (`model.visual.*`,
+  such as `Qwen/Qwen3.6-27B` itself). `qwen3_5_moe` still loads as text. Checked on
   Qwen3.6-27B-4bit and Qwen3.5-4B-MLX-8bit against their text loads: the
   agent prompts render the same tokens; next-token log-probabilities differ
   by at most 1.44, 2.01 and 0.62 on the 27B (against bounds of 1.71, 2.16
   and 1.09, from the text load's own difference when the same prompt is
   prefilled in 128-token chunks) and 0.37, 0.27 and 0.37 on the 4B (against
-  0.5); greedy continuations are the same up to the first near-tie; the
+  0.62, 0.5 and 0.5); greedy continuations are the same up to the first
+  near-tie (which came within two tokens on one prompt of each); the
   second turn reuses the same 1,662 tokens; and the vision tower adds
   0.92 GB and 0.67 GB resident. Neither load speculates, since the
   linear-attention cache cannot be rewound. Over the API both read text from
@@ -85,13 +87,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   small text poorly: the original Qwen3.6-27B weights in transformers read
   "MACMLX 2026" drawn at 1280×320 as "maxsong" and at 2560×640 as
   "MACMLX 2020", and read it right at 3840×960, the size the tests now use.
-  Upstream's `Qwen35.prepare` already runs an image in windows, so a 22.7k
-  token session with an image in turn 1 peaks at 18.7 GB on the 27B, as it
-  does without the image, but takes 50.9 s to the first token in turn 5
-  against 37.6 s, since image requests record nothing. An image sent in a
+  Upstream's `Qwen35.prepare` already runs an image in windows, so a
+  23.9k-token session with an image in turn 1 (22.7k without it) peaks at
+  18,715 MiB on the 27B, as it does without the image, but takes 50.9 s to
+  the first token in turn 5 against 37.6 s, since image requests record
+  nothing. An image sent in a
   new user message after an agent loop reuses what a text message there
   would: on the 4B, nothing, because the chat template drops the earlier
-  turns' reasoning once a new user message arrives.
+  turns' reasoning once a new user message arrives. Prompt-cache entries a
+  vision Qwen3.5/3.6 checkpoint left on SSD under the text load miss once.
 - **Gemma 4 MoE checkpoints load.** The 26B-A4B is no longer refused at load
   time; it loads as text. Its text output was checked against mlx-lm 0.32.2
   on gemma-4-26b-a4b-it-8bit: on three agent prompts, the same greedy tokens

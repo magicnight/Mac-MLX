@@ -8,10 +8,12 @@ loads through the VLM factory and runs on macMLX's text generation path, so
 it keeps the prompt cache, tool calls and replayed reasoning. One without the
 tower, and the 31B dense, 26B-A4B and E2B (attention, MoE and MLP variants
 the parity run did not cover), load as text. Dense Qwen3.5/3.6 (`qwen3_5`)
-takes the same path, checked on Qwen3.6-27B and Qwen3.5-4B; a checkpoint
-with scaled RoPE, an unusual linear-attention shape, `mtp.` tensors or no
-processor metadata loads as text, and the MoE (`qwen3_5_moe`) still loads as
-text, so images sent to those are dropped. This page
+takes the same path, checked on Qwen3.6-27B and Qwen3.5-4B. A checkpoint
+in the raw Hugging Face layout (`model.visual.*`), with scaled RoPE, an
+unusual linear-attention shape, no `vocab_size`, `mtp.` tensors, an
+`lm_head` beside tied embeddings or no processor metadata loads as text,
+and the MoE (`qwen3_5_moe`) still loads as text, so images sent to those
+are dropped. This page
 tracks the **architectures macMLX itself ports in pure Swift** and registers
 into the model factory as external overlays, together with their support
 tier.

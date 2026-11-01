@@ -4,8 +4,9 @@ Status: approved 2026-10-31. Rollout PR 1 (the engine seam) is split in
 two: the seam itself first (#165), with every image request running cold,
 then image cache step 1 (#166). PR 2 flips Gemma 4 (#167); its parity run
 changed three things, listed under "What the Gemma 4 parity run changed"
-below. Qwen3.5/3.6 did not pass its run and stays on text (see "What the
-Qwen3.6 parity run found"). E2B, the 26B-A4B and the 31B dense were run
+below. Qwen3.5/3.6 did not pass its first run (see "What the Qwen3.6
+parity run found"); it passed a second one with a larger fixture and
+flipped (PR 3, see "What the Qwen3.6 flip run found"). E2B, the 26B-A4B and the 31B dense were run
 too and stay text (see "What the other Gemma 4 sizes' runs found").
 
 ## Why
@@ -486,8 +487,9 @@ below.
   - On Gemma 4 E4B the same read is 0.24 to 0.50, under the bound.
   - Gate 2 for this family should compare against that noise rather than a
     fixed δ. On 2026-11-01 the user chose that bound (δ or 1.25 times the
-    rechunked noise, whichever is larger); these numbers are inside it, but
-    Qwen3.6 was not run again under it.
+    rechunked noise, whichever is larger); these numbers are inside it, and
+    the run of 2026-11-01 under it passed (see "What the Qwen3.6 flip run
+    found").
 - **Gate 4 failed on reading.**
   - Over the API, Qwen3.6 read the fixture "MACMLX 2026" as "MAXLX COROS",
     and as "MAXX 2000" in a tool call.
@@ -506,8 +508,9 @@ below.
     as "MAX 2016" with thinking on. mlx-community's 8-bit conversion
     misreads it in mlx-vlm too ("maxson"), so neither the 4-bit language
     model nor the conversion is the cause, and neither MLX implementation.
-    Qwen3.5-4B (8-bit) misreads it as "LILX 2026". The same render scaled
-    up 2× (2560×640) reads "MACMLX 2026", and a tight crop nearly does
+    Qwen3.5-4B (8-bit) misreads it as "LILX 2026". The same render upscaled
+    2× (2560×640, bicubic) reads "MACMLX 2026", though text drawn at
+    2560×640 does not (see the flip run), and a tight crop nearly does
     ("MACMLX2020"): at this resolution each 32-pixel merged patch carries
     too little of each glyph for this family.
   - So gate 4 for this family needs a fixture this family reads in the
@@ -530,7 +533,8 @@ fixture. Both passed, and dense Qwen3.5/3.6 flipped.
 - **Fixture.** The image gate drew "MACMLX 2026" at 640×160 points
   (1280×320 pixels on Retina). On the original Qwen3.6-27B weights,
   transformers reads it as "maxsong" at that size and as "MACMLX 2020" at
-  2560×640 and 3200×800 (also in a regular or semibold weight). It reads
+  2560×640 and 3200×800 (also in a regular or semibold weight), where a
+  bicubic 2× upscale of the 1280×320 render reads right. It reads
   it right at 3840×960 and 4096×1024, with the text moved by a few pixels
   or in a regular weight. The fixture is drawn at 3840×960 pixels, set in
   pixels so the display's backing scale does not change it.
@@ -551,8 +555,11 @@ fixture. Both passed, and dense Qwen3.5/3.6 flipped.
 - **Gate 2.**
   - 27B: |Δ log p| 1.44, 2.01 and 0.62 against bounds of 1.71, 2.16 and
     1.09 (rechunked noise 1.37, 1.73 and 0.87); KL at most 2.0e-2.
-  - 4B: 0.37, 0.27 and 0.37 against 0.5.
-  - Greedy decoding agrees up to the first near-tie on both.
+  - 4B: 0.37, 0.27 and 0.37 against 0.62, 0.5 and 0.5 (rechunked noise
+    0.50, 0.13 and 0.31).
+  - Greedy decoding agrees up to the first near-tie on both. That compared
+    11, 10 and 2 tokens on the 27B and 52, 0 and 15 on the 4B, so on two
+    prompts it says little.
 - **Gates 3, 6 and 7.**
   - Turn 2 reuses 1,662 tokens on both loads of each.
   - Growth is 921.7 MB on the 27B (921.5 MB of tower) and 667.03 MB on the
@@ -564,7 +571,9 @@ fixture. Both passed, and dense Qwen3.5/3.6 flipped.
   8 and 4. A text request after an image request reuses nothing from it.
 - **Step 1.** Against the noise of the same image request rechunked:
   - 27B: warm against cold 0.56 (bound 0.63, noise 0.50), cold against
-    one shot 0.62, warm against one shot 0.38.
+    one shot 0.62, warm against one shot 0.38. The noise comes from a
+    token above the floor, so the floor leaves the bound as it was, and
+    cold against one shot passes by 0.005.
   - 4B: 0.25, 0.27 and 0.27 (bound 0.5).
   - On Gemma 4 E4B the new fixture moved warm against one shot to 0.60,
     against 0.5. Gemma 4 prepares an image in one shot, so the rechunked
@@ -574,9 +583,11 @@ fixture. Both passed, and dense Qwen3.5/3.6 flipped.
     KL of 4.9e-6.
   - The user chose to compare |Δ log p| only on tokens above a log p of
     −10 and to check the KL and the top token against the one-shot
-    prefill, which covers the tail. On E4B that leaves only the top token
-    above the floor, so its step 1 rests on the KL and the top token; the
-    27B's and 4B's values did not change.
+    prefill. Those bound the bulk of the mass, not each token below the
+    floor: on E4B a rank-3 token could rise from −10.8 to about −3 and
+    still pass. On E4B only the top token is above the floor, so its step 1
+    rests on the KL and the top token; the reading tests stand beside it.
+    The rechunking noise is taken over the same tokens above the floor.
 - **Gate 5.**
   - Image in turn 1, 27B: turn 5 started in 50.9 s at an 18,715 MiB peak,
     against 37.6 s and 18,754 MiB without the image. Image requests record
@@ -590,9 +601,17 @@ fixture. Both passed, and dense Qwen3.5/3.6 flipped.
     snapshots. It is not the image path.
 - **Existing suites** (`HistoryBoundaryPromptCacheSmokeTests`,
   `ReasoningHistorySmokeTests`, `AnthropicCountTokensE2ETests`,
-  `Qwen36ModelTests`) pass on the full-path load of both, and
-  `ImagePrefixCacheSmokeTests` passes with the larger fixture, reading it
-  on every path.
+  `Qwen36ModelTests`) pass on the full-path load of both.
+  `ImagePrefixCacheSmokeTests` passed on both with the old fixture, which
+  it records without asserting, and with the larger one on Qwen3.6-27B,
+  where it reads the text on every path. Decoding runs at 20.7 tok/s on the
+  27B's full-path load (20.6 on the text load).
+- **Not run.** Several images in one request, Qwen3.6-27B-8bit (the same
+  shape as the 4-bit), and `qwen3_5_moe`.
+- **Why the 27B reuses only 1,660 tokens.** Its history-boundary snapshot
+  at 6.9k tokens is larger than the 512 MiB hot tier, and the suites run
+  without a cold tier, so every text turn reuses only the system-prompt
+  entry. The 4B's snapshots fit, so its turns reuse 6,918 and 12,176.
 
 ## What the other Gemma 4 sizes' runs found
 
@@ -662,8 +681,8 @@ On 2026-11-01 the parity and image suites ran on the three other mlx-community
   and passes the other two; the other gates and the image gate pass. With
   itself as a draft, the text load's greedy output differs from its own
   output without one (22 of 24 drafts accepted); the full path's does not.
-- Qwen3.6's numbers from the first run are inside the new gate 2 bound, but
-  it was not run again; its reading is covered above.
+- Qwen3.6's numbers from the first run are inside the new gate 2 bound; its
+  second run, under that bound, is "What the Qwen3.6 flip run found".
 
 ## Goals, non-goals, anti-goals
 
