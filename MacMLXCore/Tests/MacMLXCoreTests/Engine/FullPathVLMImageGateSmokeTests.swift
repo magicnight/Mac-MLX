@@ -25,11 +25,12 @@ import enum MacMLXCore.JSONValue
 /// - an image request records nothing, so a text request after it with the
 ///   same prefix reuses nothing;
 /// - and, on the engine, image cache step 1: an image request after a long
-///   text turn, warm against cold, has |Δ log p| within gate 2's bound and
-///   KL below δ²/2 on its first token. Compared on the top 10 logprobs the
-///   engine reports (its `top_logprobs` cap), with δ from the cold prefill's
-///   top-1 logit and the noise from the same request prefilled in 128-token
-///   chunks. A
+///   text turn, warm against cold and each against a one-shot prefill, has
+///   |Δ log p| within gate 2's bound, KL below δ²/2 and the same top token
+///   on its first token. Compared on the top 10 logprobs the engine reports
+///   (its `top_logprobs` cap), |Δ log p| only above a log p of −10
+///   (``stepOneLogProbFloor``), with δ from the cold prefill's top-1 logit
+///   and the noise from the same request prefilled in 128-token chunks. A
 ///   checkpoint whose image requests run cold (Gemma 4 with bidirectional
 ///   vision attention) must reuse nothing instead;
 /// - also on the engine: the image is read with `kv_bits` 8 and 4, and a
@@ -196,6 +197,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         var missing: [String] = []
         for alternative in coldTop {
             guard let other = warmByToken[alternative.token] else { missing.append(alternative.token); continue }
+            guard Double(alternative.logprob) > Self.stepOneLogProbFloor else { continue }
             maxDelta = max(maxDelta, abs(Double(alternative.logprob) - other))
         }
         let shared = coldTop.compactMap { a in warmByToken[a.token].map { (Double(a.logprob), $0) } }
@@ -232,20 +234,35 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
         let oneShot = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(coldLogits.logits)
         let oneShotTop = oneShot.indices.sorted { oneShot[$0] > oneShot[$1] }.prefix(10)
+        let oneShotFirst = try XCTUnwrap(oneShotTop.first.map {
+            tokenizer.decode(tokenIds: [$0], skipSpecialTokens: false)
+        })
         for (label, top) in [("cold", coldTop), ("warm", warmTop)] {
             let byToken = Dictionary(top.map { ($0.token, Double($0.logprob)) }, uniquingKeysWith: max)
             var splitDelta = 0.0
             var splitMissing: [String] = []
+            var shared: [(oneShot: Double, split: Double)] = []
             for id in oneShotTop {
                 let text = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
                 guard let split = byToken[text] else { splitMissing.append(text); continue }
+                shared.append((oneShot[id], split))
+                guard oneShot[id] > Self.stepOneLogProbFloor else { continue }
                 splitDelta = max(splitDelta, abs(split - oneShot[id]))
             }
+            let pNorm = FullPathVLMParitySmokeTests.LogitComparison.logSumExp(shared.map(\.oneShot))
+            let qNorm = FullPathVLMParitySmokeTests.LogitComparison.logSumExp(shared.map(\.split))
+            let splitKL = shared.reduce(0.0) { sum, pair in
+                let lp = pair.oneShot - pNorm
+                return sum + exp(lp) * (lp - (pair.split - qNorm))
+            }
             print("[image-gate] \(modelID) \(label) run against one shot: "
-                + String(format: "max|Δlogp|=%.5f ", splitDelta) + "missing=\(splitMissing)")
+                + String(format: "max|Δlogp|=%.5f KL=%.2e ", splitDelta, splitKL)
+                + "top=\(top.first?.token.debugDescription ?? "-") missing=\(splitMissing)")
             // The tenth place can swap with the eleventh between two prefills.
             XCTAssertTrue(splitMissing.count <= 1, "gate 4: the \(label) run's top 10 lacks \(splitMissing)")
             XCTAssertLessThanOrEqual(splitDelta, bound, "gate 4: \(label) against one-shot prefill, |Δ log p|")
+            XCTAssertLessThan(splitKL, delta * delta / 2, "gate 4: \(label) against one-shot prefill, KL")
+            XCTAssertEqual(top.first?.token, oneShotFirst, "gate 4: \(label) against one-shot prefill, top token")
         }
     }
 
@@ -481,6 +498,14 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
             }
         }
     }
+
+    /// Step 1 compares |Δ log p| only on tokens whose reference log p is
+    /// above this (a probability above about 4.5e-5); KL and the top token
+    /// cover the tail below it. With the 3840×960 fixture Gemma 4 E4B puts
+    /// nearly all mass on its first token, and the next ones sit near
+    /// −10 to −20, where two prefills of the same prompt in other chunks move
+    /// log p by 0.6 (rank 3, −10.78 against −10.18) at a KL of 5e-6.
+    private static let stepOneLogProbFloor = -10.0
 
     /// How far above the text turn before it a late image turn may peak: the
     /// image block's activations and the KV of the turn's new tokens, not a
