@@ -211,26 +211,32 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         XCTAssertLessThanOrEqual(maxDelta, delta, "gate 4: warm against cold, |Δ log p|")
         XCTAssertLessThan(kl, delta * delta / 2, "gate 4: warm against cold, KL")
 
-        // The cold run splits its prefill after the image
-        // (`FullPathVLM.mediaPrefillSplit`); the logits read prefills in one
-        // shot. Over the one-shot run's top 10, by token text.
+        // Both runs above prepare the block on a cached prefix: the warm one
+        // on its hit, the cold one after prefilling the text before the
+        // block itself (`FullPathVLM.textPrefillBeforeMedia`), and both
+        // split after it (`FullPathVLM.mediaPrefillSplit`). The logits read
+        // prefills the whole prompt in one `prepare`, the reference that
+        // catches a block whose attention a cached prefix changes. Each run
+        // against it over its top 10, by token text.
         let loaded = try await HuggingFaceTokenizerLoader().load(from: directory)
         let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
         let oneShot = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(coldLogits.logits)
         let oneShotTop = oneShot.indices.sorted { oneShot[$0] > oneShot[$1] }.prefix(10)
-        let coldByToken = Dictionary(coldTop.map { ($0.token, Double($0.logprob)) }, uniquingKeysWith: max)
-        var splitDelta = 0.0
-        var splitMissing: [String] = []
-        for id in oneShotTop {
-            let text = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
-            guard let split = coldByToken[text] else { splitMissing.append(text); continue }
-            splitDelta = max(splitDelta, abs(split - oneShot[id]))
+        for (label, top) in [("cold", coldTop), ("warm", warmTop)] {
+            let byToken = Dictionary(top.map { ($0.token, Double($0.logprob)) }, uniquingKeysWith: max)
+            var splitDelta = 0.0
+            var splitMissing: [String] = []
+            for id in oneShotTop {
+                let text = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
+                guard let split = byToken[text] else { splitMissing.append(text); continue }
+                splitDelta = max(splitDelta, abs(split - oneShot[id]))
+            }
+            print("[image-gate] \(modelID) \(label) run against one shot: "
+                + String(format: "max|Δlogp|=%.5f ", splitDelta) + "missing=\(splitMissing)")
+            // The tenth place can swap with the eleventh between two prefills.
+            XCTAssertTrue(splitMissing.count <= 1, "gate 4: the \(label) run's top 10 lacks \(splitMissing)")
+            XCTAssertLessThanOrEqual(splitDelta, delta, "gate 4: \(label) against one-shot prefill, |Δ log p|")
         }
-        print("[image-gate] \(modelID) split prefill against one shot: "
-            + String(format: "max|Δlogp|=%.5f ", splitDelta) + "missing=\(splitMissing)")
-        // The tenth place can swap with the eleventh between two prefills.
-        XCTAssertTrue(splitMissing.count <= 1, "gate 4: the split run's top 10 lacks \(splitMissing)")
-        XCTAssertLessThanOrEqual(splitDelta, delta, "gate 4: split against one-shot prefill, |Δ log p|")
     }
 
     // MARK: - Gate 4, on the engine
@@ -467,7 +473,8 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
     }
 
     /// How far above the text turn before it a late image turn may peak: the
-    /// image's own activations, not the history's.
+    /// image block's activations and the KV of the turn's new tokens, not a
+    /// one-shot prefill of the history.
     private static let lateImagePeakAllowance = 1 << 30
 
     // MARK: - Session

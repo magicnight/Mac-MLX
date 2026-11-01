@@ -2217,6 +2217,9 @@ public actor MLXSwiftEngine: InferenceEngine {
                         generationInput.text.tokens[0, ..<first], into: cache, context: context,
                         state: fullPath?.iteratorState(), prefill: generateParams.prefill)
                     mediaHead = (first, seconds)
+                    // A cancel that came during that prefill stops here,
+                    // before the media's one-shot `prepare`.
+                    try Task.checkCancellation()
                     generationInput = LMInput(
                         text: generationInput.text[0..., first...], image: generationInput.image,
                         video: generationInput.video, audio: generationInput.audio)

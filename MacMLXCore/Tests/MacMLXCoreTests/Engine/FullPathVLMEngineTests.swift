@@ -209,6 +209,7 @@ struct FullPathVLMEngineTests {
         let withImage = calls.filter(\.hasImage)
         try #require(withImage.count == 1, "the pixels go over once: \(calls)")
         #expect(withImage[0].cacheOffset == blockStart)
+        #expect(withImage[0].maskShape == withImage[0].tokensShape, "the mask is sliced with the tokens")
         let wantsDelta = family == .qwen35
         #expect(calls.allSatisfy { $0.hasRopeDelta == wantsDelta }, "\(calls)")
         switch family {

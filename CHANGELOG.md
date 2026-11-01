@@ -42,7 +42,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   agent session with an image re-prefills from that image on every later
   turn, since image requests record nothing (in the session measured, the
   image came in turn 1, so from the start): turn 5 of a 22.7k-token session
-  started in 3.9 s at an 11.1 GB peak, against 3.0 s and 9.5 GB without the
+  started in 3.6 s at a 9,160 MiB peak, against 3.0 s and 9,477 MiB without the
   image in the same run. The text before an image prefills in chunks too,
   so an image sent late in a long conversation costs about what its own
   block does: with the same session's image moved to turn 5 (22.7k tokens,

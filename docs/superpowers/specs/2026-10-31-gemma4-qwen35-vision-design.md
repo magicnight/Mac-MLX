@@ -548,9 +548,9 @@ On 2026-11-01 the parity and image suites ran on the three other mlx-community
 - **An image late in a long session is the costly case, and it blocks the
   31B.** Gate 5 put the image in turn 1. With it in turn 5 instead (four
   text turns, then the image; `testAnImageLateInALongSessionCompletes`),
-  everything before the image goes through `prepare` in one shot, with no
-  cancel point, because the split only chunks the text after the last
-  image:
+  everything before the image went through `prepare` in one shot, with no
+  cancel point, because the split only chunked the text after the last
+  image (as it still does on a bidirectional checkpoint):
   - E4B: 22,684 tokens, 1,450 reused, first token after 17.4 s at a 41,957
     MiB peak, 32,620 MiB above turn 4's.
   - 31B: 22,688 tokens, none reused (its image requests run cold), first
@@ -561,8 +561,10 @@ On 2026-11-01 the parity and image suites ran on the three other mlx-community
   (`FullPathVLM.textPrefillBeforeMedia`), as text, so `prepare` starts at
   the block as it does on a warm hit: turn 5 then took 3.6 s at a 9,486 MiB
   peak, 149 MiB above turn 4's, and the case asserts the peak stays within
-  1 GiB of the text turn's. Warm against cold in step 1 moved from 0.37 to
-  0.16, since both runs now prepare the block on a cached prefix. For a
+  1 GiB of the text turn's. Since the cold run in step 1 now prepares the
+  block on a cached prefix too, step 1 also compares the warm run with the
+  one-shot `prepare` the logits read does, as it already compared the cold
+  run. For a
   bidirectional checkpoint that is the case `reusesPrefixBeforeMedia` turns
   off, so the 31B needs a bounded head another way before it flips.
 - **E2B: one prompt over, stays text.** On "after a tool result" the gap is
