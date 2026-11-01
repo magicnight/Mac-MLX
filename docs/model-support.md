@@ -7,9 +7,13 @@ side. Gemma 4 is one of them: an E4B-shaped checkpoint with its vision tower
 loads through the VLM factory and runs on macMLX's text generation path, so
 it keeps the prompt cache, tool calls and replayed reasoning. One without the
 tower, and the 31B dense, 26B-A4B and E2B (attention, MoE and MLP variants
-the parity run did not cover), load as text. Qwen3.5/3.6 are VLM architectures there
-too, but macMLX still loads them as text until they pass the same parity run;
-images sent to them are dropped. This page
+the parity run did not cover), load as text. Dense Qwen3.5/3.6 (`qwen3_5`)
+takes the same path, checked on Qwen3.6-27B and Qwen3.5-4B. A checkpoint
+in the raw Hugging Face layout (`model.visual.*`), with scaled RoPE, an
+unusual linear-attention shape, no `vocab_size`, `mtp.` tensors, an
+`lm_head` beside tied embeddings or no processor metadata loads as text,
+and the MoE (`qwen3_5_moe`) still loads as text, so images sent to those
+are dropped. This page
 tracks the **architectures macMLX itself ports in pure Swift** and registers
 into the model factory as external overlays, together with their support
 tier.
@@ -63,7 +67,7 @@ just compatibility validation with real weights:
 
 | Model | `model_type` | Status |
 |---|---|---|
-| Qwen3.6 (27B dense / 35B-A3B MoE) | `qwen3_5` / `qwen3_5_moe` | ✅ Validated — 20.6 tok/s (27B 4-bit) |
+| Qwen3.6 (27B dense / 35B-A3B MoE) | `qwen3_5` / `qwen3_5_moe` | ✅ Validated — 20.6 tok/s (27B 4-bit); the 27B 4-bit reads images on the full path (the MoE was not run) |
 | ms-marco-MiniLM-L-6-v2 (`/v1/rerank`, BERT cross-encoder) | `bert` + `BertForSequenceClassification` | ✅ Validated — logits match the PyTorch fp32 reference to 2e-6 with TF32 off, 0.025 under M5's default TF32 matmuls; identical ordering (`RerankEngineSmokeTests`, fixture captured by `docs/reference/capture_ms_marco_reranker.py` at a pinned revision) |
 | Qwen3-Reranker-0.6B-4bit (`/v1/rerank`, Qwen3 causal reranker) | `qwen3` + `Qwen3ForCausalLM`, detected by the `Qwen3-Reranker` name (a shipped `1_LogitScore` must declare both yes and no tokens; this conversion ships none) | ✅ Validated — ordering and 0...1 range on a real checkpoint; no reference for the 4-bit conversion is captured in this repository |
 | nli-MiniLM2-L6-H768 (`/v1/rerank`, 3-way NLI head scored as the probability of `entailment`) | `roberta` + `RobertaForSequenceClassification`, labels contradiction / entailment / neutral | ✅ Validated — entailment probabilities match the PyTorch fp32 reference (`RerankEngineSmokeTests`, fixture captured by `docs/reference/capture_nli_reranker.py` at a pinned revision); the values are around 1e-3 for question/statement pairs, so a client-side relevance threshold will drop them |

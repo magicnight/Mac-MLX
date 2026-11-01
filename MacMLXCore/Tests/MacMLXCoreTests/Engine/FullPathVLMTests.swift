@@ -35,18 +35,21 @@ struct FullPathVLMTests {
             "unforced, only a served family takes the full path")
     }
 
-    /// Gemma 4 passed its parity gate on `gemma-4-e4b-it-8bit`; Qwen3.5/3.6
-    /// has not run it. A family joins with its own flip.
+    /// Gemma 4 passed its parity gate on `gemma-4-e4b-it-8bit`, Qwen3.5/3.6
+    /// on `Qwen3.6-27B-4bit` and `Qwen3.5-4B-MLX-8bit`. A family joins with
+    /// its own flip.
     @Test
-    func onlyGemma4IsServed() {
-        #expect(FullPathVLM.servedFamilies == [.gemma4])
+    func bothFamiliesAreServed() {
+        #expect(FullPathVLM.servedFamilies == [.gemma4, .qwen35])
     }
 
     /// Each family's `processorClass` is the key the VLM factory's processor
     /// registry builds that family's processor under, in the source this
     /// build resolved, and no `model_type` resolver in the loading registry
-    /// overrides what a Gemma 4 checkpoint declares, so the class a
-    /// checkpoint declares is the processor it gets.
+    /// overrides what a Gemma 4 or Qwen3.5 checkpoint declares, so the class
+    /// a checkpoint declares is the processor it gets. (Upstream's Qwen3.5
+    /// resolver only supplies metadata to a checkpoint that ships none, and
+    /// such a checkpoint stays text.)
     @Test(.enabled(if: ResolvedUpstreamSource.mlxSwiftLM(Self.factorySource) != nil
                    || ResolvedUpstreamSource.isRequired,
                    "no SwiftPM checkout of mlx-swift-lm next to the test bundle"))
@@ -64,6 +67,11 @@ struct FullPathVLMTests {
         let loading = try #require(ResolvedUpstreamSource.mlxSwiftLM(Self.loadingSource),
                                    "no VLMProcessorLoadingRegistry.swift in the checkout")
         #expect(!loading.contains(#""gemma4":"#), "a resolver now overrides Gemma 4's processor")
+        #expect(!loading.contains(#""qwen3_5":"#), "a resolver now overrides Qwen3.5's processor")
+        let qwen35Resolver = try #require(loading.range(of: "struct Qwen35ProcessorLoadingResolver"))
+        let qwen35Body = String(loading[qwen35Resolver.upperBound...])
+            .components(separatedBy: "\n}\n").first ?? ""
+        #expect(!qwen35Body.contains("func processorType"), "Qwen3.5's resolver now picks the processor type")
     }
 
     private static let factorySource = "Libraries/MLXVLM/VLMModelFactory.swift"

@@ -155,18 +155,27 @@ final class ImagePrefixCacheSmokeTests: XCTestCase {
     }
 
     /// High-contrast text drawn to a temporary PNG, large enough to read.
+    /// Drawn at 3840×960 pixels, as the full-path image gate draws its
+    /// fixture: Qwen3.5/3.6 misreads this text at smaller sizes, in the
+    /// reference implementation too.
     private func renderTextImage(_ text: String) throws -> URL {
-        let size = NSSize(width: 640, height: 160)
-        let image = NSImage(size: size)
-        image.lockFocus()
+        let (width, height) = (3840, 960)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0),
+            let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { throw XCTSkip("Could not render the test image") }
+        rep.size = NSSize(width: width, height: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
         NSColor.white.setFill()
-        NSRect(origin: .zero, size: size).fill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
         (text as NSString).draw(
-            at: NSPoint(x: 24, y: 52),
-            withAttributes: [.font: NSFont.systemFont(ofSize: 56, weight: .bold), .foregroundColor: NSColor.black])
-        image.unlockFocus()
-        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
-            let png = rep.representation(using: .png, properties: [:])
+            at: NSPoint(x: 144, y: 312),
+            withAttributes: [.font: NSFont.systemFont(ofSize: 336, weight: .bold), .foregroundColor: NSColor.black])
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:])
         else { throw XCTSkip("Could not render the test image") }
         let url = FileManager.default.temporaryDirectory
             .appending(path: "image-prefix-smoke-\(UUID().uuidString).png")

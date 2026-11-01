@@ -21,15 +21,17 @@ import MLXLMCommon
 /// - `MTPSpeculativeTokenIterator` needs the TARGET model to emit
 ///   `mtpLastHiddenStatesKey` + `mtpSharedKVStatesKey` in its `LMOutput.State`;
 ///   without them it latches into single-token passthrough on the first round.
-/// - In mlx-swift-lm the only model that emits them is `Gemma4` in **MLXVLM**
-///   (via its `callAsFunction(_:cache:state:)` overload). MLXLLM's
-///   `Gemma4Model` has no emit path at all.
-/// - A Gemma 4 checkpoint with its vision tower is `.mlxVLM` and loads
-///   through the VLM factory as that emitting `Gemma4`, served on the text
-///   generation path (``FullPathVLM``). One without it is `.mlx` and loads
-///   through `LLMModelFactory` as the non-emitting `Gemma4Model`.
+/// - In mlx-swift-lm the models that emit them are `Gemma4` in **MLXVLM**
+///   (via its `callAsFunction(_:cache:state:)` overload) and `Qwen35` in both
+///   **MLXVLM** and **MLXLLM**. MLXLLM's `Gemma4Model` has no emit path at
+///   all.
+/// - A Gemma 4 or Qwen3.5/3.6 checkpoint with its vision tower is `.mlxVLM`
+///   and loads through the VLM factory as the emitting VLM class, served on
+///   the text generation path (``FullPathVLM``). A Gemma 4 one without it is
+///   `.mlx` and loads through `LLMModelFactory` as the non-emitting
+///   `Gemma4Model`.
 ///
-/// So the target side is now reachable for a vision Gemma 4 checkpoint, but
+/// So the target side is reachable for those checkpoints, but
 /// `runLLMGeneration` decodes only with `TokenIterator` or upstream's
 /// draft-model `generateTokens(..., draftModel:)` (the classic
 /// `SpeculativeTokenIterator`), and a draft model always loads through

@@ -446,11 +446,10 @@ public actor ModelLibraryManager {
     /// calls, replayed reasoning and history snapshots, and these are what
     /// macMLX serves agents with. Their images are dropped until each family
     /// passes the full-path parity gate and moves to `fullPathVLMTypes`
-    /// (Qwen3.5/3.6 has not; `gemma4_unified` and `qwen3_5_moe` have no local
-    /// checkpoint to run it on).
+    /// (`gemma4_unified` and `qwen3_5_moe` have no local checkpoint to run it
+    /// on).
     static let vlmTypesServedAsText: Set<String> = [
         "gemma4_unified",
-        "qwen3_5",
         "qwen3_5_moe",
     ]
 

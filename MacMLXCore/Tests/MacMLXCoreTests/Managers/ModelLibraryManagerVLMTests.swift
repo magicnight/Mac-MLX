@@ -122,7 +122,7 @@ struct ModelLibraryManagerVLMTests {
         #expect(vlm.isDisjoint(with: fullPath))
         #expect(text.isDisjoint(with: fullPath))
         #expect(vlm.union(text).union(fullPath) == Self.upstreamVLMRegistryKeys)
-        #expect(fullPath == ["gemma4"])
+        #expect(fullPath == ["gemma4", "qwen3_5"])
         for key in Self.upstreamVLMRegistryKeys {
             #expect(await VLMTypeRegistry.shared.contains(key), "\(key) is not in the VLM registry")
         }
@@ -211,8 +211,8 @@ struct ModelLibraryManagerVLMTests {
     }
 
     /// With no vision tower in sight (the config names no `vision_config`),
-    /// a Gemma 4 checkpoint is text, and the types not served on the full path
-    /// are text whatever they carry.
+    /// a Gemma 4 or Qwen3.5 checkpoint is text, and the types not served on
+    /// the full path are text whatever they carry.
     @Test(arguments: ["gemma4", "gemma4_unified", "qwen3_5", "qwen3_5_moe"])
     func multimodalAgentModelsStayOnTheTextPath(modelType: String) async throws {
         let temp = try TemporaryDirectory()
@@ -319,15 +319,131 @@ struct ModelLibraryManagerVLMTests {
         #expect(try await scanFormat(temp.url) == format)
     }
 
-    /// Qwen3.5 has not flipped, so a complete-looking Qwen3.5 checkpoint is
-    /// still text.
-    @Test
-    func aCompleteQwen35CheckpointIsStillText() async throws {
+    // MARK: - Qwen3.5/3.6 on the full path
+
+    /// A Qwen3.6-27B checkpoint as mlx-community converts it; a Qwen3.5-4B
+    /// one with tied embeddings and no `lm_head`; and the RoPE type spelled
+    /// `type`, which wins over `rope_type` in both classes.
+    @Test(arguments: [
+        ("", false),
+        (#""tie_word_embeddings": true"#, true),
+        (#""rope_parameters": {"type": "default"}"#, false),
+        (#""rope_parameters": {"type": "default", "rope_type": "yarn"}"#, false),
+    ])
+    func aQwen35CheckpointWithItsVisionTowerIsAVLM(extra: String, tied: Bool) async throws {
+        let textConfig = Self.qwen35Text(extra)
+        if !extra.isEmpty {
+            #expect(textConfig != Self.qwen35Text(""), "the test's members were applied")
+        }
         let temp = try TemporaryDirectory()
-        let dir = try writeGemma4(in: temp.url, name: "qwen-3-5", modelType: "qwen3_5")
-        try Data(#"{"processor_class": "Qwen3VLProcessor"}"#.utf8)
-            .write(to: dir.appending(path: "processor_config.json"))
+        try writeQwen35(
+            in: temp.url, name: "qwen-3-5", textConfig: textConfig,
+            names: tied ? Self.qwen35Names.filter { !$0.contains("lm_head") } : Self.qwen35Names)
+        #expect(try await scanFormat(temp.url) == .mlxVLM)
+    }
+
+    /// The four config values the text and vision classes read with
+    /// separate code, each off the run's value, and a config without
+    /// `rope_parameters` or `text_config`, stay text.
+    @Test(arguments: [
+        #"{"rope_parameters": {"rope_type": "yarn", "factor": 4.0}, "vocab_size": 248320}"#,
+        #"{"rope_parameters": {"type": "linear"}, "vocab_size": 248320}"#,
+        #"{"rope_parameters": {"type": "yarn", "rope_type": "default"}, "vocab_size": 248320}"#,
+        #"{"rope_scaling": {"type": "default"}, "vocab_size": 248320}"#,
+        ModelLibraryManagerVLMTests.qwen35Text(#""num_experts": 256"#),
+        ModelLibraryManagerVLMTests.qwen35Text(#""linear_conv_kernel_dim": 1"#),
+        ModelLibraryManagerVLMTests.qwen35Text(#""full_attention_interval": 2"#),
+        #"{"rope_parameters": {"rope_type": "default"}}"#,
+    ])
+    func aQwen35ShapeTheParityRunDidNotCoverStaysText(textConfig: String) async throws {
+        let temp = try TemporaryDirectory()
+        try writeQwen35(in: temp.url, name: "qwen-3-5-shape", textConfig: textConfig)
         #expect(try await scanFormat(temp.url) == .mlx)
+    }
+
+    /// The vision class requires `text_config`; the root is not read.
+    @Test
+    func aQwen35ConfigWithoutATextConfigIsNotCovered() throws {
+        let text = try #require(try JSONSerialization.jsonObject(
+            with: Data(Self.qwen35Text("").utf8)) as? [String: Any])
+        #expect(FullPathVLM.Family.qwen35.parityRunCovers(["text_config": text]))
+        #expect(!FullPathVLM.Family.qwen35.parityRunCovers(text))
+    }
+
+    /// Tensor names the vision class refuses on an MLX-format checkpoint,
+    /// where the text class's sanitizer would drop or rename them: an
+    /// `mtp.` tensor, an `lm_head` beside tied embeddings, a language-model
+    /// tensor outside `language_model.`. Each keeps the checkpoint text.
+    @Test(arguments: [
+        ("language_model.mtp.layers.0.mlp.down_proj.weight", false),
+        ("mtp.fc.weight", false),
+        ("model.language_model.layers.0.mlp.down_proj.weight", false),
+        ("model.embed_tokens.weight", false),
+        ("language_model.lm_head.weight", true),
+    ])
+    func aQwen35TensorTheVisionClassRefusesKeepsItText(name: String, tied: Bool) async throws {
+        let temp = try TemporaryDirectory()
+        try writeQwen35(
+            in: temp.url, name: "qwen-3-5-names",
+            textConfig: Self.qwen35Text(tied ? #""tie_word_embeddings": true"# : ""),
+            names: Self.qwen35Names.filter { !$0.contains("lm_head") } + [name])
+        #expect(try await scanFormat(temp.url) == .mlx)
+    }
+
+    /// Without the vision tower, or with processor metadata naming another
+    /// class or none, a Qwen3.5 checkpoint is text.
+    @Test(arguments: ["tower", "processor", "noProcessor"])
+    func aQwen35CheckpointMissingAPieceStaysText(_ gap: String) async throws {
+        let temp = try TemporaryDirectory()
+        try writeQwen35(
+            in: temp.url, name: "qwen-3-5-\(gap)", textConfig: Self.qwen35Text(""),
+            names: gap == "tower" ? Self.qwen35Names.filter { !$0.hasPrefix("vision_tower.") } : Self.qwen35Names,
+            processorClass: gap == "processor" ? "Qwen2VLProcessor" : gap == "noProcessor" ? nil : "Qwen3VLProcessor")
+        #expect(try await scanFormat(temp.url) == .mlx)
+    }
+
+    /// Qwen3.6-27B's text config, with the members in `extra` (a JSON
+    /// member list) added or replacing its own.
+    static func qwen35Text(_ extra: String) -> String {
+        var config: [String: Any] = [
+            "model_type": "qwen3_5_text", "vocab_size": 248_320, "linear_conv_kernel_dim": 4,
+            "full_attention_interval": 4,
+            "rope_parameters": ["rope_type": "default", "mrope_section": [11, 11, 10], "partial_rotary_factor": 0.25],
+        ]
+        let members = (try? JSONSerialization.jsonObject(with: Data("{\(extra)}".utf8))) as? [String: Any]
+        config.merge(members ?? [:]) { _, new in new }
+        let data = (try? JSONSerialization.data(withJSONObject: config, options: .sortedKeys)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static let qwen35Names = [
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.layers.0.linear_attn.conv1d.weight",
+        "language_model.lm_head.weight",
+        "vision_tower.blocks.0.mlp.linear_fc1.weight",
+        "vision_tower.merger.linear_fc2.weight",
+    ]
+
+    /// A Qwen3.5 checkpoint in mlx-community's layout: a `vision_config`,
+    /// an index listing `names`, and `preprocessor_config.json` naming
+    /// `processorClass` (none when nil).
+    private func writeQwen35(
+        in root: URL, name: String, textConfig: String, names: [String] = qwen35Names,
+        processorClass: String? = "Qwen3VLProcessor"
+    ) throws {
+        let dir = root.appending(path: name)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: dir.appending(path: "tokenizer.json"))
+        try Data("\u{00}".utf8).write(to: dir.appending(path: "model.safetensors"))
+        try Data(#"{"model_type": "qwen3_5", "text_config": \#(textConfig), "vision_config": {"model_type": "qwen3_5"}}"#.utf8)
+            .write(to: dir.appending(path: "config.json"))
+        let map = Dictionary(uniqueKeysWithValues: names.map { ($0, "model.safetensors") })
+        try JSONSerialization.data(withJSONObject: ["metadata": [:], "weight_map": map])
+            .write(to: dir.appending(path: "model.safetensors.index.json"))
+        if let processorClass {
+            try Data(#"{"processor_class": "\#(processorClass)"}"#.utf8)
+                .write(to: dir.appending(path: "preprocessor_config.json"))
+        }
     }
 
     enum Gemma4Gap: String, CaseIterable, CustomStringConvertible {

@@ -93,11 +93,12 @@ func draftCandidatesExcludesNonMLXFormats() {
     #expect(candidates.map(\.id) == ["Qwen3-8B-4bit"])
 }
 
-/// A Gemma 4 checkpoint with its vision tower is `.mlxVLM` now, and the
-/// engine still loads it as a draft through `LLMModelFactory`, so it stays a
-/// candidate. A VLM of a family not served on the text path does not.
+/// A Gemma 4 or Qwen3.5/3.6 checkpoint with its vision tower is `.mlxVLM`
+/// now, and the engine still loads it as a draft through `LLMModelFactory`,
+/// so it stays a candidate. A VLM of a family not served on the text path
+/// does not.
 @Test
-func draftCandidatesKeepAVisionGemma4() {
+func draftCandidatesKeepAVisionModelOfAServedFamily() {
     let models = [
         makeLocalModel(id: "gemma-4-e2b-it-4bit", format: .mlxVLM, architecture: "gemma4"),
         makeLocalModel(id: "gemma-4-E2B", format: .mlxVLM, architecture: "Gemma4"),
@@ -106,7 +107,7 @@ func draftCandidatesKeepAVisionGemma4() {
         makeLocalModel(id: "no-architecture", format: .mlxVLM),
     ]
     let candidates = LocalModel.draftCandidates(from: models, excluding: nil)
-    #expect(candidates.map(\.id) == ["gemma-4-e2b-it-4bit", "gemma-4-E2B"])
+    #expect(candidates.map(\.id) == ["gemma-4-e2b-it-4bit", "gemma-4-E2B", "Qwen3.6-27B-4bit"])
 }
 
 // MARK: - isOCR (OCR badge signal, derived from the config model_type)

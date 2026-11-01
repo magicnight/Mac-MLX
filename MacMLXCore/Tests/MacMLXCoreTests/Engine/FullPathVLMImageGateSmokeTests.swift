@@ -25,9 +25,12 @@ import enum MacMLXCore.JSONValue
 /// - an image request records nothing, so a text request after it with the
 ///   same prefix reuses nothing;
 /// - and, on the engine, image cache step 1: an image request after a long
-///   text turn, warm against cold, has |Δ log p| within δ and KL below δ²/2
+///   text turn, warm against cold and each against a one-shot prefill, has
+///   |Δ log p| within gate 2's bound, KL below δ²/2 and the same top token
 ///   on its first token. Compared on the top 10 logprobs the engine reports
-///   (its `top_logprobs` cap), with δ from the cold prefill's top-1 logit. A
+///   (its `top_logprobs` cap), |Δ log p| only above a log p of −10
+///   (``stepOneLogProbFloor``), with δ from the cold prefill's top-1 logit
+///   and the noise from the same request prefilled in 128-token chunks. A
 ///   checkpoint whose image requests run cold (Gemma 4 with bidirectional
 ///   vision attention) must reuse nothing instead;
 /// - also on the engine: the image is read with `kv_bits` 8 and 4, and a
@@ -179,6 +182,18 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let coldLogits = try await engine.coldNextTokenLogits(turn2)
         let top1 = try XCTUnwrap(coldLogits.logits.max())
         let delta = 4 * FullPathVLMParitySmokeTests.LogitComparison.bf16ULP(top1)
+        // Gate 2's bound: δ, or this load's own difference on the same image
+        // request prefilled in other chunks, with the margin, if larger.
+        // Over the same tokens the differences are taken on: the one-shot
+        // top 10 above ``stepOneLogProbFloor``.
+        let rechunked = try await engine.coldNextTokenLogits(
+            turn2, prefill: FullPathVLMParitySmokeTests.noiseFloorPrefill)
+        let oneShotLogProbs = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(coldLogits.logits)
+        let rechunkedLogProbs = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(rechunked.logits)
+        let noise = oneShotLogProbs.indices.sorted { oneShotLogProbs[$0] > oneShotLogProbs[$1] }.prefix(10)
+            .filter { oneShotLogProbs[$0] > Self.stepOneLogProbFloor }
+            .map { abs(oneShotLogProbs[$0] - rechunkedLogProbs[$0]) }.max() ?? 0
+        let bound = FullPathVLMParitySmokeTests.logProbBound(delta: delta, noise: noise)
 
         let warmTop = try XCTUnwrap(warm.logprobs.first?.topLogprobs)
         let coldTop = try XCTUnwrap(cold.logprobs.first?.topLogprobs)
@@ -187,6 +202,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         var missing: [String] = []
         for alternative in coldTop {
             guard let other = warmByToken[alternative.token] else { missing.append(alternative.token); continue }
+            guard Double(alternative.logprob) > Self.stepOneLogProbFloor else { continue }
             maxDelta = max(maxDelta, abs(Double(alternative.logprob) - other))
         }
         let shared = coldTop.compactMap { a in warmByToken[a.token].map { (Double(a.logprob), $0) } }
@@ -198,6 +214,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
         print("[image-gate] \(modelID) step 1: reused=\(warm.cachedPromptTokens ?? 0) "
             + String(format: "δ=%.4f max|Δlogp|=%.5f KL=%.2e (bound %.2e) ", delta, maxDelta, kl, delta * delta / 2)
+            + String(format: "rechunked max|Δlogp|=%.5f |Δ log p| bound %.5f ", noise, bound)
             + "missing=\(missing) warm=\(warm.text.debugDescription) cold=\(cold.text.debugDescription)")
         XCTAssertEqual(cold.cachedPromptTokens ?? 0, 0, "the reference run is cold")
         guard try Self.reusesPrefixBeforeMedia(directory) else {
@@ -208,7 +225,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
         XCTAssertGreaterThan(warm.cachedPromptTokens ?? 0, 0, "step 1: the warm image request reused nothing")
         XCTAssertTrue(missing.isEmpty, "gate 4: the warm run's top 10 lacks \(missing)")
-        XCTAssertLessThanOrEqual(maxDelta, delta, "gate 4: warm against cold, |Δ log p|")
+        XCTAssertLessThanOrEqual(maxDelta, bound, "gate 4: warm against cold, |Δ log p|")
         XCTAssertLessThan(kl, delta * delta / 2, "gate 4: warm against cold, KL")
 
         // Both runs above prepare the block on a cached prefix: the warm one
@@ -222,20 +239,35 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let tokenizer = try XCTUnwrap(loaded as? TokenizerBridge)
         let oneShot = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(coldLogits.logits)
         let oneShotTop = oneShot.indices.sorted { oneShot[$0] > oneShot[$1] }.prefix(10)
+        let oneShotFirst = try XCTUnwrap(oneShotTop.first.map {
+            tokenizer.decode(tokenIds: [$0], skipSpecialTokens: false)
+        })
         for (label, top) in [("cold", coldTop), ("warm", warmTop)] {
             let byToken = Dictionary(top.map { ($0.token, Double($0.logprob)) }, uniquingKeysWith: max)
             var splitDelta = 0.0
             var splitMissing: [String] = []
+            var shared: [(oneShot: Double, split: Double)] = []
             for id in oneShotTop {
                 let text = tokenizer.decode(tokenIds: [id], skipSpecialTokens: false)
                 guard let split = byToken[text] else { splitMissing.append(text); continue }
+                shared.append((oneShot[id], split))
+                guard oneShot[id] > Self.stepOneLogProbFloor else { continue }
                 splitDelta = max(splitDelta, abs(split - oneShot[id]))
             }
+            let pNorm = FullPathVLMParitySmokeTests.LogitComparison.logSumExp(shared.map(\.oneShot))
+            let qNorm = FullPathVLMParitySmokeTests.LogitComparison.logSumExp(shared.map(\.split))
+            let splitKL = shared.reduce(0.0) { sum, pair in
+                let lp = pair.oneShot - pNorm
+                return sum + exp(lp) * (lp - (pair.split - qNorm))
+            }
             print("[image-gate] \(modelID) \(label) run against one shot: "
-                + String(format: "max|Δlogp|=%.5f ", splitDelta) + "missing=\(splitMissing)")
+                + String(format: "max|Δlogp|=%.5f KL=%.2e ", splitDelta, splitKL)
+                + "top=\(top.first?.token.debugDescription ?? "-") missing=\(splitMissing)")
             // The tenth place can swap with the eleventh between two prefills.
             XCTAssertTrue(splitMissing.count <= 1, "gate 4: the \(label) run's top 10 lacks \(splitMissing)")
-            XCTAssertLessThanOrEqual(splitDelta, delta, "gate 4: \(label) against one-shot prefill, |Δ log p|")
+            XCTAssertLessThanOrEqual(splitDelta, bound, "gate 4: \(label) against one-shot prefill, |Δ log p|")
+            XCTAssertLessThan(splitKL, delta * delta / 2, "gate 4: \(label) against one-shot prefill, KL")
+            XCTAssertEqual(top.first?.token, oneShotFirst, "gate 4: \(label) against one-shot prefill, top token")
         }
     }
 
@@ -472,6 +504,15 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
     }
 
+    /// Step 1 compares |Δ log p|, and takes the rechunking noise, only on
+    /// tokens whose reference log p is above this (a probability above about
+    /// 4.5e-5). Below it only the KL over the shared top 10 and the top token
+    /// are checked, which bound the bulk of the mass, not each tail token. With the 3840×960 fixture Gemma 4 E4B puts
+    /// nearly all mass on its first token, and the next ones sit near
+    /// −10 to −20, where two prefills of the same prompt in other chunks move
+    /// log p by 0.6 (rank 3, −10.78 against −10.18) at a KL of 5e-6.
+    private static let stepOneLogProbFloor = -10.0
+
     /// How far above the text turn before it a late image turn may peak: the
     /// image block's activations and the KV of the turn's new tokens, not a
     /// one-shot prefill of the history.
@@ -667,19 +708,30 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         text.uppercased().filter { !$0.isWhitespace }.contains(anchor.filter { !$0.isWhitespace })
     }
 
-    /// High-contrast text drawn to a temporary PNG, large enough to read.
+    /// High-contrast text drawn to a temporary 3840×960-pixel PNG. The size
+    /// is in pixels, not points, so it does not follow the display's backing
+    /// scale. Qwen3.5/3.6 needs it this large: on the original Qwen3.6-27B
+    /// weights, the reference implementation (transformers) reads the year
+    /// as "2020" at 2560×640 and 3200×800, and reads it right at this size
+    /// with the text moved by a few pixels or drawn in a regular weight.
     private static func renderTextImage(_ text: String) throws -> URL {
-        let size = NSSize(width: 640, height: 160)
-        let image = NSImage(size: size)
-        image.lockFocus()
+        let (width, height) = (3840, 960)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0),
+            let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { throw XCTSkip("Could not render the test image") }
+        rep.size = NSSize(width: width, height: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
         NSColor.white.setFill()
-        NSRect(origin: .zero, size: size).fill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
         (text as NSString).draw(
-            at: NSPoint(x: 24, y: 52),
-            withAttributes: [.font: NSFont.systemFont(ofSize: 56, weight: .bold), .foregroundColor: NSColor.black])
-        image.unlockFocus()
-        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
-            let png = rep.representation(using: .png, properties: [:])
+            at: NSPoint(x: 144, y: 312),
+            withAttributes: [.font: NSFont.systemFont(ofSize: 336, weight: .bold), .foregroundColor: NSColor.black])
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:])
         else { throw XCTSkip("Could not render the test image") }
         let url = FileManager.default.temporaryDirectory
             .appending(path: "full-path-image-gate-\(UUID().uuidString).png")

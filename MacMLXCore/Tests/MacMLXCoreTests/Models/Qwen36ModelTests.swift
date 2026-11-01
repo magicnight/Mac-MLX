@@ -11,11 +11,12 @@ import XCTest
 /// `model_type: "qwen3_5"` (dense) / `"qwen3_5_moe"` (MoE) — the exact same
 /// `model_type` strings Qwen3.5 already uses. mlx-swift-lm 3.32.3's
 /// `Qwen35Model` / `Qwen35MoEModel` (registered in `LLMModelFactory` under
-/// those two keys) and macMLX's own format classifier
-/// (`ModelLibraryManager.vlmTypesServedAsText`, which keeps `qwen3_5` text)
-/// therefore already resolve Qwen3.6 checkpoints with zero code changes —
-/// this test exists to PROVE that against real downloaded weights, not to
-/// add support.
+/// those two keys) therefore already load Qwen3.6 checkpoints as text with
+/// zero code changes — this test exists to PROVE that against real
+/// downloaded weights, not to add support. A `qwen3_5` checkpoint with its
+/// vision tower is now `.mlxVLM` on the full path (``FullPathVLM``);
+/// `MACMLX_GATED_FULL_PATH_VLM=1` runs this test on that load
+/// (``GatedLoad``).
 ///
 /// GATED — never runs in CI (15 GB download). Self-skips unless ALL hold:
 ///   1. `requireMLXRuntimeOrSkip()` passes (real Metal, i.e. xcodebuild),
