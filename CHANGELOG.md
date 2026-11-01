@@ -43,11 +43,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   turn, since image requests record nothing (in the session measured, the
   image came in turn 1, so from the start): turn 5 of a 22.7k-token session
   started in 3.9 s at an 11.1 GB peak, against 3.0 s and 9.5 GB without the
-  image in the same run. An image sent late in a long conversation is the
-  costly case: the whole history before it prefills in one shot, with no
-  cancel point. With the same session's image moved to turn 5 (22.7k
-  tokens, 1,450 reused), the first token came after 17.4 s at a 41,957 MiB
-  peak. The parity run caught two differences, fixed before the switch: the
+  image in the same run. The text before an image prefills in chunks too,
+  so an image sent late in a long conversation costs about what its own
+  block does: with the same session's image moved to turn 5 (22.7k tokens,
+  1,450 reused), the first token came after 3.6 s at a 9,486 MiB peak,
+  against 2.4 s and 9,337 MiB for the text turn before it (17.4 s and
+  41,957 MiB when that text went through `prepare` with the image). The
+  parity run caught two differences, fixed before the switch: the
   family's message generator rendered a tool call with no text as a list,
   which Gemma 4's template reads as a closed turn, so a prompt ending in a
   tool result opened no model turn; and mlx-swift-lm 3.32.3's speculative

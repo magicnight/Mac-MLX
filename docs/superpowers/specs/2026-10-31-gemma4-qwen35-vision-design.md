@@ -557,8 +557,12 @@ On 2026-11-01 the parity and image suites ran on the three other mlx-community
     token after 304.6 s at an 88,476 MiB peak, which a 64 GB Mac cannot
     hold.
 
-  For E4B the text before the first image could be prefilled in chunks
-  first, as the warm path already does with a cached prefix. For a
+  For E4B the text before the first image now prefills in chunks first
+  (`FullPathVLM.textPrefillBeforeMedia`), as text, so `prepare` starts at
+  the block as it does on a warm hit: turn 5 then took 3.6 s at a 9,486 MiB
+  peak, 149 MiB above turn 4's, and the case asserts the peak stays within
+  1 GiB of the text turn's. Warm against cold in step 1 moved from 0.37 to
+  0.16, since both runs now prepare the block on a cached prefix. For a
   bidirectional checkpoint that is the case `reusesPrefixBeforeMedia` turns
   off, so the 31B needs a bounded head another way before it flips.
 - **E2B: one prompt over, stays text.** On "after a tool result" the gap is
