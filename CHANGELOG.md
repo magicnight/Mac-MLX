@@ -43,7 +43,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   turn, since image requests record nothing (in the session measured, the
   image came in turn 1, so from the start): turn 5 of a 22.7k-token session
   started in 3.9 s at an 11.1 GB peak, against 3.0 s and 9.5 GB without the
-  image in the same run. The parity run caught two differences, fixed before the switch: the
+  image in the same run. An image sent late in a long conversation is the
+  costly case: the whole history before it prefills in one shot, with no
+  cancel point. With the same session's image moved to turn 5 (22.7k
+  tokens, 1,450 reused), the first token came after 17.4 s at a 41,957 MiB
+  peak. The parity run caught two differences, fixed before the switch: the
   family's message generator rendered a tool call with no text as a list,
   which Gemma 4's template reads as a closed turn, so a prompt ending in a
   tool result opened no model turn; and mlx-swift-lm 3.32.3's speculative
@@ -51,6 +55,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   as Gemma 4's vision class does. Prompt-cache entries a Gemma 4 vision
   checkpoint left on SSD under the text load miss once. Qwen3.5/3.6 and
   `gemma4_unified` still load as text.
+- **Gemma 4 MoE checkpoints load.** The 26B-A4B is no longer refused at load
+  time; it loads as text. Its text output was checked against mlx-lm 0.32.2
+  on gemma-4-26b-a4b-it-8bit: on three agent prompts, the same greedy tokens
+  through each tool call, and next-token log-probabilities no further from
+  mlx-lm's one-shot prefill than mlx-lm's own prefill in 128-, 512- or
+  2,048-token chunks gets on the same prompt. With itself as a draft, its greedy output differed
+  from its output without one (22 of 24 drafts accepted); the cause is not
+  known yet.
 - **OpenAI Responses API: `POST /v1/responses`.** Codex, and any other client
   that speaks the Responses API, can run its agent loop against macMLX: text,
   streamed reasoning, function tools (Codex's namespaced tools included, with
