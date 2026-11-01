@@ -34,6 +34,11 @@ struct LastPromptTokenTargetTests {
         return out
     }
 
+    /// Exact equality with greedy decoding holds on the seed-7 weights. Some
+    /// seeds have a near-tie that the verify pass and single-token decode
+    /// break differently, even on a plain `.tokens` target (seed 54 of the
+    /// first 64), so a failure of the first expectation points at the weights
+    /// or at MLX's numerics, not at the wrapper.
     @Test
     func aTargetThatPrefillsThePromptSpeculatesItsWholeAnswer() throws {
         let target = try TinyRandomLanguageModel.qwen3.make()

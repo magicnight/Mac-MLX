@@ -15,9 +15,11 @@ import MLXNN
 ///
 /// Every instance is 2 layers, hidden size 32, 4 query / 2 KV heads of width 8,
 /// a 64-token vocabulary, float32, and a fixed seed, so two calls build the same
-/// weights. Every layer is full attention (Gemma 3's `sliding_window_pattern` is
-/// 1, Gemma 4's `layer_types` are all `full_attention`, no KV-shared layers), so
-/// `newCache` returns only plain caches and the dense-cache gate accepts it:
+/// weights. They come from a random state of their own, not the global one,
+/// which tests running in parallel draw from. Every layer is full attention
+/// (Gemma 3's `sliding_window_pattern` is 1, Gemma 4's `layer_types` are all
+/// `full_attention`, no KV-shared layers), so `newCache` returns only plain
+/// caches and the dense-cache gate accepts it:
 /// a sliding-window layer would get a `RotatingKVCache`, which the batched path
 /// refuses before the mask matters.
 ///
@@ -40,7 +42,10 @@ enum TinyRandomLanguageModel: String, CaseIterable {
     /// Build the model with freshly seeded random weights, evaluated so later
     /// forwards all read the same materialised parameters.
     func make(seed: UInt64 = 7) throws -> any LanguageModel {
-        MLXRandom.seed(seed)
+        try withRandomState(MLXRandom.RandomState(seed: seed)) { try build() }
+    }
+
+    private func build() throws -> any LanguageModel {
         let model: any LanguageModel & Module
         switch self {
         case .gemma:
