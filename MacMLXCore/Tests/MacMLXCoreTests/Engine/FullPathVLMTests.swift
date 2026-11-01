@@ -68,6 +68,10 @@ struct FullPathVLMTests {
                                    "no VLMProcessorLoadingRegistry.swift in the checkout")
         #expect(!loading.contains(#""gemma4":"#), "a resolver now overrides Gemma 4's processor")
         #expect(!loading.contains(#""qwen3_5":"#), "a resolver now overrides Qwen3.5's processor")
+        let qwen35Resolver = try #require(loading.range(of: "struct Qwen35ProcessorLoadingResolver"))
+        let qwen35Body = String(loading[qwen35Resolver.upperBound...])
+            .components(separatedBy: "\n}\n").first ?? ""
+        #expect(!qwen35Body.contains("func processorType"), "Qwen3.5's resolver now picks the processor type")
     }
 
     private static let factorySource = "Libraries/MLXVLM/VLMModelFactory.swift"

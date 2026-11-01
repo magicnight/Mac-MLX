@@ -321,13 +321,23 @@ struct ModelLibraryManagerVLMTests {
 
     // MARK: - Qwen3.5/3.6 on the full path
 
-    /// A Qwen3.6-27B checkpoint as mlx-community converts it, and a
-    /// Qwen3.5-4B one with tied embeddings and no `lm_head`.
-    @Test(arguments: [false, true])
-    func aQwen35CheckpointWithItsVisionTowerIsAVLM(tied: Bool) async throws {
+    /// A Qwen3.6-27B checkpoint as mlx-community converts it; a Qwen3.5-4B
+    /// one with tied embeddings and no `lm_head`; and the RoPE type spelled
+    /// `type`, which wins over `rope_type` in both classes.
+    @Test(arguments: [
+        ("", false),
+        (#""tie_word_embeddings": true"#, true),
+        (#""rope_parameters": {"type": "default"}"#, false),
+        (#""rope_parameters": {"type": "default", "rope_type": "yarn"}"#, false),
+    ])
+    func aQwen35CheckpointWithItsVisionTowerIsAVLM(extra: String, tied: Bool) async throws {
+        let textConfig = Self.qwen35Text(extra)
+        if !extra.isEmpty {
+            #expect(textConfig != Self.qwen35Text(""), "the test's members were applied")
+        }
         let temp = try TemporaryDirectory()
         try writeQwen35(
-            in: temp.url, name: "qwen-3-5", textConfig: Self.qwen35Text(tied ? #""tie_word_embeddings": true"# : ""),
+            in: temp.url, name: "qwen-3-5", textConfig: textConfig,
             names: tied ? Self.qwen35Names.filter { !$0.contains("lm_head") } : Self.qwen35Names)
         #expect(try await scanFormat(temp.url) == .mlxVLM)
     }
@@ -338,6 +348,7 @@ struct ModelLibraryManagerVLMTests {
     @Test(arguments: [
         #"{"rope_parameters": {"rope_type": "yarn", "factor": 4.0}, "vocab_size": 248320}"#,
         #"{"rope_parameters": {"type": "linear"}, "vocab_size": 248320}"#,
+        #"{"rope_parameters": {"type": "yarn", "rope_type": "default"}, "vocab_size": 248320}"#,
         #"{"rope_scaling": {"type": "default"}, "vocab_size": 248320}"#,
         ModelLibraryManagerVLMTests.qwen35Text(#""num_experts": 256"#),
         ModelLibraryManagerVLMTests.qwen35Text(#""linear_conv_kernel_dim": 1"#),

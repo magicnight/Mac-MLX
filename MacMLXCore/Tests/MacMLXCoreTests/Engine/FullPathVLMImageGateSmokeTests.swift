@@ -184,11 +184,16 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         let delta = 4 * FullPathVLMParitySmokeTests.LogitComparison.bf16ULP(top1)
         // Gate 2's bound: δ, or this load's own difference on the same image
         // request prefilled in other chunks, with the margin, if larger.
+        // Over the same tokens the differences are taken on: the one-shot
+        // top 10 above ``stepOneLogProbFloor``.
         let rechunked = try await engine.coldNextTokenLogits(
             turn2, prefill: FullPathVLMParitySmokeTests.noiseFloorPrefill)
-        let noise = try XCTUnwrap(FullPathVLMParitySmokeTests.LogitComparison(
-            reference: coldLogits.logits, candidate: rechunked.logits, top: 10))
-        let bound = FullPathVLMParitySmokeTests.logProbBound(delta: delta, noise: noise.maxLogProbDelta)
+        let oneShotLogProbs = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(coldLogits.logits)
+        let rechunkedLogProbs = FullPathVLMParitySmokeTests.LogitComparison.logSoftmax(rechunked.logits)
+        let noise = oneShotLogProbs.indices.sorted { oneShotLogProbs[$0] > oneShotLogProbs[$1] }.prefix(10)
+            .filter { oneShotLogProbs[$0] > Self.stepOneLogProbFloor }
+            .map { abs(oneShotLogProbs[$0] - rechunkedLogProbs[$0]) }.max() ?? 0
+        let bound = FullPathVLMParitySmokeTests.logProbBound(delta: delta, noise: noise)
 
         let warmTop = try XCTUnwrap(warm.logprobs.first?.topLogprobs)
         let coldTop = try XCTUnwrap(cold.logprobs.first?.topLogprobs)
@@ -209,7 +214,7 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
         print("[image-gate] \(modelID) step 1: reused=\(warm.cachedPromptTokens ?? 0) "
             + String(format: "δ=%.4f max|Δlogp|=%.5f KL=%.2e (bound %.2e) ", delta, maxDelta, kl, delta * delta / 2)
-            + String(format: "rechunked max|Δlogp|=%.5f |Δ log p| bound %.5f ", noise.maxLogProbDelta, bound)
+            + String(format: "rechunked max|Δlogp|=%.5f |Δ log p| bound %.5f ", noise, bound)
             + "missing=\(missing) warm=\(warm.text.debugDescription) cold=\(cold.text.debugDescription)")
         XCTAssertEqual(cold.cachedPromptTokens ?? 0, 0, "the reference run is cold")
         guard try Self.reusesPrefixBeforeMedia(directory) else {
@@ -499,9 +504,10 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
         }
     }
 
-    /// Step 1 compares |Δ log p| only on tokens whose reference log p is
-    /// above this (a probability above about 4.5e-5); KL and the top token
-    /// cover the tail below it. With the 3840×960 fixture Gemma 4 E4B puts
+    /// Step 1 compares |Δ log p|, and takes the rechunking noise, only on
+    /// tokens whose reference log p is above this (a probability above about
+    /// 4.5e-5). Below it only the KL over the shared top 10 and the top token
+    /// are checked, which bound the bulk of the mass, not each tail token. With the 3840×960 fixture Gemma 4 E4B puts
     /// nearly all mass on its first token, and the next ones sit near
     /// −10 to −20, where two prefills of the same prompt in other chunks move
     /// log p by 0.6 (rank 3, −10.78 against −10.18) at a KL of 5e-6.
