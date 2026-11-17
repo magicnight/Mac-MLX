@@ -275,24 +275,24 @@ assert.doesNotMatch(englishRelease.classes, /\bbuilding\b/);
 assert.doesNotMatch(chineseRelease.classes, /\bbuilding\b/);
 assert.equal(englishRelease.content.match(/<li\b/g)?.length, 4);
 assert.equal(chineseRelease.content.match(/<li\b/g)?.length, 4);
-assert.match(englishRelease.content, /<strong>v0\.10\.0 · Oct 29, 2026<\/strong>/);
-assert.match(chineseRelease.content, /<strong>v0\.10\.0 · 2026年10月29日<\/strong>/);
-assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.10\.0"[^>]*>View v0\.10\.0 release ↗<\/a>/);
-assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.10\.0"[^>]*>查看 v0\.10\.0 版本 ↗<\/a>/);
+assert.match(englishRelease.content, /<strong>v0\.11\.0 · Nov 17, 2026<\/strong>/);
+assert.match(chineseRelease.content, /<strong>v0\.11\.0 · 2026年11月17日<\/strong>/);
+assert.match(englishRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.11\.0"[^>]*>View v0\.11\.0 release ↗<\/a>/);
+assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/mac-mlx\/releases\/tag\/v0\.11\.0"[^>]*>查看 v0\.11\.0 版本 ↗<\/a>/);
 for (const capability of [
-  /Structured output accepts the nested, referenced, and range-bounded schemas Foundation Models sends for @Generable types/,
-  /Unloading a model now gives its memory back, and in the app rerankers and embedders count against the pool budget/,
-  /\/v1\/rerank moves to MLXRerankers, with BERT and Qwen3 rerankers checked on real checkpoints/,
-  /The DMG is built from committed lockfiles, so it ships the dependency graph its tests ran on/,
+  /Codex runs against a stateless \/v1\/responses, and Claude Code against \/v1\/messages with thinking and count_tokens/,
+  /reasoning reaches the chat template, and agent turns on Qwen3\.6 and Mellum2 reuse the previous turn/,
+  /Foundation Models client were checked end to end against a running server on two models/,
+  /Gemma 4 E4B and dense Qwen3\.5\/3\.6 read images while keeping the prompt cache, tool calls, and replayed reasoning/,
 ]) assert.match(englishRelease.content, capability);
 for (const capability of [
-  /结构化输出接受 Foundation Models 为 @Generable 类型发送的嵌套、引用与数值范围 Schema/,
-  /卸载模型现会真正归还内存，应用中的重排器与嵌入模型也计入模型池预算/,
-  /\/v1\/rerank 改用 MLXRerankers，BERT 与 Qwen3 重排器已在真实检查点上核验/,
-  /DMG 依据已提交的 lockfile 构建，交付的依赖图与测试所用一致/,
+  /Codex 对接无状态的 \/v1\/responses，Claude Code 对接带 thinking 与词元计数端点的 \/v1\/messages/,
+  /回放的推理会传到聊天模板，Qwen3\.6 与 Mellum2 上的智能体轮次会复用上一轮的历史/,
+  /Xcode 27 与 Apple Foundation Models 客户端已在两个模型上对运行中的服务做端到端核验/,
+  /Gemma 4 E4B 与稠密 Qwen3\.5\/3\.6 可以读图，同时保留提示缓存、工具调用与推理回传/,
 ]) assert.match(chineseRelease.content, capability);
-assert.match(llms, /Latest release: v0\.10\.0/);
-assert.match(ogImage, /v0\.10\.0/);
+assert.match(llms, /Latest release: v0\.11\.0/);
+assert.match(ogImage, /v0\.11\.0/);
 
 const combined = `${html}\n${zhHTML}\n${llms}\n${ogImage}`;
 for (const staleClaim of [
