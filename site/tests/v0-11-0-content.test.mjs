@@ -114,6 +114,7 @@ test("v0.11.0 surfaces state their boundaries", () => {
 
   const reasoning = both("reasoning-round-trip");
   assert.match(reasoning.en.detail, /not encryption/);
+  assert.match(reasoning.en.detail, /Gemma 4 only on those with tool calls/);
   assert.match(reasoning.en.detail, /the Ollama endpoints are out of scope/);
   assert.match(reasoning.zh.detail, /并非加密/);
 
@@ -147,7 +148,8 @@ test("measured v0.11.0 claims keep their scope", () => {
 test("the v0.11.0 release record states what it does not claim", () => {
   assert.match(current.en.summary, /^The current release/);
   assert.match(current.en.compatibilityNotes, /\/v1\/responses is stateless/);
-  assert.match(current.en.compatibilityNotes, /covered two models and no images/);
+  assert.match(current.en.compatibilityNotes, /covered Xcode 27 on Qwen3\.6-27B and Apple's Foundation Models client on it and Gemma 4 E4B, with no images/);
+  assert.match(current.en.upgradeNotes, /tool_choice "none" and tools: \[\] still batch/);
   assert.match(current.en.compatibilityNotes, /Multi-token-prediction decoding is not part of this release/);
   assert.match(current["zh-Hans"].compatibilityNotes, /多词元预测解码不属于这一版本/);
   assert.deepEqual([...current.plannedFactIds], ["paged-kv", "adaptive-memory-guard", "sampling-expanded"]);
@@ -158,5 +160,6 @@ test("the v0.11.0 release record states what it does not claim", () => {
 
   const apis = faqs.find((item) => item.id === "apis");
   assert.match(apis.en.answer, /^v0\.11\.0 /);
-  assert.match(apis.en.answer, /checked end to end on two models, without images/);
+  assert.match(apis.en.answer, /checked end to end, without images: Xcode 27 on Qwen3\.6-27B, and Apple's Foundation Models client on it and Gemma 4 E4B/);
+  assert.match(page.en.directAnswer, /The Xcode 27 and Foundation Models runs covered no images/);
 });

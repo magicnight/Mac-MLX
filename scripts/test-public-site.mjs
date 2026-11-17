@@ -282,13 +282,13 @@ assert.match(chineseRelease.content, /href="https:\/\/github\.com\/magicnight\/m
 for (const capability of [
   /Codex runs against a stateless \/v1\/responses, and Claude Code against \/v1\/messages with thinking and count_tokens/,
   /reasoning reaches the chat template, and agent turns on Qwen3\.6 and Mellum2 reuse the previous turn/,
-  /Foundation Models client were checked end to end against a running server on two models/,
+  /Xcode 27 was checked end to end on Qwen3\.6-27B, and Apple/,
   /Gemma 4 E4B and dense Qwen3\.5\/3\.6 read images while keeping the prompt cache, tool calls, and replayed reasoning/,
 ]) assert.match(englishRelease.content, capability);
 for (const capability of [
   /Codex 对接无状态的 \/v1\/responses，Claude Code 对接带 thinking 与词元计数端点的 \/v1\/messages/,
   /回放的推理会传到聊天模板，Qwen3\.6 与 Mellum2 上的智能体轮次会复用上一轮的历史/,
-  /Xcode 27 与 Apple Foundation Models 客户端已在两个模型上对运行中的服务做端到端核验/,
+  /Xcode 27 已在 Qwen3\.6-27B 上做端到端核验，Apple Foundation Models 客户端已在它与 Gemma 4 E4B 上核验/,
   /Gemma 4 E4B 与稠密 Qwen3\.5\/3\.6 可以读图，同时保留提示缓存、工具调用与推理回传/,
 ]) assert.match(chineseRelease.content, capability);
 assert.match(llms, /Latest release: v0\.11\.0/);
