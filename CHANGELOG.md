@@ -418,9 +418,11 @@ yet, so MTP moves to the release that takes it. Dependencies are unchanged.
   ci-local's spm job run it, where a missing source fails the test rather
   than skips it), so an mlx-swift-lm bump that adds a key fails until it is
   placed. Gemma 4 and Qwen3.5/3.6, which that registry
-  also lists, stay on the text path on purpose: a VLM load has no prompt
-  cache, batching, replayed reasoning or history snapshots, which are what
-  macMLX serves agents with, so their images are still dropped, as before.
+  also lists, are not routed to a stock VLM load: it has no prompt cache,
+  batching, replayed reasoning or history snapshots, which are what macMLX
+  serves agents with. They take images through the full path instead, on
+  the checkpoints the two image entries under Added name, and stay
+  text-only otherwise.
   This is routing only, checked against the registries and the published
   checkpoints' `processor_class`; I have no checkpoint of the newly routed
   types, so none was run here.
