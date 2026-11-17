@@ -1250,8 +1250,11 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// built as the generator's message dictionaries with that reasoning
     /// added as `reasoning_content` (see `injectingReasoning`), which the
     /// input processor passes to the template unchanged: `Chat.Message` has
-    /// no reasoning slot. Otherwise it is the `.chat` input it always was, so
-    /// a request without reasoning renders exactly as before. The
+    /// no reasoning slot. A request that replays a tool call with a null
+    /// argument is built from the dictionaries too, with those nulls made
+    /// readable (see `replacingNullToolArguments`). Otherwise it is the
+    /// `.chat` input it always was, so a request with neither renders exactly
+    /// as before. The
     /// dictionaries carry only image placeholders, so the input keeps the
     /// `.chat` input's images and videos, which the processor reads from
     /// `UserInput.images` either way. Another VLM has no generator here and
@@ -1306,23 +1309,31 @@ public actor MLXSwiftEngine: InferenceEngine {
         // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
         // to the plain Sendable shape the upstream API expects. Tools (when
         // present) reach the template via `UserInput.tools`.
-        let additionalContext = request.templateKwargs?.mapValues { $0.toSendable() }
+        let additionalContext = request.templateKwargs?.mapValues { $0.toTemplateValue() }
         let chatInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
 
         let assistantReasoning = request.allMessages.filter { $0.role == .assistant }.map(\.reasoning)
         let hasReasoning = assistantReasoning.contains(where: { $0?.isEmpty == false })
+        // A replayed tool call with a null argument: the generators render it
+        // as `NSNull`, which the template cannot read (see
+        // `replacingNullToolArguments`), so the request renders from the
+        // generator's dictionaries with those nulls replaced.
+        let hasNullToolArgument = request.allMessages.contains { message in
+            message.toolCalls?.contains { $0.arguments.values.contains(where: \.containsNull) } ?? false
+        }
         // A full-path VLM (the only VLM handed a generator) always renders
         // through it: from `.chat`, its processor would render with its
         // family's own generator, which lays out a message without media
         // differently from the text load (see `FullPathMessageGenerator`).
         // A caller that drops the images (`isVLM: false`) says so itself.
         let rendersThroughGenerator = rendersThroughGenerator ?? (isVLM && messageGenerator != nil)
-        if let messageGenerator, hasReasoning || rendersThroughGenerator {
+        if let messageGenerator, hasReasoning || rendersThroughGenerator || hasNullToolArgument {
             // The generator's own entry point over the input the processor
             // would get, so one that reads `additionalContext` (TranslateGemma)
             // builds what it always builds; its `.messages` output then passes
             // through the processor's `generate(from:)` unchanged.
-            let messages = messageGenerator.generate(from: chatInput)
+            let generated = messageGenerator.generate(from: chatInput)
+            let messages = hasNullToolArgument ? replacingNullToolArguments(generated) : generated
             func rendered(_ messages: [[String: any Sendable]]) -> UserInput {
                 UserInput(
                     messages: messages, images: chatInput.images, videos: chatInput.videos,
@@ -1341,9 +1352,32 @@ public actor MLXSwiftEngine: InferenceEngine {
                     )
                 }
             }
-            if rendersThroughGenerator { return rendered(messages) }
+            if rendersThroughGenerator || hasNullToolArgument { return rendered(messages) }
         }
         return chatInput
+    }
+
+    /// `messages` — a message generator's dictionaries — with every `NSNull`
+    /// under a `tool_calls` entry replaced by `Optional.none`. The generators
+    /// render a tool call's arguments through `ToolCall`, which turns a JSON
+    /// null into `NSNull`; swift-jinja reads `nil` as null and throws on
+    /// `NSNull`, failing the whole request. mlx-swift-lm fixes this in
+    /// `ToolCall` itself after 3.32.3 (ml-explore/mlx-swift-lm#780).
+    static func replacingNullToolArguments(_ messages: [[String: any Sendable]]) -> [[String: any Sendable]] {
+        func replacing(_ value: any Sendable) -> any Sendable {
+            switch value {
+            case is NSNull: return (any Sendable)?.none
+            case let array as [any Sendable]: return array.map(replacing)
+            case let object as [String: any Sendable]: return object.mapValues(replacing)
+            default: return value
+            }
+        }
+        return messages.map { message in
+            guard let calls = message["tool_calls"] else { return message }
+            var message = message
+            message["tool_calls"] = replacing(calls)
+            return message
+        }
     }
 
     /// `messages` — a message generator's dictionaries for a conversation —
@@ -2937,11 +2971,12 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// (`[[String: any Sendable]]`) shape. Elements that aren't JSON objects are
     /// dropped rather than force-cast — the project forbids `as!`, and a
     /// malformed spec must never crash generation. The caller compares counts
-    /// to log how many were dropped.
+    /// to log how many were dropped. A JSON null (`"default": null`) becomes
+    /// `Optional.none`, which the template reads as null.
     static func toolSpecs(from tools: [JSONValue]) -> [ToolSpec] {
         tools.compactMap { element in
             guard case .object(let object) = element else { return nil }
-            return object.mapValues { $0.toSendable() }
+            return object.mapValues { $0.toTemplateValue() }
         }
     }
 
