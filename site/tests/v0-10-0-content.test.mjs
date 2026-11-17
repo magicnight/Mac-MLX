@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { facts } from "../content/facts.mjs";
-import { faqs } from "../content/faqs.mjs";
 import { pages } from "../content/pages.mjs";
 import { project } from "../content/project.mjs";
 import { releases } from "../content/releases.mjs";
 
 const factsById = new Map(facts.map((fact) => [fact.id, fact]));
-const current = releases[0];
+// v0.10.0 is now a historical record; its own entry, not releases[0], carries what it shipped.
+const v0100 = releases.find((item) => item.id === "v0-10-0");
 const v090 = releases.find((item) => item.id === "v0-9-0");
+const currentTag = `v${project.currentVersion}`;
 const releasedV0100FactIds = [
   "structured-output-generable-schemas",
   "usage-reporting",
@@ -36,16 +37,14 @@ function both(factId) {
   return { en: item.en, zh: item["zh-Hans"] };
 }
 
-test("project and release registries identify v0.10.0 as current", () => {
-  assert.deepEqual(
-    { currentVersion: project.currentVersion, releaseDate: project.releaseDate, lastVerified: project.lastVerified },
-    { currentVersion: "0.10.0", releaseDate: "2026-10-29", lastVerified: "2026-10-29" },
-  );
-  assert.equal(current.id, "v0-10-0");
-  assert.equal(current.version, project.currentVersion);
-  assert.equal(current.releaseDate, project.releaseDate);
-  assert.equal(current.lastVerified, project.lastVerified);
-  assert.deepEqual([...current.officialSources], [
+test("v0.10.0 stays in the release registry as a historical record", () => {
+  assert.ok(v0100, "v0.10.0 must remain a release record");
+  assert.notEqual(project.currentVersion, "0.10.0");
+  assert.equal(v0100.version, "0.10.0");
+  assert.equal(v0100.releaseDate, "2026-10-29");
+  assert.match(v0100.en.summary, /^Historically,/);
+  assert.match(v0100["zh-Hans"].summary, /^作为历史记录，/);
+  assert.deepEqual([...v0100.officialSources], [
     "https://github.com/magicnight/mac-mlx/releases/tag/v0.10.0",
     "https://github.com/magicnight/mac-mlx/blob/v0.10.0/CHANGELOG.md",
     "https://github.com/magicnight/mac-mlx/blob/v0.10.0/docs/model-support.md",
@@ -58,19 +57,22 @@ test("project and release registries identify v0.10.0 as current", () => {
   }
   assert.match(v090.en.upgradeNotes, /For this historical release, review the v0\.9\.0 tagged changelog/);
   assert.match(v090.en.upgradeNotes, /are not part of v0\.9\.0/);
+  assert.match(v0100.en.upgradeNotes, /For this historical release, review the v0\.10\.0 tagged changelog/);
+  assert.match(v0100.en.upgradeNotes, /are not part of v0\.10\.0/);
 });
 
-test("v0.10.0 facts ship in v0.10.0 on the current immutable tag", () => {
+test("v0.10.0 facts ship in v0.10.0 on immutable tagged evidence", () => {
   for (const factId of releasedV0100FactIds) {
     const item = factsById.get(factId);
     assert.ok(item, `missing ${factId}`);
     assert.equal(item.status, "released", `${factId} must be released`);
     assert.equal(item.sinceVersion, "0.10.0", `${factId} was delivered in v0.10.0`);
-    assert.ok(citesTag(item, `v${project.currentVersion}`), `${factId} must cite the v${project.currentVersion} tag`);
-    assert.ok(current.shippedFactIds.includes(factId), `v0.10.0 must ship ${factId}`);
+    // Evidence cites the current tag, or v0.10.0 for a fact the current tag superseded.
+    assert.ok(citesTag(item, currentTag) || citesTag(item, "v0.10.0"), `${factId} must cite immutable tagged evidence`);
+    assert.ok(v0100.shippedFactIds.includes(factId), `v0.10.0 must ship ${factId}`);
     assert.ok(!v090.shippedFactIds.includes(factId), `${factId} must not be backdated into v0.9.0`);
   }
-  assert.deepEqual(current.developmentFactIds, [], "nothing on main is ahead of the v0.10.0 tag");
+  assert.deepEqual(v0100.developmentFactIds, [], "v0.10.0 has no development facts on main");
   for (const item of facts) {
     assert.notEqual(item.status, "development", `${item.id} is still marked as unreleased main work`);
     assert.doesNotMatch(item.sinceVersion, /^post-/, `${item.id} still names a post-tag version`);
@@ -81,18 +83,18 @@ test("superseded facts stay in the releases that shipped them, on that release's
   for (const [oldId, newId] of Object.entries(supersededBy)) {
     const old = factsById.get(oldId);
     assert.deepEqual([...old.pageIds], [], `${oldId} no longer fronts a current page`);
-    assert.ok(!current.shippedFactIds.includes(oldId), `v0.10.0 ships ${newId} instead of ${oldId}`);
-    assert.ok(!current.limitationFactIds.includes(oldId), `${oldId} is not a v0.10.0 limitation`);
+    assert.ok(!v0100.shippedFactIds.includes(oldId), `v0.10.0 ships ${newId} instead of ${oldId}`);
+    assert.ok(!v0100.limitationFactIds.includes(oldId), `${oldId} is not a v0.10.0 limitation`);
     assert.ok(v090.shippedFactIds.includes(oldId), `v0.9.0 really did ship ${oldId}`);
     assert.ok(citesTag(old, "v0.9.0"), `${oldId} cites the v0.9.0 tag it describes`);
-    assert.ok(!citesTag(old, `v${project.currentVersion}`), `${oldId} must not cite code the current tag replaced`);
+    assert.ok(!citesTag(old, currentTag), `${oldId} must not cite code the current tag replaced`);
     assert.ok(factsById.get(newId).pageIds.length > 0, `${newId} takes over the page slot`);
   }
 });
 
 test("unverified v0.10.0 surfaces are visible limitations with their boundary sentences", () => {
   for (const factId of ["structured-output-generable-schemas", "rerank-mlx-rerankers", "chat-template-native", "audio-app-cache", "audio-endpoints", "audio-in-app", "mtp-drafter-detection"]) {
-    assert.ok(current.limitationFactIds.includes(factId), `${factId} must be a visible v0.10.0 limitation`);
+    assert.ok(v0100.limitationFactIds.includes(factId), `${factId} must be a visible v0.10.0 limitation`);
   }
 
   const schemas = both("structured-output-generable-schemas");
@@ -159,23 +161,19 @@ test("measured v0.10.0 claims keep their scope", () => {
 });
 
 test("the v0.10.0 release record states what it does not claim", () => {
-  assert.match(current.en.summary, /^The current release/);
-  assert.match(current.en.compatibilityNotes, /is not a verified Xcode 27 or Foundation Models end-to-end connection/);
-  assert.match(current.en.compatibilityNotes, /the XLM-RoBERTa \(BGE\) and Jina v3 rerank paths were not run on a real checkpoint/);
-  assert.match(current.en.compatibilityNotes, /no test runs audio inference/);
-  assert.match(current["zh-Hans"].compatibilityNotes, /并不等于已验证的 Xcode 27 或 Foundation Models 端到端连接/);
-  assert.match(current["zh-Hans"].compatibilityNotes, /没有任何测试运行音频推理/);
+  assert.match(v0100.en.compatibilityNotes, /is not a verified Xcode 27 or Foundation Models end-to-end connection/);
+  assert.match(v0100.en.compatibilityNotes, /the XLM-RoBERTa \(BGE\) and Jina v3 rerank paths were not run on a real checkpoint/);
+  assert.match(v0100.en.compatibilityNotes, /no test runs audio inference/);
+  assert.match(v0100["zh-Hans"].compatibilityNotes, /并不等于已验证的 Xcode 27 或 Foundation Models 端到端连接/);
+  assert.match(v0100["zh-Hans"].compatibilityNotes, /没有任何测试运行音频推理/);
 
+  for (const id of ["release-v0-10-0", "release-v0-9-0"]) {
+    const historical = pages.find((item) => item.id === id);
+    assert.match(historical.en.title, /\(historical\)/);
+    assert.deepEqual(historical.blocks.find((block) => block.type === "sources").factIds, []);
+  }
   const page = pages.find((item) => item.id === "release-v0-10-0");
-  assert.match(page.en.directAnswer, /Schema compatibility is not a verified Xcode 27 connection/);
-  assert.match(page.en.directAnswer, /were not run on real checkpoints/);
-  const historical = pages.find((item) => item.id === "release-v0-9-0");
-  assert.match(historical.en.title, /\(historical\)/);
-  assert.deepEqual(historical.blocks.find((block) => block.type === "sources").factIds, []);
-
-  const apis = faqs.find((item) => item.id === "apis");
-  assert.match(apis.en.answer, /^v0\.10\.0 /);
-  assert.match(apis.en.answer, /Schema compatibility with Apple's client is not a verified end-to-end Xcode 27 connection/);
+  assert.match(page.en.directAnswer, /the later v0\.11\.0 agent-backend work, including the verified Foundation Models connection, is not part of it/);
 });
 
 test("planned work is phrased without a version-number boundary", () => {
@@ -189,7 +187,7 @@ test("planned work is phrased without a version-number boundary", () => {
   const e2e = both("foundation-models-e2e");
   assert.match(e2e.en.detail, /no end-to-end connection through Xcode 27 or a Foundation Models app has been verified/);
   assert.match(e2e.en.detail, /no generation quality through either path is claimed/);
-  assert.ok(current.plannedFactIds.includes("foundation-models-e2e"));
+  assert.ok(v0100.plannedFactIds.includes("foundation-models-e2e"));
   assert.ok(!v090.plannedFactIds.includes("foundation-models-e2e"), "the plan postdates the v0.9.0 record");
 });
 

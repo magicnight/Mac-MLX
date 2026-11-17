@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-17
+
+Codex and Claude Code can run their agent loops against macMLX: the
+Responses API, `count_tokens` and the reasoning round trip are in, an agent
+turn reuses the previous turn's history on hybrid and sliding-window models,
+Xcode 27 and Apple's Foundation Models client were checked end to end, and
+Gemma 4 E4B and dense Qwen3.5/3.6 read images. MTP decoding, planned for this
+release with the mlx-swift-lm 3.33 move, is not in it: 3.33 is not tagged
+yet, so MTP moves to the release that takes it. Dependencies are unchanged.
+
 ### Added
 - **Images on Gemma 4 E4B.** A Gemma 4 checkpoint that ships its vision
   tower, in the shape the parity run covered, now loads as a vision model, so
@@ -223,8 +233,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   that one, 0). The Parameters Inspector's template kwarg
   `preserve_thinking: true` makes Qwen3.6 render every turn's reasoning,
   keeping the render append-only across queries (3,239 reused of 3,298).
-  VLMs are out of scope (their processors build the prompt without it, so
-  GLM-OCR and the other VLMs never get it), as are the Ollama endpoints. On
+  VLMs on the stock vision path are out of scope (their processors build
+  the prompt without it, so GLM-OCR and the other stock-path VLMs never get
+  it), as are the Ollama endpoints; the full-path Gemma 4 E4B and
+  Qwen3.5/3.6 vision loads get it (see Added). On
   `/v1/messages` only, a system turn right after a tool result is now
   appended to that result rather than opening a user turn: Claude Code ends
   each request in a tool loop with one (`<total_tokens>…</total_tokens>`
@@ -255,7 +267,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   work. `@Guide(.pattern)` is a 400, and on a thinking model `.greedy` can
   reason in a loop until the limit. An unbounded `Double` has no digit limit
   in the constraint, so a model could run one on; it did not in these runs.
-  It took the two changes below and the last three fixes under Fixed.
+  It took the two changes below and the leading-blank-lines, `top_p: 0` and
+  unbounded-`integer` fixes under Fixed.
   Setup, what was checked on which model, and the limits are on
   [Xcode 27 and Foundation Models](docs/foundation-models.md). Not checked
   yet: images, other models, what an app sees with no server running, and
@@ -408,9 +421,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   ci-local's spm job run it, where a missing source fails the test rather
   than skips it), so an mlx-swift-lm bump that adds a key fails until it is
   placed. Gemma 4 and Qwen3.5/3.6, which that registry
-  also lists, stay on the text path on purpose: a VLM load has no prompt
-  cache, batching, replayed reasoning or history snapshots, which are what
-  macMLX serves agents with, so their images are still dropped, as before.
+  also lists, are not routed to a stock VLM load: it has no prompt cache,
+  batching, replayed reasoning or history snapshots, which are what macMLX
+  serves agents with. They take images through the full path instead, on
+  the checkpoints the two image entries under Added name, and stay
+  text-only otherwise.
   This is routing only, checked against the registries and the published
   checkpoints' `processor_class`; I have no checkpoint of the newly routed
   types, so none was run here.

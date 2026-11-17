@@ -71,8 +71,8 @@ function validateSourceData(homeTemplate, articleTemplate, today) {
       seenPaths.add(path);
     }
   }
-  assert.equal(routes.length, 18, "the complete hub must have 18 route IDs");
-  assert.equal(seenPaths.size, 36, "the complete hub must have 36 localized paths");
+  assert.equal(routes.length, 19, "the complete hub must have 19 route IDs");
+  assert.equal(seenPaths.size, 38, "the complete hub must have 38 localized paths");
 
   const englishCount = homeTemplate.match(/\bdata-en=/g)?.length ?? 0;
   const chineseCount = homeTemplate.match(/\bdata-zh=/g)?.length ?? 0;
@@ -220,7 +220,7 @@ async function validateGeneratedOutput(root, documents, markdownDocuments, disco
   await access(join(root, "assets/og-image.svg"));
   for (const capture of socialCardCaptures) await access(join(root, capture.output.replace(/^public\//, "")));
   const sitemap = await readFile(join(root, "sitemap.xml"), "utf8");
-  assert.equal(sitemap.match(/<url>/g)?.length, 36);
+  assert.equal(sitemap.match(/<url>/g)?.length, 38);
   assert.doesNotMatch(sitemap, /\?lang=/);
 }
 
