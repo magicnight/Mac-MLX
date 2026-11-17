@@ -135,6 +135,20 @@ struct TemplateNullTests {
         #expect(value(messages, at: [2, "tool_call_id"]) as? String == "c1")
     }
 
+    /// Reasoning and a null argument on one assistant turn: both render.
+    @Test
+    func aNullToolCallArgumentRendersBesideReasoning() throws {
+        var conversation = callingTool(arguments: argumentsWithNulls)
+        conversation[1] = ChatMessage(
+            role: .assistant, content: "", toolCalls: conversation[1].toolCalls, reasoning: "Look it up.")
+        let input = MLXSwiftEngine.userInput(
+            for: GenerateRequest(model: "m", messages: conversation), isVLM: false,
+            messageGenerator: DefaultMessageGenerator(), logsDroppedInputs: false)
+        let messages = try json("messages", in: try context(input))
+        #expect(value(messages, at: [1, "reasoning_content"]) as? String == "Look it up.")
+        #expect(value(messages, at: [1, "tool_calls", 0, "function", "arguments", "unit"]) is NSNull)
+    }
+
     /// A tool call without a null renders from the `.chat` input it always
     /// did: only a request that would fail takes the generator's dictionaries.
     @Test

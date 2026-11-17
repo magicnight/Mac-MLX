@@ -76,8 +76,9 @@ public enum JSONValue: Codable, Hashable, Sendable {
 
     /// Unwrap to the plain `Sendable` shape `JSONSerialization` takes
     /// (`String`/`Int`/`Double`/`Bool`/`NSNull`, or nested `[any Sendable]` /
-    /// `[String: any Sendable]`). A value on its way to the chat template
-    /// takes `toTemplateValue()` instead.
+    /// `[String: any Sendable]`). A value handed to the chat template as it
+    /// is (a tool schema, a template kwarg) takes `toTemplateValue()`
+    /// instead.
     public func toSendable() -> any Sendable {
         switch self {
         case .string(let value): return value

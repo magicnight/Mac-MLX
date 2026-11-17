@@ -1254,11 +1254,13 @@ public actor MLXSwiftEngine: InferenceEngine {
     /// argument is built from the dictionaries too, with those nulls made
     /// readable (see `replacingNullToolArguments`). Otherwise it is the
     /// `.chat` input it always was, so a request with neither renders exactly
-    /// as before. The
-    /// dictionaries carry only image placeholders, so the input keeps the
+    /// as before. The dictionaries carry only image placeholders, so the
+    /// input keeps the
     /// `.chat` input's images and videos, which the processor reads from
     /// `UserInput.images` either way. Another VLM has no generator here and
-    /// never gets the reasoning.
+    /// never gets the reasoning, and still fails on a replayed tool call
+    /// with a null argument: its processor renders `.chat` with its own
+    /// generator.
     static func userInput(
         for request: GenerateRequest,
         isVLM: Bool,
@@ -1319,7 +1321,8 @@ public actor MLXSwiftEngine: InferenceEngine {
         // `replacingNullToolArguments`), so the request renders from the
         // generator's dictionaries with those nulls replaced.
         let hasNullToolArgument = request.allMessages.contains { message in
-            message.toolCalls?.contains { $0.arguments.values.contains(where: \.containsNull) } ?? false
+            message.role == .assistant
+                && message.toolCalls?.contains { $0.arguments.values.contains(where: \.containsNull) } ?? false
         }
         // A full-path VLM (the only VLM handed a generator) always renders
         // through it: from `.chat`, its processor would render with its
@@ -2996,7 +2999,9 @@ public actor MLXSwiftEngine: InferenceEngine {
 
     /// Convert a macMLX `ToolCallRequest` back into an upstream `ToolCall` so the
     /// chat template can render it as an assistant tool-call block. Uses the
-    /// `[String: any Sendable]` `Function` initialiser (no `as!`).
+    /// `[String: any Sendable]` `Function` initialiser (no `as!`), whose
+    /// `JSONValue.from` reads a null only as `NSNull`: `toSendable()`, not
+    /// `toTemplateValue()`.
     static func upstreamToolCall(from request: ToolCallRequest) -> ToolCall {
         ToolCall(
             function: .init(

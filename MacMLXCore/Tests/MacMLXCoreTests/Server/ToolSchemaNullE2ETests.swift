@@ -87,11 +87,13 @@ final class ToolSchemaNullE2ETests: XCTestCase {
             port: port,
             body: body(tools: [tool(property: ["type": "string", "default": NSNull()])], messages: hi))
         XCTAssertEqual(withNull.status, 200, withNull.text)
-        // The null is rendered, not dropped: the prompt is longer by it.
+        // A template that prints the schema (Qwen's `tojson`) renders the
+        // null, so its prompt is longer; Gemma 4's prints only the keys it
+        // knows, and `default` is not one.
         let plainTokens = try promptTokens(plain.text)
         let nullTokens = try promptTokens(withNull.text)
         print("TOOL_NULL \(modelID) schema prompt_tokens plain=\(plainTokens) null=\(nullTokens)")
-        XCTAssertGreaterThan(nullTokens, plainTokens)
+        XCTAssertGreaterThanOrEqual(nullTokens, plainTokens)
 
         // A replayed tool call with a null argument.
         func replay(arguments: String) -> [[String: Any]] {
