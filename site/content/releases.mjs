@@ -95,7 +95,7 @@ export const releases = Object.freeze([
     }),
     "zh-Hans": Object.freeze({
       title: "macMLX v0.11.0",
-      summary: "当前版本让 macMLX 成为本地智能体后端：Codex 对接新的 /v1/responses，Claude Code 对接带 thinking 与 count_tokens 的 /v1/messages；回放的推理会传到聊天模板；在混合与滑动窗口模型上，智能体的每一轮都会复用上一轮的历史；Xcode 27 与 Apple Foundation Models 客户端已做端到端核验；Gemma 4 E4B 与稠密 Qwen3.5/3.6 可以读图。",
+      summary: "当前版本让 macMLX 成为本地智能体后端：Codex 对接新的 /v1/responses，Claude Code 对接带 thinking 与 count_tokens 的 /v1/messages；回放的推理会传到聊天模板；在混合与滑动窗口模型上，智能体轮次会复用之前的历史；Xcode 27 与 Apple Foundation Models 客户端已做端到端核验；Gemma 4 E4B 与稠密 Qwen3.5/3.6 可以读图。",
       compatibilityNotes: "新接口明确说明自身边界：/v1/responses 是无状态的，且逐个处理请求；Claude Code 的每个模型别名都必须映射到本地模型；端到端运行只覆盖 Xcode 27 在 Qwen3.6-27B 上、Apple Foundation Models 客户端在它与 Gemma 4 E4B 上，且不含图像；读图只适用于附带视觉塔的 E4B 形状 Gemma 4 检查点与稠密 Qwen3.5/3.6 检查点，图像请求不会在提示缓存中记录任何内容。多词元预测解码不属于这一版本。",
       upgradeNotes: "升级前请查看标签版 v0.11.0 更新日志。不带 max_tokens 或 max_completion_tokens 的 chat completion 现在最多可生成 32,768 个词元，而不是 2,048 个，连续批处理器的每行上限也随之升到 32,768；提供工具的请求现在一律走单流路径，但 tool_choice \"none\" 与 tools: [] 仍会批处理；chat completion 的回答现在从第一个非空白文本开始；/v1/messages 接受 tool_choice 的 none、any 与 tool（any 与 tool 提供全部工具但不强制调用），并以 Anthropic 的错误形状报告未知模型或加载失败；GET /v1/models 会列出模型目录中的每个聊天模型；视觉 Gemma 4 或 Qwen3.5/3.6 检查点此前以文本方式加载时留在 SSD 上的提示缓存条目会各未命中一次。",
     }),
