@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-17
+
+Codex and Claude Code can run their agent loops against macMLX: the
+Responses API, `count_tokens` and the reasoning round trip are in, an agent
+turn reuses the previous turn's history on hybrid and sliding-window models,
+Xcode 27 and Apple's Foundation Models client were checked end to end, and
+Gemma 4 E4B and dense Qwen3.5/3.6 read images. MTP decoding, planned for this
+release with the mlx-swift-lm 3.33 move, is not in it: 3.33 is not tagged
+yet, so MTP moves to the release that takes it. Dependencies are unchanged.
+
 ### Added
 - **Images on Gemma 4 E4B.** A Gemma 4 checkpoint that ships its vision
   tower, in the shape the parity run covered, now loads as a vision model, so
