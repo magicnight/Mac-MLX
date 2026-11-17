@@ -287,6 +287,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A JSON null in a request no longer fails it with HTTP 500 ("Cannot
+  convert value of type NSNull to Jinja Value"). Zed's agent sends tool
+  schemas with `"default": null`, so none of its requests got through
+  ([#175](../../issues/175)). A null in a tool schema, in
+  `chat_template_kwargs` or in the arguments of a tool call replayed in the
+  conversation now reaches the chat template as null. One case still
+  fails: a replayed tool call with a null argument on a model loaded on
+  the stock vision path (Qwen2/2.5/3-VL, Gemma 3, Mistral 3, Pixtral,
+  SmolVLM and the other vision families; every Gemma 4 and Qwen3.5/3.6
+  checkpoint is fixed, with images or as text), which waits for the
+  mlx-swift-lm release after 3.32.3.
+
 - Agent turns now reuse the previous turn's history on hybrid
   (linear-attention, e.g. Qwen3.6) and sliding-window (e.g. Mellum2) models.
   Codex and Claude Code send the whole conversation every turn, and the

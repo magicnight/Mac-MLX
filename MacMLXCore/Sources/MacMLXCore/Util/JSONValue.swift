@@ -74,9 +74,11 @@ public enum JSONValue: Codable, Hashable, Sendable {
 
     // MARK: - Bridging
 
-    /// Unwrap to the plain `Sendable` shape the tokenizer's
-    /// `additionalContext` expects (`String`/`Int`/`Double`/`Bool`/
-    /// `NSNull`, or nested `[any Sendable]` / `[String: any Sendable]`).
+    /// Unwrap to the plain `Sendable` shape `JSONSerialization` takes
+    /// (`String`/`Int`/`Double`/`Bool`/`NSNull`, or nested `[any Sendable]` /
+    /// `[String: any Sendable]`). A value handed to the chat template as it
+    /// is (a tool schema, a template kwarg) takes `toTemplateValue()`
+    /// instead.
     public func toSendable() -> any Sendable {
         switch self {
         case .string(let value): return value
@@ -86,6 +88,28 @@ public enum JSONValue: Codable, Hashable, Sendable {
         case .null: return NSNull()
         case .array(let value): return value.map { $0.toSendable() }
         case .object(let value): return value.mapValues { $0.toSendable() }
+        }
+    }
+
+    /// Like `toSendable()`, for a value the chat template reads (a tool
+    /// schema, a template kwarg): `.null` becomes `Optional.none`, which
+    /// swift-jinja reads as null. It throws on `NSNull`.
+    public func toTemplateValue() -> any Sendable {
+        switch self {
+        case .null: return (any Sendable)?.none
+        case .array(let value): return value.map { $0.toTemplateValue() }
+        case .object(let value): return value.mapValues { $0.toTemplateValue() }
+        default: return toSendable()
+        }
+    }
+
+    /// True when this value is, or holds at any depth, a JSON null.
+    public var containsNull: Bool {
+        switch self {
+        case .null: return true
+        case .array(let value): return value.contains(where: \.containsNull)
+        case .object(let value): return value.values.contains(where: \.containsNull)
+        default: return false
         }
     }
 }
