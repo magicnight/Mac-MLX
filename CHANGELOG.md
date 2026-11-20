@@ -14,7 +14,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   the inbound stream is already closed. 2.29.0 changes one default:
   `LocalFileSystem` no longer follows symbolic links. macMLX serves no files
   from disk, so nothing changes for it. No other pin moved.
-- **swift-transformers 1.4.0.** Besides the decode fix above, the release
+- **swift-transformers 1.4.0.** Besides the decode fix below, the release
   moves the encoder closer to the Rust `tokenizers` library, so a prompt can
   encode to different ids than before. Across 1,401 texts (prose, code,
   Chinese, emoji, and 350 with CRLF line ends), Gemma 4, Qwen 3.5, Qwen 3.6
