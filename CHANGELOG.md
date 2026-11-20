@@ -52,8 +52,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
     so all four local Gemma 4 checkpoints now match Python on every render.
   - A boolean printed by a template is `True` or `False`, not `true` or
     `false`. This reaches MiniCPM3's tool signatures and the tool-call
-    arguments Seed-OSS and Qwen 3.5 replay from history. Values a template
-    passes through `tojson` were already right and are unchanged.
+    arguments Seed-OSS and Qwen 3.5 replay from history. Both models write
+    `True` themselves (checked with mlx-lm on Qwen3.5-4B and Seed-OSS-36B),
+    so the replayed call now reads the way the model wrote it, and the prompt
+    cache can be reused across it; with 2.5.1 the replay said `true` and the
+    two parted at that token. Values a template passes through `tojson` were
+    already right and are unchanged.
   - A template's final newline is dropped, as Python drops it. Of the local
     templates only Qwen3-Reranker's and ctxl-rerank's end in one, and
     reranking does not render a chat template, so this shows only when such
