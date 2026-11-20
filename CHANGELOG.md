@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Hummingbird 2.29.0.** 2.28.1 stops a request-body handler spinning when
+  the inbound stream is already closed. 2.29.0 changes one default:
+  `LocalFileSystem` no longer follows symbolic links. macMLX serves no files
+  from disk, so nothing changes for it. No other pin moved.
+
 ## [0.11.0] - 2026-11-17
 
 Codex and Claude Code can run their agent loops against macMLX: the
