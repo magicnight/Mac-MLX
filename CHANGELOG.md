@@ -39,6 +39,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   Checkpoints that set the flag to `false`, such as Qwen 3.6 and GLM-OCR,
   decode as before; a BPE checkpoint that set it to `true`, as some Llama 3.x
   configs do, now keeps those spaces as well.
+- **Chat templates render the way Python renders them in three more
+  places.** swift-jinja 3.2.1 follows Jinja2 much more closely than 2.5.1
+  did. Ten conversations, each with and without the generation prompt, went
+  through the 19 chat templates on the development machine, and the token ids
+  were compared with transformers 5.23.0: 2.5.1 differed on 140 of 380, 3.2.1 on
+  66. What changed:
+  - Gemma 4's tool declarations lost a stray space after each opening brace
+    (`parameters:{ properties:{ city:{` is now `parameters:{properties:{city:{`),
+    so all four local Gemma 4 checkpoints now match Python on every render.
+  - A boolean printed by a template is `True` or `False`, not `true` or
+    `false`. This reaches MiniCPM3's tool signatures and the tool-call
+    arguments Seed-OSS and Qwen 3.5 replay from history. Values a template
+    passes through `tojson` were already right and are unchanged.
+  - A template's final newline is dropped, as Python drops it. This reaches
+    the Qwen3-Reranker and ctxl-rerank templates on every render.
+
+  Qwen 3.6, Mellum 2, GLM-OCR, Hunyuan and Command R7B rendered the same ids
+  on both versions. The 66 renders that still differ are all tool schemas:
+  macMLX hands the template a schema with its JSON keys sorted, and Python
+  keeps the order the client sent. That is older than this change and not
+  fixed by it. A prompt that renders differently misses the prompt cache
+  once.
 
 ## [0.11.0] - 2026-11-17
 

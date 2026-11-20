@@ -547,7 +547,12 @@ hash (probed with swift-jinja's floor raised from 2.4.2 to 2.4.3 under the
 past the 0.9.0 pin): the hash covers the workspace's own package
 references. When the pins still satisfy the new floor nothing else changes
 either; when they do not, only the pins that must move change, as
-swift-huggingface's did in that second case.
+swift-huggingface's did in that second case. swift-jinja is the case where
+the app's pin does not move at all: Core links it into its test target only,
+the app never sees that floor, and swift-transformers 1.4.0 accepts 2.4.2 up
+to 4.0.0, so after the move to 3.2.1 Xcode's resolve kept 2.5.1 and only the
+parity check said so. Set the pin's `revision` and `version` in the app's
+lockfile to Core's and resolve again; Xcode keeps it.
 
 ### A probe that passes has proved nothing until it reached the kernel
 
