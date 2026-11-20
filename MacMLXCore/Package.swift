@@ -144,7 +144,7 @@ let package = Package(
         // CLI, the app) resolves its graph. The library-level guarantee is the
         // swift-transformers 1.4.0 floor above, whose manifest requires
         // swift-jinja 2.4.2 ..< 4.0.0. Keep the two in step.
-        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.4.2"),
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "3.2.1"),
         // Audio (v0.9 W1a): MIT, Swift-native STT (Whisper/Parakeet family) and
         // TTS (Kokoro family) on top of MLX. Adds NO new transitive package —
         // it only depends on mlx-swift / mlx-swift-lm / swift-transformers /
