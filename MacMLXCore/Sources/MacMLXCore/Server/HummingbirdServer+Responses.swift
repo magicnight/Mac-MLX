@@ -54,7 +54,7 @@ extension HummingbirdServer {
         }
         let responsesRequest: ResponsesRequest
         do {
-            responsesRequest = try JSONDecoder().decode(ResponsesRequest.self, from: data)
+            responsesRequest = try JSONKeyOrder.decode(ResponsesRequest.self, from: data)
         } catch {
             return errorResponse(
                 status: .badRequest,

@@ -14,6 +14,9 @@ import Foundation
 
 /// A JSON value: string, integer, double, bool, null, array, or object.
 ///
+/// An object keeps the order of its keys (see `JSONObject`), because the chat
+/// template prints a tool schema in that order.
+///
 /// `Codable` so it persists inside `ModelParameters`; `Hashable` so the
 /// containing structs keep their synthesised conformances; `Sendable`
 /// for strict-concurrency crossing into the engine actors.
@@ -24,7 +27,14 @@ public enum JSONValue: Codable, Hashable, Sendable {
     case bool(Bool)
     case null
     case array([JSONValue])
-    case object([String: JSONValue])
+    case object(JSONObject)
+
+    /// An object over a plain dictionary, keys sorted. A dictionary literal
+    /// takes the case itself and keeps the order it is written in.
+    @_disfavoredOverload
+    public static func object(_ dictionary: [String: JSONValue]) -> JSONValue {
+        .object(JSONObject(dictionary))
+    }
 
     // MARK: - Decoding
 
@@ -47,7 +57,7 @@ public enum JSONValue: Codable, Hashable, Sendable {
             self = .string(value)
         } else if let value = try? container.decode([JSONValue].self) {
             self = .array(value)
-        } else if let value = try? container.decode([String: JSONValue].self) {
+        } else if let value = try? JSONObject(from: decoder) {
             self = .object(value)
         } else {
             throw DecodingError.dataCorruptedError(

@@ -730,7 +730,7 @@ func decodeToolArgumentsJSON(_ raw: String?, tool: String) throws -> [String: JS
             message: "Malformed `arguments` for tool '\(tool)': expected a JSON object string."
         )
     }
-    return object
+    return object.dictionary
 }
 
 /// Convert one decoded OpenAI `tool_calls[]` entry into a `ToolCallRequest`.
@@ -879,7 +879,7 @@ private func toolCallRequest(fromAnthropicUse block: AnthropicBlock) throws -> T
     case .none, .some(.null):
         arguments = [:]
     case .some(.object(let object)):
-        arguments = object
+        arguments = object.dictionary
     case .some:
         throw ToolHistoryDecodeError(
             message: "The `input` of `tool_use` '\(name)' must be a JSON object."
@@ -1865,7 +1865,7 @@ public actor HummingbirdServer {
 
         let chatReq: ChatCompletionRequest
         do {
-            chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: data)
+            chatReq = try JSONKeyOrder.decode(ChatCompletionRequest.self, from: data)
         } catch {
             // Legacy text-completions fallback (P3-1): `/v1/completions` (and
             // the `POST /` / `POST /v1` aliases) historically carry a bare
@@ -3475,7 +3475,7 @@ public actor HummingbirdServer {
     ) async throws -> (request: GenerateRequest, thinkingReply: AnthropicThinkingReply) {
         let req: AnthropicMessagesRequest
         do {
-            req = try JSONDecoder().decode(AnthropicMessagesRequest.self, from: data)
+            req = try JSONKeyOrder.decode(AnthropicMessagesRequest.self, from: data)
         } catch {
             throw AnthropicRequestError(message: "Invalid JSON: \(error.localizedDescription)")
         }
