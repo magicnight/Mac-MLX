@@ -124,6 +124,13 @@ test("validation rejects future dates and sources outside official ownership", a
   const futureCompetitor = { ...competitors[0], snapshotDate: "2026-11-21" };
   assert.throws(() => validateCompetitors([futureCompetitor], { today: "2026-11-20", maxAgeDays: 45 }), /future competitor snapshot/);
   assert.throws(() => validateCompetitors([{ ...competitors[0], lastVerified: "2026-11-21" }], { today: "2026-11-20", maxAgeDays: 45 }), /future competitor verification/);
+  // The build-level stale check trips on facts first, so the competitor window is pinned here.
+  const competitorExpiry = new Date(`${competitors[0].lastVerified}T00:00:00Z`);
+  competitorExpiry.setUTCDate(competitorExpiry.getUTCDate() + 45);
+  const lastFreshDay = competitorExpiry.toISOString().slice(0, 10);
+  competitorExpiry.setUTCDate(competitorExpiry.getUTCDate() + 1);
+  assert.doesNotThrow(() => validateCompetitors(competitors, { today: lastFreshDay, maxAgeDays: 45 }));
+  assert.throws(() => validateCompetitors(competitors, { today: competitorExpiry.toISOString().slice(0, 10), maxAgeDays: 45 }), /stale competitor/);
   const foreignCompetitor = { ...competitors[0], officialSources: [...competitors[0].officialSources, "https://example.com/ollama"] };
   assert.throws(() => validateCompetitors([foreignCompetitor], { today: "2026-11-20", maxAgeDays: 45 }), /unapproved official source/);
 

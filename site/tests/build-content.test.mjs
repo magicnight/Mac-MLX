@@ -114,6 +114,6 @@ test("repeated content builds are byte-identical", async () => {
 
 test("build validation uses an injectable actual UTC date without changing rendered dates", async () => {
   await assert.doesNotReject(prepareSite({ today: "2026-11-20" }));
-  await assert.rejects(prepareSite({ today: "2027-01-05" }), /stale (?:competitor|fact)/);
+  await assert.rejects(prepareSite({ today: "2027-01-05" }), /stale fact/);
   assert.match(generatedDocuments.get("/architecture/"), /2026-11-17/);
 });
