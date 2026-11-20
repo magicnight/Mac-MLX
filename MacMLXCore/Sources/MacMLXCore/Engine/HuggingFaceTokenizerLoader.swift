@@ -57,10 +57,13 @@ struct TokenizerBridge: MLXLMCommon.Tokenizer, @unchecked Sendable {
         self.chatTemplateOverride = chatTemplateOverride
     }
 
-    /// `addSpecialTokens: false` MUST mean no special tokens. swift-transformers
-    /// 1.3.4's `RobertaProcessing.postProcess` ignores the flag and always wraps
-    /// the tokens in `<s> … </s>` (its `BertProcessing` and `TemplateProcessing`
-    /// honour it). mlx-swift-lm's pair encoders rely on the flag: they encode
+    /// `addSpecialTokens: false` MUST mean no special tokens. Up to
+    /// swift-transformers 1.3.5, `RobertaProcessing.postProcess` ignored the
+    /// flag and always wrapped the tokens in `<s> … </s>` (its `BertProcessing`
+    /// and `TemplateProcessing` honoured it); 1.4.0 fixed that
+    /// (huggingface/swift-transformers#400), and the bypass below stays as the
+    /// one path that does not depend on a post-processor getting it right.
+    /// mlx-swift-lm's pair encoders rely on the flag: they encode
     /// the query and the document bare and add the special tokens themselves,
     /// so a RoBERTa-tokenizer reranker received `<s><s> q </s></s> </s><s> d
     /// </s></s>` and scored a different input — top-1 flipped on

@@ -14,6 +14,31 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   the inbound stream is already closed. 2.29.0 changes one default:
   `LocalFileSystem` no longer follows symbolic links. macMLX serves no files
   from disk, so nothing changes for it. No other pin moved.
+- **swift-transformers 1.4.0.** Besides the decode fix below, the release
+  moves the encoder closer to the Rust `tokenizers` library, so a prompt can
+  encode to different ids than before. Across 1,401 texts (prose, code,
+  Chinese, emoji, and 350 with CRLF line ends), Gemma 4, Qwen 3.5, Qwen 3.6
+  and Mellum 2 produced the same ids on both versions; GLM-OCR produced
+  different ids for 133 of the 350 CRLF texts and the same ids for
+  everything else. Prompt-cache entries are keyed on
+  ids, so a prompt that encodes differently misses the cache once and is
+  stored again. A tokenizer whose Split or Replace regex cannot be compiled
+  now fails to load with an error that names the pattern; 1.3.4 ignored a
+  bad Split pattern and crashed on a bad Replace one. The move also
+  brings yyjson 0.13.0.
+
+### Fixed
+- **Gemma 4 output keeps the spaces the model wrote before punctuation.**
+  Gemma 4's tokenizer config does not set `clean_up_tokenization_spaces`,
+  swift-transformers 1.3.4 treated that as on, and the cleanup removed the
+  space before `.`, `,`, `!`, `?` and before contractions such as `n't` and
+  `'s`. The tokens for `x != y , is n't it ?` came back as `x!= y, isn't
+  it?`, which mattered most in code. swift-transformers 1.4.0 follows
+  Transformers 5.7.0: cleanup is off unless the config asks for it, and BPE
+  tokenizers skip it unless the config sets a second, explicit override.
+  Checkpoints that set the flag to `false`, such as Qwen 3.6 and GLM-OCR,
+  decode as before; a BPE checkpoint that set it to `true`, as some Llama 3.x
+  configs do, now keeps those spaces as well.
 
 ## [0.11.0] - 2026-11-17
 
