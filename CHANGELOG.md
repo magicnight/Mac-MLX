@@ -41,10 +41,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   configs do, now keeps those spaces as well.
 - **Chat templates render the way Python renders them in three more
   places.** swift-jinja 3.2.1 follows Jinja2 much more closely than 2.5.1
-  did. Ten conversations, each with and without the generation prompt, went
-  through the 19 chat templates on the development machine, and the token ids
-  were compared with transformers 5.23.0: 2.5.1 differed on 140 of 380, 3.2.1 on
-  66. What changed:
+  did. Ten hand-built conversations, each with and without the generation
+  prompt, went through the tokenizer and the 19 chat templates on the
+  development machine, and the token ids were compared with transformers
+  5.23.0: 2.5.1 differed on 140 of 380, 3.2.1 on 66. That measures the
+  template engine; the server's own message building sits in front of it and
+  is covered by the end-to-end suites. What changed:
   - Gemma 4's tool declarations lost a stray space after each opening brace
     (`parameters:{ properties:{ city:{` is now `parameters:{properties:{city:{`),
     so all four local Gemma 4 checkpoints now match Python on every render.
@@ -52,15 +54,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
     `false`. This reaches MiniCPM3's tool signatures and the tool-call
     arguments Seed-OSS and Qwen 3.5 replay from history. Values a template
     passes through `tojson` were already right and are unchanged.
-  - A template's final newline is dropped, as Python drops it. This reaches
-    the Qwen3-Reranker and ctxl-rerank templates on every render.
+  - A template's final newline is dropped, as Python drops it. Of the local
+    templates only Qwen3-Reranker's and ctxl-rerank's end in one, and
+    reranking does not render a chat template, so this shows only when such
+    a checkpoint is used for chat.
 
   Qwen 3.6, Mellum 2, GLM-OCR, Hunyuan and Command R7B rendered the same ids
-  on both versions. The 66 renders that still differ are all tool schemas:
-  macMLX hands the template a schema with its JSON keys sorted, and Python
-  keeps the order the client sent. That is older than this change and not
-  fixed by it. A prompt that renders differently misses the prompt cache
-  once.
+  on both versions. The 66 renders that still differ are all tool schemas
+  with the same content in a different key order: a tool reaches the template
+  as a Swift dictionary, which has no order, swift-jinja sorts its keys, and
+  Python keeps the order the client sent. That is older than this change and
+  not fixed by it. A prompt that renders differently is reused from the
+  prompt cache only up to the first token that differs.
+
+  One render that used to work can now fail. swift-jinja 3 stops a macro
+  that calls itself at 16 levels, where 2.5.1 and Python have no such limit
+  in practice. Gemma 4's and MiniCPM3's templates walk a tool's parameter
+  schema with a recursive macro, so a schema nested about 15 levels deep
+  now fails the request with "Maximum recursion depth of 16 exceeded" instead
+  of rendering. Ten levels render on every template.
 
 ## [0.11.0] - 2026-11-17
 

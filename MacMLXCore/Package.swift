@@ -140,11 +140,16 @@ let package = Package(
         // 3.x renders much closer to Python's Jinja2, which is what the
         // checkpoints' templates were written for. Against transformers 5.23.0
         // on 19 local templates and 20 renders each, 2.5.1 differed on 140 and
-        // 3.2.1 on 66; the 66 are all tool schemas whose JSON keys we hand over
-        // sorted, where Python keeps the client's order. What 3.x fixed: stray
+        // 3.2.1 on 66; the 66 are all tool schemas in a different key order (a
+        // tool arrives as an unordered Swift dictionary and swift-jinja's
+        // `Value(any:)` sorts the keys; Python keeps the client's order). What
+        // 3.x fixed: stray
         // spaces in Gemma 4's tool declarations, `true` for `True` in MiniCPM3,
         // Seed-OSS and Qwen 3.5 tool text, and a trailing newline the reranker
-        // templates should not end with.
+        // templates should not end with. What 3.x costs: a macro may call
+        // itself at most 16 deep (`maximumCallDepth`, which swift-transformers
+        // does not expose), so Gemma 4's and MiniCPM3's recursive schema macros
+        // throw on a tool schema nested about 15 levels.
         //
         // This declaration links Jinja into the render-parity TEST target only,
         // so the tests render through the exact engine production uses. It is

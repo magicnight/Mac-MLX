@@ -43,6 +43,27 @@ struct JinjaPythonParityTests {
                 == "None|[True, False, 'a']")
     }
 
+    /// Not parity: Python has no such limit here. swift-jinja 3 stops a macro
+    /// that calls itself at 16 levels, and Gemma 4's and MiniCPM3's templates
+    /// walk a tool's parameter schema with one. Pinned so that a change to the
+    /// limit, in either direction, is noticed.
+    @Test
+    func aRecursiveMacroRendersTenLevelsAndStopsPastSixteen() throws {
+        let source =
+            "{%- macro walk(node) -%}"
+            + "{{ node['name'] }}{%- if node['child'] -%}>{{ walk(node['child']) }}{%- endif -%}"
+            + "{%- endmacro -%}{{ walk(root) }}"
+        func chain(_ depth: Int) -> Value {
+            var node: Value = ["name": .string("n\(depth)")]
+            for level in stride(from: depth - 1, through: 1, by: -1) {
+                node = ["name": .string("n\(level)"), "child": node]
+            }
+            return node
+        }
+        #expect(try render(source, ["root": chain(10)]) == (1...10).map { "n\($0)" }.joined(separator: ">"))
+        #expect(throws: (any Error).self) { try render(source, ["root": chain(20)]) }
+    }
+
     @Test
     func oneTrailingNewlineIsDropped() throws {
         #expect(try render("<think>\n\n</think>\n\n\n") == "<think>\n\n</think>\n\n")
