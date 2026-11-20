@@ -15,6 +15,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `LocalFileSystem` no longer follows symbolic links. macMLX serves no files
   from disk, so nothing changes for it. No other pin moved.
 
+### Fixed
+- **Gemma 4 output keeps the spaces the model wrote before punctuation.**
+  Gemma 4's tokenizer config does not set `clean_up_tokenization_spaces`,
+  swift-transformers 1.3.4 treated that as on, and the cleanup removed the
+  space before `.`, `,`, `!`, `?` and before contractions such as `n't` and
+  `'s`. The tokens for `x != y , is n't it ?` came back as `x!= y, isn't
+  it?`, which mattered most in code. swift-transformers 1.4.0 follows
+  Transformers 5.7.0: cleanup is off unless the config asks for it, and BPE
+  tokenizers skip it either way. Token ids are unchanged, so prompts and
+  cached prefixes are too. Checkpoints that set the flag to `false`, such as
+  Qwen 3.6 and GLM-OCR, decode as before; a BPE checkpoint that set it to
+  `true`, as some Llama 3.x configs do, now keeps those spaces as well. The
+  move also brings yyjson 0.13.0.
+
 ## [0.11.0] - 2026-11-17
 
 Codex and Claude Code can run their agent loops against macMLX: the
