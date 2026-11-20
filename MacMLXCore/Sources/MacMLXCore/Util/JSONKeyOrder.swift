@@ -21,17 +21,38 @@ import Foundation
 /// the objects it did not reach decode with sorted keys, and reporting the
 /// malformed text is left to the decoder.
 public struct JSONKeyOrder: Sendable {
-    /// Object keys in text order, by the path of the object that has them.
+    /// One step from a container to a child: a member of an object or an
+    /// element of an array.
+    private enum Component: Hashable {
+        case member(String)
+        case element(Int)
+    }
+
+    /// The step `component` taken from the container numbered `parent`.
+    private struct Edge: Hashable {
+        let parent: Int
+        let component: Component
+    }
+
+    /// The number of the text's top-level value.
+    private static let root = 0
+
+    /// Object keys in text order, by the number of the object that has them.
     /// An object with fewer than two keys is left out: it has one order.
-    private let orders: [String: [String]]
+    private let orders: [Int: [String]]
+    /// The numbers of the containers that lead to an object in `orders`, by
+    /// the step that reaches them. A container is a number and one step from
+    /// its parent, never a whole path, so what the scan keeps grows with the
+    /// text and not with how deep the text nests.
+    private let children: [Edge: Int]
 
     /// Scans `data`, a JSON text in UTF-8.
     public init(scanning data: Data) {
-        orders = data.withUnsafeBytes { raw in
+        (orders, children) = data.withUnsafeBytes { raw in
             var scanner = Scanner(bytes: raw.bindMemory(to: UInt8.self))
             scanner.skipByteOrderMark()
-            _ = scanner.scanValue(path: "", depth: 0)
-            return scanner.orders
+            scanner.scan()
+            return (scanner.orders, scanner.children)
         }
     }
 
@@ -49,35 +70,61 @@ public struct JSONKeyOrder: Sendable {
     /// the decoder carries no scan or the scan does not know the object.
     static func keys(at decoder: any Decoder) -> [String]? {
         guard let userInfoKey, let order = decoder.userInfo[userInfoKey] as? JSONKeyOrder else { return nil }
-        var path = ""
-        for component in decoder.codingPath {
+        var container = root
+        for key in decoder.codingPath {
             // An array element's key, as `JSONDecoder` builds it. A key of any
             // other origin has no `intValue` or a `stringValue` that is the
             // object key itself, so an object key is never read as an index.
-            if let index = component.intValue, component.stringValue == "Index \(index)" {
-                path += Self.element(index)
+            let component: Component
+            if let index = key.intValue, key.stringValue == "Index \(index)" {
+                component = .element(index)
             } else {
-                path += Self.member(component.stringValue)
+                component = .member(key.stringValue)
             }
+            guard let child = order.children[Edge(parent: container, component: component)] else { return nil }
+            container = child
         }
-        return order.orders[path]
+        return order.orders[container]
     }
 
     private static let userInfoKey = CodingUserInfoKey(rawValue: "MacMLXCore.JSONKeyOrder")
 
-    // A path is its components joined, each with a NUL and a tag in front, so a
-    // member named `i0` and the element 0 differ.
-    private static func member(_ key: String) -> String { "\u{0}k" + key }
-    private static func element(_ index: Int) -> String { "\u{0}i\(index)" }
-
     // MARK: - Scanner
 
+    /// Walks the text with its own stack of open containers and no recursion:
+    /// the scan runs on whatever thread decodes the request, and a text is
+    /// free to nest as deep as it likes.
     private struct Scanner {
         let bytes: UnsafeBufferPointer<UInt8>
         var index = 0
-        var orders: [String: [String]] = [:]
+        var orders: [Int: [String]] = [:]
+        var children: [Edge: Int] = [:]
 
-        /// `JSONDecoder` refuses deeper nesting than this.
+        /// A container the scan is inside of.
+        private struct Open {
+            /// The step that reached it, `nil` for the top-level value.
+            let edge: Edge?
+            let number: Int
+            let isObject: Bool
+            /// Whether `children` has its edge yet. An edge is only kept once
+            /// an object at or below it is recorded, so a text of many
+            /// containers with nothing to record keeps nothing.
+            var kept: Bool
+            /// Whether a first member or element has been looked for.
+            var started = false
+            /// An object's keys so far, in order and once each.
+            var keys: [String] = []
+            var seen: Set<String> = []
+            /// An array's elements so far.
+            var count = 0
+        }
+
+        /// The containers the scan is inside of, outermost first.
+        private var open: [Open] = []
+        private var nextNumber = JSONKeyOrder.root + 1
+
+        /// `JSONDecoder` refuses deeper nesting than this, so the scan stops
+        /// there too.
         private static let maximumDepth = 512
 
         init(bytes: UnsafeBufferPointer<UInt8>) {
@@ -93,16 +140,6 @@ public struct JSONKeyOrder: Sendable {
             }
         }
 
-        /// The path of a child that is about to be scanned. Only an object or
-        /// an array has a use for it, so a scalar child costs no string.
-        private mutating func childPath(_ path: String, _ component: @autoclosure () -> String) -> String {
-            skipWhitespace()
-            switch current {
-            case UInt8(ascii: "{"), UInt8(ascii: "["): return path + component()
-            default: return ""
-            }
-        }
-
         private mutating func skipWhitespace() {
             while let byte = current, byte == 0x20 || byte == 0x0A || byte == 0x0D || byte == 0x09 {
                 index += 1
@@ -115,16 +152,75 @@ public struct JSONKeyOrder: Sendable {
             return true
         }
 
-        /// Scans one value. `false` means the text stopped making sense and the
-        /// scan is over.
-        mutating func scanValue(path: String, depth: Int) -> Bool {
-            guard depth <= Self.maximumDepth else { return false }
+        /// Scans the text. It stops, with what it has recorded so far, where
+        /// the text stops making sense or nests deeper than `maximumDepth`.
+        mutating func scan() {
+            guard begin(reachedBy: nil) else { return }
+            // Each turn finishes the innermost open container or begins its
+            // next member or element.
+            while let innermost = open.indices.last {
+                skipWhitespace()
+                let isObject = open[innermost].isObject
+                let closing = isObject ? UInt8(ascii: "}") : UInt8(ascii: "]")
+                if open[innermost].started {
+                    if consume(closing) {
+                        close()
+                        continue
+                    }
+                    guard consume(UInt8(ascii: ",")) else { return }
+                    skipWhitespace()
+                } else {
+                    open[innermost].started = true
+                    if consume(closing) {
+                        close()
+                        continue
+                    }
+                }
+                if isObject {
+                    guard let key = scanString(wanted: true) else { return }
+                    skipWhitespace()
+                    guard consume(UInt8(ascii: ":")) else { return }
+                    if open[innermost].seen.insert(key).inserted {
+                        open[innermost].keys.append(key)
+                    }
+                    guard begin(reachedBy: nextIsContainer() ? .member(key) : nil) else { return }
+                } else {
+                    let element = open[innermost].count
+                    open[innermost].count += 1
+                    guard begin(reachedBy: nextIsContainer() ? .element(element) : nil) else { return }
+                }
+            }
+        }
+
+        /// Whether the value about to be scanned is an object or an array.
+        /// Only those are numbered, so a scalar child costs nothing.
+        private mutating func nextIsContainer() -> Bool {
+            skipWhitespace()
+            return current == UInt8(ascii: "{") || current == UInt8(ascii: "[")
+        }
+
+        /// Begins one value: steps over a scalar, or opens a container, which
+        /// `component` reaches from the innermost open one (`nil` for the
+        /// top-level value). `false` ends the scan.
+        private mutating func begin(reachedBy component: Component?) -> Bool {
             skipWhitespace()
             switch current {
-            case UInt8(ascii: "{"): return scanObject(path: path, depth: depth)
-            case UInt8(ascii: "["): return scanArray(path: path, depth: depth)
-            case UInt8(ascii: "\""): return scanString(wanted: false) != nil
-            case nil: return false
+            case UInt8(ascii: "{"), UInt8(ascii: "["):
+                guard open.count < Self.maximumDepth else { return false }
+                let isObject = current == UInt8(ascii: "{")
+                index += 1
+                if let component, let parent = open.last?.number {
+                    let edge = Edge(parent: parent, component: component)
+                    open.append(Open(edge: edge, number: nextNumber, isObject: isObject, kept: false))
+                    nextNumber += 1
+                } else {
+                    open.append(Open(edge: nil, number: JSONKeyOrder.root, isObject: isObject, kept: true))
+                }
+                return true
+            case UInt8(ascii: "\""):
+                return scanString(wanted: false) != nil
+            case nil:
+                return false
             default:
                 // A number, `true`, `false` or `null`: up to the next delimiter.
                 while let byte = current, !Self.endsScalar(byte) {
@@ -141,45 +237,22 @@ public struct JSONKeyOrder: Sendable {
             }
         }
 
-        private mutating func scanObject(path: String, depth: Int) -> Bool {
-            index += 1
-            var keys: [String] = []
-            var seen: Set<String> = []
-            skipWhitespace()
-            if consume(UInt8(ascii: "}")) { return true }
-            while true {
-                skipWhitespace()
-                guard let key = scanString(wanted: true) else { return false }
-                skipWhitespace()
-                guard consume(UInt8(ascii: ":")) else { return false }
-                let child = childPath(path, JSONKeyOrder.member(key))
-                guard scanValue(path: child, depth: depth + 1) else { return false }
-                if seen.insert(key).inserted {
-                    keys.append(key)
+        /// Closes the innermost open container. An object with more than one
+        /// key has its keys recorded, and the edges that lead to it kept.
+        private mutating func close() {
+            guard let closed = open.last else { return }
+            if closed.isObject, closed.keys.count > 1 {
+                var index = open.count - 1
+                while index >= 0, !open[index].kept {
+                    if let edge = open[index].edge {
+                        children[edge] = open[index].number
+                    }
+                    open[index].kept = true
+                    index -= 1
                 }
-                skipWhitespace()
-                if consume(UInt8(ascii: ",")) { continue }
-                guard consume(UInt8(ascii: "}")) else { return false }
-                if keys.count > 1 {
-                    orders[path] = keys
-                }
-                return true
+                orders[closed.number] = closed.keys
             }
-        }
-
-        private mutating func scanArray(path: String, depth: Int) -> Bool {
-            index += 1
-            skipWhitespace()
-            if consume(UInt8(ascii: "]")) { return true }
-            var element = 0
-            while true {
-                let child = childPath(path, JSONKeyOrder.element(element))
-                guard scanValue(path: child, depth: depth + 1) else { return false }
-                element += 1
-                skipWhitespace()
-                if consume(UInt8(ascii: ",")) { continue }
-                return consume(UInt8(ascii: "]"))
-            }
+            open.removeLast()
         }
 
         /// Scans a string, `nil` when it is not one. Returns its value when

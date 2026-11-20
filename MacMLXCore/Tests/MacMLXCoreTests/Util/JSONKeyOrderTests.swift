@@ -126,6 +126,19 @@ struct JSONKeyOrderTests {
         }
     }
 
+    /// What the scan keeps is bounded by the text. Long keys nested deep once
+    /// cost a path per level, each as long as everything above it; this text
+    /// would have kept hundreds of megabytes that way.
+    @Test
+    func deepNestingUnderLongKeysScansInLinearSpaceAndTime() {
+        let key = String(repeating: "k", count: 20_000)
+        let depth = 400
+        let text = String(repeating: "{\"b\":1,\"\(key)\":", count: depth) + "1" + String(repeating: "}", count: depth)
+        let clock = ContinuousClock()
+        let elapsed = clock.measure { _ = JSONKeyOrder(scanning: Data(text.utf8)) }
+        #expect(elapsed < .seconds(5))
+    }
+
     /// Deeper than the scan follows: no crash, and the decoder still decides.
     @Test
     func deepNestingDoesNotOverflow() {
