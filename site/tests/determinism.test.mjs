@@ -15,8 +15,8 @@ async function sourceAssets() {
 
 test("the complete generated text tree and tracked static inputs hash identically across two preparations", async () => {
   const [first, second, assets] = await Promise.all([
-    prepareSite({ today: "2026-11-17" }),
-    prepareSite({ today: "2026-11-17" }),
+    prepareSite({ today: "2026-11-20" }),
+    prepareSite({ today: "2026-11-20" }),
     sourceAssets(),
   ]);
   assert.equal(digestPreparedSite(first, assets), digestPreparedSite(second, assets));
