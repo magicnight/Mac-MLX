@@ -110,8 +110,11 @@ let package = Package(
         // which conflicts with our CLI's argparse 1.8.x requirement.
         // 1.4.0 follows Transformers 5.7.0 on decoding: cleanup of tokenization
         // spaces is off unless the tokenizer config asks for it, and BPE
-        // tokenizers skip it either way, so `x != y` no longer decodes as
-        // `x!= y`. Token ids are unchanged. Its manifest requires swift-jinja
+        // tokenizers skip it unless the config forces it, so `x != y` no longer
+        // decodes as `x!= y`. The release also changes encoding in places (code
+        // point matching in Split, Replace and BPE merges, `ignore_merges`,
+        // `fuse_unk`), so do not assume ids are stable across it: GLM-OCR's
+        // moved on CRLF text, the other local checkpoints' did not. Its manifest requires swift-jinja
         // 2.4.2 ..< 4.0.0, and Transformers is linked into the MacMLXCore
         // LIBRARY, so that requirement reaches every root that depends on this
         // package — the CLI and the app included. The swift-jinja declaration
