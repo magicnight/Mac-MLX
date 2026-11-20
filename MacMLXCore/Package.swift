@@ -106,14 +106,19 @@ let package = Package(
         // that does not reach it.
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.29.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
-        // Use 1.3.x series: avoids 0.1.24's pin on swift-argument-parser 1.4.x
+        // Use the 1.x series: avoids 0.1.24's pin on swift-argument-parser 1.4.x
         // which conflicts with our CLI's argparse 1.8.x requirement.
-        // 1.3.4 is the floor on purpose: its own manifest requires swift-jinja
-        // >= 2.4.2, and Transformers is linked into the MacMLXCore LIBRARY, so
-        // that requirement reaches every root that depends on this package —
-        // the CLI and the app included. The swift-jinja declaration further
-        // down does NOT do that job (see its comment).
-        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.4"),
+        // 1.4.0 follows Transformers 5.7.0 on decoding: cleanup of tokenization
+        // spaces is off unless the tokenizer config asks for it, and BPE
+        // tokenizers skip it either way, so `x != y` no longer decodes as
+        // `x!= y`. Token ids are unchanged. Its manifest requires swift-jinja
+        // 2.4.2 ..< 4.0.0, and Transformers is linked into the MacMLXCore
+        // LIBRARY, so that requirement reaches every root that depends on this
+        // package — the CLI and the app included. The swift-jinja declaration
+        // further down does NOT do that job (see its comment), which also means
+        // only the committed lockfiles keep the CLI and the app off swift-jinja
+        // 3.x until Core moves there.
+        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.4.0"),
         // MCP client pool (v0.5+). Pinned per-minor — SDK is still
         // pre-1.0. macmlx-cli already pulls the same package for the
         // v0.4.0 server-side MCP feature, but Core needs its own
@@ -125,7 +130,7 @@ let package = Package(
         // Command R7B) and #64 (`strip(arg)` argument handling, Hunyuan
         // `<answer>`) — are in 2.4.0; 2.4.0 also changed `Value.object`'s keys
         // and broke swift-transformers, and 2.4.1 restored String-keyed source
-        // compatibility, and 2.4.2 is the floor swift-transformers 1.3.4
+        // compatibility, and 2.4.2 is the floor swift-transformers 1.4.0
         // declares. Every checkpoint chat template now renders natively, with
         // no built-in override.
         //
@@ -134,8 +139,8 @@ let package = Package(
         // NOT what guarantees the version downstream: SwiftPM ignores a
         // dependency package's test-only requirements when another root (the
         // CLI, the app) resolves its graph. The library-level guarantee is the
-        // swift-transformers 1.3.4 floor above, whose manifest requires
-        // swift-jinja >= 2.4.2. Keep the two in step.
+        // swift-transformers 1.4.0 floor above, whose manifest requires
+        // swift-jinja 2.4.2 ..< 4.0.0. Keep the two in step.
         .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.4.2"),
         // Audio (v0.9 W1a): MIT, Swift-native STT (Whisper/Parakeet family) and
         // TTS (Kokoro family) on top of MLX. Adds NO new transitive package —
