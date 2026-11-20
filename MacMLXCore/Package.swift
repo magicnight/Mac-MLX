@@ -100,7 +100,11 @@ let package = Package(
         // 2.26.0 fixed three denial-of-service advisories (GHSA-wqpw-qq6j-p4x2,
         // GHSA-62cf-93wq-244m, GHSA-97r6-mq85-c3rv); 2.28.0 also raises its
         // swift-nio-ssl and swift-nio-http2 floors past their July advisories.
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
+        // 2.28.1 stops `consumeWithInboundCloseHandler` spinning on a stream
+        // that is already closed. 2.29.0 makes `LocalFileSystem` stop following
+        // symbolic links by default; the server serves no files from disk, so
+        // that does not reach it.
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.29.0"),
         .package(url: "https://github.com/kean/Pulse.git", from: "5.2.3"),
         // Use 1.3.x series: avoids 0.1.24's pin on swift-argument-parser 1.4.x
         // which conflicts with our CLI's argparse 1.8.x requirement.
