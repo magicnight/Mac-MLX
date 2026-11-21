@@ -16,11 +16,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   GPU affine-quantize fix (`mlx#4775`) is still ahead of any release, and one
   is new, below. What changes for a user:
   - **The SSD prompt cache starts over once.** The move changes what several
-    models compute (the norm epsilon in Qwen 3.5/3.6's gated-delta layers,
-    RoPE scaling for Gemma 3 checkpoints that store it in `rope_parameters`),
-    and a KV snapshot is only as good as the numerics that produced it. Files
-    written by an earlier build are deleted on first launch and no longer
-    served; the cache refills as conversations run.
+    models compute (the norm epsilon in the gated-delta layers of Qwen
+    3.5/3.6 and Qwen3-Next, RoPE scaling for Gemma 3 checkpoints that store it
+    in `rope_parameters`), and a KV snapshot is only as good as the numerics
+    that produced it. Files written by an earlier build are never served
+    again: they are deleted on first launch, or when first looked up if the
+    cache's index is missing. The cache refills as conversations run.
   - **Qwen 3.8 loads as text.** mlx-swift-lm 3.33.0 adds `qwen3_8`,
     `qwen3_8_moe` and `prism_hadamard_qwen35`. They load through the text
     path, with the prompt cache and tool calls; images are not read, since no
@@ -32,9 +33,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - **A Gemma 2 request on its own no longer depends on macMLX's copy of the
     model.** Upstream's Gemma 2 prefill is causal as of 3.33.0. The copy
     stays, because upstream still misapplies the per-row mask of a batch.
-  - **A LoRA adapter that targets a layer type the library cannot wrap now
-    fails to apply** with an error, where 3.32.3 reported success and left
-    those layers untouched.
+  - **A LoRA adapter that targets a subclass of a linear layer now fails to
+    apply** with an error (for example the Hadamard-rotated layers of
+    `prism_hadamard_qwen35`). 3.32.3 wrapped such a layer as a plain linear
+    one and lost what the subclass adds.
+  - **Speculative decoding on a Gemma 4 checkpoint with its vision tower no
+    longer goes through a wrapper.** 3.32.3 dropped the first token of a
+    speculative answer when the target prefilled its own prompt, and macMLX
+    wrapped the target to avoid it. 3.33.0 emits the token.
+  - The mlx-audio-swift fork gains a three-line change so Parakeet builds
+    against mlx-swift 0.33; nothing else in it moves.
 - **Hummingbird 2.29.0.** 2.28.1 stops a request-body handler spinning when
   the inbound stream is already closed. 2.29.0 changes one default:
   `LocalFileSystem` no longer follows symbolic links. macMLX serves no files
@@ -53,13 +61,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   brings yyjson 0.13.0.
 
 ### Fixed
-- **Speculative decoding on a Gemma 4 or Qwen 3.5/3.6 checkpoint with its
-  vision tower no longer needs a workaround.** mlx-swift-lm 3.32.3 dropped the
-  first token of a speculative answer when the target prefilled its own
-  prompt; macMLX wrapped the target to avoid it. 3.33.0 emits the token and
-  the wrapper is removed.
-- **A long Gemma 4 prompt would have crashed on an M5 with stock mlx-swift
-  0.33.0; the fork carries the fix.** Since core v0.32.3 the attention kernel
+- **A Gemma 4 prefill of 1,024 tokens or more in one pass would have crashed
+  on an M5 with stock mlx-swift 0.33.0; the fork carries the fix.** An image
+  request prefills that way. Since core v0.32.3 the attention kernel
   for head dimensions 256 and 512 on the M5 GPU fails to build at run time
   (`mlx#4832`: one template argument too many), which ends the process. Only
   Swift builds are affected, since the Python wheel ships its kernels

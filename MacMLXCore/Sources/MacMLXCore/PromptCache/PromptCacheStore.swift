@@ -138,7 +138,8 @@ public actor PromptCacheStore {
     /// deleted, as a missing fingerprint is. "3" adds that the state was
     /// computed by mlx-swift 0.33 / mlx-swift-lm 3.33.0 or later: that move
     /// changed what several models compute (the gated-delta norm epsilon of
-    /// Qwen 3.5/3.6, Gemma 3's RoPE scaling read from `rope_parameters`), and
+    /// Qwen 3.5/3.6 and Qwen3-Next, Gemma 3's RoPE scaling read from
+    /// `rope_parameters`), and
     /// a snapshot is only as good as the numerics that produced it. Raise it
     /// with any dependency move that changes a served model's output.
     static let coldRecordVersion = "3"
@@ -420,7 +421,14 @@ public actor PromptCacheStore {
             guard let entry = trie.get(model: modelID, tokens: candidate.key),
                 entry.fingerprint == modelFingerprint
             else { continue }
-            if candidate.requiresTrim, !MLXLMCommon.canTrimPromptCache(entry.caches) {
+            // Counted, as in `makeHit` and at the prefix drop in `insert`: a
+            // longer entry that cannot rewind the whole distance is passed
+            // over for the shorter one, rather than taken here and refused
+            // there.
+            let toTrim = candidate.heldCount - max(0, min(candidate.targetReuse, tokens.count - 1))
+            if candidate.requiresTrim,
+                !MLXLMCommon.canTrimPromptCache(entry.caches, numTokens: toTrim)
+            {
                 continue
             }
             return makeHit(

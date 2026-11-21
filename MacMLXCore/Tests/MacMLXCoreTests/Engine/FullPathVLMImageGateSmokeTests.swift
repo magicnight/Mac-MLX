@@ -224,11 +224,15 @@ final class FullPathVLMImageGateSmokeTests: XCTestCase {
             return
         }
         XCTAssertGreaterThan(warm.cachedPromptTokens ?? 0, 0, "step 1: the warm image request reused nothing")
-        // The tenth place can swap with the eleventh between two prefills,
-        // as it can against the one-shot prefill below: on mlx-swift 0.33 the
-        // warm run's tenth is not the cold run's, with every token above the
-        // floor equal to five decimals.
-        XCTAssertTrue(missing.count <= 1, "gate 4: the warm run's top 10 lacks \(missing)")
+        // The tail of the top 10 can swap with the eleventh between two
+        // prefills: on mlx-swift 0.33 the warm run's tenth is not the cold
+        // run's, with every token above the floor equal to five decimals. So
+        // only a token the cold run puts above the floor has to be there.
+        let coldByToken = Dictionary(coldTop.map { ($0.token, Double($0.logprob)) }, uniquingKeysWith: max)
+        let missingAboveFloor = missing.filter { (coldByToken[$0] ?? 0) > Self.stepOneLogProbFloor }
+        XCTAssertTrue(
+            missingAboveFloor.isEmpty,
+            "gate 4: the warm run's top 10 lacks \(missingAboveFloor), which the cold run puts above the floor")
         XCTAssertLessThanOrEqual(maxDelta, bound, "gate 4: warm against cold, |Δ log p|")
         XCTAssertLessThan(kl, delta * delta / 2, "gate 4: warm against cold, KL")
 

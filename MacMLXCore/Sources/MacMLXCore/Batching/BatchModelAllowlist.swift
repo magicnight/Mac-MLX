@@ -46,8 +46,9 @@ public enum BatchModelAllowlist {
     /// 3.33.0, takes its mask from the first cache's `makeMask`, but its
     /// grouped-query scores are `[B, kvHeads, repeats, L, S]` and it applies
     /// the per-row `[B, 1, L, S]` mask to them unchanged, so the row axis
-    /// lands on the head axis. Wrong logits on every row when the two sizes
-    /// happen to broadcast, no error. Re-add it only once that model lines the
+    /// lands on the head axis. Wrong logits on every row, with no error, when
+    /// the two sizes are equal or one of them is 1; otherwise the broadcast
+    /// fails. Re-add it only once that model lines the
     /// mask up and
     /// `BatchRaggedDecodeParityTests.testGemma2RaggedDecodeMisappliesThePerRowMask`
     /// fails as a result. `gemma2` checkpoints load as `Gemma2OverlayModel`

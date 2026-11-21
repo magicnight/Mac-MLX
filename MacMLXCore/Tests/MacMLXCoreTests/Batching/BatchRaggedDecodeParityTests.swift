@@ -141,8 +141,8 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
         print("[ragged-parity] gemma2 max abs logit error per row: \(errors)")
         XCTAssertGreaterThan(
             errors.min() ?? 0, 0.5,
-            "upstream Gemma 2 now decodes a ragged batch as it decodes each row alone: "
-                + "Gemma2Model can go on the allowlist, and Gemma2OverlayModel and its "
+            "a row of upstream Gemma 2's ragged batch now matches its own decode: if both "
+                + "do, Gemma2Model can go on the allowlist, and Gemma2OverlayModel and its "
                 + "ModelOverlay registration can be retired")
     }
 
