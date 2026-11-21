@@ -145,13 +145,13 @@ enum ResponsesInputTranslator {
                         throw TranslationError(
                             message: "`tools[\(index)].tools[\(nestedIndex)]` must be an object.")
                     }
-                    if let tool = try declaredTool(nestedFields, namespace: namespace) {
+                    if let tool = try declaredTool(nestedFields.dictionary, namespace: namespace) {
                         declared.append(tool)
                     } else {
                         dropped.append("\(namespace).\(string(nestedFields["type"]) ?? "unknown")")
                     }
                 }
-            } else if let tool = try declaredTool(fields, namespace: nil) {
+            } else if let tool = try declaredTool(fields.dictionary, namespace: nil) {
                 declared.append(tool)
             } else {
                 dropped.append(type)
@@ -254,20 +254,20 @@ enum ResponsesInputTranslator {
             let type = string(fields["type"]) ?? (fields["role"] != nil ? "message" : nil)
             switch type {
             case "message":
-                let message = try message(fields)
+                let message = try message(fields.dictionary)
                 out.append(message.role == .assistant ? adding(pendingReasoning, to: message) : message)
                 pendingReasoning.removeAll()
             case "function_call":
-                appendToolCall(try functionCall(fields, toolNames: toolNames), reasoning: pendingReasoning, to: &out)
+                appendToolCall(try functionCall(fields.dictionary, toolNames: toolNames), reasoning: pendingReasoning, to: &out)
                 pendingReasoning.removeAll()
             case "custom_tool_call":
-                appendToolCall(try customToolCall(fields, toolNames: toolNames), reasoning: pendingReasoning, to: &out)
+                appendToolCall(try customToolCall(fields.dictionary, toolNames: toolNames), reasoning: pendingReasoning, to: &out)
                 pendingReasoning.removeAll()
             case "function_call_output", "custom_tool_call_output":
-                out.append(try toolOutput(fields, type: type ?? ""))
+                out.append(try toolOutput(fields.dictionary, type: type ?? ""))
                 pendingReasoning.removeAll()
             case "reasoning":
-                if let text = reasoningText(fields) { pendingReasoning.append(text) }
+                if let text = reasoningText(fields.dictionary) { pendingReasoning.append(text) }
             case "item_reference":
                 throw TranslationError(
                     message: "`item_reference` input items are not supported: macMLX keeps no "
@@ -316,7 +316,7 @@ enum ResponsesInputTranslator {
                 case "input_image" where role == .system:
                     texts.append(MidConversationSystemFolding.omittedImage)
                 case "input_image":
-                    images.append(try image(partFields))
+                    images.append(try image(partFields.dictionary))
                 case .some(let other):
                     throw TranslationError(message: "Content part type '\(other)' is not supported.")
                 case .none:
