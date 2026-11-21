@@ -41,4 +41,73 @@ struct JSONValueTests {
         let object = JSONValue.object(["k": .bool(true)]).toSendable() as? [String: any Sendable]
         #expect((object?["k"] as? Bool) == true)
     }
+
+    // MARK: Nesting
+
+    /// `depth` containers around a null: objects, arrays, or the two in turn.
+    private func nested(_ depth: Int, open: [String], close: [String]) -> Data {
+        var text = ""
+        for level in 0..<depth { text += open[level % open.count] }
+        text += "null"
+        for level in (0..<depth).reversed() { text += close[level % close.count] }
+        return Data(text.utf8)
+    }
+
+    private static let shapes: [(open: [String], close: [String])] = [
+        (["{\"a\":"], ["}"]),
+        (["["], ["]"]),
+        (["{\"a\":", "["], ["}", "]"]),
+    ]
+
+    /// The deepest text that decodes does so on the thread a test runs on,
+    /// which is the kind of thread a request is decoded on.
+    @Test
+    func aValueAtTheNestingLimitDecodes() throws {
+        for shape in Self.shapes {
+            let data = nested(JSONValue.maximumNestingDepth, open: shape.open, close: shape.close)
+            var value = try JSONDecoder().decode(JSONValue.self, from: data)
+            var depth = 0
+            while true {
+                if case .object(let object) = value, let inner = object["a"] {
+                    value = inner
+                } else if case .array(let array) = value, let inner = array.first {
+                    value = inner
+                } else {
+                    break
+                }
+                depth += 1
+            }
+            #expect(depth == JSONValue.maximumNestingDepth)
+            #expect(value == .null)
+        }
+    }
+
+    /// One level more is an error, and the error says why. It used to decode,
+    /// and at a few hundred levels the recursion ran off the end of the stack.
+    @Test
+    func aValuePastTheNestingLimitIsAnError() {
+        for shape in Self.shapes {
+            for depth in [JSONValue.maximumNestingDepth + 1, 500] {
+                let data = nested(depth, open: shape.open, close: shape.close)
+                #expect {
+                    try JSONDecoder().decode(JSONValue.self, from: data)
+                } throws: { error in
+                    guard case DecodingError.dataCorrupted(let context) = error else { return false }
+                    return context.debugDescription.contains("nested deeper")
+                }
+            }
+        }
+    }
+
+    /// The limit counts from the top of the text, not from the value: a value
+    /// inside a request counts the request's own containers.
+    @Test
+    func theLimitCountsFromTheTopOfTheText() throws {
+        struct Wrapper: Decodable { let tools: [JSONValue] }
+        let fits = nested(JSONValue.maximumNestingDepth - 2, open: ["["], close: ["]"])
+        let tooDeep = nested(JSONValue.maximumNestingDepth - 1, open: ["["], close: ["]"])
+        func wrapped(_ data: Data) -> Data { Data(#"{"tools":["#.utf8) + data + Data("]}".utf8) }
+        _ = try JSONDecoder().decode(Wrapper.self, from: wrapped(fits))
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(Wrapper.self, from: wrapped(tooDeep)) }
+    }
 }

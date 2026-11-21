@@ -38,7 +38,20 @@ public enum JSONValue: Codable, Hashable, Sendable {
 
     // MARK: - Decoding
 
+    /// How many containers deep a value may sit, counted from the top of the
+    /// text being decoded. Decoding recurses once per level, and a request
+    /// body is decoded on a cooperative thread, whose 512 KB stack a debug
+    /// build ran out of at about 200 levels. A tool schema or a template kwarg
+    /// nests a small fraction of this.
+    public static let maximumNestingDepth = 64
+
     public init(from decoder: Decoder) throws {
+        guard decoder.codingPath.count <= Self.maximumNestingDepth else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "JSON nested deeper than \(Self.maximumNestingDepth) levels"))
+        }
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
@@ -55,10 +68,17 @@ public enum JSONValue: Codable, Hashable, Sendable {
             self = .double(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else if let value = try? JSONObject(from: decoder) {
-            self = .object(value)
+        } else if var elements = try? decoder.unkeyedContainer() {
+            // What is inside a container decodes with a plain `try`, so an
+            // error from below (the depth limit) arrives as itself and not as
+            // "Unsupported JSON value" from every level above it.
+            var array: [JSONValue] = []
+            while !elements.isAtEnd {
+                array.append(try elements.decode(JSONValue.self))
+            }
+            self = .array(array)
+        } else if JSONObject.isObject(at: decoder) {
+            self = .object(try JSONObject(from: decoder))
         } else {
             throw DecodingError.dataCorruptedError(
                 in: container,

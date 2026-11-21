@@ -49,6 +49,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   SDK decodes a schema into an unordered dictionary; and the arguments of a
   tool call replayed from history, on any endpoint, are still sorted. Gemma
   4's template sorts the keys itself (`dictsort`) and renders as before.
+- **A deeply nested request body is refused instead of crashing the
+  server.** A free-form JSON value in a request (a tool schema, a
+  `response_format` schema, template kwargs) decodes by recursion, on a
+  thread with a 512 KB stack, and a body nested a few hundred levels ran
+  off the end of it: about 200 levels in a debug build, about 500 in a
+  release one. Any client that could reach the port could stop the process
+  that way. Such a value may now sit at most 64 containers deep, counted
+  from the top of the body, and a deeper one gets a 400. A body between 65
+  and those few hundred levels used to be accepted and is now refused.
 - **Gemma 4 output keeps the spaces the model wrote before punctuation.**
   Gemma 4's tokenizer config does not set `clean_up_tokenization_spaces`,
   swift-transformers 1.3.4 treated that as on, and the cleanup removed the
