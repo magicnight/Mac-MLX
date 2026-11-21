@@ -1,5 +1,5 @@
 {
-  "originHash" : "62b5ea4bf3664cc57db608ea38d24d6b70d923b0fd68bd34a9617059d7b4fc0d",
+  "originHash" : "d21562a7dd87b3a3c1feb4a67a23460229abe0be3daa2e9b4be83bed7c1207bd",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -41,7 +41,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/magicnight/mlx-swift.git",
       "state" : {
-        "revision" : "8a9422e6385078199ba3d96a23560dbbd322c7bf"
+        "revision" : "93d2883825528ea962ba2c1a3679c978c3e08053"
       }
     },
     {

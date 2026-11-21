@@ -393,7 +393,7 @@ possible and we did it. What follows is what the move actually required, which
 differs from what the previous version of this section predicted. Keep both
 lessons: the facts, and the fact that a landmine table rots.
 
-**What the fork was for, and why it shrank to two patches (five since 2026-10-29).** Twelve of the
+**What the fork was for, and why it shrank to two patches (five from 2026-10-29, two again since 2026-11-21).** Twelve of the
 thirteen cherry-picks the fork carried on top of v0.31.1 are in core v0.32.2 —
 every one verified by `git merge-base --is-ancestor` against `1f8e74e3`, and
 the three that live in kernel headers (`mlx#3631`, `mlx#3497`, `mlx#3361`) also
@@ -421,6 +421,18 @@ its cmake step could not fetch metal-cpp; only `quantized.cpp`,
 `metal/quantized.h` and `metal/sdpa_vector.h` changed. Since `#4775` is on
 mlx main only, the fork outlives any mlx-swift release that vendors core
 v0.32.4.
+
+On 2026-11-21 the fork was rebuilt on mlx-swift 0.33.0 (core v0.32.4) as
+branch `0.33.0-macmlx`, over a `v0.32.4-macmlx` branch of the mlx mirror. Four
+of the five are in that core, so it carries two: `mlx#4775` as before, and the
+fix for `mlx#4832` (upstream PR `#4903`, still open when it was picked). Since
+core v0.32.3 the JIT source for the NAX attention kernel at head dimension 256
+or 512 passes one template argument more than `attention_nax_dsplit` declares,
+and the failed build ends the process; the gated Gemma 4 image suite hit it on
+the first run against upstream 0.33.0. That fix is in `jit_kernels.cpp`, host
+C++ compiled from the submodule, so it needed no generated copies.
+`SDPASplitDKernelJITTests` pins it. If upstream merges a different fix, take
+theirs and drop the pick.
 
 **The cross-thread abort is gone, by construction.** `ml-explore/mlx#3348` made
 `default_stream()` thread-local in core v0.31.2, and mlx-swift 0.31.x's

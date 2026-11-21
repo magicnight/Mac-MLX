@@ -9,8 +9,8 @@ let package = Package(
     ],
     dependencies: [
         // CONTROLLED MINIMAL FORK (master plan §1.1, rebased 2026-11-21):
-        // upstream mlx-swift 0.33.0, which vendors core v0.32.4, plus ONE
-        // upstream cherry-pick that no mlx-swift release carries:
+        // upstream mlx-swift 0.33.0, which vendors core v0.32.4, plus TWO
+        // upstream fixes that no mlx-swift release carries:
         //
         //   - ml-explore/mlx#4775 (mlx main, after core v0.32.4) — GPU affine
         //     quantize started its maximum at 0, so an all-negative group was
@@ -21,6 +21,18 @@ let package = Package(
         //     The fix is in a kernel header, so the fork changes the generated
         //     copies under Source/Cmlx/mlx-generated as well as the submodule
         //     pointer (.claude/distribution.md says why both).
+        //
+        //   - ml-explore/mlx#4903 (open upstream, fixes mlx#4832) — since core
+        //     v0.32.3 the JIT source for the NAX attention kernel with head
+        //     dimension 256 or 512 passes one template argument more than
+        //     attention_nax_dsplit declares, so building it fails and the
+        //     process ends ("Unable to build metal library from source").
+        //     Reached on the M5 GPU by causal attention over 1,024 or more
+        //     query rows when the input is not float32 or TF32 is on, which is
+        //     how Gemma 4 prefills. Reproduced here against upstream 0.33.0.
+        //     SDPASplitDKernelJITTests. The fix is in host C++
+        //     (jit_kernels.cpp), compiled from the submodule, so the pointer
+        //     alone carries it.
         //
         // The other four fixes the previous base (0.32.3, core v0.32.2) carried
         // are in core v0.32.4, each checked by ancestry: #3922 and #4009 (the
@@ -45,13 +57,14 @@ let package = Package(
         // The fork carries no API changes; its .gitmodules points the mlx
         // submodule at the magicnight mirror so the carried commit resolves.
         // Drop this override and return to the upstream package as soon as an
-        // mlx-swift release vendors a core that contains #4775. Pinned by
+        // mlx-swift release vendors a core that contains #4775 and a fix for
+        // #4832. Pinned by
         // revision so it can never drift; CLIForkPinTests, AppForkPinTests and
         // the CI step that reads the app's resolved graph keep the three roots
         // in step.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "8a9422e6385078199ba3d96a23560dbbd322c7bf"),
+            revision: "93d2883825528ea962ba2c1a3679c978c3e08053"),
         // Minor-pinned: a minor bump of mlx-swift-lm raises its mlx-swift floor,
         // which the fork's revision pin can satisfy at resolution but not at the
         // source level. Move both together, never one.
