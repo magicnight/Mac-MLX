@@ -106,6 +106,8 @@ struct JSONValueTests {
         let depth = JSONValue.maximumNestingDepth
         let data = Data((String(repeating: "[", count: depth) + "[]" + String(repeating: "]", count: depth)).utf8)
         _ = try JSONDecoder().decode(JSONValue.self, from: data)
+        let oneMore = Data("[".utf8) + data + Data("]".utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(JSONValue.self, from: oneMore) }
     }
 
     /// The limit counts from the top of the text, not from the value: a value

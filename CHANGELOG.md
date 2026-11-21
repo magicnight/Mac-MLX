@@ -60,8 +60,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
     65 and those few hundred levels used to be accepted and is now refused.
   - On `/v1/messages`, a `tool_result` whose content held another
     `tool_result`, and so on, overflowed at about 150 levels. Only the text
-    blocks of a tool result were ever read; anything else inside one is now
-    skipped without being decoded.
+    blocks of a tool result were ever read, so only the `type` and `text` of
+    its blocks are decoded now and anything else inside one is ignored. A
+    body refused before because of a malformed field in such a block is now
+    served.
 - **Gemma 4 output keeps the spaces the model wrote before punctuation.**
   Gemma 4's tokenizer config does not set `clean_up_tokenization_spaces`,
   swift-transformers 1.3.4 treated that as on, and the cleanup removed the
