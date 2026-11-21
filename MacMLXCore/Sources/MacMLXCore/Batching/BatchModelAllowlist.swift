@@ -42,13 +42,14 @@ public enum BatchModelAllowlist {
     /// honour A1's per-row `.batch` offset) and to build every mask through
     /// `cache.makeMask` in the vendored mlx-swift-lm.
     ///
-    /// NOT `Gemma2Model`: it reads `ropeOffset`, but `Gemma2ModelInner` builds
-    /// its mask with the `[KVCache]?` overload of `createAttentionMask`, which
-    /// never calls `makeMask` (nil at one token, a plain causal mask from the
-    /// first cache's offset otherwise), so in a ragged batch the left-padded
-    /// rows attend to their zero-filled pad columns. Wrong logits, no error.
-    /// Re-add it only once that model takes its mask from the cache and
-    /// `BatchRaggedDecodeParityTests.testGemma2RaggedDecodeAttendsToLeftPadding`
+    /// NOT `Gemma2Model`: it reads `ropeOffset` and, since mlx-swift-lm
+    /// 3.33.0, takes its mask from the first cache's `makeMask`, but its
+    /// grouped-query scores are `[B, kvHeads, repeats, L, S]` and it applies
+    /// the per-row `[B, 1, L, S]` mask to them unchanged, so the row axis
+    /// lands on the head axis. Wrong logits on every row when the two sizes
+    /// happen to broadcast, no error. Re-add it only once that model lines the
+    /// mask up and
+    /// `BatchRaggedDecodeParityTests.testGemma2RaggedDecodeMisappliesThePerRowMask`
     /// fails as a result. `gemma2` checkpoints load as `Gemma2OverlayModel`
     /// (registered by `ModelOverlay`), which asks the cache for its mask and is
     /// listed below.

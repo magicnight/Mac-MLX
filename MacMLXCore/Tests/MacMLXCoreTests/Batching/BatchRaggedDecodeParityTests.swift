@@ -16,12 +16,14 @@ import XCTest
 /// xcodebuild pass. Two prompts of different lengths make the cohort ragged:
 /// the shorter row is left-padded by the merge, so a model whose attention
 /// mask does not come from the cache's `makeMask` attends to those zero-filled
-/// pad columns at every decode step and its logits move, with no error. That
-/// is how upstream's `Gemma2Model` is wired in mlx-swift-lm 3.32.3, and why it
-/// is off the allowlist: ``testGemma2RaggedDecodeAttendsToLeftPadding`` pins
+/// pad columns at every decode step and its logits move, with no error.
+/// Upstream's `Gemma2Model` did that through mlx-swift-lm 3.32.3. Since
+/// 3.33.0 it asks the cache, and then applies the per-row mask to its
+/// grouped-query scores without lining the two up, which is why it is still
+/// off the allowlist: ``testGemma2RaggedDecodeMisappliesThePerRowMask`` pins
 /// the divergence, so a release that fixes it fails here and the model can be
 /// reconsidered. `gemma2` checkpoints load as macMLX's `Gemma2OverlayModel`,
-/// which takes its mask from the cache and is checked with the allowlisted set.
+/// which lines the mask up and is checked with the allowlisted set.
 ///
 /// The decode inputs are teacher-forced (the same tokens for both runs), so
 /// one early argmax flip cannot cascade into a comparison of different
@@ -38,7 +40,7 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
     /// models: with TF32 off the worst row is 3.4e-6, with it on 0.018 (the
     /// Gemma 2 overlay, added later: 3.0e-6 with TF32 off). The gate is the
     /// project's 1e-4 with TF32 off and about three times the TF32 worst case
-    /// with it on; Gemma 2's left-padded row is off by 1.58 either way. For the
+    /// with it on; upstream Gemma 2's rows are off by 2.2 and 3.5. For the
     /// tight gate:
     ///
     ///   TEST_RUNNER_MLX_ENABLE_TF32=0 xcodebuild test -scheme MacMLXCore \
@@ -125,20 +127,23 @@ final class BatchRaggedDecodeParityTests: XCTestCase {
         XCTAssertEqual(core.rowCount, 0, "a refused admit must not leave a row behind")
     }
 
-    /// Why Gemma 2 is off the allowlist. `Gemma2ModelInner` builds its mask
-    /// with the `[KVCache]?` overload of `createAttentionMask`, which never
-    /// asks the cache: `nil` at one token, a plain causal mask otherwise. The
-    /// unpadded row matches; the left-padded row's decode attends to its pad
-    /// columns and does not.
-    func testGemma2RaggedDecodeAttendsToLeftPadding() throws {
+    /// Why Gemma 2 is off the allowlist. Since mlx-swift-lm 3.33.0
+    /// `Gemma2ModelInner` takes its mask from the first cache, so it gets
+    /// `BatchKVCache`'s per-row `[B, 1, L, S]` mask; `Gemma2Attention` applies
+    /// it to `[B, kvHeads, repeats, L, S]` scores as it is, and the row axis
+    /// broadcasts against the head axis. With two rows and two key-value
+    /// heads that is silent, and both rows decode wrong, the unpadded one
+    /// too. (Through 3.32.3 the mask never came from the cache and only the
+    /// left-padded row was wrong.)
+    func testGemma2RaggedDecodeMisappliesThePerRowMask() throws {
         try requireTrustworthyMetalOrSkip()
         let errors = try raggedDecodeLogitErrors(try TinyRandomLanguageModel.gemma2.make())
         print("[ragged-parity] gemma2 max abs logit error per row: \(errors)")
         XCTAssertGreaterThan(
-            errors[0], 0.5,
-            "Gemma 2's left-padded row no longer diverges: if mlx-swift-lm now takes its "
-                + "mask from the cache, Gemma2Model can go back on the allowlist")
-        XCTAssertLessThan(errors[1], tolerance, "the unpadded row has no pad columns to leak")
+            errors.min() ?? 0, 0.5,
+            "upstream Gemma 2 now decodes a ragged batch as it decodes each row alone: "
+                + "Gemma2Model can go on the allowlist, and Gemma2OverlayModel and its "
+                + "ModelOverlay registration can be retired")
     }
 
     // MARK: - Helpers

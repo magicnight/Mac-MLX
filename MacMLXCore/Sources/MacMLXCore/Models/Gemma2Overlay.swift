@@ -15,16 +15,24 @@ import MLXNN
 // `Gemma2Model`, registered into the stock factory by `ModelOverlay` so it
 // REPLACES upstream's `gemma2` entry (the `HunyuanV1Dense.swift` precedent).
 //
-// Why it exists. Upstream `Gemma2ModelInner` builds its mask with the
-// `[KVCache]?` overload of `createAttentionMask`, which returns a BOOLEAN causal
-// mask (or nil at one token) and never asks the cache, and `Gemma2Attention`
-// then ADDS that mask to the soft-capped scores (`scores + mask`). A boolean
-// added to floats is +1 on visible positions and +0 on future ones, so a
-// multi-token prefill is not causal at all: every prompt token attends to every
-// later one. Single-token decode is unaffected (the mask is nil there), which
-// is why the model still produces plausible text. And because the mask never
-// comes from the cache, `BatchKVCache`'s left-pad mask is ignored in a ragged
-// batch, the reason upstream's type is off ``BatchModelAllowlist``.
+// Why it exists. Through mlx-swift-lm 3.32.3 upstream `Gemma2ModelInner` built
+// its mask with the `[KVCache]?` overload of `createAttentionMask`, which
+// returned a BOOLEAN causal mask (or nil at one token) and never asked the
+// cache, and `Gemma2Attention` then ADDED that mask to the soft-capped scores
+// (`scores + mask`). A boolean added to floats is +1 on visible positions and
+// +0 on future ones, so a multi-token prefill was not causal at all: every
+// prompt token attended to every later one. And because the mask never came
+// from the cache, `BatchKVCache`'s left-pad mask was ignored in a ragged batch.
+//
+// 3.33.0 (ml-explore/mlx-swift-lm#728) fixed the first half the same way this
+// file does: the mask comes from the first layer's cache and a boolean one
+// selects. Its prefill now equals this file's, position for position. What it
+// did not fix is the batch: with grouped-query attention the scores are
+// `[B, kvHeads, repeats, L, S]`, and upstream applies `BatchKVCache`'s per-row
+// `[B, 1, L, S]` mask to them as it is, so the row axis lands on the head axis
+// and both rows of a ragged batch come out wrong. That is why upstream's type
+// stays off ``BatchModelAllowlist`` and why this copy is still what `gemma2`
+// loads as.
 //
 // The fix, matching Python mlx-lm's `gemma2.py`: the mask comes from the first
 // layer's cache through `makeAttentionMask(n:cache:returnArray: true)` (which is
@@ -44,8 +52,9 @@ import MLXNN
 // upstream's on shared weights, so the mask is the only difference.
 //
 // Retire this file (and its `ModelOverlay` registration) once upstream's
-// `Gemma2Model` takes its mask from the cache; `Gemma2OverlayTests`'s
-// upstream canary fails when that happens.
+// `Gemma2Model` lines a per-row mask up with its grouped scores;
+// `BatchRaggedDecodeParityTests.testGemma2RaggedDecodeMisappliesThePerRowMask`
+// fails when that happens.
 
 // MARK: - Configuration
 
