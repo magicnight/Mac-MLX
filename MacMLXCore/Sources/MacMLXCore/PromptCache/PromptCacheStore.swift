@@ -135,14 +135,20 @@ public actor PromptCacheStore {
     /// positions (#142). A file written before the stamp may hold the stop
     /// token's position past its key and cannot be told apart from one that
     /// does not, so a missing or different stamp is rejected and the file
-    /// deleted, as a missing fingerprint is.
-    static let coldRecordVersion = "2"
+    /// deleted, as a missing fingerprint is. "3" adds that the state was
+    /// computed by mlx-swift 0.33 / mlx-swift-lm 3.33.0 or later: that move
+    /// changed what several models compute (the gated-delta norm epsilon of
+    /// Qwen 3.5/3.6, Gemma 3's RoPE scaling read from `rope_parameters`), and
+    /// a snapshot is only as good as the numerics that produced it. Raise it
+    /// with any dependency move that changes a served model's output.
+    static let coldRecordVersion = "3"
 
-    /// The first cold format whose files carry the `recordVersion` stamp. A
-    /// store opening an index from before it reclaims every cold file under
-    /// the root, since no fetch will serve an unstamped file again; a later
-    /// bump discards only the index, as before.
-    static let firstStampedColdFormatVersion = 2
+    /// The first cold format whose files carry the current `recordVersion`
+    /// stamp. A store opening an index from before it reclaims every cold
+    /// file under the root, since no fetch will serve a file with an older
+    /// stamp, or none, again; a bump that leaves the stamp alone discards
+    /// only the index.
+    static let firstStampedColdFormatVersion = 3
 
     /// Test seam: whether the cold index still records `tokens` for `modelID`.
     func hasColdRecord(modelID: String, tokens: [Int]) -> Bool {
@@ -352,9 +358,13 @@ public actor PromptCacheStore {
         }
         lru.push(key, type: cacheType)
 
-        // A trimmable cache can serve any of its own prefixes via trim(), so
-        // stored strict-prefix entries are pure overhead — drop them.
-        if MLXLMCommon.canTrimPromptCache(caches) {
+        // A cache that can be trimmed all the way back can serve any of its
+        // own prefixes via trim(), so stored strict-prefix entries are pure
+        // overhead — drop them. Counted, not `isTrimmable`: since mlx-swift-lm
+        // 3.33.0 a cache can be trimmable within a bounded window only
+        // (LFM2's `RewindableConvolutionCache` keeps 64 positions), and a
+        // history snapshot further back than that is one it cannot reach.
+        if MLXLMCommon.canTrimPromptCache(caches, numTokens: tokens.count) {
             for (prefixLength, removed) in trie.popPrefixes(model: modelID, tokens: tokens) {
                 nBytes -= removed.nbytes
                 lru.remove(
@@ -578,7 +588,12 @@ public actor PromptCacheStore {
         if reported > 0, reported != heldCount { return nil }
         let toTrim = heldCount - reuse
         if toTrim > 0 {
-            guard MLXLMCommon.canTrimPromptCache(copies) else { return nil }
+            // Every layer must be able to rewind by exactly `toTrim`. Since
+            // mlx-swift-lm 3.33.0 `isTrimmable` no longer says that (a cache
+            // can retain a bounded history), and `trimPromptCache` clamps or
+            // does nothing when asked for more, which would leave the caches
+            // ahead of the reuse count this hit reports.
+            guard MLXLMCommon.canTrimPromptCache(copies, numTokens: toTrim) else { return nil }
             MLXLMCommon.trimPromptCache(copies, numTokens: toTrim)
         }
         return PromptCacheHit(snapshot: PromptCacheSnapshot(copies), reusedTokenCount: reuse)

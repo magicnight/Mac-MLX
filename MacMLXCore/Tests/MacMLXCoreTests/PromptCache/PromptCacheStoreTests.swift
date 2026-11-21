@@ -149,6 +149,42 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(offset(hit), 1)
     }
 
+    /// A cache that can rewind only a bounded number of positions: LFM2's
+    /// `RewindableConvolutionCache` (mlx-swift-lm 3.33.0), beside an attention
+    /// layer. `isTrimmable` is true for it at any distance, and
+    /// `trimPromptCache` trims nothing when asked for more than it retains,
+    /// so a hit that trusted `isTrimmable` reported a reuse the caches were
+    /// still ahead of. Within the window the hit is trimmed exactly; past it
+    /// there is no hit.
+    func testATrimPastABoundedRewindWindowIsNotAHit() async throws {
+        try requireMLXRuntimeOrSkip()
+        let count = 10, stateLength = 2, window = 4
+        let attention = KVCacheSimple()
+        _ = attention.update(
+            keys: MLXArray.zeros([1, 1, count, 4]), values: MLXArray.ones([1, 1, count, 4]))
+        let convolution = RewindableConvolutionCache(stateLength: stateLength, rollbackCapacity: window)
+        convolution.record(
+            input: MLXArray.ones([1, count, 3]),
+            initialState: MLXArray.zeros([1, stateLength, 3]),
+            currentState: MLXArray.ones([1, stateLength, 3]))
+        let caches: [any KVCache] = [attention, convolution]
+        XCTAssertTrue(canTrimPromptCache(caches), "the premise: trimmable by the uncounted check")
+        XCTAssertEqual(convolution.maxTrimCount, window)
+
+        let stored = Array(1...count)
+        let store = PromptCacheStore(root: tmpRoot())
+        await store.insert(modelID: model, tokens: stored, snapshot: PromptCacheSnapshot(caches))
+
+        // Two positions back: inside the window.
+        let near = await store.fetchNearest(modelID: model, tokens: Array(stored.prefix(8)) + [99])
+        XCTAssertEqual(near?.reusedTokenCount, 8)
+        XCTAssertEqual(near?.snapshot.caches.map(\.offset), [8, 8])
+
+        // Seven positions back: past it. Nothing may be served.
+        let far = await store.fetchNearest(modelID: model, tokens: Array(stored.prefix(3)) + [99])
+        XCTAssertNil(far, "a hit here would report 3 reused tokens over caches still at \(count)")
+    }
+
     /// The headline product case: a growing multi-turn conversation reuses the
     /// whole previous turn and prefills only the newly-appended tokens.
     func testIncrementalReuseAcrossGrowingTurns() async throws {
@@ -1667,6 +1703,7 @@ final class PromptCacheStoreTests: XCTestCase {
             ("ChunkedKVCache", ChunkedKVCache()),
             ("ArraysCache", ArraysCache(size: 2)),
             ("MambaCache", MambaCache()),
+            ("RewindableConvolutionCache", RewindableConvolutionCache(stateLength: 2)),
             ("RotatingKVCache", RotatingKVCache(maxSize: 8)),
             ("QuantizedKVCache", QuantizedKVCache()),
             ("CacheList", CacheList(KVCacheSimple())),
@@ -1677,8 +1714,8 @@ final class PromptCacheStoreTests: XCTestCase {
             try savePromptCache(url: fileA, cache: [cache], metadata: [:])
             let (_, metaA) = try loadArraysAndMetadata(url: fileA)
             XCTAssertEqual(
-                metaA["2.0"], ColdTierWriter.cacheClassName(cache),
-                "\(label): cacheClassName replica must match the LIVE savePromptCache's tag")
+                metaA["2.0"], try ColdTierWriter.cacheClassName(cache),
+                "\(label): the cold tier's class tag must match the LIVE savePromptCache's")
         }
     }
 

@@ -56,11 +56,14 @@ enum ColdIndex {
     ///      so the fetches reject it, and a store opening a manifest from
     ///      before this format reclaims every cold file under the root
     ///      (``PromptCacheStore/firstStampedColdFormatVersion``).
+    ///   5. the numerics that computed the state: format 3 goes with
+    ///      `recordVersion` "3", stamped from mlx-swift 0.33 / mlx-swift-lm
+    ///      3.33.0 on.
     /// Bump on ANY of those changing. ``PromptCacheStore`` version-gates the
     /// manifest on load: a mismatch discards it wholesale and starts the cold
     /// trie empty (degraded — exact-hash re-hits of stamped files still work,
     /// never wrong output).
-    static let coldFormatVersion = 2
+    static let coldFormatVersion = 3
 
     /// Decode the manifest at `url`, or `nil` on any failure — an absent file,
     /// a truncated/garbage payload, or a decode error. The read is atomic via
