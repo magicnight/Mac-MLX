@@ -68,7 +68,13 @@ public enum ModelOverlay {
 
         // Mellum 2 (12B-A2.5B) — pure-Swift port (see `Models/Mellum2.swift`).
         // A Qwen3-lineage sparse-MoE decoder with alternating sliding/full
-        // attention; upstream mlx-swift-lm has no `mellum` type.
+        // attention. mlx-swift-lm 3.33.0 ships its own `mellum`
+        // (ml-explore/mlx-swift-lm#697), which this registration replaces:
+        // ours is the one the local checkpoint's smoke and parity runs cover.
+        // Upstream's also reads `mlp_layer_types` (dense layers) and
+        // `attention_bias`, which this port does not, so a checkpoint that
+        // uses either fails its strict weight load here. Retire this port
+        // once upstream's passes the same runs on Mellum2-12B.
         await LLMTypeRegistry.shared.registerModelType("mellum") { data in
             let config = try JSONDecoder.json5()
                 .decode(Mellum2Configuration.self, from: data)

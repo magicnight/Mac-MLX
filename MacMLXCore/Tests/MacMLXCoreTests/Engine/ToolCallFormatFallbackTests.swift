@@ -40,10 +40,12 @@ struct ToolCallFormatFallbackTests {
             configURL: writeConfig(modelType: "qwen3_moe"))?.rawValue == "json")
     }
 
-    @Test("qwen3_5 / qwen3_next defer to upstream (nil — upstream sets xml_function)")
+    @Test("qwen3_5 / qwen3_8 / qwen3_next defer to upstream (nil — the model declares its format)")
     func qwenNextFamilyDefersToUpstream() throws {
         #expect(try MLXSwiftEngine.inferToolCallFormatFallback(
             configURL: writeConfig(modelType: "qwen3_5")) == nil)
+        #expect(try MLXSwiftEngine.inferToolCallFormatFallback(
+            configURL: writeConfig(modelType: "qwen3_8_moe")) == nil)
         #expect(try MLXSwiftEngine.inferToolCallFormatFallback(
             configURL: writeConfig(modelType: "qwen3_next")) == nil)
     }
