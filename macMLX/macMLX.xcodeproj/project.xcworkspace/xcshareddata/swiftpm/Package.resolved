@@ -1,5 +1,5 @@
 {
-  "originHash" : "92d8814ed345c7bbf932b04dfa1373c3e3c10c8b93df8d1ee8fa5c8df14b47e4",
+  "originHash" : "32999f7841226af82b7825a69a775e3b7bfa7729a80c599b63279fbe01345a88",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -33,7 +33,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/magicnight/mlx-audio-swift.git",
       "state" : {
-        "revision" : "504b338c8f8e7f2bebd1e7eb973a5cc64630dcae"
+        "revision" : "e9ecc7b07257ef2e403fe88965a9c33cbfd25671"
       }
     },
     {
@@ -41,7 +41,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/magicnight/mlx-swift.git",
       "state" : {
-        "revision" : "420dd0552f7abf383a60977c9be040c6a0216163"
+        "revision" : "8a9422e6385078199ba3d96a23560dbbd322c7bf"
       }
     },
     {
@@ -49,8 +49,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ml-explore/mlx-swift-lm.git",
       "state" : {
-        "revision" : "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6",
-        "version" : "3.32.3"
+        "revision" : "ca661dc6885f8603e911746838b60d312439a368",
+        "version" : "3.33.0"
       }
     },
     {

@@ -26,7 +26,7 @@ let package = Package(
         // two ever drift.
         .package(
             url: "https://github.com/magicnight/mlx-swift.git",
-            revision: "420dd0552f7abf383a60977c9be040c6a0216163"),
+            revision: "8a9422e6385078199ba3d96a23560dbbd322c7bf"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
         // MCP server MVP (v0.4.0). Pin per-minor — SDK is still pre-1.0.
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),

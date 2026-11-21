@@ -8,12 +8,16 @@ import Testing
 
 @testable import MacMLXCore
 
-/// ``LastPromptTokenTarget`` on tiny random weights: a target whose `prepare`
-/// prefills the whole prompt and returns logits, as VLM `Gemma4.prepare`
-/// does, loses its first token under upstream's speculative iterator, and
-/// wrapped it speculates to exactly the plain greedy output.
-@Suite("LastPromptTokenTarget", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
-struct LastPromptTokenTargetTests {
+/// A speculative target whose `prepare` prefills the whole prompt and returns
+/// logits, as VLM `Gemma4.prepare` does, on tiny random weights. mlx-swift-lm
+/// 3.32.3's `SpeculativeTokenIterator` sampled such a target's first token
+/// into the first verify pass and never emitted it, so the full path
+/// (``FullPathVLM``) wrapped its target to leave the last prompt token for
+/// that pass. 3.33.0 emits the token and the wrapper is gone; this holds the
+/// line it stood on.
+@Suite("Speculative decoding on a target that returns logits",
+       .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+struct SpeculativeLogitsTargetTests {
 
     private static var prompt: LMInput { LMInput(tokens: MLXArray((1...12).map(Int32.init))) }
     private static let parameters = GenerateParameters(maxTokens: 10, temperature: 0)
@@ -38,7 +42,7 @@ struct LastPromptTokenTargetTests {
     /// seeds have a near-tie that the verify pass and single-token decode
     /// break differently, even on a plain `.tokens` target (seed 54 of the
     /// first 64), so a failure of the first expectation points at the weights
-    /// or at MLX's numerics, not at the wrapper.
+    /// or at MLX's numerics, not at the target's `prepare`.
     @Test
     func aTargetThatPrefillsThePromptSpeculatesItsWholeAnswer() throws {
         let target = try TinyRandomLanguageModel.qwen3.make()
@@ -49,35 +53,7 @@ struct LastPromptTokenTargetTests {
 
         let logitsTarget = WholePromptPrepareModel(target)
         #expect(try plain(logitsTarget) == reference, "the stand-in decodes as the model it wraps")
-        // Upstream's drop. When this fails, upstream has fixed it and
-        // `LastPromptTokenTarget` can go.
-        let dropped = try speculative(logitsTarget, draft: draft)
-        #expect(Array(dropped.prefix(9)) == Array(reference.dropFirst()), "upstream emits the first token")
-
-        #expect(try speculative(LastPromptTokenTarget(logitsTarget), draft: draft) == reference)
-    }
-
-    /// A short prompt or one with a mask is left to the wrapped model.
-    @Test
-    func anInputItDoesNotHandleGoesToTheWrappedModel() throws {
-        let target = LastPromptTokenTarget(WholePromptPrepareModel(try TinyRandomLanguageModel.qwen3.make()))
-        let cache = try target.newCache(parameters: nil)
-        guard case .tokens(let single) = try target.prepare(
-            LMInput(tokens: MLXArray([Int32(5)])), cache: cache, state: nil, prefill: .init())
-        else {
-            Issue.record("a one-token prompt is left whole for the first verify pass")
-            return
-        }
-        #expect(single.tokens.asArray(Int.self) == [5])
-
-        let masked = LMInput(text: .init(
-            tokens: MLXArray([Int32(5), 6]).reshaped(1, 2), mask: MLXArray.ones([1, 2], dtype: .int8)))
-        guard case .logits = try target.prepare(
-            masked, cache: try target.newCache(parameters: nil), state: nil, prefill: .init())
-        else {
-            Issue.record("a masked prompt goes to the wrapped model, which returns logits")
-            return
-        }
+        #expect(try speculative(logitsTarget, draft: draft) == reference, "the first token is emitted")
     }
 }
 

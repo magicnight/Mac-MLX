@@ -99,29 +99,32 @@ struct ModelLibraryManagerVLMTests {
     }
 
     /// The keys of mlx-swift-lm's `VLMTypeRegistry.shared` at the pinned
-    /// revision (3.32.3), as `Libraries/MLXVLM/VLMModelFactory.swift` lists
+    /// revision (3.33.0), as `Libraries/MLXVLM/VLMModelFactory.swift` lists
     /// them. `vlmRegistryMirrorMatchesTheResolvedSource` fails when the
     /// resolved mlx-swift-lm lists other keys, so a bump that adds one is
     /// caught there; the tests after it then say which side it belongs on.
     private static let upstreamVLMRegistryKeys: Set<String> = [
         "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
-        "qwen3_5", "qwen3_5_moe", "idefics3", "gemma3", "gemma4", "gemma4_unified",
+        "qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe", "prism_hadamard_qwen35",
+        "idefics3", "gemma3", "gemma4", "gemma4_unified", "diffusion_gemma",
         "smolvlm", "fastvlm", "llava_qwen2", "pixtral", "mistral3", "lfm2_vl",
         "lfm2-vl", "glm_ocr", "muse_glimmer",
     ]
 
-    /// Every registry key is classified exactly once: loaded as a VLM, or on
-    /// purpose as text. A stale list (it once held `fast_vlm` and
-    /// `qwen3_5_vl`, which upstream never registered) fails here.
+    /// Every registry key is classified exactly once: loaded as a VLM, on
+    /// purpose as text, on the full path, or not served. A stale list (it
+    /// once held `fast_vlm` and `qwen3_5_vl`, which upstream never
+    /// registered) fails here.
     @Test
     func everyVLMRegistryKeyIsClassifiedOnce() async {
         let vlm = ModelLibraryManager.knownVLMTypes
         let text = ModelLibraryManager.vlmTypesServedAsText
         let fullPath = ModelLibraryManager.fullPathVLMTypes
-        #expect(vlm.isDisjoint(with: text))
-        #expect(vlm.isDisjoint(with: fullPath))
-        #expect(text.isDisjoint(with: fullPath))
-        #expect(vlm.union(text).union(fullPath) == Self.upstreamVLMRegistryKeys)
+        let notServed = ModelLibraryManager.vlmTypesNotServed
+        let sets = [vlm, text, fullPath, notServed]
+        #expect(sets.map(\.count).reduce(0, +) == sets.reduce(into: Set<String>()) { $0.formUnion($1) }.count,
+                "a key is in more than one set")
+        #expect(vlm.union(text).union(fullPath).union(notServed) == Self.upstreamVLMRegistryKeys)
         #expect(fullPath == ["gemma4", "qwen3_5"])
         for key in Self.upstreamVLMRegistryKeys {
             #expect(await VLMTypeRegistry.shared.contains(key), "\(key) is not in the VLM registry")
@@ -133,7 +136,7 @@ struct ModelLibraryManagerVLMTests {
     /// `ModelTypeRegistry` can only answer `contains`, not list. Every line
     /// of the registry's dictionary that opens with a quoted key counts,
     /// whatever creates the model; a type registered elsewhere through
-    /// `registerModelType` would not be seen (there is none at 3.32.3).
+    /// `registerModelType` would not be seen (there is none at 3.33.0).
     ///
     /// Runs under `swift test`, where the checkout sits in the scratch
     /// directory next to the test bundle; under xcodebuild there is none and
@@ -213,12 +216,27 @@ struct ModelLibraryManagerVLMTests {
     /// With no vision tower in sight (the config names no `vision_config`),
     /// a Gemma 4 or Qwen3.5 checkpoint is text, and the types not served on
     /// the full path are text whatever they carry.
-    @Test(arguments: ["gemma4", "gemma4_unified", "qwen3_5", "qwen3_5_moe"])
+    @Test(arguments: [
+        "gemma4", "gemma4_unified", "qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe", "prism_hadamard_qwen35",
+    ])
     func multimodalAgentModelsStayOnTheTextPath(modelType: String) async throws {
         let temp = try TemporaryDirectory()
         try writeModel(in: temp.url, name: "text-\(modelType)", modelType: modelType)
         let models = try await ModelLibraryManager().scan(temp.url)
         #expect(models.first?.format == .mlx)
+    }
+
+    /// A type that is not served is kept off the VLM factory, and the text
+    /// factory must not know it either: that is what turns its load into an
+    /// unsupported-type error instead of a model the engine cannot drive.
+    @Test
+    func aTypeThatIsNotServedLoadsThroughNeitherFactory() async throws {
+        for key in ModelLibraryManager.vlmTypesNotServed {
+            let temp = try TemporaryDirectory()
+            try writeModel(in: temp.url, name: "unserved-\(key)", modelType: key)
+            #expect(try await ModelLibraryManager().scan(temp.url).first?.format == .mlx)
+            #expect(await !LLMTypeRegistry.shared.contains(key), "\(key) is in the LLM registry")
+        }
     }
 
     // MARK: - Gemma 4 on the full path

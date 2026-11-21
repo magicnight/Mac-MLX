@@ -51,7 +51,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     private var loadedModelFingerprint: String?
 
     /// Version string including the mlx-swift-lm library tag.
-    public let version: String = "mlx-swift-lm 3.32.3"
+    public let version: String = "mlx-swift-lm 3.33.0"
 
     // MARK: Private state
 
@@ -856,7 +856,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             return inputTokens + generatedTokenIDs + [terminalStopToken]
         case .length:
             return inputTokens + generatedTokenIDs + (terminalStopToken.map { [$0] } ?? [])
-        case .cancelled:
+        case .cancelled, .steered, .interrupted:
+            // `.steered` and `.interrupted` end a `ChatSession` step at a
+            // steering boundary. The engine drives `TokenIterator` itself and
+            // never steers, so neither can arrive here; if one ever does, the
+            // cache is not in a state this key could name.
             return nil
         }
     }
@@ -2640,11 +2644,6 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         let setup: (stream: AsyncStream<TokenGeneration>, toolCallFormat: ToolCallFormat?) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
-                // A full-path VLM's `prepare` returns logits, which upstream's
-                // speculative iterator would drop the first token of (see
-                // `LastPromptTokenTarget`).
-                var context = context
-                if fullPath != nil { context.model = LastPromptTokenTarget(context.model) }
                 let stream: AsyncStream<TokenGeneration>
                 // Omit `numDraftTokens` entirely (rather than substitute a
                 // number we hardcode) when the request didn't set one, so a
@@ -2871,7 +2870,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             switch info.stopReason {
             case .length:
                 infoReason = .length
-            case .stop, .cancelled:
+            case .stop, .cancelled, .steered, .interrupted:
                 infoReason = .stop
             }
             // On a prompt-cache HIT the iterator only prefilled the suffix, so
