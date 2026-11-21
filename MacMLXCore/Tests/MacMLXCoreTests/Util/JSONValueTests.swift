@@ -99,6 +99,15 @@ struct JSONValueTests {
         }
     }
 
+    /// The limit is on where a value sits, and an empty container at the limit
+    /// has nothing below it, so it decodes like any other value there.
+    @Test
+    func anEmptyContainerAtTheLimitDecodes() throws {
+        let depth = JSONValue.maximumNestingDepth
+        let data = Data((String(repeating: "[", count: depth) + "[]" + String(repeating: "]", count: depth)).utf8)
+        _ = try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+
     /// The limit counts from the top of the text, not from the value: a value
     /// inside a request counts the request's own containers.
     @Test
