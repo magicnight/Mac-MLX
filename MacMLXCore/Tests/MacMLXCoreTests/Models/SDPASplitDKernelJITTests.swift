@@ -33,8 +33,12 @@ import MLX
 /// take another kernel and the test only checks the numbers.
 ///
 /// A failure of the build is a crash of the test process, not a failed
-/// expectation. The reference is plain softmax attention in float32 on the
-/// CPU stream over the same bfloat16 values.
+/// expectation. The reference is plain softmax attention in float32 over the
+/// same bfloat16 values. It runs on the CPU stream from end to end and is
+/// evaluated on its own, so no GPU work waits on the CPU: such a wait can end
+/// the process with a GPU timeout when the CPU work is long (mlx#2827). The
+/// first version of this test scaled the scores and compared the results on
+/// the GPU, and the CI runner's Metal job ended with that timeout.
 @Suite(
     "SDPA split-D kernel builds at run time",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
@@ -55,21 +59,32 @@ struct SDPASplitDKernelJITTests {
         let underTest = MLXFast.scaledDotProductAttention(
             queries: q, keys: k, values: v, scale: scale, mask: .causal
         ).asType(.float32)
+        MLX.eval(underTest)
 
-        let (q32, k32, v32) = (q.asType(.float32), k.asType(.float32), v.asType(.float32))
+        let cpu = StreamOrDevice.cpu
+        let q32 = q.asType(.float32, stream: cpu)
+        let k32 = k.asType(.float32, stream: cpu)
+        let v32 = v.asType(.float32, stream: cpu)
         let positions = MLXArray(Int32(0) ..< Int32(length))
-        let visible = positions.expandedDimensions(axis: 1) .>= positions.expandedDimensions(axis: 0)
-        var scores = MLX.matmul(q32, k32.transposed(0, 1, 3, 2), stream: .cpu) * scale
-        scores = MLX.which(visible, scores, MLXArray(-Float.infinity), stream: .cpu)
+        let visible = MLX.greaterEqual(
+            positions.expandedDimensions(axis: 1, stream: cpu),
+            positions.expandedDimensions(axis: 0, stream: cpu), stream: cpu)
+        var scores = MLX.multiply(
+            MLX.matmul(q32, k32.transposed(0, 1, 3, 2, stream: cpu), stream: cpu), scale,
+            stream: cpu)
+        scores = MLX.which(visible, scores, MLXArray(-Float.infinity), stream: cpu)
         let reference = MLX.matmul(
-            MLX.softmax(scores, axis: -1, precise: true, stream: .cpu), v32, stream: .cpu)
+            MLX.softmax(scores, axis: -1, precise: true, stream: cpu), v32, stream: cpu)
+        MLX.eval(reference)
 
         // Per query row, against that row's own largest output: a late row
         // averages over a thousand values and is far smaller than the first,
         // so one absolute bound would let a wrong late row through.
-        let rowError = MLX.abs(underTest - reference).max(axis: -1)
-        let rowScale = MLX.abs(reference).max(axis: -1)
-        let relative = MLX.max(rowError / rowScale).item(Float.self)
+        let rowError = MLX.abs(MLX.subtract(underTest, reference, stream: cpu), stream: cpu)
+            .max(axis: -1, stream: cpu)
+        let rowScale = MLX.abs(reference, stream: cpu).max(axis: -1, stream: cpu)
+        let relative = MLX.max(MLX.divide(rowError, rowScale, stream: cpu), stream: cpu)
+            .item(Float.self)
         // The output is rounded to bfloat16 (8 significand bits, 0.4% of an
         // element) and the kernel sums in another order than the reference.
         // A wrong half of the head dimension or a wrong row moves a row by
