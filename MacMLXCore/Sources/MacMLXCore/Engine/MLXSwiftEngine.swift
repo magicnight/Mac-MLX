@@ -1320,8 +1320,9 @@ public actor MLXSwiftEngine: InferenceEngine {
         // `additionalContext` — the tokenizer hands them to the Jinja
         // template (e.g. `enable_thinking` for Qwen3). Unwrap JSONValue
         // to the plain Sendable shape the upstream API expects. Tools (when
-        // present) reach the template via `UserInput.tools`.
-        let additionalContext = request.templateKwargs?.mapValues { $0.toTemplateValue() }
+        // present) go in `UserInput.tools`, and again in the context with
+        // their key order (see `templateContext`).
+        let additionalContext = Self.templateContext(kwargs: request.templateKwargs, tools: request.tools)
         let chatInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: additionalContext)
 
         let assistantReasoning = request.allMessages.filter { $0.role == .assistant }.map(\.reasoning)

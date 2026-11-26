@@ -161,7 +161,7 @@ public enum ResponseFormatDecoder {
         case "json_object":
             return .jsonObject
         case "json_schema":
-            return .jsonSchema(try compileJSONSchemaEnvelope(root))
+            return .jsonSchema(try compileJSONSchemaEnvelope(root.dictionary))
         default:
             throw ResponseFormatError.unsupportedFeature("response_format type '\(type)'")
         }
@@ -184,7 +184,7 @@ public enum ResponseFormatDecoder {
         guard case .object(let schema) = schemaValue else {
             throw ResponseFormatError.invalidFormat("json_schema.schema must be an object")
         }
-        return try compileRootSchema(schema)
+        return try compileRootSchema(schema.dictionary)
     }
 
     /// Per-compile state: the root's definition tables, the `$ref`s being
@@ -254,7 +254,7 @@ public enum ResponseFormatDecoder {
         guard case .object(let table) = value else {
             throw ResponseFormatError.invalidFormat("schema.\(keyword) must be an object")
         }
-        return table
+        return table.dictionary
     }
 
     /// Compile an object schema: the root, or a nested object at `path`.
@@ -320,7 +320,7 @@ public enum ResponseFormatDecoder {
             guard case .object(let property) = propertyValue else {
                 throw ResponseFormatError.invalidFormat("property '\(child)' must be an object")
             }
-            let type = try compileValue(property, path: child, depth: depth, context: &context)
+            let type = try compileValue(property.dictionary, path: child, depth: depth, context: &context)
             compiled.append(JSONSchemaObject.Property(name: name, type: type))
         }
 
@@ -464,7 +464,7 @@ public enum ResponseFormatDecoder {
                 "\(path.isEmpty ? "array" : "nested array") without 'items' \(location(path)) "
                     + "(free-form arrays are not supported)")
         case .object(let object)?:
-            items = object
+            items = object.dictionary
         case .array?:
             throw ResponseFormatError.unsupportedFeature("tuple-form 'items' \(location(path))")
         case .bool?:
@@ -709,7 +709,7 @@ public enum ResponseFormatDecoder {
         guard case .object(let target) = value else {
             throw ResponseFormatError.invalidFormat("'$ref' target '\(ref)' must be a schema object")
         }
-        return target
+        return target.dictionary
     }
 
     /// RFC 6901: `~1` → `/`, `~0` → `~`; any other `~` sequence is malformed.

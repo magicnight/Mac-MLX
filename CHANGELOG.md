@@ -61,6 +61,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   brings yyjson 0.13.0.
 
 ### Fixed
+- **Tool schemas reach the chat template with their keys in the order the
+  client sent them.** A template that prints a tool with `tojson` (Qwen,
+  Command R7B and most others) got the keys sorted:
+  `{"function": {"description": …, "name": …, "parameters": …}, "type":
+  "function"}` where Python transformers prints `{"type": "function",
+  "function": {"name": …, "description": …, "parameters": …}}`. It is the
+  same JSON and a different prompt from the one the checkpoints were trained
+  on. The order was lost twice: the request decoded into Swift dictionaries,
+  and swift-transformers sorts a dictionary's keys when it builds the
+  template context. `/v1/chat/completions`, `/v1/messages` and
+  `/v1/responses` now keep the order of the request body, and the tools go
+  to the template in that order. Most requests with tools render to
+  different token ids than before (not one whose keys were already in
+  sorted order, nor one for a template that does not print the schema with
+  `tojson`), and prompt-cache entries are keyed on ids, so such a
+  conversation misses the cache once and is stored again.
+  Not covered: a tool that comes from an MCP server (the app's chat and
+  `macmlx`) still has the inside of its `parameters` sorted, because the MCP
+  SDK decodes a schema into an unordered dictionary; and the arguments of a
+  tool call replayed from history, on any endpoint, are still sorted. Gemma
+  4's template sorts the keys itself (`dictsort`) and renders as before.
 - **A Gemma 4 prefill of 1,024 tokens or more in one pass would have crashed
   on an M5 with stock mlx-swift 0.33.0; the fork carries the fix.** An image
   request prefills that way. Since core v0.32.3 the attention kernel
@@ -117,7 +138,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   with the same content in a different key order: a tool reaches the template
   as a Swift dictionary, which has no order, swift-jinja sorts its keys, and
   Python keeps the order the client sent. That is older than this change and
-  not fixed by it. A prompt that renders differently is reused from the
+  not fixed by it; the entry at the top of this list fixes it. A prompt that renders differently is reused from the
   prompt cache only up to the first token that differs.
 
   One render that used to work can now fail. swift-jinja 3 stops a macro
