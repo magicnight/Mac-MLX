@@ -88,12 +88,10 @@ struct JSONKeyOrderTests {
         #expect(try JSONKeyOrder.decode(JSONValue.self, from: data).orderedDescription == "{b:{d:1,c:2},a:1}")
     }
 
-    /// A schema nested deeper than a real one gets still decodes in order.
-    /// (Much deeper overflows the stack of a cooperative thread in
-    /// `JSONValue`'s recursive decode, with or without a scan.)
+    /// A schema nested as deep as `JSONValue` decodes still decodes in order.
     @Test
     func aDeeplyNestedObjectDecodes() throws {
-        let depth = 100
+        let depth = JSONValue.maximumNestingDepth
         let text = String(repeating: #"{"b":1,"a":"#, count: depth) + "null" + String(repeating: "}", count: depth)
         var value = try JSONKeyOrder.decode(JSONValue.self, from: Data(text.utf8))
         for _ in 0..<depth {

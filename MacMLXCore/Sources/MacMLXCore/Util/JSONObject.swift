@@ -163,6 +163,11 @@ extension JSONObject: Codable {
         init?(intValue: Int) { nil }
     }
 
+    /// Whether the value `decoder` is positioned at is a JSON object.
+    static func isObject(at decoder: any Decoder) -> Bool {
+        (try? decoder.container(keyedBy: MemberKey.self)) != nil
+    }
+
     /// Decodes a JSON object. The keys take the order of the JSON text when the
     /// decoder carries a `JSONKeyOrder` that knows this object, and sorted
     /// order otherwise.

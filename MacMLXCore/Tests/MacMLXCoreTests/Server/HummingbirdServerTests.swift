@@ -2540,11 +2540,15 @@ struct HummingbirdServerTests {
     /// matching `/v1/models` — not the raw directory id.
     @Test
     func ollamaTagsReportsConfiguredAlias() async throws {
-        // Unique id + alias so this never collides with a real user override in
-        // the shared ~/.mac-mlx/model-params dir the server reads; removed below.
-        let modelID = "macmlx-test-\(UUID().uuidString)"
-        let alias = "friendly-\(UUID().uuidString)"
-        let store = ModelParametersStore()  // default dir — the same store the server reads
+        // The override lives in a store of the test's own, handed to the
+        // server, so nothing is written under the user's ~/.mac-mlx and
+        // nothing is left behind when the request throws.
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "macmlx-test-params-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ModelParametersStore(directory: directory)
+        let modelID = "some-model-dir"
+        let alias = "friendly"
         try await store.save(ModelParameters(alias: alias), for: modelID)
 
         let engine = StubInferenceEngine(engineID: .mlxSwift)
@@ -2554,14 +2558,13 @@ struct HummingbirdServerTests {
             quantization: nil, parameterCount: nil, architecture: nil
         )
         try await engine.load(model)
-        let server = HummingbirdServer(engine: engine)
+        let server = HummingbirdServer(engineProvider: { engine }, parameters: store)
         let port = try await server.start(preferredPort: 19_080)
 
         let url = URL(string: "http://127.0.0.1:\(port)/api/tags")!
         let (data, response) = try await get(url)
 
         await server.stop()
-        await store.reset(for: modelID)  // clean up the override file regardless of assertions
 
         #expect(response.statusCode == 200)
         let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
