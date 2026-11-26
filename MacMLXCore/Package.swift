@@ -22,7 +22,8 @@ let package = Package(
         //     copies under Source/Cmlx/mlx-generated as well as the submodule
         //     pointer (.claude/distribution.md says why both).
         //
-        //   - ml-explore/mlx#4903 (open upstream, fixes mlx#4832) — since core
+        //   - ml-explore/mlx#4903 (fixes mlx#4832; merged on mlx main as
+        //     190cb65 after core v0.32.4, in no release yet) — since core
         //     v0.32.3 the JIT source for the NAX attention kernel with head
         //     dimension 256 or 512 passes one template argument more than
         //     attention_nax_dsplit declares, so building it fails and the
@@ -32,7 +33,8 @@ let package = Package(
         //     how Gemma 4 prefills. Reproduced here against upstream 0.33.0.
         //     SDPASplitDKernelJITTests. The fix is in host C++
         //     (jit_kernels.cpp), compiled from the submodule, so the pointer
-        //     alone carries it.
+        //     alone carries it. The carried commit makes the same change as
+        //     the merged one.
         //
         // The other four fixes the previous base (0.32.3, core v0.32.2) carried
         // are in core v0.32.4, each checked by ancestry: #3922 and #4009 (the
@@ -57,8 +59,8 @@ let package = Package(
         // The fork carries no API changes; its .gitmodules points the mlx
         // submodule at the magicnight mirror so the carried commit resolves.
         // Drop this override and return to the upstream package as soon as an
-        // mlx-swift release vendors a core that contains #4775 and a fix for
-        // #4832. Pinned by
+        // mlx-swift release vendors a core that contains #4775 and #4903.
+        // Pinned by
         // revision so it can never drift; CLIForkPinTests, AppForkPinTests and
         // the CI step that reads the app's resolved graph keep the three roots
         // in step.

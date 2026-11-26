@@ -425,14 +425,16 @@ v0.32.4.
 On 2026-11-21 the fork was rebuilt on mlx-swift 0.33.0 (core v0.32.4) as
 branch `0.33.0-macmlx`, over a `v0.32.4-macmlx` branch of the mlx mirror. Four
 of the five are in that core, so it carries two: `mlx#4775` as before, and the
-fix for `mlx#4832` (upstream PR `#4903`, still open when it was picked). Since
+fix for `mlx#4832` (upstream PR `#4903`, picked while it was open and merged
+on 2026-11-22 as `190cb65`, after core v0.32.4; the merged change is the same
+as the carried one). Since
 core v0.32.3 the JIT source for the NAX attention kernel at head dimension 256
 or 512 passes one template argument more than `attention_nax_dsplit` declares,
 and the failed build ends the process; the gated Gemma 4 image suite hit it on
 the first run against upstream 0.33.0. That fix is in `jit_kernels.cpp`, host
 C++ compiled from the submodule, so it needed no generated copies.
-`SDPASplitDKernelJITTests` pins it. If upstream merges a different fix, take
-theirs and drop the pick.
+`SDPASplitDKernelJITTests` pins it. Like `#4775`, it leaves the fork once an
+mlx-swift release vendors a core that contains it.
 
 **The cross-thread abort is gone, by construction.** `ml-explore/mlx#3348` made
 `default_stream()` thread-local in core v0.31.2, and mlx-swift 0.31.x's

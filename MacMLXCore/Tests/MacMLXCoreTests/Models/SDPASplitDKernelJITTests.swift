@@ -14,7 +14,7 @@ import MLX
 /// source: "Unable to build metal library from source", a fatal error.
 /// mlx-swift builds its kernels at run time (`MLX_METAL_JIT`), where the
 /// Python wheel ships them compiled, so only a Swift build sees it. The fork
-/// carries the fix (upstream PR #4903, open when it was picked); it is host
+/// carries the fix (upstream PR #4903, merged after core v0.32.4); it is host
 /// C++, so the submodule pointer is the whole change.
 ///
 /// The kernel is selected on a NAX GPU (M5) for fused full attention at head

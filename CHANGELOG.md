@@ -88,8 +88,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   for head dimensions 256 and 512 on the M5 GPU fails to build at run time
   (`mlx#4832`: one template argument too many), which ends the process. Only
   Swift builds are affected, since the Python wheel ships its kernels
-  compiled. No macMLX release shipped it: the fix (upstream PR #4903, open)
-  is carried on the fork, with a test that builds the kernel.
+  compiled. No macMLX release shipped it: the fix (upstream PR #4903, merged
+  after core v0.32.4 and in no release yet) is carried on the fork, with a
+  test that builds the kernel.
 - **A prompt-cache hit is only served when the cache can rewind exactly as
   far as the hit needs.** mlx-swift-lm 3.33.0 gives LFM2 a cache that can step
   back 64 positions and no further, and reports itself trimmable all the
