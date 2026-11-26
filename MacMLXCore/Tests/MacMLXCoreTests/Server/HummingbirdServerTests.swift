@@ -2490,7 +2490,7 @@ struct HummingbirdServerTests {
     /// frames (N = text chunks + terminal chunk). The stub emits N frames whose
     /// K differs from N, so the pre-fix `incrementTokens(chunkCount)` (frames)
     /// and the fix are observably different.
-    @Test
+    @Test(.timeLimit(.minutes(10)))
     func streamingTokenCounterReflectsCompletionTokensNotFrames() async throws {
         let textChunks = 3
         let reportedK = 7  // != frame count (textChunks + 1 = 4)
@@ -2515,18 +2515,20 @@ struct HummingbirdServerTests {
 
         // The counter is bumped on the server AFTER the body closure finishes
         // writing, which can land just after the client receives [DONE]. Poll
-        // /x/status until it settles (non-zero), then assert the exact value.
+        // /x/status until it is non-zero, then assert the exact value: a
+        // request adds its whole count in one `incrementTokens` call, so the
+        // first non-zero reading is the final one. No deadline: a wait on the
+        // clock is a wait on the rest of the test process, and the time limit
+        // ends a counter that never moves.
         let statusURL = URL(string: "http://127.0.0.1:\(port)/x/status")!
         var counted = 0
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
+        while counted == 0 {
             let (data, _) = try await get(statusURL)
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let c = json["tokens_generated_total"] as? Int, c > 0 {
+               let c = json["tokens_generated_total"] as? Int {
                 counted = c
-                break
             }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            if counted == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
         }
         await server.stop()
 
