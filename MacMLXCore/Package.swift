@@ -118,9 +118,9 @@ let package = Package(
         // 2.4.2 ..< 4.0.0, and Transformers is linked into the MacMLXCore
         // LIBRARY, so that requirement reaches every root that depends on this
         // package — the CLI and the app included. The swift-jinja declaration
-        // further down does NOT do that job (see its comment), so that range,
-        // not our 3.2.1 floor, is all the manifests ask of the CLI and the app;
-        // the committed lockfiles and the parity check hold them at Core's pin.
+        // further down is narrower (3.2.1) and, linked into the library too,
+        // reaches them as well; the committed lockfiles and the parity check
+        // hold them at Core's exact pin.
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.4.0"),
         // MCP client pool (v0.5+). Pinned per-minor — SDK is still
         // pre-1.0. macmlx-cli already pulls the same package for the
@@ -140,10 +140,11 @@ let package = Package(
         // 3.x renders much closer to Python's Jinja2, which is what the
         // checkpoints' templates were written for. Against transformers 5.23.0
         // on 19 local templates and 20 renders each, 2.5.1 differed on 140 and
-        // 3.2.1 on 66; the 66 are all tool schemas in a different key order (a
-        // tool arrives as an unordered Swift dictionary and swift-jinja's
-        // `Value(any:)` sorts the keys; Python keeps the client's order). What
-        // 3.x fixed: stray
+        // 3.2.1 on 66; the 66 were all tool schemas in a different key order,
+        // which is not the template engine's doing (the request decoded into
+        // unordered Swift dictionaries and swift-jinja's `Value(any:)` sorts a
+        // dictionary's keys; Python keeps the client's order) and is fixed on
+        // our side, see `JSONObject`. What 3.x fixed: stray
         // spaces in Gemma 4's tool declarations, `true` for `True` in MiniCPM3,
         // Seed-OSS and Qwen 3.5 tool text, and a trailing newline the reranker
         // templates should not end with. What 3.x costs: a macro may call
@@ -151,16 +152,21 @@ let package = Package(
         // does not expose), so Gemma 4's and MiniCPM3's recursive schema macros
         // throw on a tool schema nested about 15 levels.
         //
-        // This declaration links Jinja into the render-parity TEST target only,
-        // so the tests render through the exact engine production uses. It is
-        // NOT what guarantees the version downstream: SwiftPM ignores a
-        // dependency package's test-only requirements when another root (the
-        // CLI, the app) resolves its graph. The library-level guarantee is the
-        // swift-transformers 1.4.0 floor above, whose manifest requires
-        // swift-jinja 2.4.2 ..< 4.0.0. That range is wider than this floor, so
-        // moving this one also means moving the pin in all three lockfiles; the
-        // app's does not move on its own (see "Moving a dependency").
+        // This declaration links Jinja into the render-parity TEST target, so
+        // the tests render through the exact engine production uses, and into
+        // the LIBRARY, which hands the chat template its tools as a
+        // `Jinja.Value` (`JSONValue.toJinjaValue()`): the one shape
+        // swift-transformers passes through with the key order intact, where
+        // it sorts the keys of a Swift dictionary. Being a library requirement,
+        // this floor reaches every root that depends on this package, the CLI
+        // and the app included. Moving it still means moving the pin in all
+        // three lockfiles; the app's does not move on its own (see "Moving a
+        // dependency").
         .package(url: "https://github.com/huggingface/swift-jinja.git", from: "3.2.1"),
+        // `Jinja.Value.object` is an `OrderedDictionary`, so building one takes
+        // OrderedCollections. swift-jinja already brings the package in (from
+        // 1.0.0); 1.1.0 is where its `OrderedDictionary` settled.
+        .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
         // Audio (v0.9 W1a): MIT, Swift-native STT (Whisper/Parakeet family) and
         // TTS (Kokoro family) on top of MLX. Adds NO new transitive package —
         // it only depends on mlx-swift / mlx-swift-lm / swift-transformers /
@@ -235,6 +241,8 @@ let package = Package(
                 .product(name: "MLXRerankers", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "swift-jinja"),
+                .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "Pulse", package: "Pulse"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "MCP", package: "swift-sdk"),
