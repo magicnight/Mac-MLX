@@ -217,8 +217,8 @@ func aliasResolvesToModelWithTemplateKwargs() async throws {
     // Exercises the exact two-step chain HummingbirdServer.templateKwargs(for:)
     // now runs after the v0.5.1 A5 alias fix: a request naming the model by
     // its alias resolves to the backing directory id, then the per-model
-    // kwargs load from that id. The server helper itself uses the real home
-    // dir, so this store-level alias→id + load chain is the clean seam.
+    // kwargs load from that id. This is the store's half of the chain; the
+    // server's use of it is in HummingbirdServerParameterStoreTests.
     let (store, dir) = makeTempStore()
     defer { try? FileManager.default.removeItem(at: dir) }
 
