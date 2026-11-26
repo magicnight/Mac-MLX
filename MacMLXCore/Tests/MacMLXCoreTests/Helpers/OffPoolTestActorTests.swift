@@ -3,14 +3,25 @@ import Foundation
 import Testing
 
 /// `MLXTestActor` and `BlockingTestActor` keep their test bodies off the
-/// cooperative pool. These tests check that each actor runs its bodies where it
-/// says, and that no MLX-gated test goes without one.
+/// cooperative pool, on threads of their own at utility QoS. These tests check
+/// that each actor runs its bodies where it says, and that no MLX-gated test
+/// goes without one.
 @Suite("Off-pool test actors")
 struct OffPoolTestActorTests {
 
     /// The label of the queue the caller is running on.
     private static func currentQueueLabel() -> String {
         String(cString: __dispatch_queue_get_label(nil))
+    }
+
+    /// The name of the thread the caller is running on.
+    private static func currentThreadName() -> String {
+        Thread.current.name ?? ""
+    }
+
+    /// Whether the caller runs at utility QoS, below the tests' own priority.
+    private static func runsAtUtility() -> Bool {
+        qos_class_self() == QOS_CLASS_UTILITY
     }
 
     /// The control: without an actor, a test body runs on the cooperative pool,
@@ -21,20 +32,23 @@ struct OffPoolTestActorTests {
     }
 
     @Test @MLXTestActor
-    func anMLXTestRunsOnTheMLXQueue() {
-        #expect(Self.currentQueueLabel() == MLXTestActor.queue.label)
+    func anMLXTestRunsOnTheMLXThreadAtUtility() {
+        #expect(Self.currentThreadName() == MLXTestActor.threadName)
+        #expect(Self.runsAtUtility())
     }
 
-    /// An async body comes back to the queue after it suspends.
+    /// An async body comes back to the thread after it suspends.
     @Test @MLXTestActor
-    func anAsyncMLXTestResumesOnTheMLXQueue() async throws {
+    func anAsyncMLXTestResumesOnTheMLXThread() async throws {
         try await Task.sleep(for: .milliseconds(1))
-        #expect(Self.currentQueueLabel() == MLXTestActor.queue.label)
+        #expect(Self.currentThreadName() == MLXTestActor.threadName)
+        #expect(Self.runsAtUtility())
     }
 
     @Test @BlockingTestActor
-    func aBlockingTestRunsOnItsOwnQueue() {
-        #expect(Self.currentQueueLabel() == BlockingTestActor.queue.label)
+    func aBlockingTestRunsOnItsOwnThreadAtUtility() {
+        #expect(Self.currentThreadName() == BlockingTestActor.threadName)
+        #expect(Self.runsAtUtility())
     }
 
     /// Every suite or test that carries the MLX gate is isolated to

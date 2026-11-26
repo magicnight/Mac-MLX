@@ -1,8 +1,7 @@
-import Dispatch
-
 /// The actor every MLX-gated Swift Testing suite is isolated to. Its executor
-/// is a serial queue of its own, so the bodies themselves never run on the
-/// cooperative pool.
+/// is a thread of its own at utility QoS (`UtilityThreadExecutor`), so the
+/// bodies themselves never run on the cooperative pool, and on a busy runner
+/// the other tests' work comes first.
 ///
 /// MLX work is synchronous. `eval` blocks its thread until the GPU is done, the
 /// first use of a kernel compiles its shader inline, and mlx-swift takes one
@@ -32,9 +31,10 @@ import Dispatch
 actor MLXTestActor {
     static let shared = MLXTestActor()
 
-    static let queue = DispatchSerialQueue(label: "macmlx.tests.mlx", qos: .userInitiated, autoreleaseFrequency: .workItem)
+    static let threadName = "macmlx.tests.mlx"
+    static let executor = UtilityThreadExecutor(name: threadName)
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
-        Self.queue.asUnownedSerialExecutor()
+        Self.executor.asUnownedSerialExecutor()
     }
 }
