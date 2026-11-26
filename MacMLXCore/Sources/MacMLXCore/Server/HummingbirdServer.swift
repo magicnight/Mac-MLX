@@ -1088,6 +1088,12 @@ public actor HummingbirdServer {
     /// are loaded directly and nothing accounts for them.
     private let auxiliaryResidency: (any AuxiliaryResidency)?
 
+    /// Where the per-model settings the server acts on come from: the alias a
+    /// model is listed under and can be named by, and its chat-template
+    /// kwargs. A store on `~/.mac-mlx/model-params` unless the caller hands
+    /// in another, as a test does to stay out of the user's data.
+    private let parameters: ModelParametersStore
+
     /// A2d continuous-batching seam (default `nil` = disabled → every request
     /// takes the legacy single-stream path, byte-for-byte unchanged). When
     /// installed, an OpenAI chat/completions request the ``BatchRoutingPolicy``
@@ -1359,6 +1365,7 @@ public actor HummingbirdServer {
         self.loadHook = nil
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
+        self.parameters = ModelParametersStore()
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
         self.batchServing = nil
@@ -1379,6 +1386,7 @@ public actor HummingbirdServer {
         self.loadHook = nil
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
+        self.parameters = ModelParametersStore()
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
         self.batchServing = nil
@@ -1401,6 +1409,7 @@ public actor HummingbirdServer {
         self.loadHook = loadHook
         self.inFlightHook = nil
         self.auxiliaryResidency = nil
+        self.parameters = ModelParametersStore()
         self.apiKey = apiKey
         self.stallTimeoutSeconds = Self.defaultStallTimeoutSeconds
         self.batchServing = nil
@@ -1414,7 +1423,9 @@ public actor HummingbirdServer {
     /// mark the active model busy in a pool one layer up; `auxiliaryResidency`
     /// (#130) lets that pool budget the reranker and the embedder the server
     /// keeps; `stallTimeoutSeconds` (SRV-4) bounds inter-chunk silence during
-    /// generation — `<= 0` disables the watchdog.
+    /// generation — `<= 0` disables the watchdog. `parameters` is the store
+    /// aliases and chat-template kwargs are read from; one on
+    /// `~/.mac-mlx/model-params` by default.
     public init(
         engineProvider: @escaping @Sendable () async -> (any InferenceEngine)?,
         modelResolver: @escaping ModelResolver = { _ in nil },
@@ -1424,7 +1435,8 @@ public actor HummingbirdServer {
         auxiliaryResidency: (any AuxiliaryResidency)? = nil,
         apiKey: String? = nil,
         stallTimeoutSeconds: TimeInterval = HummingbirdServer.defaultStallTimeoutSeconds,
-        batchServing: (any BatchGenerationServing)? = nil
+        batchServing: (any BatchGenerationServing)? = nil,
+        parameters: ModelParametersStore = ModelParametersStore()
     ) {
         self.engineProvider = engineProvider
         self.modelResolver = modelResolver
@@ -1432,6 +1444,7 @@ public actor HummingbirdServer {
         self.loadHook = loadHook
         self.inFlightHook = inFlightHook
         self.auxiliaryResidency = auxiliaryResidency
+        self.parameters = parameters
         self.apiKey = apiKey
         self.stallTimeoutSeconds = stallTimeoutSeconds
         self.batchServing = batchServing
@@ -1831,7 +1844,7 @@ public actor HummingbirdServer {
     /// The id a model is reported under: its alias when one is set, else its
     /// directory id. An empty alias counts as none.
     private func reportedModelID(_ modelID: String) async -> String {
-        let params = await ModelParametersStore().load(for: modelID)
+        let params = await parameters.load(for: modelID)
         if let alias = params.alias, !alias.isEmpty { return alias }
         return modelID
     }
@@ -2651,7 +2664,7 @@ public actor HummingbirdServer {
         if await modelResolver(requestedID) != nil {
             return true
         }
-        if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID) {
+        if let aliasID = await parameters.modelID(forAlias: requestedID) {
             return await modelResolver(aliasID) != nil
         }
         return false
@@ -2687,7 +2700,7 @@ public actor HummingbirdServer {
         let target: LocalModel
         if let resolved = await modelResolver(requestedID) {
             target = resolved
-        } else if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID),
+        } else if let aliasID = await parameters.modelID(forAlias: requestedID),
                   let aliasTarget = await modelResolver(aliasID) {
             target = aliasTarget
         } else {
@@ -2748,9 +2761,8 @@ public actor HummingbirdServer {
     /// by its user-facing alias resolves to the backing directory id before
     /// the per-model params are loaded, mirroring the swap resolver above.
     func templateKwargs(for modelID: String) async -> [String: JSONValue]? {
-        let store = ModelParametersStore()
-        let resolvedID = await store.modelID(forAlias: modelID) ?? modelID
-        let params = await store.load(for: resolvedID)
+        let resolvedID = await parameters.modelID(forAlias: modelID) ?? modelID
+        let params = await parameters.load(for: resolvedID)
         guard let kwargs = params.templateKwargs, !kwargs.isEmpty else { return nil }
         return kwargs
     }
@@ -4217,7 +4229,7 @@ public actor HummingbirdServer {
         if let resolved = await modelResolver(requestedID) {
             return resolved
         }
-        if let aliasID = await ModelParametersStore().modelID(forAlias: requestedID),
+        if let aliasID = await parameters.modelID(forAlias: requestedID),
            let aliasTarget = await modelResolver(aliasID) {
             return aliasTarget
         }
