@@ -74,14 +74,26 @@ public actor LogManager {
     /// can fill many GB. We keep a 100 MB FIFO cap (Pulse evicts the
     /// oldest entries once the cap is reached) — plenty for a week's
     /// worth of real-world events without unbounded disk growth.
+    ///
+    /// In a test runner (``TestHost``) the store is one kept in memory
+    /// instead. Code under test logs through ``shared``, so on the real path
+    /// every test run wrote into the user's log.
     public init() {
-        self.store = Self.makeCappedStore()
+        self.store = TestHost.isActive ? Self.testStore : Self.makeCappedStore()
     }
 
     /// Test / preview initialiser — caller provides a custom store.
     public init(store: LoggerStore) {
         self.store = store
     }
+
+    /// The store every ``init()`` shares in a test runner. Pulse writes
+    /// nothing to disk for an in-memory store; its URL, `/dev/null`, only has
+    /// to exist, because Pulse saves entries only then. If it cannot be opened, the fallback is the one the capped store has:
+    /// Pulse's own default, which is not under `~/.mac-mlx` either.
+    private static let testStore: LoggerStore =
+        (try? LoggerStore(storeURL: URL(filePath: "/dev/null"), options: [.inMemory]))
+        ?? LoggerStore.shared
 
     /// Build the production LoggerStore with a 100 MB size cap.
     /// Falls back to `LoggerStore.shared` if our explicit store fails
