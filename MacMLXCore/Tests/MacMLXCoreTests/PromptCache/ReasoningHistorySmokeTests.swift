@@ -206,12 +206,14 @@ final class ReasoningHistorySmokeTests: XCTestCase {
             for: request, isVLM: false, messageGenerator: DefaultMessageGenerator(), logsDroppedInputs: false)
     }
 
-    /// The `.chat` input the engine built before reasoning was rendered.
+    /// The `.chat` input the engine built before reasoning was rendered,
+    /// with the template context the engine builds (the kwargs and, since
+    /// tools keep the client's key order, the tools again).
     private func chatInput(_ request: GenerateRequest) -> UserInput {
         UserInput(
             chat: request.allMessages.map { MLXSwiftEngine.upstreamChatMessage(from: $0, images: []) },
             tools: request.tools.map { MLXSwiftEngine.toolSpecs(from: $0) },
-            additionalContext: request.templateKwargs?.mapValues { $0.toSendable() })
+            additionalContext: MLXSwiftEngine.templateContext(kwargs: request.templateKwargs, tools: request.tools))
     }
 
     /// The loop's four turns on `engine`, from an empty cache: each turn's
