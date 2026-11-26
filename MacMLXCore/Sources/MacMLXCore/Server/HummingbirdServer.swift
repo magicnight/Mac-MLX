@@ -661,10 +661,10 @@ private struct AnthropicBlock: Decodable, Sendable {
 /// Anthropic `tool_result.content`: either a bare string or an array of content
 /// blocks (only `text` blocks are meaningful to a text model). `text` flattens
 /// both into the single string fed back to the model as the tool result. The
-/// decoder tries the string form first, falling through to `[AnthropicBlock]`.
+/// decoder tries the string form first, falling through to the blocks.
 private enum AnthropicToolResultContent: Decodable, Sendable {
     case string(String)
-    case blocks([AnthropicBlock])
+    case blocks([AnthropicToolResultBlock])
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -672,7 +672,7 @@ private enum AnthropicToolResultContent: Decodable, Sendable {
             self = .string(s)
             return
         }
-        self = .blocks(try container.decode([AnthropicBlock].self))
+        self = .blocks(try container.decode([AnthropicToolResultBlock].self))
     }
 
     /// Concatenated text of the result's text blocks (or the bare string).
@@ -685,6 +685,15 @@ private enum AnthropicToolResultContent: Decodable, Sendable {
                 .joined(separator: "\n")
         }
     }
+}
+
+/// One block inside a `tool_result`. Only its text is read, so it is not an
+/// `AnthropicBlock`: that type has a `content` of its own, and a tool result
+/// inside a tool result inside a tool result decoded by recursion until a
+/// body nested a few hundred levels ran off the end of the stack.
+private struct AnthropicToolResultBlock: Decodable, Sendable {
+    let type: String
+    let text: String?
 }
 
 /// Anthropic image block `source`. Only the base64 form is decoded
