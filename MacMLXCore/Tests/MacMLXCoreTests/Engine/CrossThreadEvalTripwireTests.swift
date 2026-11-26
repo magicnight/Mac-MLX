@@ -44,6 +44,7 @@ import MLX
 @Suite(
     "Cross-thread eval tripwire",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct CrossThreadEvalTripwireTests {
 
     /// Carries the detached thread's result back. `@unchecked Sendable` is

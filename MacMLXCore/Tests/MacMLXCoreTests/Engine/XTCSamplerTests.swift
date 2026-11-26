@@ -23,6 +23,7 @@ struct XTCSamplerTests {
     @Test(
         "XTC excludes the top choices, keeping the least-probable above threshold",
         .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+    @MLXTestActor
     func excludesTopChoices() {
         // threshold 0.1 ⇒ candidates {0:0.5, 1:0.3, 2:0.15}; least is token2, so
         // tokens 0 and 1 are masked to -inf. ArgMax over the survivors {2, 3} → 2.
@@ -33,6 +34,7 @@ struct XTCSamplerTests {
     @Test(
         "with fewer than two tokens above threshold XTC is a no-op",
         .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+    @MLXTestActor
     func noOpWhenNoCandidates() {
         // threshold 0.6 ⇒ no token's prob exceeds it, so nothing is masked and the
         // argmax is the natural top token 0. (Applied unconditionally at prob 1.0.)

@@ -10,6 +10,7 @@ import MLX
 /// exactly like the other MLX-backed suites (runs under xcodebuild; skipped under
 /// bare `swift test`).
 @Suite("SeedOss sanitize", .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct SeedOssSanitizeTests {
 
     /// A tiny SeedOss with the given tie flag — cheap, lazy construction.

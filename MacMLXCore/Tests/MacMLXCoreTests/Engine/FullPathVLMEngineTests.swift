@@ -24,6 +24,7 @@ import os
 @Suite(
     "MLXSwiftEngine full-path VLM input",
     .serialized, .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct FullPathVLMEngineTests {
 
     private static let noColdTier = PromptCacheConfig(coldEnabled: false)
