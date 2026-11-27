@@ -28,6 +28,7 @@ struct EmbeddingPoolingTests {
         .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"),
         arguments: [Pooling.Strategy.mean, Pooling.Strategy.last]
     )
+    @MLXTestActor
     func poolingExcludesPaddingOnlyWithMask(strategy: Pooling.Strategy) {
         // Two real tokens, hidden size 2.
         let short = MLXArray([1.0 as Float, 2, 3, 4]).reshaped(1, 2, 2)

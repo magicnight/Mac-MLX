@@ -14,12 +14,17 @@ actor AudioSnapshotFetcher {
 
     private var inFlight: [String: Task<Void, any Error>] = [:]
 
-    /// How many callers joined a fetch that was already running. A test hook:
-    /// it is how a test knows a second caller is parked on the first fetch
-    /// before it lets that fetch finish.
-    private(set) var joins = 0
+    /// Called with the repo id each time a caller joins a fetch that was
+    /// already running, just before that caller starts waiting on it. A test
+    /// hook: it is how a test learns that a second caller has found the
+    /// first fetch and is about to wait on it, before the test lets that
+    /// fetch finish. Reported as an event rather than kept as a count, so
+    /// the test can wait for it instead of polling against a deadline.
+    private let onJoin: @Sendable (_ modelID: String) -> Void
 
-    init() {}
+    init(onJoin: @escaping @Sendable (_ modelID: String) -> Void = { _ in }) {
+        self.onJoin = onJoin
+    }
 
     /// Run `fetch` for `modelID`, or wait for the one already running.
     ///
@@ -32,7 +37,7 @@ actor AudioSnapshotFetcher {
     /// entry gets the finished result, a failure included.
     func fetch(_ modelID: String, using fetch: @escaping AudioEngine.SnapshotFetch) async throws {
         if let running = inFlight[modelID] {
-            joins += 1
+            onJoin(modelID)
             do { try await running.value } catch { throw Self.loadFailure(error) }
             return
         }

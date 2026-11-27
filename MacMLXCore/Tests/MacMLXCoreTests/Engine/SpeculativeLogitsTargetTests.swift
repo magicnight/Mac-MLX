@@ -17,6 +17,7 @@ import Testing
 /// line it stood on.
 @Suite("Speculative decoding on a target that returns logits",
        .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct SpeculativeLogitsTargetTests {
 
     private static var prompt: LMInput { LMInput(tokens: MLXArray((1...12).map(Int32.init))) }

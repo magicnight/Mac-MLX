@@ -14,6 +14,7 @@ import MLXLMCommon
 /// (MLXArrays), so the suite gates on the metallib exactly like the other
 /// MLX-backed suites (runs under xcodebuild; skipped under bare `swift test`).
 @Suite("Cohere2 cache", .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct Cohere2CacheTests {
 
     /// A tiny 8-layer model with `sliding_window_pattern = 4`, so the expected

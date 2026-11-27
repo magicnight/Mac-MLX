@@ -11,6 +11,7 @@ import MLX
 /// suite gates on the metallib exactly like the other MLX-backed suites (runs under
 /// xcodebuild; skipped under bare `swift test`).
 @Suite("InternLM3 sanitize", .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct InternLM3SanitizeTests {
 
     /// A tiny model — cheap, lazy construction.

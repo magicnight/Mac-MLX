@@ -30,6 +30,7 @@ import MLX
 @Suite(
     "Quantized matmul parity",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct QuantizedMatmulParityTests {
 
     /// Largest absolute elementwise difference, computed in float32.

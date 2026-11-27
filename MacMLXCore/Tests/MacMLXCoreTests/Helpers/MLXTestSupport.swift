@@ -11,8 +11,9 @@ private final class MLXTestSupportBundleToken {}
 /// resource bundle. `xcodebuild` embeds it under the `.xctest` bundle's
 /// `Resources`; bare `swift test` binaries frequently omit it — and MLX
 /// `fatalError`s on first use, which cannot be caught. Swift-testing suites
-/// gate with `.enabled(if: mlxMetallibIsAvailable, …)`; XCTest suites use
-/// `requireMLXRuntimeOrSkip()` below.
+/// gate with `.enabled(if: mlxMetallibIsAvailable, …)` and are isolated to
+/// `MLXTestActor`, which keeps their Metal work off the cooperative pool;
+/// XCTest suites use `requireMLXRuntimeOrSkip()` below.
 let mlxMetallibIsAvailable: Bool = {
     func hasMetallib(_ bundle: Bundle?) -> Bool {
         bundle?.url(forResource: "default", withExtension: "metallib") != nil

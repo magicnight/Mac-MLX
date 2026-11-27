@@ -289,7 +289,21 @@ struct HummingbirdServerEmbeddingsTests {
     /// lock), hence a flag plus a sleep.
     private actor Done {
         private(set) var isSet = false
-        func set() { isSet = true }
+        /// Finishes when the flag is raised, so a test can wait for it rather
+        /// than poll a clock. Raising it twice is harmless.
+        nonisolated let raised: AsyncStream<Void>
+        private let raise: AsyncStream<Void>.Continuation
+
+        init() {
+            let (raised, raise) = AsyncStream.makeStream(of: Void.self)
+            self.raised = raised
+            self.raise = raise
+        }
+
+        func set() {
+            isSet = true
+            raise.finish()
+        }
     }
 
     /// Post `body`, raising `done` when the response arrives — or when the
@@ -317,19 +331,14 @@ struct HummingbirdServerEmbeddingsTests {
         await !server.generationLockIsHeld
     }
 
-    /// Whether `done` is set within `seconds`, polling. Used with the lock held
+    /// Whether `done` is raised, waiting for it. Used with the lock held
     /// throughout: a handler that does not wait for the lock answers in
-    /// milliseconds and one that does never answers, so the bound only decides
-    /// how long a regression takes to fail. Generous because the Metal CI job
-    /// runs the whole suite in parallel on a slow runner, where a round trip
-    /// has taken close to 20 s and a fixed 2 s sleep produced a false failure.
-    private func answered(_ done: Done, within seconds: Double) async -> Bool {
-        let deadline = ContinuousClock.now + .seconds(seconds)
-        while ContinuousClock.now < deadline {
-            if await done.isSet { return true }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        return false
+    /// milliseconds, and one that does never answers, so it fails at the
+    /// test's time limit (the wait ends when the test is cancelled) instead of
+    /// at a deadline the rest of the run can use up.
+    private func answered(_ done: Done) async -> Bool {
+        for await _ in done.raised {}
+        return await done.isSet
     }
 
     /// SRV-2 for the auxiliary engines: a `/v1/rerank` request that needs a
@@ -414,7 +423,7 @@ struct HummingbirdServerEmbeddingsTests {
     /// Lookup and kind errors are answered before the lock: an unknown model
     /// (404) and a chat model (400) come back at once even while a generation
     /// holds the lock, and neither touches it.
-    @Test
+    @Test(.timeLimit(.minutes(10)))
     func embeddingsLookupAndKindErrorsDoNotWaitForTheLock() async throws {
         let server = serverResolving("chat-model", format: .mlx)
         let port = try await server.start(preferredPort: 19_770)
@@ -423,17 +432,17 @@ struct HummingbirdServerEmbeddingsTests {
         try await server.acquireGenerationLock()
         let unknownDone = Done()
         let unknown = post(url, ["model": "nope", "input": "hello"], raising: unknownDone)
-        let unknownAnswered = await answered(unknownDone, within: 60)
+        let unknownAnswered = await answered(unknownDone)
         #expect(unknownAnswered, "a 404 must not queue behind a generation")
 
         let kindDone = Done()
         let wrongKind = post(url, ["model": "chat-model", "input": "hello"], raising: kindDone)
-        let kindAnswered = await answered(kindDone, within: 60)
+        let kindAnswered = await answered(kindDone)
         #expect(kindAnswered, "a 400 must not queue behind a generation")
 
-        // Release before awaiting the results, so a regression (the request
-        // parked behind the lock) cannot hang the test; the flags above are
-        // the assertion.
+        // Release before awaiting the results: after a regression (the
+        // request parked behind the lock) failed at the time limit, the
+        // requests still finish. The flags above are the assertion.
         await server.releaseGenerationLock()
         let (unknownData, unknownResponse) = try await unknown.value
         #expect(unknownResponse.statusCode == 404)

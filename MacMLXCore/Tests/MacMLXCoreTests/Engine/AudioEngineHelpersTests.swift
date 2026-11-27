@@ -186,53 +186,140 @@ struct AudioEngineHelpersTests {
 
     /// Two requests for one model that is not on disk share a single fetch:
     /// upstream clears a directory it finds incomplete, so two downloads of
-    /// one repo would delete each other's files. A different repo fetches on
-    /// its own, and once a fetch has finished the next prepare fetches again
-    /// (nothing remembers "on disk"; upstream's own check is cheap). No timing
-    /// is involved: the fake fetch is held at a gate until the test has seen
-    /// the second caller join it.
-    @Test
+    /// one repo would delete each other's files. A caller that joins waits
+    /// the fetch out, a different repo fetches on its own, and once a fetch
+    /// has finished the next prepare fetches again (nothing remembers "on
+    /// disk"; upstream's own check is cheap).
+    ///
+    /// The test waits for what the engine does, never for a clock. Every
+    /// fake fetch reports when it starts and when it finishes (it parks at a
+    /// gate in between), the fetcher reports each join, and every prepare
+    /// reports how it ended. All of it lands on one stream, which the test
+    /// reads in the order things happened. Wrong behaviour mostly shows up
+    /// as the wrong next event (a second fetch where a join belongs, a join
+    /// where a fetch belongs, a prepare that throws or returns early), and
+    /// the first wrong event ends the test there. What cannot show up that
+    /// way is a step that never happens, and that is what the time limit is
+    /// for: it cancels the test, a cancelled read ends the stream, and the
+    /// test fails by name instead of holding the run (the body awaits
+    /// nothing but the stream and the gate). No step has a deadline of its
+    /// own, because how long a step takes is not the engine's doing: this
+    /// test's tasks queue with every other test's, and on a three-core CI
+    /// runner that queue once held them for over a minute.
+    @Test(.timeLimit(.minutes(10)))
     func concurrentPreparesForOneRepoShareASingleFetch() async throws {
-        let log = FetchLog()
+        let whisper = "openai/whisper-tiny"
+        let kokoro = "mlx-community/Kokoro-82M-4bit"
+        let (events, report) = AsyncStream.makeStream(of: FetchEvent.self)
         let gate = Gate()
-        let fetcher = AudioSnapshotFetcher()
         let engine = AudioEngine(
             fetch: { modelID in
-                await log.record(modelID)
+                report.yield(.started(modelID))
                 await gate.wait()
+                report.yield(.finished(modelID))
             },
-            fetcher: fetcher)
-
-        let first = Task { try await engine.prepareSTT(model: "openai/whisper-tiny") }
-        try await poll { await log.entries == ["openai/whisper-tiny"] }
-        let second = Task { try await engine.prepareSTT(model: "openai/whisper-tiny") }
-        let other = Task { try await engine.prepareTTS(model: "mlx-community/Kokoro-82M-4bit") }
-        try await poll { await fetcher.joins == 1 }
-        try await poll { await log.entries.count == 2 }
-        await gate.open()
-        try await first.value
-        try await second.value
-        try await other.value
-        let entries = await log.entries
-        #expect(entries.sorted() == ["mlx-community/Kokoro-82M-4bit", "openai/whisper-tiny"])
-
-        try await engine.prepareSTT(model: "openai/whisper-tiny")
-        let after = await log.entries
-        #expect(after.count == 3)
-    }
-
-    /// Poll `condition` until it holds, up to 60 s — generous for a starved CI
-    /// runner; a correct engine satisfies every condition in milliseconds.
-    private func poll(_ condition: @Sendable () async -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(60)
-        while ContinuousClock.now < deadline {
-            if await condition() { return }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            fetcher: AudioSnapshotFetcher(onJoin: { report.yield(.joined($0)) }))
+        /// Run one prepare in a task of its own and report how it ended.
+        func start(_ modelID: String, _ prepare: @escaping @Sendable () async throws -> Void) {
+            Task {
+                do {
+                    try await prepare()
+                    report.yield(.returned(modelID))
+                } catch {
+                    report.yield(.threw(modelID, "\(error)"))
+                }
+            }
         }
-        throw PollTimeout()
+        // However the test leaves, let go of whatever is still parked at the
+        // gate.
+        defer { Task { await gate.open() } }
+        var happened = events.makeAsyncIterator()
+
+        start(whisper) { try await engine.prepareSTT(model: whisper) }
+        let firstFetch = await happened.next()
+        try #require(firstFetch == .started(whisper))
+
+        // That fetch stays in flight until the gate opens, so a second
+        // prepare of the same repo meets it: it joins, and no fetch starts.
+        start(whisper) { try await engine.prepareSTT(model: whisper) }
+        let secondCaller = await happened.next()
+        try #require(secondCaller == .joined(whisper))
+
+        // A different repo does not wait for that fetch; its own starts
+        // while the first is still held...
+        start(kokoro) { try await engine.prepareTTS(model: kokoro) }
+        let otherFetch = await happened.next()
+        try #require(otherFetch == .started(kokoro))
+
+        // ...and leaves the first repo's fetch where it was: one more caller
+        // for that repo still joins it.
+        start(whisper) { try await engine.prepareSTT(model: whisper) }
+        let thirdCaller = await happened.next()
+        try #require(thirdCaller == .joined(whisper))
+
+        // With the gate open both fetches finish and all four callers
+        // return. For each repo the fetch finishes first: a caller that
+        // joined waits the fetch out instead of returning while the files
+        // are still arriving. (The two repos interleave freely, so each is
+        // checked on its own.)
+        await gate.open()
+        let afterOpen = await take(outcomes: 4, from: &happened)
+        try #require(afterOpen.filter { $0.modelID == whisper }
+            == [.finished(whisper), .returned(whisper), .returned(whisper), .returned(whisper)])
+        try #require(afterOpen.filter { $0.modelID == kokoro } == [.finished(kokoro), .returned(kokoro)])
+
+        // Nothing remembers the finished fetch: the next prepare runs one
+        // more, and that is everything that happened.
+        start(whisper) { try await engine.prepareSTT(model: whisper) }
+        let later = await take(outcomes: 1, from: &happened)
+        try #require(later == [.started(whisper), .finished(whisper), .returned(whisper)])
+        report.finish()
+        let leftover = await happened.next()
+        #expect(leftover == nil)
     }
 
-    private struct PollTimeout: Error {}
+    /// What a fetch test observes, in the order it happened.
+    private enum FetchEvent: Equatable, Sendable {
+        /// A fake fetch began for the repo.
+        case started(String)
+        /// A caller joined the fetch already running for the repo.
+        case joined(String)
+        /// A fake fetch got through the gate; it returns right after.
+        case finished(String)
+        /// A prepare call for the repo returned.
+        case returned(String)
+        /// A prepare call for the repo threw; the second value is the error.
+        case threw(String, String)
+
+        var modelID: String {
+            switch self {
+            case .started(let id), .joined(let id), .finished(let id), .returned(let id), .threw(let id, _):
+                return id
+            }
+        }
+
+        /// Whether this is a prepare call reporting how it ended.
+        var isOutcome: Bool {
+            switch self {
+            case .returned, .threw: return true
+            case .started, .joined, .finished: return false
+            }
+        }
+    }
+
+    /// The events up to and including the `count`-th prepare call to report
+    /// how it ended, or everything there was if the stream ends first.
+    private func take(
+        outcomes count: Int, from events: inout AsyncStream<FetchEvent>.Iterator
+    ) async -> [FetchEvent] {
+        var taken: [FetchEvent] = []
+        var outcomes = 0
+        while outcomes < count, let event = await events.next() {
+            taken.append(event)
+            if event.isOutcome { outcomes += 1 }
+        }
+        return taken
+    }
 
     /// Parks callers until opened. Built on continuations rather than a sleep
     /// loop so a cancelled task waits like any other instead of spinning.
@@ -315,11 +402,6 @@ struct AudioEngineHelpersTests {
             }
         }
         #expect(await engine.loadedSTTModelID == nil)
-    }
-
-    private actor FetchLog {
-        private(set) var entries: [String] = []
-        func record(_ modelID: String) { entries.append(modelID) }
     }
 
     @Test

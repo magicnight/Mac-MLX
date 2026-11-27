@@ -21,6 +21,7 @@ import Testing
 /// per-layer inputs and a KV-shared last layer. The weights are never
 /// evaluated.
 @Suite("Gemma 4 LoRA layers", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct Gemma4LoRALayerPathTests {
 
     private static let config = Data(#"""

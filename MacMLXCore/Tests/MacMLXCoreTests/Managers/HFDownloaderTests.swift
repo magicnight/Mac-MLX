@@ -247,8 +247,8 @@ struct HFDownloaderTests {
     /// fetch runs at once. The fill loop used to wait for four HEADs to
     /// start and never returned once the files ran out, holding the actor
     /// (#143).
-    @Test func sizeBytesHeadsFewerUndeclaredFilesThanItsConcurrencyCap() async throws {
-        let total = try #require(await sizeBytesWithDeadline(
+    @Test(.timeLimit(.minutes(10))) func sizeBytesHeadsFewerUndeclaredFilesThanItsConcurrencyCap() async throws {
+        let total = try #require(await sizeBytesDetached(
             declared: 512, undeclared: ["model.safetensors": 1000, "tokenizer.json": 24]))
         let expected: Int64 = 512 + 1000 + 24
         #expect(total == expected)
@@ -256,21 +256,23 @@ struct HFDownloaderTests {
 
     /// Six undeclared files: four HEADs start, and each one that finishes
     /// has to start the next.
-    @Test func sizeBytesHeadsMoreUndeclaredFilesThanItsConcurrencyCap() async throws {
+    @Test(.timeLimit(.minutes(10))) func sizeBytesHeadsMoreUndeclaredFilesThanItsConcurrencyCap() async throws {
         let undeclared = Dictionary(uniqueKeysWithValues: (1...6).map {
             ("model-\($0)-of-6.safetensors", Int64($0) * 100)
         })
-        let total = try #require(await sizeBytesWithDeadline(declared: 512, undeclared: undeclared))
+        let total = try #require(await sizeBytesDetached(declared: 512, undeclared: undeclared))
         let expected: Int64 = 512 + 100 + 200 + 300 + 400 + 500 + 600
         #expect(total == expected)
     }
 
     /// Runs `sizeBytes(for:)` for a repository with one declared file and the
     /// given undeclared ones, answered by HEAD with `x-linked-size`. The call
-    /// runs detached and is polled for up to 60 s, so a fill loop that spins
-    /// on the downloader's actor fails the test instead of hanging the run;
-    /// the spinning actor is that test's own downloader.
-    private func sizeBytesWithDeadline(
+    /// runs detached and reports its outcome on a stream, so a fill loop that
+    /// spins on the downloader's actor fails the test at its time limit (the
+    /// read ends when the test is cancelled) instead of hanging the run; the
+    /// spinning actor is that test's own downloader. There is no deadline: a
+    /// wait on the clock is a wait on the rest of the test process too.
+    private func sizeBytesDetached(
         declared: Int64, undeclared: [String: Int64]
     ) async throws -> Int64? {
         var siblings = [#"{"rfilename": "config.json", "size": \#(declared)}"#]
@@ -291,22 +293,21 @@ struct HFDownloaderTests {
         defer { MockURLProtocol.handler = nil }
 
         let downloader = HFDownloader(urlSession: makeMockSession())
-        let result = OSAllocatedUnfairLock<Result<Int64?, any Error>?>(initialState: nil)
+        let (outcomes, report) = AsyncStream.makeStream(of: Result<Int64?, any Error>.self)
         Task.detached {
             do {
                 let total = try await downloader.sizeBytes(for: "mlx-community/undeclared")
-                result.withLock { $0 = .success(total) }
+                report.yield(.success(total))
             } catch {
-                result.withLock { $0 = .failure(error) }
+                report.yield(.failure(error))
             }
         }
-        let deadline = ContinuousClock.now + .seconds(60)
-        while ContinuousClock.now < deadline {
-            if let outcome = result.withLock({ $0 }) { return try outcome.get() }
-            try await Task.sleep(for: .milliseconds(10))
+        var outcome = outcomes.makeAsyncIterator()
+        guard let result = await outcome.next() else {
+            Issue.record("sizeBytes(for:) did not return before the time limit")
+            return nil
         }
-        Issue.record("sizeBytes(for:) did not return within 60 s")
-        return nil
+        return try result.get()
     }
 
     @Test func filesSingleSiblingNoSize() async throws {

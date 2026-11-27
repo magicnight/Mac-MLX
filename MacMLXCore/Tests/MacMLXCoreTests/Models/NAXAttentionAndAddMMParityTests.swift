@@ -24,6 +24,7 @@ import MLXFast
 @Suite(
     "NAX attention and addmm parity",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct NAXAttentionAndAddMMParityTests {
 
     // Peaked enough that attention actually selects. With q, k ~ N(0, s²) at
