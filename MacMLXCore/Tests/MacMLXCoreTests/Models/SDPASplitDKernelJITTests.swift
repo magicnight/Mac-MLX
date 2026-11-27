@@ -30,22 +30,39 @@ import MLX
 ///
 /// Gemma 4's head dimension is 256, and `FullPathVLMImageGateSmokeTests`
 /// died here on mlx-swift 0.33.0 before the fix. On other GPUs these shapes
-/// take another kernel and the test only checks the numbers.
+/// take another kernel and the test only checks the numbers, with 2 heads at
+/// head dimension 512 instead of 32: the larger shape reaches nothing more
+/// there, and on the CI runner's paravirtualized GPU the Metal job twice ended
+/// with a GPU timeout while it ran.
 ///
 /// A failure of the build is a crash of the test process, not a failed
 /// expectation. The reference is plain softmax attention in float32 over the
 /// same bfloat16 values. It runs on the CPU stream from end to end and is
 /// evaluated on its own, so no GPU work waits on the CPU: such a wait can end
-/// the process with a GPU timeout when the CPU work is long (mlx#2827). The
-/// first version of this test scaled the scores and compared the results on
-/// the GPU, and the CI runner's Metal job ended with that timeout.
+/// the process with a GPU timeout when the CPU work is long (mlx#2827).
 @Suite(
     "SDPA split-D kernel builds at run time",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct SDPASplitDKernelJITTests {
 
-    @Test("causal attention over 1,024 tokens", arguments: [(256, 2), (512, 32)])
-    func longCausalAttentionMatchesReference(headDim: Int, heads: Int) {
+    /// Whether MLX takes its NAX kernels on this GPU, by the rule
+    /// `metal::is_nax_available` applies: macOS 26.2 or later and a GPU of
+    /// generation 17 or later (18 for a phone GPU), the generation being the
+    /// two digits before the last character of the Metal architecture name,
+    /// as in `applegpu_g17s`.
+    static var gpuTakesNAXKernels: Bool {
+        guard #available(macOS 26.2, *) else { return false }
+        let name = Array(GPU.deviceInfo().architecture)
+        guard name.count >= 3, let tens = name[name.count - 3].wholeNumberValue,
+            let ones = name[name.count - 2].wholeNumberValue
+        else { return false }
+        return tens * 10 + ones >= (name.last == "p" ? 18 : 17)
+    }
+
+    @Test("causal attention over 1,024 tokens", arguments: [256, 512])
+    func longCausalAttentionMatchesReference(headDim: Int) {
+        let heads = headDim == 512 && Self.gpuTakesNAXKernels ? 32 : 2
         let length = 1024
         let scale = 1 / Float(headDim).squareRoot()
 
