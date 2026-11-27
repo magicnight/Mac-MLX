@@ -31,6 +31,7 @@ import MLX
 @Suite(
     "NAX split-K GEMM parity",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct NAXSplitKGemmParityTests {
 
     /// Cosine similarity between two flattened arrays, computed in float32.

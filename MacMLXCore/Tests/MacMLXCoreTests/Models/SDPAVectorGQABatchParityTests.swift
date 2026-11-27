@@ -36,6 +36,7 @@ import MLX
 @Suite(
     "SDPA vector GQA batch parity",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct SDPAVectorGQABatchParityTests {
 
     @Test(

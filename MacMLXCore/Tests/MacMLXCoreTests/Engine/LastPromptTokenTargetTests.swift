@@ -13,6 +13,7 @@ import Testing
 /// does, loses its first token under upstream's speculative iterator, and
 /// wrapped it speculates to exactly the plain greedy output.
 @Suite("LastPromptTokenTarget", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct LastPromptTokenTargetTests {
 
     private static var prompt: LMInput { LMInput(tokens: MLXArray((1...12).map(Int32.init))) }

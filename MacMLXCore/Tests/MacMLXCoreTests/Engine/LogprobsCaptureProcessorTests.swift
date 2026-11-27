@@ -15,6 +15,7 @@ struct LogprobsCaptureProcessorTests {
     @Test(
         "captures the sampled token's logprob and top-N alternatives, logits unchanged",
         .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+    @MLXTestActor
     func capturesLogprobs() throws {
         let sink = LogprobsCaptureProcessor.Sink()
         var processor = LogprobsCaptureProcessor(inner: nil, sink: sink, topN: 2)
@@ -40,6 +41,7 @@ struct LogprobsCaptureProcessorTests {
     @Test(
         "topN 0 records only the sampled token's logprob, no alternatives",
         .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+    @MLXTestActor
     func topNZero() throws {
         let sink = LogprobsCaptureProcessor.Sink()
         var processor = LogprobsCaptureProcessor(inner: nil, sink: sink, topN: 0)

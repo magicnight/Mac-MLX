@@ -8,6 +8,7 @@ import Testing
 @testable import MacMLXCore
 
 @Suite("TinyRandomLanguageModel", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct TinyRandomLanguageModelTests {
 
     /// A seed builds the same weights whatever random state is in use around

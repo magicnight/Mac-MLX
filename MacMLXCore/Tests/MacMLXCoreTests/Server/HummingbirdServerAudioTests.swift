@@ -461,6 +461,9 @@ struct HummingbirdServerAudioTests {
         private let loadFailure: EngineError?
         private let speechSampleRate: Int
         private var server: HummingbirdServer?
+        /// The model id of each prepare call, as it is recorded.
+        nonisolated let prepares: AsyncStream<String>
+        private let reportPrepare: AsyncStream<String>.Continuation
 
         init(
             failingPrepare prepareFailure: EngineError? = nil,
@@ -470,6 +473,9 @@ struct HummingbirdServerAudioTests {
             self.prepareFailure = prepareFailure
             self.loadFailure = loadFailure
             self.speechSampleRate = speechSampleRate
+            let (prepares, reportPrepare) = AsyncStream.makeStream(of: String.self)
+            self.prepares = prepares
+            self.reportPrepare = reportPrepare
         }
 
         func attach(to server: HummingbirdServer) { self.server = server }
@@ -489,12 +495,14 @@ struct HummingbirdServerAudioTests {
         func prepareSTT(model: String) async throws {
             if let held = await probeLock() { lockHeldDuringPrepare.append(held) }
             prepareCalls.append(model)
+            reportPrepare.yield(model)
             if let prepareFailure { throw prepareFailure }
         }
 
         func prepareTTS(model: String) async throws {
             if let held = await probeLock() { lockHeldDuringPrepare.append(held) }
             prepareCalls.append(model)
+            reportPrepare.yield(model)
             if let prepareFailure { throw prepareFailure }
         }
 
@@ -532,7 +540,21 @@ struct HummingbirdServerAudioTests {
     /// is not cancellable from a task group, so a bounded wait needs a flag.
     private actor Done {
         private(set) var isSet = false
-        func set() { isSet = true }
+        /// Finishes when the flag is raised, so a test can wait for it rather
+        /// than poll a clock. Raising it twice is harmless.
+        nonisolated let raised: AsyncStream<Void>
+        private let raise: AsyncStream<Void>.Continuation
+
+        init() {
+            let (raised, raise) = AsyncStream.makeStream(of: Void.self)
+            self.raised = raised
+            self.raise = raise
+        }
+
+        func set() {
+            isSet = true
+            raise.finish()
+        }
     }
 
     /// `done` is raised on a transport failure too, so a timed-out request
@@ -570,37 +592,30 @@ struct HummingbirdServerAudioTests {
         }
     }
 
-    /// The backend's prepare calls once at least one has arrived, polling up
-    /// to `seconds` (same reasoning as `allSet`), or whatever has arrived by
-    /// the deadline.
-    private func prepared(_ backend: ScriptedAudioBackend, within seconds: Double) async -> [String] {
-        let deadline = ContinuousClock.now + .seconds(seconds)
-        while ContinuousClock.now < deadline {
-            let calls = await backend.prepareCalls
-            if !calls.isEmpty { return calls }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
+    /// The backend's prepare calls once the first has arrived. It waits for
+    /// the backend to report one, not for a clock: a deadline is spent on the
+    /// rest of the test process too, and the Metal CI job once held every
+    /// test for a minute. A prepare that never comes ends at the test's time
+    /// limit, and the calls recorded by then (none) fail the expectation.
+    private func firstPrepares(_ backend: ScriptedAudioBackend) async -> [String] {
+        var prepares = backend.prepares.makeAsyncIterator()
+        _ = await prepares.next()
         return await backend.prepareCalls
     }
 
-    /// Whether every flag is set within `seconds`, polling. Used with the lock
-    /// held throughout: a correct handler answers in milliseconds and a
-    /// handler that waits for the lock never answers, so the bound only decides
-    /// how long a regression takes to fail. It is generous because the Metal
-    /// CI job runs the whole suite in parallel on a slow runner, where a
-    /// request round trip has taken close to 20 s; a 2 s bound failed there.
-    private func allSet(_ flags: [Done], within seconds: Double) async -> Bool {
-        let deadline = ContinuousClock.now + .seconds(seconds)
-        while ContinuousClock.now < deadline {
-            var pending = false
-            for flag in flags {
-                let isSet = await flag.isSet
-                if !isSet { pending = true }
-            }
-            if !pending { return true }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+    /// Whether every flag is raised, waiting for each. Used with the lock held
+    /// throughout: a correct handler answers in milliseconds, and one that
+    /// waits for the lock never answers, so it fails at the test's time limit
+    /// (the wait ends when the test is cancelled) instead of at a deadline the
+    /// rest of the run can use up.
+    private func allSet(_ flags: [Done]) async -> Bool {
+        for flag in flags {
+            for await _ in flag.raised {}
         }
-        return false
+        for flag in flags {
+            if await !flag.isSet { return false }
+        }
+        return true
     }
 
     /// Whether every path that took the lock also released it: nobody owns
@@ -619,7 +634,7 @@ struct HummingbirdServerAudioTests {
     /// loaded first and queued second, so a cold swap ran beside a generation,
     /// and a second request could replace the model, or empty the slot, while
     /// the first was parked at the lock.
-    @Test
+    @Test(.timeLimit(.minutes(10)))
     func transcriptionsLoadWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
         let backend = ScriptedAudioBackend(failingLoad: .modelLoadFailed(reason: "scripted"))
         let server = await makeServer(backend: backend)
@@ -634,7 +649,7 @@ struct HummingbirdServerAudioTests {
             raising: done)
         // The fetch arrives while the lock is held (it does not wait for it);
         // then give a wrong handler time to go on and load anyway.
-        let preparedWhileLocked = await prepared(backend, within: 60)
+        let preparedWhileLocked = await firstPrepares(backend)
         #expect(preparedWhileLocked == ["openai/whisper-tiny"], "the fetch must not wait for the lock")
         try await Task.sleep(nanoseconds: 300_000_000)
         let calledWhileLocked = await backend.transcribeCalls.count
@@ -658,7 +673,7 @@ struct HummingbirdServerAudioTests {
     }
 
     /// Same contract on `/v1/audio/speech`.
-    @Test
+    @Test(.timeLimit(.minutes(10)))
     func speechLoadWaitsForTheGenerationLockAndReleasesItOnFailure() async throws {
         let backend = ScriptedAudioBackend(failingLoad: .modelLoadFailed(reason: "scripted"))
         let server = await makeServer(backend: backend)
@@ -670,7 +685,7 @@ struct HummingbirdServerAudioTests {
             speechURL(port),
             object: ["model": "mlx-community/Kokoro-82M-4bit", "input": "hello", "voice": "af_heart"],
             raising: done)
-        let preparedWhileLocked = await prepared(backend, within: 60)
+        let preparedWhileLocked = await firstPrepares(backend)
         #expect(preparedWhileLocked == ["mlx-community/Kokoro-82M-4bit"], "the fetch must not wait for the lock")
         try await Task.sleep(nanoseconds: 300_000_000)
         let calledWhileLocked = await backend.synthesizeCalls.count
@@ -695,7 +710,7 @@ struct HummingbirdServerAudioTests {
     /// A malformed model id is answered before the lock, like the lookup
     /// errors on `/v1/embeddings`: with the lock held, both routes still
     /// return their 400 promptly and never reach the backend.
-    @Test
+    @Test(.timeLimit(.minutes(10)))
     func aMalformedModelIDDoesNotWaitForTheLock() async throws {
         let backend = ScriptedAudioBackend()
         let server = await makeServer(backend: backend)
@@ -713,7 +728,7 @@ struct HummingbirdServerAudioTests {
             speechURL(port),
             object: ["model": "not-a-repo-id", "input": "hello", "voice": "af_heart"],
             raising: speechDone)
-        let answered = await allSet([transcriptionDone, speechDone], within: 60)
+        let answered = await allSet([transcriptionDone, speechDone])
         #expect(answered, "a malformed id must be answered without waiting for the lock")
         await server.releaseGenerationLock()
 
@@ -735,7 +750,7 @@ struct HummingbirdServerAudioTests {
     /// A model the Hub cannot deliver fails in the fetch, which runs before
     /// the lock: with the lock held, both routes still return their 500
     /// promptly, never load, and leave the lock exactly as they found it.
-    @Test
+    @Test(.timeLimit(.minutes(10)))
     func aPrepareFailureIs500WithoutWaitingForTheLock() async throws {
         let backend = ScriptedAudioBackend(
             failingPrepare: .modelLoadFailed(reason: "the Hub was unreachable"))
@@ -754,7 +769,7 @@ struct HummingbirdServerAudioTests {
             speechURL(port),
             object: ["model": "mlx-community/Kokoro-82M-4bit", "input": "hello", "voice": "af_heart"],
             raising: speechDone)
-        let answered = await allSet([transcriptionDone, speechDone], within: 60)
+        let answered = await allSet([transcriptionDone, speechDone])
         #expect(answered, "a failed fetch must be answered without waiting for the lock")
         await server.releaseGenerationLock()
 

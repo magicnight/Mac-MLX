@@ -296,6 +296,7 @@ struct OverlayRegistrationTests {
     /// fatal under bare `swift test` without the metallib. The registration test
     /// above never invokes the creator, so it stays ungated.
     @Test(.enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"), arguments: cases)
+    @MLXTestActor
     func factoryInstantiatesFromConfig(_ modelCase: Case) async throws {
         await ModelOverlay.registerAll()
         let model = try await LLMTypeRegistry.shared.createModel(

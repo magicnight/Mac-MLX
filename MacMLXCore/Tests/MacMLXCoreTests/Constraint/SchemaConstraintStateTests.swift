@@ -568,7 +568,7 @@ struct SchemaConstraintStateTests {
     /// for a completion has a budget of walks: a correct automaton completes
     /// every prefix within a few, and a dead end would otherwise be explored
     /// to the full depth, thousands of times over.
-    @Test
+    @Test @BlockingTestActor
     func boundedPrefixesAlwaysComplete() throws {
         let roots: [SchemaValueType] = [
             integers(-12, 35), integers(0, 0), integers(7, nil), integers(nil, -3),
@@ -679,7 +679,7 @@ struct SchemaConstraintStateTests {
     /// complete states (see ``SchemaTrapSearch``). Fixed schemas cover the
     /// shapes of known traps (a comma after the last key, a dead surrogate
     /// escape); seeded schemas cover the rest.
-    @Test
+    @Test @BlockingTestActor
     func noReachableStateIsATrap() throws {
         let schemas: [JSONSchemaObject] = [
             schema([("a", .string)]),

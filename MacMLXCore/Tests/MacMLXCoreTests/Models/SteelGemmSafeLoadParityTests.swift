@@ -24,6 +24,7 @@ import MLX
 @Suite(
     "Steel GEMM safe-load parity",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct SteelGemmSafeLoadParityTests {
 
     private func maxAbsDiff(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {

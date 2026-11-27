@@ -279,6 +279,7 @@ struct FullPathVLMTests {
 /// The MLX-backed half: the state a warm continuation starts from and the
 /// shape the text path gets.
 @Suite("FullPathVLM inputs", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct FullPathVLMInputTests {
 
     @Test

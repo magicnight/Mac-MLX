@@ -22,6 +22,7 @@ import Testing
 /// `full_attention_interval` 4 lays them out. The weights are never
 /// evaluated.
 @Suite("Qwen3.5 LoRA layers", .enabled(if: mlxMetallibIsAvailable, "needs the MLX Metal library"))
+@MLXTestActor
 struct Qwen35LoRALayerPathTests {
 
     private static let config = Data(#"""

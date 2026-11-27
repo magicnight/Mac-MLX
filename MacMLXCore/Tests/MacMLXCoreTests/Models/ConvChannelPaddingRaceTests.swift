@@ -42,6 +42,7 @@ import MLX
     "Conv channel-padding scalar lifetime",
     .serialized,
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct ConvChannelPaddingRaceTests {
 
     private static let maxIterations = 300

@@ -10,6 +10,7 @@ import MLX
 /// xcodebuild; skipped under bare `swift test`). A tiny config keeps construction
 /// cheap.
 @Suite("Mellum2 sanitize", .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct Mellum2SanitizeTests {
 
     /// A tiny Mellum2: 1 layer, 2 experts, tiny dims — cheap, lazy construction.

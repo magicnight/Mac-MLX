@@ -10,6 +10,7 @@ import MLX
 /// gates on the metallib exactly like the other MLX-backed suites (runs under
 /// xcodebuild; skipped under bare `swift test`).
 @Suite("HunyuanV1Dense sanitize", .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct HunyuanV1DenseSanitizeTests {
 
     /// A tiny model with the given tie flag — cheap, lazy construction.

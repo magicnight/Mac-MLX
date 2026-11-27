@@ -42,22 +42,26 @@ struct PoolAuxiliaryResidencyTests {
         return ModelParametersStore(directory: directory)
     }
 
-    @Test("admission carries the model's TTL from the parameters store")
+    @Test("admission carries the model's TTL from the parameters store", .timeLimit(.minutes(10)))
     func admissionCarriesTheTTL() async throws {
         let pool = ModelPool(maxBytes: 10_000_000_000) { _ in Stub() }
         let parameters = try temporaryParameters()
         try await parameters.save(ModelParameters(ttlSeconds: 1), for: "qwen")
         let residency = PoolAuxiliaryResidency(pool: pool, parameters: parameters)
         let released = OSAllocatedUnfairLock<Int>(initialState: 0)
-        try await residency.admit(.reranker, model("qwen"), load: {}, release: { released.withLock { $0 += 1 } })
+        // The release lands a moment after the sweep returns; the closure says
+        // when, so the test waits for that and not for a clock.
+        let (releases, releaseHappened) = AsyncStream.makeStream(of: Void.self)
+        try await residency.admit(.reranker, model("qwen"), load: {}, release: {
+            released.withLock { $0 += 1 }
+            releaseHappened.yield()
+        })
         await residency.endUse(.reranker, "qwen")
         await pool.sweepIdle(now: Date().addingTimeInterval(5))
         let resident = await pool.residentModelIDs()
         #expect(resident == [], "past the TTL the store named, the sweep reclaims it")
-        let deadline = Date().addingTimeInterval(60)
-        while released.withLock({ $0 }) == 0, Date() < deadline {
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
+        var releaseEvents = releases.makeAsyncIterator()
+        try #require(await releaseEvents.next() != nil, "the sweep never released the model")
         #expect(released.withLock { $0 } == 1)
     }
 

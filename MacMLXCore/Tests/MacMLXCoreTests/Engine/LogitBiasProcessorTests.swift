@@ -18,6 +18,7 @@ struct LogitBiasProcessorTests {
     @Test(
         "bias is added to exactly the named columns; out-of-range ids are ignored",
         .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+    @MLXTestActor
     func additiveBias() throws {
         let vocab = 5
         let base = MLXArray([Float(0), 1, 2, 3, 4]).reshaped([1, vocab])

@@ -32,9 +32,10 @@ import MLX
 @Suite(
     "Affine quantize on signed groups",
     .enabled(if: mlxMetallibIsAvailable, "Requires default.metallib (run under xcodebuild)"))
+@MLXTestActor
 struct AffineQuantizeSignedGroupTests {
 
-    private static let cases: [(groupSize: Int, bits: Int)] = [32, 64, 128].flatMap { groupSize in
+    nonisolated private static let cases: [(groupSize: Int, bits: Int)] = [32, 64, 128].flatMap { groupSize in
         [2, 3, 4, 5, 6, 8].map { (groupSize: groupSize, bits: $0) }
     }
 
