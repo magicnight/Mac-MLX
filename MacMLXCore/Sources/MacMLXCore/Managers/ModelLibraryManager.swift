@@ -414,8 +414,9 @@ public actor ModelLibraryManager {
     ///
     /// Source of truth: `VLMTypeRegistry.shared` in `Libraries/MLXVLM/
     /// VLMModelFactory.swift` at the pinned revision, less
-    /// `vlmTypesServedAsText` and `fullPathVLMTypes`. Every key of that
-    /// registry is in exactly one of the three sets. `ModelLibraryManagerVLMTests` keeps a copy of the
+    /// `vlmTypesServedAsText`, `fullPathVLMTypes` and `vlmTypesNotServed`.
+    /// Every key of that registry is in exactly one of the four sets.
+    /// `ModelLibraryManagerVLMTests` keeps a copy of the
     /// registry's keys, checks the copy against the checked-out
     /// `VLMModelFactory.swift` (under `swift test`) and both sets against the
     /// copy and the registries, so a bump that adds, drops or renames a key
@@ -446,11 +447,28 @@ public actor ModelLibraryManager {
     /// calls, replayed reasoning and history snapshots, and these are what
     /// macMLX serves agents with. Their images are dropped until each family
     /// passes the full-path parity gate and moves to `fullPathVLMTypes`
-    /// (`gemma4_unified` and `qwen3_5_moe` have no local checkpoint to run it
-    /// on).
+    /// (none of these has a local checkpoint to run it on). Qwen 3.8 uses
+    /// the Qwen 3.5 classes under its own keys, and
+    /// `prism_hadamard_qwen35` is a Hadamard-rotated ternary Qwen 3.5; the
+    /// Qwen 3.5 run does not cover a key it never loaded.
     static let vlmTypesServedAsText: Set<String> = [
         "gemma4_unified",
         "qwen3_5_moe",
+        "qwen3_8",
+        "qwen3_8_moe",
+        "prism_hadamard_qwen35",
+    ]
+
+    /// `model_type` values the VLM factory can load and macMLX does not
+    /// serve. `diffusion_gemma` generates a block of tokens at a time
+    /// (`BlockDiffusionLanguageModel`) and its next-token entry point is a
+    /// `fatalError`, while the engine drives `TokenIterator` itself, prefills
+    /// history through it and batches by next-token logits. The text factory
+    /// does not register the type, so a checkpoint is listed as `.mlx` and
+    /// its load fails there with an unsupported-type error rather than
+    /// reaching that trap.
+    static let vlmTypesNotServed: Set<String> = [
+        "diffusion_gemma",
     ]
 
     /// `model_type` values loaded through the VLM factory and served on the

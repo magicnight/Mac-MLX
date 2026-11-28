@@ -10,6 +10,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **mlx-swift 0.33.0 and mlx-swift-lm 3.33.0.** The MLX core moves from
+  v0.32.2 to v0.32.4. The fork of mlx-swift is rebuilt on 0.33.0 and carries
+  two fixes where it carried five: four of the five are in the new core, the
+  GPU affine-quantize fix (`mlx#4775`) is still ahead of any release, and one
+  is new, below. What changes for a user:
+  - **The SSD prompt cache starts over once.** The move changes what several
+    models compute (the norm epsilon in the gated-delta layers of Qwen
+    3.5/3.6 and Qwen3-Next, RoPE scaling for Gemma 3 checkpoints that store it
+    in `rope_parameters`), and a KV snapshot is only as good as the numerics
+    that produced it. Files written by an earlier build are never served
+    again: they are deleted on first launch, or when first looked up if the
+    cache's index is missing. The cache refills as conversations run.
+  - **Qwen 3.8 loads as text.** mlx-swift-lm 3.33.0 adds `qwen3_8`,
+    `qwen3_8_moe` and `prism_hadamard_qwen35`. They load through the text
+    path, with the prompt cache and tool calls; images are not read, since no
+    checkpoint was available to run the image gate on. None of the three was
+    run here.
+  - **Diffusion Gemma is not supported.** `diffusion_gemma` generates a block
+    of tokens at a time and the engine decodes one token at a time; loading
+    one fails with an unsupported-type error.
+  - **A Gemma 2 request on its own no longer depends on macMLX's copy of the
+    model.** Upstream's Gemma 2 prefill is causal as of 3.33.0. The copy
+    stays, because upstream still misapplies the per-row mask of a batch.
+  - **A LoRA adapter that targets a subclass of a linear layer now fails to
+    apply** with an error (for example the Hadamard-rotated layers of
+    `prism_hadamard_qwen35`). 3.32.3 wrapped such a layer as a plain linear
+    one and lost what the subclass adds.
+  - **Speculative decoding on a Gemma 4 checkpoint with its vision tower no
+    longer goes through a wrapper.** 3.32.3 dropped the first token of a
+    speculative answer when the target prefilled its own prompt, and macMLX
+    wrapped the target to avoid it. 3.33.0 emits the token.
+  - The mlx-audio-swift fork gains a three-line change so Parakeet builds
+    against mlx-swift 0.33; nothing else in it moves.
 - **Hummingbird 2.29.0.** 2.28.1 stops a request-body handler spinning when
   the inbound stream is already closed. 2.29.0 changes one default:
   `LocalFileSystem` no longer follows symbolic links. macMLX serves no files
@@ -64,6 +97,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
     its blocks are decoded now and anything else inside one is ignored. A
     body refused before because of a malformed field in such a block is now
     served.
+- **A Gemma 4 prefill of 1,024 tokens or more in one pass would have crashed
+  on an M5 with stock mlx-swift 0.33.0; the fork carries the fix.** An image
+  request prefills that way. Since core v0.32.3 the attention kernel
+  for head dimensions 256 and 512 on the M5 GPU fails to build at run time
+  (`mlx#4832`: one template argument too many), which ends the process. Only
+  Swift builds are affected, since the Python wheel ships its kernels
+  compiled. No macMLX release shipped it: the fix (upstream PR #4903, merged
+  after core v0.32.4 and in no release yet) is carried on the fork, with a
+  test that builds the kernel.
+- **A prompt-cache hit is only served when the cache can rewind exactly as
+  far as the hit needs.** mlx-swift-lm 3.33.0 gives LFM2 a cache that can step
+  back 64 positions and no further, and reports itself trimmable all the
+  same. The store took that at its word, so a hit further back than 64 would
+  have reused a cache still positioned at the end of the earlier request.
+  It now checks the distance, and the SSD tier writes the new cache under its
+  own type name instead of its parent's. Found by reading the upgrade's
+  diff; no macMLX release shipped it.
 - **Gemma 4 output keeps the spaces the model wrote before punctuation.**
   Gemma 4's tokenizer config does not set `clean_up_tokenization_spaces`,
   swift-transformers 1.3.4 treated that as on, and the cleanup removed the

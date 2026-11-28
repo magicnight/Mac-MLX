@@ -149,6 +149,67 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertEqual(offset(hit), 1)
     }
 
+    /// A cache that can rewind only a bounded number of positions: LFM2's
+    /// `RewindableConvolutionCache` (mlx-swift-lm 3.33.0), beside an attention
+    /// layer. `isTrimmable` is true for it at any distance, and
+    /// `trimPromptCache` trims nothing when asked for more than it retains,
+    /// so a hit that trusted `isTrimmable` reported a reuse the caches were
+    /// still ahead of. Within the window the hit is trimmed exactly; past it
+    /// there is no hit.
+    func testATrimPastABoundedRewindWindowIsNotAHit() async throws {
+        try requireMLXRuntimeOrSkip()
+        let count = 10, stateLength = 2, window = 4
+        let attention = KVCacheSimple()
+        _ = attention.update(
+            keys: MLXArray.zeros([1, 1, count, 4]), values: MLXArray.ones([1, 1, count, 4]))
+        let convolution = RewindableConvolutionCache(stateLength: stateLength, rollbackCapacity: window)
+        convolution.record(
+            input: MLXArray.ones([1, count, 3]),
+            initialState: MLXArray.zeros([1, stateLength, 3]),
+            currentState: MLXArray.ones([1, stateLength, 3]))
+        let caches: [any KVCache] = [attention, convolution]
+        XCTAssertTrue(canTrimPromptCache(caches), "the premise: trimmable by the uncounted check")
+        XCTAssertEqual(convolution.maxTrimCount, window)
+
+        let stored = Array(1...count)
+        let store = PromptCacheStore(root: tmpRoot())
+        await store.insert(modelID: model, tokens: stored, snapshot: PromptCacheSnapshot(caches))
+
+        // Two positions back: inside the window.
+        let near = await store.fetchNearest(modelID: model, tokens: Array(stored.prefix(8)) + [99])
+        XCTAssertEqual(near?.reusedTokenCount, 8)
+        XCTAssertEqual(near?.snapshot.caches.map(\.offset), [8, 8])
+
+        // Seven positions back: past it. Nothing may be served.
+        let far = await store.fetchNearest(modelID: model, tokens: Array(stored.prefix(3)) + [99])
+        XCTAssertNil(far, "a hit here would report 3 reused tokens over caches still at \(count)")
+    }
+
+    /// The longer entry cannot rewind far enough and a shorter one is stored
+    /// beside it (the insert keeps strict prefixes of an entry that cannot be
+    /// trimmed all the way back): the shorter one serves.
+    func testAShorterEntryServesWhenTheLongerCannotRewindThatFar() async throws {
+        try requireMLXRuntimeOrSkip()
+        func bounded(_ count: Int) -> PromptCacheSnapshot {
+            let attention = KVCacheSimple()
+            _ = attention.update(
+                keys: MLXArray.zeros([1, 1, count, 4]), values: MLXArray.ones([1, 1, count, 4]))
+            let convolution = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 4)
+            convolution.record(
+                input: MLXArray.ones([1, count, 3]),
+                initialState: MLXArray.zeros([1, 2, 3]),
+                currentState: MLXArray.ones([1, 2, 3]))
+            return PromptCacheSnapshot([attention, convolution])
+        }
+        let store = PromptCacheStore(root: tmpRoot())
+        await store.insert(modelID: model, tokens: [1, 2], snapshot: bounded(2))
+        await store.insert(modelID: model, tokens: Array(1...10), snapshot: bounded(10))
+
+        let hit = await store.fetchNearest(modelID: model, tokens: [1, 2, 3, 99])
+        XCTAssertEqual(hit?.reusedTokenCount, 2, "the two-token entry survived the insert and serves")
+        XCTAssertEqual(hit?.snapshot.caches.map(\.offset), [2, 2])
+    }
+
     /// The headline product case: a growing multi-turn conversation reuses the
     /// whole previous turn and prefills only the newly-appended tokens.
     func testIncrementalReuseAcrossGrowingTurns() async throws {
@@ -883,7 +944,43 @@ final class PromptCacheStoreTests: XCTestCase {
         XCTAssertFalse(recorded, "and drops its record")
     }
 
-    /// A manifest from before the first stamped format (#142) sits beside
+    /// A file stamped by an earlier build ("2": exact positions, numerics
+    /// from before mlx-swift 0.33 / mlx-swift-lm 3.33.0) is rejected and
+    /// deleted on both cold paths, as an unstamped one is.
+    func testColdRejectsAndDeletesAFileWithAnEarlierRecordStamp() async throws {
+        try requireMLXRuntimeOrSkip()
+        let earlier = ["modelFingerprint": fpA, "recordVersion": "2"]
+        XCTAssertNotEqual(PromptCacheStore.coldRecordVersion, "2")
+
+        // Exact path: no manifest names the file.
+        let root = tmpRoot()
+        let store = PromptCacheStore(root: root, maxEntries: 8)
+        let exactFile = PromptCacheKey(modelID: model, tokens: [1, 2]).shardedFileURL(under: root)
+        try FileManager.default.createDirectory(
+            at: exactFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try savePromptCache(
+            url: exactFile, cache: makeSnapshot(tokenCount: 2).caches,
+            metadata: earlier.merging(["modelID": model, "tokenCount": "2"]) { $1 })
+        let exact = await store.fetchNearest(modelID: model, tokens: [1, 2], modelFingerprint: fpA)
+        XCTAssertNil(exact, "a file with an earlier stamp is not served")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exactFile.path), "and is deleted")
+
+        // Trie path: a current manifest points at a file an earlier build rewrote.
+        let (trieRoot, trieFile, _) = await demoteToCold(tokens: [1, 2, 3, 4], fingerprint: fpA)
+        try savePromptCache(
+            url: trieFile, cache: makeSnapshot(tokenCount: 4).caches,
+            metadata: earlier.merging(["modelID": model, "tokenCount": "4"]) { $1 })
+        let restarted = PromptCacheStore(root: trieRoot)
+        let extended = await restarted.fetchNearest(
+            modelID: model, tokens: [1, 2, 3, 4, 5, 6], modelFingerprint: fpA)
+        XCTAssertNil(extended, "the trie path does not serve it either")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: trieFile.path), "and deletes it")
+        let recorded = await restarted.hasColdRecord(modelID: model, tokens: [1, 2, 3, 4])
+        XCTAssertFalse(recorded, "and drops its record")
+    }
+
+    /// A manifest from before the format whose files carry the current
+    /// record stamp sits beside
     /// files that can never be served again: a store opening the root
     /// reclaims every cold file under it and starts a manifest of the current
     /// format. A foreign (newer) version is left alone.
@@ -1667,6 +1764,7 @@ final class PromptCacheStoreTests: XCTestCase {
             ("ChunkedKVCache", ChunkedKVCache()),
             ("ArraysCache", ArraysCache(size: 2)),
             ("MambaCache", MambaCache()),
+            ("RewindableConvolutionCache", RewindableConvolutionCache(stateLength: 2)),
             ("RotatingKVCache", RotatingKVCache(maxSize: 8)),
             ("QuantizedKVCache", QuantizedKVCache()),
             ("CacheList", CacheList(KVCacheSimple())),
@@ -1677,8 +1775,8 @@ final class PromptCacheStoreTests: XCTestCase {
             try savePromptCache(url: fileA, cache: [cache], metadata: [:])
             let (_, metaA) = try loadArraysAndMetadata(url: fileA)
             XCTAssertEqual(
-                metaA["2.0"], ColdTierWriter.cacheClassName(cache),
-                "\(label): cacheClassName replica must match the LIVE savePromptCache's tag")
+                metaA["2.0"], try ColdTierWriter.cacheClassName(cache),
+                "\(label): the cold tier's class tag must match the LIVE savePromptCache's")
         }
     }
 

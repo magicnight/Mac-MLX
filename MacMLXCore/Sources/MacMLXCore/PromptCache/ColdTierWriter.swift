@@ -146,7 +146,7 @@ actor ColdTierWriter {
     ) throws -> Data {
         let cacheData = cache.map { $0.state }
         let cacheInfo = cache.map { $0.metaState }
-        let cacheClasses = cache.map { cacheClassName($0) }
+        let cacheClasses = try cache.map { try cacheClassName($0) }
 
         var flatData: [String: MLXArray] = [:]
         for (i, arrays) in cacheData.enumerated() {
@@ -172,25 +172,19 @@ actor ColdTierWriter {
         return try saveToData(arrays: flatData, metadata: flatMeta)
     }
 
-    /// Verbatim replica of mlx-swift-lm's PRIVATE `cacheClassName` (KVCache.swift)
-    /// — the class-name tag `savePromptCache` writes as `flatMeta["2.\(i)"]` and
-    /// `loadPromptCache` switches on to reconstruct each cache's concrete type.
-    /// Replicated (not called) because it is `private` upstream; the subclass
-    /// order matters (`ChunkedKVCache` before `KVCacheSimple`, `MambaCache` before
-    /// `ArraysCache`) and is kept identical to upstream — the equivalence test
-    /// fails loudly if this switch ever drifts from it (the `"2.i"` class tags in
-    /// the serialised metadata would no longer match the LIVE `savePromptCache`).
-    nonisolated static func cacheClassName(_ c: any KVCache) -> String {
-        switch c {
-        case is ChunkedKVCache: return "ChunkedKVCache"
-        case is MambaCache: return "MambaCache"
-        case is ArraysCache: return "ArraysCache"
-        case is RotatingKVCache: return "RotatingKVCache"
-        case is QuantizedKVCache: return "QuantizedKVCache"
-        case is KVCacheSimple: return "KVCache"
-        case is CacheList: return "CacheList"
-        default: return "KVCache"
+    /// The class-name tag `savePromptCache` writes as `flatMeta["2.\(i)"]` and
+    /// `loadPromptCache` switches on to reconstruct each cache's concrete type:
+    /// the type's own `serializedClassName`, public since mlx-swift-lm 3.33.0.
+    /// Through 3.32.3 this was a copy of upstream's private table, and a copy
+    /// goes stale: 3.33.0's `RewindableConvolutionCache` (LFM2) subclasses
+    /// `MambaCache`, so the copy tagged it "MambaCache" and a restore would
+    /// have read its metadata as another type's. A type that names no class
+    /// cannot be restored and is not written.
+    nonisolated static func cacheClassName(_ c: any KVCache) throws -> String {
+        guard let name = type(of: c).serializedClassName else {
+            throw ColdTierWriteError.unserializableCache(type: String(describing: type(of: c)))
         }
+        return name
     }
 
     // MARK: - Shared filesystem helpers (nonisolated: pure path work)
@@ -275,9 +269,11 @@ actor ColdTierWriter {
     }
 }
 
-/// A failure of the cold-tier atomic write's final `rename` step, carrying the
-/// POSIX `errno` for diagnostics. Any throw here surfaces to the store's
-/// `finishWrite`, which reconciles the phantom index record.
+/// A failure of a cold-tier write: the atomic write's final `rename` step,
+/// carrying the POSIX `errno` for diagnostics, or a cache whose type names no
+/// serialized class and so could not be restored. Any throw here surfaces to
+/// the store's `finishWrite`, which reconciles the phantom index record.
 enum ColdTierWriteError: Error, Equatable {
     case renameFailed(code: Int32)
+    case unserializableCache(type: String)
 }

@@ -393,7 +393,7 @@ possible and we did it. What follows is what the move actually required, which
 differs from what the previous version of this section predicted. Keep both
 lessons: the facts, and the fact that a landmine table rots.
 
-**What the fork was for, and why it shrank to two patches (five since 2026-10-29).** Twelve of the
+**What the fork was for, and why it shrank to two patches (five from 2026-10-29, two again since 2026-11-21).** Twelve of the
 thirteen cherry-picks the fork carried on top of v0.31.1 are in core v0.32.2 —
 every one verified by `git merge-base --is-ancestor` against `1f8e74e3`, and
 the three that live in kernel headers (`mlx#3631`, `mlx#3497`, `mlx#3361`) also
@@ -421,6 +421,20 @@ its cmake step could not fetch metal-cpp; only `quantized.cpp`,
 `metal/quantized.h` and `metal/sdpa_vector.h` changed. Since `#4775` is on
 mlx main only, the fork outlives any mlx-swift release that vendors core
 v0.32.4.
+
+On 2026-11-21 the fork was rebuilt on mlx-swift 0.33.0 (core v0.32.4) as
+branch `0.33.0-macmlx`, over a `v0.32.4-macmlx` branch of the mlx mirror. Four
+of the five are in that core, so it carries two: `mlx#4775` as before, and the
+fix for `mlx#4832` (upstream PR `#4903`, picked while it was open and merged
+on 2026-11-22 as `190cb65`, after core v0.32.4; the merged change is the same
+as the carried one). Since
+core v0.32.3 the JIT source for the NAX attention kernel at head dimension 256
+or 512 passes one template argument more than `attention_nax_dsplit` declares,
+and the failed build ends the process; the gated Gemma 4 image suite hit it on
+the first run against upstream 0.33.0. That fix is in `jit_kernels.cpp`, host
+C++ compiled from the submodule, so it needed no generated copies.
+`SDPASplitDKernelJITTests` pins it. Like `#4775`, it leaves the fork once an
+mlx-swift release vendors a core that contains it.
 
 **The cross-thread abort is gone, by construction.** `ml-explore/mlx#3348` made
 `default_stream()` thread-local in core v0.31.2, and mlx-swift 0.31.x's
@@ -467,7 +481,7 @@ title is how that happens; read the diff.
 | The fork's base must move together with mlx-swift-lm | the root's revision pin overrides mlx-swift-lm's `.upToNextMinor(from: "0.32.3")`, so SwiftPM never forces the move — source compatibility does. Staying on a 0.31.x base means staying on mlx-swift-lm 3.31.4 and everything after it |
 | mlx-swift-lm 3.32.3 changed the default prefill chunking from stride-of-step-size to `.balanced` (`PrefillParameters.Chunking`), and the deprecated `TokenIterator.init(…prefillStepSize:)` forwards into that new default | a silent change to chunk boundaries — and therefore to exact outputs — on every generation path, including `generateTokens`. The move pins `chunking: .remainder` where `GenerateParameters` is built, which restores the legacy stride and reserved tail on the generic `LLMModel` path and every VLM path (checked by reading against 3.31.4). It does not cover Gemma3Text, whose prefill 3.32.3 reworked on its own, and no output-level comparison was possible here. The batched path's prefill is hand-rolled in `ModelBatchInferenceCore` and never reads this setting. Adopting `.balanced` is a measured change of its own, not a dependency bump side effect |
 | mlx-swift-lm 3.32.3 added a complete `compile()` overload matrix to `MLXLMCommon` whose bodies are `@Sendable` (`#589`, `CompileOverloads.swift`) | any module that imports both `MLX` and `MLXLMCommon` and calls bare `compile { … }` with a non-Sendable capture stops compiling, because the call now resolves to the `@Sendable` overload. mlx-audio-swift's `ParakeetModel.swift` had two such calls; the fix is to write `MLX.compile`, which is what they always were. Expect this in any other MLX-side dependency that imports `MLXLMCommon` |
-| macMLX picks the factory by `model_type`: `ModelLibraryManager.knownVLMTypes` go to `VLMModelFactory`, `vlmTypesServedAsText` stay on the text factory on purpose, everything else is text | a key the new revision adds to `VLMTypeRegistry.shared` is sent to the text factory, which fails or drops the images. `ModelLibraryManagerVLMTests/vlmRegistryMirrorMatchesTheResolvedSource` reads the checked-out `Libraries/MLXVLM/VLMModelFactory.swift` from the scratch directory next to the test bundle under `swift test` and fails on any difference; update its `upstreamVLMRegistryKeys` and place each new key in one of the two sets. Under xcodebuild there is no such checkout and the test is skipped; the spm job (CI and ci-local) sets `MACMLX_REQUIRE_RESOLVED_SOURCE=1`, which makes a missing checkout fail instead, so that job is the gate |
+| macMLX picks the factory by `model_type`: `ModelLibraryManager.knownVLMTypes` go to `VLMModelFactory`, `vlmTypesServedAsText` stay on the text factory on purpose, everything else is text | a key the new revision adds to `VLMTypeRegistry.shared` is sent to the text factory, which fails or drops the images. `ModelLibraryManagerVLMTests/vlmRegistryMirrorMatchesTheResolvedSource` reads the checked-out `Libraries/MLXVLM/VLMModelFactory.swift` from the scratch directory next to the test bundle under `swift test` and fails on any difference; update its `upstreamVLMRegistryKeys` and place each new key in one of the four sets (`knownVLMTypes`, `vlmTypesServedAsText`, the full-path families, `vlmTypesNotServed`). Under xcodebuild there is no such checkout and the test is skipped; the spm job (CI and ci-local) sets `MACMLX_REQUIRE_RESOLVED_SOURCE=1`, which makes a missing checkout fail instead, so that job is the gate |
 | The prompt cache keys a finished response on the stop token the loop delivers with `includeStopToken` (#142), recognised with a copy of the loop's private `buildStopTokenIds` plus `unknownTokenId` | a bump that changes what the loop delivers, when it breaks, or which tokens it stops on is caught only by two gated smokes, so run both on every mlx-swift-lm bump: `MACMLX_RUN_MELLUM_SMOKE=1 TEST_RUNNER_MACMLX_RUN_MELLUM_SMOKE=1 MACMLX_RUN_GEMMA4_SMOKE=1 TEST_RUNNER_MACMLX_RUN_GEMMA4_SMOKE=1 xcodebuild test -scheme MacMLXCore -destination 'platform=macOS' -skipPackagePluginValidation -only-testing:MacMLXCoreTests/Mellum2SmokeTests/testMellum2EOSStopRecordsTheStopTokenInItsKey -only-testing:MacMLXCoreTests/Gemma4PromptCacheSmokeTests` (both variables, with and without the `TEST_RUNNER_` prefix: xcodebuild hands the test runner only the prefixed ones, and a missing one is an `XCTSkip` that reports green; look for the `[eos-smoke]` lines). Their record checks fail when the cache and the key stop agreeing, and `MLXSwiftEngine.promptCacheKey` says what the engine assumes |
 
 **Still true from v0.31.1 days.** `BatchPositionedCacheWrapper` existed because

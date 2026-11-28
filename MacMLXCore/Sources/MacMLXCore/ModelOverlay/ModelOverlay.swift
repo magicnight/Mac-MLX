@@ -68,7 +68,13 @@ public enum ModelOverlay {
 
         // Mellum 2 (12B-A2.5B) — pure-Swift port (see `Models/Mellum2.swift`).
         // A Qwen3-lineage sparse-MoE decoder with alternating sliding/full
-        // attention; upstream mlx-swift-lm has no `mellum` type.
+        // attention. mlx-swift-lm 3.33.0 ships its own `mellum`
+        // (ml-explore/mlx-swift-lm#697), which this registration replaces:
+        // ours is the one the local checkpoint's smoke and parity runs cover.
+        // Upstream's also reads `mlp_layer_types` (dense layers) and
+        // `attention_bias`, which this port does not, so a checkpoint that
+        // uses either fails its strict weight load here. Retire this port
+        // once upstream's passes the same runs on Mellum2-12B.
         await LLMTypeRegistry.shared.registerModelType("mellum") { data in
             let config = try JSONDecoder.json5()
                 .decode(Mellum2Configuration.self, from: data)
@@ -141,11 +147,11 @@ public enum ModelOverlay {
         }
 
         // Gemma 2 — macMLX's corrected copy of upstream's `Gemma2Model` (see
-        // `Models/Gemma2Overlay.swift`). Upstream ships `gemma2`, but its
-        // prefill mask is a boolean ADDED to the scores (so prompts are not
-        // causal) and never comes from the cache (so ragged batches attend to
-        // left padding). This registration replaces upstream's entry, the
-        // `hunyuan_v1_dense` precedent; delete it once upstream fixes the mask.
+        // `Models/Gemma2Overlay.swift`). Upstream ships `gemma2` and since
+        // 3.33.0 its prefill is causal, but it applies a per-row batch mask
+        // without lining it up with its grouped-query scores, so a ragged
+        // batch decodes wrong. This registration replaces upstream's entry,
+        // the `hunyuan_v1_dense` precedent; delete it once upstream fixes that.
         await LLMTypeRegistry.shared.registerModelType("gemma2") { data in
             let config = try JSONDecoder.json5()
                 .decode(Gemma2OverlayConfiguration.self, from: data)

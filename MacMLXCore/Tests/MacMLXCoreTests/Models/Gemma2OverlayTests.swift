@@ -12,19 +12,14 @@ import XCTest
 /// random-weight instances built from one configuration
 /// (``TinyRandomLanguageModel``), so no checkpoint is needed.
 ///
-/// Upstream ADDS a boolean causal mask to the soft-capped scores, so its
-/// multi-token prefill is not causal; single-token decode (mask nil) is fine.
-/// The overlay is meant to differ from upstream in that mask and nowhere else,
-/// which these tests pin from both sides: the overlay's prefill equals its own
-/// token-by-token decode, its decode equals upstream's decode on the same
-/// weights, and its parameter keys equal upstream's so real checkpoints load
-/// unchanged.
-///
-/// ``testUpstreamGemma2PrefillIsNotCausal`` is a canary rather than a
-/// documented expectation: it asserts upstream's prefill still diverges, so the
-/// day an mlx-swift-lm bump fixes it this suite fails and the overlay (with its
-/// `ModelOverlay` registration) can be retired instead of shadowing a fixed
-/// upstream forever.
+/// Through mlx-swift-lm 3.32.3 upstream ADDED a boolean causal mask to the
+/// soft-capped scores, so its multi-token prefill was not causal. 3.33.0 fixed
+/// that, and ``testUpstreamGemma2PrefillIsCausal`` holds it there. The overlay
+/// now differs from upstream only in how it applies a per-row batch mask
+/// (`BatchRaggedDecodeParityTests`), which these tests pin from both sides:
+/// the overlay's prefill equals its own token-by-token decode, its decode
+/// equals upstream's decode on the same weights, and its parameter keys equal
+/// upstream's so real checkpoints load unchanged.
 final class Gemma2OverlayTests: XCTestCase {
 
     private let prompt = [9, 1, 22, 40, 7, 13, 2, 31]
@@ -54,18 +49,18 @@ final class Gemma2OverlayTests: XCTestCase {
             "a causal prefill must reproduce the token-by-token logits at every position")
     }
 
-    /// Canary: upstream's prefill is not causal. When this fails, mlx-swift-lm
-    /// has fixed `Gemma2Model`'s mask and the overlay can go.
-    func testUpstreamGemma2PrefillIsNotCausal() throws {
+    /// Upstream's prefill is causal since mlx-swift-lm 3.33.0
+    /// (ml-explore/mlx-swift-lm#728); before it the worst position was off by
+    /// more than 0.5. The overlay is not what makes a single request right
+    /// any more, and this fails if upstream's mask regresses.
+    func testUpstreamGemma2PrefillIsCausal() throws {
         try requireTrustworthyMetalOrSkip()
         let errors = try prefillVersusIncrementalErrors(try TinyRandomLanguageModel.gemma2.make())
         print("[gemma2-overlay] upstream prefill vs incremental, per position: \(errors)")
-        let error = errors.max() ?? 0
-        XCTAssertGreaterThan(
-            error, 0.5,
-            "upstream Gemma2Model's prefill now matches its decode: if mlx-swift-lm takes "
-                + "the mask from the cache and applies a boolean mask with `which`, retire "
-                + "Gemma2OverlayModel and its ModelOverlay registration")
+        let error = errors.max() ?? .infinity
+        XCTAssertLessThan(
+            error, tolerance,
+            "upstream Gemma2Model's prefill no longer matches its token-by-token decode")
     }
 
     /// The prompt run with no cache at all (the mask then comes from

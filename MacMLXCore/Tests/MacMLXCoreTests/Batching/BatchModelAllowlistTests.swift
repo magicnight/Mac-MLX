@@ -12,7 +12,7 @@ final class BatchModelAllowlistTests: XCTestCase {
     func testGemma2IsNotAllowlisted() throws {
         try requireMLXRuntimeOrSkip()
         // Its mask is built without the cache, so left padding is unmasked;
-        // see BatchRaggedDecodeParityTests.testGemma2RaggedDecodeAttendsToLeftPadding.
+        // see BatchRaggedDecodeParityTests.testGemma2RaggedDecodeMisappliesThePerRowMask.
         XCTAssertFalse(BatchModelAllowlist.contains(try TinyRandomLanguageModel.gemma2.make()))
     }
 

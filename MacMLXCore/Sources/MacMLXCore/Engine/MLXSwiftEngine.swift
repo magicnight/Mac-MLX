@@ -51,7 +51,7 @@ public actor MLXSwiftEngine: InferenceEngine {
     private var loadedModelFingerprint: String?
 
     /// Version string including the mlx-swift-lm library tag.
-    public let version: String = "mlx-swift-lm 3.32.3"
+    public let version: String = "mlx-swift-lm 3.33.0"
 
     // MARK: Private state
 
@@ -674,16 +674,19 @@ public actor MLXSwiftEngine: InferenceEngine {
     }
 
     /// macMLX-side backfill for `ModelConfiguration.toolCallFormat` when upstream
-    /// `ToolCallFormat.infer` leaves it nil for a tool-capable family. Upstream
-    /// maps only `qwen3_5` / `qwen3_next` (→ `.xmlFunction`), so plain Qwen3 —
-    /// and Qwen2 / Qwen2.5 — load with NO format and their hermes-style
-    /// `<tool_call>{JSON}</tool_call>` output (the `.json` format) is never
-    /// parsed: the streaming `ToolCallProcessor` doesn't run and the tool call
-    /// leaks into visible content. This returns `.json` for those Qwen LLM
-    /// variants and nil for everything else; the caller applies it ONLY when the
-    /// upstream format is nil, so a format upstream already set is never
-    /// overridden. Read from `config.json`'s `model_type`; any IO/JSON error is
-    /// treated as "no fallback".
+    /// leaves it nil for a Qwen checkpoint. Upstream resolves the format from
+    /// the model's own declaration (Qwen 3.5/3.6/3.8 declare `.qwen35`), a
+    /// `tool_parser_type` in the tokenizer config, and then the chat template's
+    /// markers, so a Qwen2 / Qwen2.5 / Qwen3 checkpoint whose template shows
+    /// `<tool_call>` and `tool_call.name` already gets `.json`. What is left is
+    /// one whose template shows no tool syntax at all (a reranker, a distill
+    /// that kept the `qwen2` type): it loads with NO format, and if it does
+    /// write the hermes `<tool_call>{JSON}</tool_call>` the call would leak
+    /// into visible content. This returns `.json` for the Qwen LLM types that
+    /// declare nothing and nil for everything else; the caller applies it ONLY
+    /// when the upstream format is nil, so a format upstream already set is
+    /// never overridden. Read from `config.json`'s `model_type`; any IO/JSON
+    /// error is treated as "no fallback".
     static func inferToolCallFormatFallback(configURL: URL) -> ToolCallFormat? {
         guard let data = try? Data(contentsOf: configURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -692,8 +695,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             return nil
         }
         let type = modelType.lowercased()
-        // Upstream already handles these (→ `.xmlFunction`); never shadow them.
-        if type.hasPrefix("qwen3_5") || type.hasPrefix("qwen3_next") { return nil }
+        // Upstream declares these itself (`.qwen35`, `.xmlFunction`); never
+        // shadow them.
+        if type.hasPrefix("qwen3_5") || type.hasPrefix("qwen3_8") || type.hasPrefix("qwen3_next") {
+            return nil
+        }
         // Qwen2 / Qwen2.5 / Qwen3 (incl. `_moe`) speak the hermes `<tool_call>` +
         // JSON body format, which is `ToolCallFormat.json`.
         if type.hasPrefix("qwen2") || type.hasPrefix("qwen3") { return .json }
@@ -856,7 +862,11 @@ public actor MLXSwiftEngine: InferenceEngine {
             return inputTokens + generatedTokenIDs + [terminalStopToken]
         case .length:
             return inputTokens + generatedTokenIDs + (terminalStopToken.map { [$0] } ?? [])
-        case .cancelled:
+        case .cancelled, .steered, .interrupted:
+            // `.steered` and `.interrupted` end a `ChatSession` step at a
+            // steering boundary. The engine drives `TokenIterator` itself and
+            // never steers, so neither can arrive here; if one ever does, the
+            // cache is not in a state this key could name.
             return nil
         }
     }
@@ -2641,11 +2651,6 @@ public actor MLXSwiftEngine: InferenceEngine {
 
         let setup: (stream: AsyncStream<TokenGeneration>, toolCallFormat: ToolCallFormat?) =
             try await container.perform(nonSendable: inputBox) { context, inputBox in
-                // A full-path VLM's `prepare` returns logits, which upstream's
-                // speculative iterator would drop the first token of (see
-                // `LastPromptTokenTarget`).
-                var context = context
-                if fullPath != nil { context.model = LastPromptTokenTarget(context.model) }
                 let stream: AsyncStream<TokenGeneration>
                 // Omit `numDraftTokens` entirely (rather than substitute a
                 // number we hardcode) when the request didn't set one, so a
@@ -2872,7 +2877,7 @@ public actor MLXSwiftEngine: InferenceEngine {
             switch info.stopReason {
             case .length:
                 infoReason = .length
-            case .stop, .cancelled:
+            case .stop, .cancelled, .steered, .interrupted:
                 infoReason = .stop
             }
             // On a prompt-cache HIT the iterator only prefilled the suffix, so
